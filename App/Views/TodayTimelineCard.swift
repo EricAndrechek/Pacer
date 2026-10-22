@@ -1,19 +1,19 @@
 import SwiftUI
 import SwiftData
-import Charts
 import PacerCore
 import PacerUI
 
-/// 24-hour timeline of today's activity. Shows when during the day you
-/// were burning tokens — useful for spotting "I had a 4-hour deep
+/// 24-hour timeline of today's spend. Shows when during the day you
+/// were spending — useful for spotting "I had a 4-hour deep
 /// session this afternoon" or "early morning was unusually quiet."
 ///
-/// Buckets `TokenSample` rows by hour-of-day in the user's local zone.
-/// Bar height encodes total tokens; the peak hour is highlighted.
+/// Buckets today's `HourlyAggregate` rows by hour-of-day in the user's
+/// local zone and draws them with the shared `PacerStackedPartChart`: each
+/// hour stacked by priced part, the costliest hour labelled, and a hover
+/// card with the hour's cost, tokens, breakdown and top models.
 struct TodayTimelineCard: View {
-    /// Optional click handler — clicking any hour with traffic drills
-    /// into today's day modal. Wired by DashboardView; nil for any
-    /// other surface.
+    /// Optional click handler — clicking any hour drills into today's
+    /// day modal. Wired by DashboardView; nil for any other surface.
     let onTodayTap: (() -> Void)?
 
     init(onTodayTap: (() -> Void)? = nil, scopeAccountId: String? = nil) {
@@ -58,15 +58,12 @@ struct TodayTimelineCard: View {
         )
     }()
 
-    private struct Hour: Identifiable {
-        let hour: Int
-        let tokens: Int64
-        let cost: Double
-        var id: Int { hour }
-    }
-
     private struct Cached {
-        var hours: [Hour] = (0..<24).map { Hour(hour: $0, tokens: 0, cost: 0) }
+        /// All 24 hours, quiet ones as empty bars, each with its breakdown
+        /// and top models precomputed for the hover card.
+        var buckets: [PacerChartBucket] = PacerChartBucket.allHourKeys.map {
+            PacerChartBucket(id: $0, breakdown: .zero)
+        }
         var peakHour: Int?
         var totalTokens: Int64 = 0
     }
@@ -76,65 +73,34 @@ struct TodayTimelineCard: View {
         // Sum across models per hour. Each HourlyAggregate row is one
         // (today, hour, model) bucket pre-applied with the user's
         // current cost mode, so we just add them up.
-        var byHour: [Int: (tokens: Int64, cost: Double)] = [:]
+        var builder = PacerChartBucketBuilder()
         var total: Int64 = 0
         for row in hourlyRows {
-            var v = byHour[row.hour] ?? (0, 0)
-            let t = row.tokens.all
-            v.tokens += t
-            v.cost += row.totalCostUSD
-            byHour[row.hour] = v
-            total += t
+            builder.add(PacerChartBucket.hourKey(row.hour), row.costBreakdown, model: row.model)
+            total += row.tokens.all
         }
-        let bucketed = (0..<24).map { h -> Hour in
-            let v = byHour[h] ?? (0, 0)
-            return Hour(hour: h, tokens: v.tokens, cost: v.cost)
+        let buckets = builder.buckets(keys: PacerChartBucket.allHourKeys)
+        // The costliest hour, ties to the later one — the same bar the chart
+        // labels, so the chip and the label point at one hour.
+        let peak = buckets.filter { $0.total > 0 }.max { a, b in
+            a.total != b.total ? a.total < b.total : a.id < b.id
         }
-        let peak = bucketed.max { $0.tokens < $1.tokens }
         cached = Cached(
-            hours: bucketed,
-            peakHour: (peak?.tokens ?? 0) > 0 ? peak?.hour : nil,
+            buckets: buckets,
+            peakHour: peak.flatMap { Int($0.id) },
             totalTokens: total
         )
     }
-
-    /// Debounced hover that the chart RuleMark + trailing slot read.
-    /// Updated from `rawHoveredHour` only once the pointer settles, so a
-    /// scroll that sweeps the cursor across the bars doesn't re-lay-out the
-    /// whole chart on every pointer event — the scroll-stutter cause. See
-    /// docs/perf-tuning.md.
-    @State private var hoveredHour: Int?
-    /// Raw `chartXSelection` binding — updates on every pointer move; only
-    /// feeds the debounce below.
-    @State private var rawHoveredHour: Int?
-    @State private var hoverDebounce: Task<Void, Never>?
 
     var body: some View {
         // Read here as well as inside `PacerCard`'s stored closures, so a
         // refresh redraws this view, not only the card it hands them to
         // (#140; AGENTS.md, "SwiftUI state and data flow").
-        let _ = (cached, hoveredHour)
+        let cached = self.cached
         PacerCard("Today by hour", trailing: {
-            // Hover swaps the trailing slot to "11 AM • 32K tokens · $1.20"
-            // — same pattern other charts use. Falls back to the peak
-            // chip when nothing is hovered. Click on the chart drills
-            // into today's day modal (handler wired by parent view).
-            if let h = hoveredHour, let row = cached.hours.first(where: { $0.hour == h }), row.tokens > 0 {
-                HStack(spacing: 8) {
-                    Text(hourLabel(h, style: .regular))
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
-                    Text(pacerTokens(row.tokens)).help(pacerTokensExact(row.tokens))
-                        .font(.system(size: 12, weight: .semibold, design: .rounded))
-                        .monospacedDigit()
-                    if row.cost > 0 {
-                        Text(pacerCost(row.cost)).help(pacerCostExact(row.cost))
-                            .font(.system(size: 11))
-                            .foregroundStyle(.tertiary)
-                            .monospacedDigit()
-                    }
-                }
-            } else if let peak = cached.peakHour {
+            // The hovered hour's numbers are in the card floating over the
+            // chart; this slot keeps the peak chip and never swaps.
+            if let peak = cached.peakHour {
                 Chip(
                     text: "peak \(hourLabel(peak, style: .compact))",
                     systemImage: "chart.bar.fill",
@@ -149,7 +115,13 @@ struct TodayTimelineCard: View {
                     .foregroundStyle(.secondary)
                     .frame(height: 100)
             } else {
-                chart
+                // Clicking any hour drills into today's day modal.
+                PacerStackedPartChart(
+                    cached.buckets, kind: .hour, annotating: 1,
+                    onTap: onTodayTap.map { tap in { (_: String) in tap() } }
+                )
+                .accessibilityLabel("Today's cost by hour")
+                .accessibilityHint(onTodayTap != nil ? "Opens today's detailed breakdown" : "")
             }
         }
         .onAppear { refreshCache() }
@@ -160,75 +132,8 @@ struct TodayTimelineCard: View {
         .onChange(of: scope.accountId) { _, _ in refreshCache() }
     }
 
-    private var chart: some View {
-        Chart(cached.hours) { h in
-            BarMark(
-                x: .value("Hour", h.hour),
-                y: .value("Tokens", h.tokens)
-            )
-            .foregroundStyle(
-                h.hour == cached.peakHour
-                    ? Color.accentColor
-                    : Color.accentColor.opacity(0.55)
-            )
-            .cornerRadius(2)
-            .annotation(position: .top, alignment: .center, spacing: 2) {
-                if h.hour == cached.peakHour && h.tokens > 0 {
-                    Text(pacerTokens(h.tokens)).help(pacerTokensExact(h.tokens))
-                        .font(.system(size: 9, weight: .medium))
-                        .foregroundStyle(.secondary)
-                }
-            }
-            if hoveredHour == h.hour && h.tokens > 0 {
-                RuleMark(x: .value("Selected", h.hour))
-                    .foregroundStyle(.secondary.opacity(0.5))
-                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 2]))
-            }
-        }
-        .frame(height: 130)
-        .chartXSelection(value: $rawHoveredHour)
-        // Coalesce the rapid hover stream a scroll produces into a single
-        // commit once the pointer settles, so the chart's marks re-lay-out
-        // at most once per hover instead of once per pointer event. 40ms is
-        // imperceptible on a deliberate hover but collapses a fast
-        // scroll-sweep across the bars to zero chart re-layouts.
-        .onChange(of: rawHoveredHour) { _, newValue in
-            hoverDebounce?.cancel()
-            hoverDebounce = Task { @MainActor in
-                try? await Task.sleep(for: .milliseconds(40))
-                guard !Task.isCancelled else { return }
-                hoveredHour = newValue
-            }
-        }
-        .chartYAxis(.hidden)
-        .chartXAxis {
-            // Locale-aware ticks. 24h: 0/6/12/18/23. 12h: 12a/6a/12p/6p/11p.
-            AxisMarks(values: [0, 6, 12, 18, 23]) { value in
-                AxisGridLine().foregroundStyle(.secondary.opacity(0.18))
-                AxisValueLabel {
-                    if let h = value.as(Int.self) {
-                        Text(hourLabel(h, style: .compact))
-                            .font(.system(size: 9))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-        }
-        // Tap anywhere on the chart drills into today's day modal —
-        // same pattern as DailyCostChartCard. The chartXSelection
-        // binding is already tracking hover state; tap commits.
-        // Arrow cursor (default) per HIG — clickable charts don't
-        // warrant the link cursor.
-        .contentShape(Rectangle())
-        .onTapGesture {
-            if onTodayTap != nil { onTodayTap?() }
-        }
-        .accessibilityLabel("Today's activity by hour")
-        .accessibilityHint(onTodayTap != nil ? "Opens today's detailed breakdown" : "")
-    }
-
     /// Wrapper that builds a Date for hour-of-day h on today, then
-    /// runs it through the shared `pacerHour` helper. Lets the chart
+    /// runs it through the shared `pacerHour` helper. Lets the chip
     /// pick up the locale's clock format without re-implementing it.
     private func hourLabel(_ h: Int, style: PacerHourStyle) -> String {
         var components = Calendar.current.dateComponents([.year, .month, .day], from: Date())

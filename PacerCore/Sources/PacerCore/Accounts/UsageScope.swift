@@ -78,13 +78,18 @@ public struct HourlyRow: Sendable, Equatable, Identifiable {
     /// gained it when the Now tile turned out to gate its whole contents on
     /// this field, and read "Nothing running." under every scope.
     public let sampleCount: Int
+    /// `totalCostUSD` split into its five priced parts (#296), as on
+    /// `DailyRow`, so the hour chart stacks by part from the row the total
+    /// came from.
+    public let cost: CostComponents
 
     public var id: String { "\(date)|\(hour)|\(model)" }
 
     public init(date: String, hour: Int, model: String,
                 inputTokens: Int64, outputTokens: Int64, cacheReadTokens: Int64,
                 cacheCreation5mTokens: Int64, cacheCreation1hTokens: Int64,
-                totalCostUSD: Double, sampleCount: Int = 0) {
+                totalCostUSD: Double, sampleCount: Int = 0,
+                cost: CostComponents = .zero) {
         self.date = date
         self.hour = hour
         self.model = model
@@ -95,6 +100,7 @@ public struct HourlyRow: Sendable, Equatable, Identifiable {
         self.cacheCreation1hTokens = cacheCreation1hTokens
         self.totalCostUSD = totalCostUSD
         self.sampleCount = sampleCount
+        self.cost = cost
     }
 }
 
@@ -105,7 +111,8 @@ public extension HourlyAggregate {
                   cacheReadTokens: cacheReadTokens,
                   cacheCreation5mTokens: cacheCreation5mTokens,
                   cacheCreation1hTokens: cacheCreation1hTokens,
-                  totalCostUSD: totalCostUSD, sampleCount: sampleCount)
+                  totalCostUSD: totalCostUSD, sampleCount: sampleCount,
+                  cost: costComponents)
     }
 }
 
@@ -116,7 +123,8 @@ public extension AccountHourlyAggregate {
                   cacheReadTokens: cacheReadTokens,
                   cacheCreation5mTokens: cacheCreation5mTokens,
                   cacheCreation1hTokens: cacheCreation1hTokens,
-                  totalCostUSD: totalCostUSD, sampleCount: sampleCount)
+                  totalCostUSD: totalCostUSD, sampleCount: sampleCount,
+                  cost: costComponents)
     }
 }
 

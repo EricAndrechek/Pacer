@@ -181,6 +181,10 @@ public extension DailyRow {
     var costBreakdown: CostBreakdown { CostBreakdown(cost: cost, tokens: tokens) }
 }
 
+public extension HourlyRow {
+    var costBreakdown: CostBreakdown { CostBreakdown(cost: cost, tokens: tokens) }
+}
+
 public extension ProjectDailyReadable {
     var costBreakdown: CostBreakdown { CostBreakdown(cost: costComponents, tokens: tokens) }
 }

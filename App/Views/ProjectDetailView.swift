@@ -73,10 +73,10 @@ struct ProjectDetailView: View {
     /// state change re-evaluates the body. With ~90 rows per project
     /// that's 180 decoder allocations per hover tick.
     @State private var cachedModelSlices: [ModelSlice] = []
-    /// Cached output of the per-row `.map` that builds the chart's
-    /// daily series. Cheap to compute, but cached for the same
-    /// reason — avoids redundant work on chart hover.
-    @State private var cachedDailySeries: [DayPoint] = []
+    /// The daily chart's bars, each with its breakdown and top models (by
+    /// cost, from `modelCostJSON`) precomputed for the hover card, so a
+    /// hover reads them rather than decoding anything.
+    @State private var cachedDailySeries: [PacerChartBucket] = []
     /// Cached totals. The summary tile-grid reads from this; the
     /// previous version walked every aggregate on every render.
     @State private var cachedTotals = Totals()
@@ -194,14 +194,7 @@ struct ProjectDetailView: View {
 
     private var totals: Totals { cachedTotals }
 
-    private struct DayPoint: Identifiable {
-        let date: String
-        let cost: Double
-        let tokens: Int64
-        var id: String { date }
-    }
-
-    private var dailySeries: [DayPoint] { cachedDailySeries }
+    private var dailySeries: [PacerChartBucket] { cachedDailySeries }
 
     private struct ModelSlice: Identifiable {
         let model: String
@@ -241,16 +234,14 @@ struct ProjectDetailView: View {
         let t = Totals(rows: aggregates)
         var breakdown = CostBreakdown.zero
         var byModel: [String: (tokens: Int64, cost: Double)] = [:]
-        var days: [DayPoint] = []
-        days.reserveCapacity(aggregates.count)
+        var days = PacerChartBucketBuilder()
         let decoder = JSONDecoder()
         for r in aggregates {
             breakdown += r.costBreakdown
-            days.append(DayPoint(
-                date: r.date,
-                cost: r.totalCostUSD,
-                tokens: r.tokens.all
-            ))
+            // Decoded once per row, for the chart's per-day top models and
+            // the Models card's per-model cost below.
+            let costs = (try? decoder.decode([String: Double].self, from: r.modelCostJSON)) ?? [:]
+            days.add(r.date, r.costBreakdown, modelCosts: costs)
             // Uncached (input + output) per model: all the stored side-table
             // holds, so the Models card says so (#215).
             if let tokens = try? decoder.decode([String: Int64].self, from: r.modelTokensJSON) {
@@ -258,18 +249,16 @@ struct ProjectDetailView: View {
                     byModel[model, default: (0, 0)].tokens += tok
                 }
             }
-            if let costs = try? decoder.decode([String: Double].self, from: r.modelCostJSON) {
-                for (model, c) in costs {
-                    byModel[model, default: (0, 0)].cost += c
-                }
+            for (model, c) in costs {
+                byModel[model, default: (0, 0)].cost += c
             }
         }
         cachedTotals = t
         cachedBreakdown = breakdown
-        // Sort by date explicitly rather than leaning on the `@Query(sort:)`
-        // staying put — the band-date chart that plots this needs a
-        // chronological x-domain (same invariant as the Models trend).
-        cachedDailySeries = days.sorted { $0.date < $1.date }
+        // The builder orders by date rather than leaning on the
+        // `@Query(sort:)` staying put — the band-date chart that plots this
+        // needs a chronological x-domain (same invariant as the Models trend).
+        cachedDailySeries = days.buckets()
         cachedModelSlices = byModel.map { (model, v) in
             ModelSlice(model: model, tokens: v.tokens, cost: v.cost)
         }.sorted { $0.tokens > $1.tokens }
@@ -846,122 +835,18 @@ struct ProjectDetailView: View {
         .padding(.horizontal, 4)
     }
 
-    /// Debounced hover (chart RuleMark + reads). Updated from
-    /// `rawHoveredDate` only once the pointer settles, so a scroll sweeping
-    /// the bars doesn't re-lay-out the chart per pointer event. See
-    /// docs/perf-tuning.md.
-    @State private var hoveredDate: String?
-    /// Raw `chartXSelection` binding (immediate); feeds the debounce + tap.
-    @State private var rawHoveredDate: String?
-    @State private var hoveredDateDebounce: Task<Void, Never>?
-
+    /// The project's cost per active day, stacked by part — the shared
+    /// `PacerStackedPartChart`, with the same hover card as every cost chart.
+    /// Its top models are by cost, from the rollup's `modelCostJSON`.
+    /// Clicking a bar opens that day.
     private var dailyChartCard: some View {
-        PacerCard("Daily activity", trailing: {
-            // Hover swaps the trailing slot to show the selected
-            // bar's date + cost — same pattern as DailyCostChartCard.
-            // Keeps the chart's plot area a fixed height regardless of
-            // hover state; the previous "annotation on rule mark" path
-            // pushed the bars up and down on every hover.
-            if let d = hoveredDate, let row = dailySeries.first(where: { $0.date == d }) {
-                HStack(spacing: 8) {
-                    Text(row.date)
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                    Text(pacerCost(row.cost)).help(pacerCostExact(row.cost))
-                        .font(.system(size: 12, weight: .semibold, design: .rounded))
-                        .monospacedDigit()
-                }
-            }
-        }) {
-            Chart {
-                ForEach(dailySeries) { d in
-                    BarMark(
-                        x: .value("Date", d.date),
-                        y: .value("Cost", d.cost)
-                    )
-                    .foregroundStyle(.tint)
-                    .cornerRadius(1.5)
-                }
-                if let h = hoveredDate, dailySeries.contains(where: { $0.date == h }) {
-                    RuleMark(x: .value("Selected", h))
-                        .foregroundStyle(.secondary.opacity(0.5))
-                        .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 2]))
-                }
-            }
-            .frame(height: 160)
-            .chartYAxis {
-                AxisMarks(position: .leading) { value in
-                    AxisGridLine().foregroundStyle(.secondary.opacity(0.18))
-                    AxisValueLabel {
-                        if let v = value.as(Double.self) {
-                            Text(pacerCost(v)).help(pacerCostExact(v))
-                                .font(.system(size: 9))
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
-            }
-            .chartXAxis {
-                // Show every Nth date label so the axis isn't crowded
-                // on long ranges. With ~90 days at default range, 10
-                // strides ≈ 9 labels; reads well at the card's width.
-                AxisMarks(values: stridedDailySeriesDates(every: max(dailySeries.count / 9, 1))) { value in
-                    AxisValueLabel {
-                        if let date = value.as(String.self),
-                           dailyAxisMarks.contains(date) {
-                            Text(shortDailyDate(date))
-                                .font(.system(size: 9))
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
-            }
-            .chartXSelection(value: $rawHoveredDate)
-            .onChange(of: rawHoveredDate) { _, newValue in
-                hoveredDateDebounce?.cancel()
-                hoveredDateDebounce = Task { @MainActor in
-                    try? await Task.sleep(for: .milliseconds(40))
-                    guard !Task.isCancelled else { return }
-                    hoveredDate = newValue
-                }
-            }
-            // Arrow cursor (default) per macOS HIG — clickable charts
-            // don't warrant the link cursor.
-            .contentShape(Rectangle())
-            .onTapGesture {
-                // Immediate selection, not the debounced one — the 40ms
-                // debounce may not have committed `hoveredDate` yet on tap.
-                if let d = rawHoveredDate {
-                    push(.day(date: d))
-                }
-            }
+        PacerCard("Daily activity") {
+            PacerStackedPartChart(dailySeries, kind: .day, onTap: { date in
+                push(.day(date: date))
+            })
             .accessibilityLabel("Daily cost for \(displayName)")
             .accessibilityHint("Click a bar to drill into that day")
         }
-    }
-
-    private func stridedDailySeriesDates(every n: Int) -> [String] {
-        guard !dailySeries.isEmpty, n > 0 else { return [] }
-        return stride(from: 0, to: dailySeries.count, by: n).map { dailySeries[$0].date }
-    }
-
-    /// The same dates as a set, for deciding label-by-label whether to draw.
-    ///
-    /// `AxisMarks(values:)` is not honoured on a band axis from macOS 26 on —
-    /// every date gets a mark — so the stride has to be enforced in the label
-    /// content too or a long range renders every date overlapping. Same
-    /// reasoning as `PacerDateAxis.labelIfMarked`, which the charts built on
-    /// the shared helper use.
-    private var dailyAxisMarks: Set<String> {
-        Set(stridedDailySeriesDates(every: max(dailySeries.count / 9, 1)))
-    }
-
-    /// `2026-04-30` → `04-30`. Year omitted at this density; user
-    /// already has page context (the project detail header shows the
-    /// time range).
-    private func shortDailyDate(_ ymd: String) -> String {
-        guard ymd.count == 10 else { return ymd }
-        return String(ymd.suffix(5))
     }
 
     @State private var hoveredModelAngle: Double?

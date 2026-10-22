@@ -293,55 +293,32 @@ private struct MonthlyChartCard: View {
         )
     }
 
-    /// Debounced selection (chart RuleMark / annotations + trailing slot).
-    /// Updated from `rawSelectedMonth` only once the pointer settles, so a
-    /// scroll sweeping the bars doesn't re-lay-out the chart per pointer
-    /// event. See docs/perf-tuning.md.
-    @State private var selectedMonth: String?
-    /// Raw `chartXSelection` binding (immediate); feeds the debounce.
-    @State private var rawSelectedMonth: String?
-    @State private var selectedMonthDebounce: Task<Void, Never>?
-    @State private var cachedMonthly: [MonthBucket] = []
+    /// Each month's bar, with its breakdown and top models precomputed for
+    /// the hover card, and the header's total.
+    @State private var cachedMonthly: [PacerChartBucket] = []
     @State private var cachedTotal: Double = 0
 
-    private struct MonthBucket: Identifiable {
-        let month: String  // YYYY-MM
-        let cost: Double
-        var id: String { month }
-    }
+    private var monthly: [PacerChartBucket] { cachedMonthly }
 
-    private var monthly: [MonthBucket] { cachedMonthly }
-
-    /// Rebuild `cachedMonthly` from a Dictionary-grouping walk over
-    /// every aggregate. Used to run on every body render — and the
-    /// `chart` view referenced `monthly` independently from `body`,
-    /// effectively doubling the cost. Now runs once per scan tick.
+    /// Roll the days up into months, once per scan tick or scope switch
+    /// rather than on every body render.
     private func refreshMonthly() {
-        var totals: [String: Double] = [:]
+        var builder = PacerChartBucketBuilder()
         for row in aggregates {
-            guard row.date.count >= 7 else { continue }
-            let key = String(row.date.prefix(7))
-            totals[key, default: 0] += row.totalCostUSD
+            guard let month = PacerChartBucket.monthKey(row.date) else { continue }
+            builder.add(month, row.costBreakdown, model: row.model)
         }
-        let sorted = totals.keys.sorted()
-        let last12 = sorted.suffix(12)
-        cachedMonthly = last12.map { MonthBucket(month: $0, cost: totals[$0] ?? 0) }
-        cachedTotal = cachedMonthly.reduce(0) { $0 + $1.cost }
+        cachedMonthly = builder.buckets(last: 12)
+        cachedTotal = cachedMonthly.reduce(0) { $0 + $1.total }
     }
 
     var body: some View {
         let total = cachedTotal
+        let monthly = self.monthly
         PacerCard("Last 12 months", trailing: {
-            if let selectedMonth, let row = monthly.first(where: { $0.month == selectedMonth }) {
-                HStack(spacing: 8) {
-                    Text(longMonth(row.month))
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
-                    Text(pacerCost(row.cost)).help(pacerCostExact(row.cost))
-                        .font(.system(size: 12, weight: .semibold, design: .rounded))
-                        .monospacedDigit()
-                }
-            } else if !monthly.isEmpty {
+            // The hovered month's numbers are in the card floating over the
+            // chart; this slot never swaps.
+            if !monthly.isEmpty {
                 Text("total \(pacerCost(total))")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
@@ -354,7 +331,10 @@ private struct MonthlyChartCard: View {
                     .foregroundStyle(.secondary)
                     .frame(height: 200)
             } else {
-                chart
+                // Every month keeps its total on top, as before: a dozen
+                // labels fit, and the month-to-month read is the point.
+                PacerStackedPartChart(monthly, kind: .month, annotating: monthly.count)
+                    .accessibilityLabel("Cost by month for the last 12 months")
             }
         }
         .onAppear { refreshMonthly() }
@@ -364,104 +344,6 @@ private struct MonthlyChartCard: View {
         // happens to fire — which on an idle machine is seven to ten seconds,
         // and looks exactly like a very slow render rather than a stale one.
         .onChange(of: scope.accountId) { _, _ in refreshMonthly() }
-    }
-
-    private var chart: some View {
-        Chart {
-            ForEach(monthly) { m in
-                // Capped for the same reason `DailyCostChartCard` caps its
-                // bars: an account one month old drew a single slab across the
-                // whole card.
-                BarMark(
-                    x: .value("Month", m.month),
-                    y: .value("Cost", m.cost),
-                    width: PacerSparseBars.width(count: monthly.count, cap: 56)
-                )
-                .foregroundStyle(.tint)
-                .cornerRadius(2)
-                .annotation(position: .top, alignment: .center, spacing: 2) {
-                    if m.cost > 0 && m.month != selectedMonth {
-                        Text(pacerCost(m.cost)).help(pacerCostExact(m.cost))
-                            .font(.system(size: 9, weight: .medium))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .accessibilityLabel("\(longMonth(m.month))")
-                .accessibilityValue(pacerCostExact(m.cost))
-            }
-            // Selection callout moved to the card header so the chart
-            // doesn't reflow on hover. Just keep a thin dashed rule
-            // to mark the selected bar.
-            if selectedMonth != nil,
-               let m = selectedMonth,
-               monthly.contains(where: { $0.month == m }) {
-                RuleMark(x: .value("Selected", m))
-                    .foregroundStyle(.secondary.opacity(0.5))
-                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 2]))
-            }
-        }
-        .frame(height: 220)
-        .chartXSelection(value: $rawSelectedMonth)
-        .onChange(of: rawSelectedMonth) { _, newValue in
-            selectedMonthDebounce?.cancel()
-            selectedMonthDebounce = Task { @MainActor in
-                try? await Task.sleep(for: .milliseconds(40))
-                guard !Task.isCancelled else { return }
-                selectedMonth = newValue
-            }
-        }
-        .chartYAxis {
-            AxisMarks(position: .leading) { value in
-                AxisGridLine().foregroundStyle(.secondary.opacity(0.18))
-                AxisValueLabel {
-                    if let d = value.as(Double.self) {
-                        Text(pacerCost(d)).help(pacerCostExact(d))
-                            .font(.system(size: 9))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-        }
-        .chartXAxis {
-            AxisMarks { value in
-                AxisValueLabel {
-                    if let m = value.as(String.self) {
-                        Text(shortMonth(m))
-                            .font(.system(size: 9))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-        }
-        .accessibilityLabel("Cost by month for the last 12 months")
-    }
-
-    /// `2026-04` → `Apr` (or `Apr '26` when the visible window straddles
-    /// a year boundary). Previously this rendered as "Apr 26" which
-    /// looked like the 26th of April rather than April 2026 — confusing
-    /// when the cells are big.
-    private func shortMonth(_ ym: String) -> String {
-        guard ym.count == 7,
-              let yearInt = Int(ym.prefix(4)),
-              let monthInt = Int(ym.suffix(2))
-        else { return ym }
-        let names = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
-        guard monthInt >= 1 && monthInt <= 12 else { return ym }
-        let yearsInWindow = Set(monthly.map { String($0.month.prefix(4)) }).count
-        if yearsInWindow > 1 {
-            return "\(names[monthInt - 1]) ’\(String(format: "%02d", yearInt % 100))"
-        }
-        return names[monthInt - 1]
-    }
-
-    private func longMonth(_ ym: String) -> String {
-        guard ym.count == 7,
-              let yearInt = Int(ym.prefix(4)),
-              let monthInt = Int(ym.suffix(2))
-        else { return ym }
-        let names = ["January","February","March","April","May","June","July","August","September","October","November","December"]
-        guard monthInt >= 1 && monthInt <= 12 else { return ym }
-        return "\(names[monthInt - 1]) \(yearInt)"
     }
 }
 
