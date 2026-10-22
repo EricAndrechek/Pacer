@@ -5,7 +5,7 @@ import PacerCore
 import PacerUI
 
 /// Compact "what did I spend today" widget. Hero is the cost in USD,
-/// sub-line is total tokens (input + output + cache reads). Refreshed
+/// sub-line is today's tokens, all five parts (`TokenBreakdown.all`). Refreshed
 /// every 5 minutes — fast enough that an active session moves the
 /// number visibly, slow enough to fit comfortably inside the OS's
 /// widget refresh budget.
@@ -50,9 +50,7 @@ struct TodayCostProvider: TimelineProvider {
                     }
                 })
             let cost = rows.reduce(0) { $0 + $1.totalCostUSD }
-            let tokens = rows.reduce(Int64(0)) {
-                $0 + $1.inputTokens + $1.outputTokens
-            }
+            let tokens = rows.reduce(Int64(0)) { $0 + $1.tokens.all }
             return TodayCostEntry(
                 date: Date(),
                 costUSD: cost,

@@ -63,29 +63,22 @@ struct WeeklyComparisonCard: View {
 
     private struct WeekTotals {
         var cost: Double = 0
-        var inputTokens: Int64 = 0
-        var outputTokens: Int64 = 0
-        var cacheReadTokens: Int64 = 0
-        var cacheCreation5mTokens: Int64 = 0
-        var cacheCreation1hTokens: Int64 = 0
+        var tokens = TokenBreakdown.zero
         var distinctDates: Set<String> = []
 
-        var totalTokens: Int64 { inputTokens + outputTokens }
+        /// All five parts (#215). This was input + output, which left out the
+        /// cache reads and writes that are most of a week's tokens.
+        var totalTokens: Int64 { tokens.all }
         var activeDays: Int { distinctDates.filter { _ in true }.count }
         /// The shared cache hit rate (`TokenBreakdown.cacheHitRatio`,
         /// #225): reads over every prompt token. The same number Today,
         /// Day detail and the cost breakdowns show.
-        var cacheHitRatio: Double {
-            TokenBreakdown(
-                inputTokens: inputTokens, outputTokens: outputTokens,
-                cacheReadTokens: cacheReadTokens,
-                cacheCreation5mTokens: cacheCreation5mTokens,
-                cacheCreation1hTokens: cacheCreation1hTokens
-            ).cacheHitRatio ?? 0
-        }
-        /// Cost per million tokens — orientation-invariant productivity
-        /// metric. Numbers in the $1–$15 range are typical for Claude
-        /// Code workloads (varies by model + cache hit rate).
+        var cacheHitRatio: Double { tokens.cacheHitRatio ?? 0 }
+        /// Cost per million tokens, every token counted — the blended rate
+        /// the week paid. Cache reads are most of the volume and the
+        /// cheapest part, so this sits well under a model's input rate; it
+        /// was per million input + output once, which priced the week's
+        /// cache bill against a fraction of its tokens.
         var costPerMillionTokens: Double? {
             guard totalTokens > 0 else { return nil }
             return cost / (Double(totalTokens) / 1_000_000)
@@ -120,11 +113,7 @@ struct WeeklyComparisonCard: View {
             }
             func add(to t: inout WeekTotals) {
                 t.cost += row.totalCostUSD
-                t.inputTokens += row.inputTokens
-                t.outputTokens += row.outputTokens
-                t.cacheReadTokens += row.cacheReadTokens
-                t.cacheCreation5mTokens += row.cacheCreation5mTokens
-                t.cacheCreation1hTokens += row.cacheCreation1hTokens
+                t.tokens += row.tokens
                 t.distinctDates.insert(row.date)
             }
             switch bucket {

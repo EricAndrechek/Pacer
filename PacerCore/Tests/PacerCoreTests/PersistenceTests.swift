@@ -719,10 +719,10 @@ private struct AggregateSnapshot: Sendable {
     #expect(a.topModel == "claude-opus-4-7")
 
     let b = sessions.first { $0.sessionId == "sess-B" }!
-    // `totalTokens` is input + output only — cache_read is excluded
-    // since it's effectively free and would dwarf the meaningful signal.
-    // sess-B has input=1, output=1, cacheRead=1, so totalTokens=2.
-    #expect(b.totalTokens == 2)
+    // sess-B has input=1, output=1, cacheRead=1: three tokens in all,
+    // two of them uncached (#215).
+    #expect(b.tokens.all == 3)
+    #expect(b.tokens.uncached == 2)
     #expect(b.topModel == "claude-opus-4-7")
 }
 

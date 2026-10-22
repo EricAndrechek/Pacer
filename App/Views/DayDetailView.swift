@@ -108,16 +108,15 @@ struct DayDetailView: View {
 
     private struct Totals {
         var cost: Double = 0
-        var input: Int64 = 0
-        var output: Int64 = 0
-        var cacheRead: Int64 = 0
-        var cacheCreation: Int64 = 0
+        var tokens = TokenBreakdown.zero
     }
 
     private struct ProjectRow: Identifiable {
         let path: String
         let displayName: String
         let cost: Double
+        /// `TokenBreakdown.all`, from the same `ProjectUsageTotals` fold the
+        /// Projects list and Project detail use, so the three agree (#215).
         let tokens: Int64
         var id: String { path }
     }
@@ -149,10 +148,7 @@ struct DayDetailView: View {
         var t = Totals()
         for r in aggregates {
             t.cost += r.totalCostUSD
-            t.input += r.inputTokens
-            t.output += r.outputTokens
-            t.cacheRead += r.cacheReadTokens
-            t.cacheCreation += r.cacheCreation5mTokens + r.cacheCreation1hTokens
+            t.tokens += r.tokens
         }
 
         // Per-project rollup read straight from `ProjectDailyAggregate` —
@@ -160,12 +156,12 @@ struct DayDetailView: View {
         // and cost already applied at the user's current cost mode by
         // `ProjectAggregateRecomputer`. No per-sample iteration, no
         // pricing lookups on the body path.
-        let rows = projectAggregatesForDay.map { agg in
+        let rows = CollectionUsageRollup.perPathTotals(from: projectAggregatesForDay).map { path, totals in
             ProjectRow(
-                path: agg.projectPath,
-                displayName: pacerShortPath(agg.projectPath),
-                cost: agg.totalCostUSD,
-                tokens: agg.inputTokens + agg.outputTokens
+                path: path,
+                displayName: pacerShortPath(path),
+                cost: totals.cost,
+                tokens: totals.tokens.all
             )
         }.sorted { lhs, rhs in
             // Stable sort: by cost desc, with displayName as a
@@ -214,10 +210,7 @@ struct DayDetailView: View {
         case .name:
             primary = { $0.model < $1.model }
         case .tokens:
-            let totalTokens: (DailyRow) -> Int64 = {
-                $0.inputTokens + $0.outputTokens
-            }
-            primary = { totalTokens($0) < totalTokens($1) }
+            primary = { $0.tokens.all < $1.tokens.all }
         case .cost:
             primary = { $0.totalCostUSD < $1.totalCostUSD }
         }
@@ -329,20 +322,20 @@ struct DayDetailView: View {
                         tooltip: pacerCostExact(t.cost)
                     )
                     MetricTile(
-                        value: pacerTokens(t.input), label: "input",
-                        tooltip: pacerTokensExact(t.input)
+                        value: pacerTokens(t.tokens.inputTokens), label: "input",
+                        tooltip: pacerTokensExact(t.tokens.inputTokens)
                     )
                     MetricTile(
-                        value: pacerTokens(t.output), label: "output",
-                        tooltip: pacerTokensExact(t.output)
+                        value: pacerTokens(t.tokens.outputTokens), label: "output",
+                        tooltip: pacerTokensExact(t.tokens.outputTokens)
                     )
                     MetricTile(
-                        value: pacerTokens(t.cacheRead), label: "cache read",
-                        tooltip: pacerTokensExact(t.cacheRead)
+                        value: pacerTokens(t.tokens.cacheReadTokens), label: "cache read",
+                        tooltip: pacerTokensExact(t.tokens.cacheReadTokens)
                     )
                     MetricTile(
-                        value: pacerTokens(t.cacheCreation), label: "cache write",
-                        tooltip: pacerTokensExact(t.cacheCreation)
+                        value: pacerTokens(t.tokens.cacheWrite), label: "cache write",
+                        tooltip: pacerTokensExact(t.tokens.cacheWrite)
                     )
                 }
             }
@@ -520,7 +513,7 @@ struct DayDetailView: View {
                                 .font(.system(size: 12, weight: .medium))
                                 .lineLimit(1)
                             Spacer(minLength: 8)
-                            Text(pacerTokens(agg.inputTokens + agg.outputTokens)).help(pacerTokensExact(agg.inputTokens + agg.outputTokens))
+                            Text(pacerTokens(agg.tokens.all)).help(pacerTokensExact(agg.tokens.all))
                                 .font(.system(size: 11))
                                 .foregroundStyle(.secondary)
                                 .monospacedDigit()

@@ -61,10 +61,12 @@ public final class ProjectDailyAggregate {
     /// only by ProjectDetailView (small per-row cost; rows for one
     /// project ≤ ~90).
     public var sessionIdsJSON: Data
-    /// JSON `[String: Int64]` mapping model name → total tokens
-    /// (input + output + cacheRead) for this bucket. Used by
+    /// JSON `[String: Int64]` mapping model name → input + output tokens
+    /// for this bucket — uncached tokens, not `TokenBreakdown.all`, so a
+    /// view reading it labels it "uncached tokens" (#215). Used by
     /// ProjectDetailView's per-model donut so we don't have to fetch
-    /// raw samples on drill-in.
+    /// raw samples on drill-in. Widening it to all five parts changes a
+    /// stored encoding and rebuilds every project row.
     public var modelTokensJSON: Data
     /// JSON `[String: Double]` mapping model name → totalCostUSD.
     public var modelCostJSON: Data

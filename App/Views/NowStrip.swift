@@ -279,9 +279,7 @@ struct NowStrip: View {
     private func refreshFacts() {
         var next = TodayFacts()
         next.todayCost = todayAggregates.reduce(0) { $0 + $1.totalCostUSD }
-        next.todayTokens = todayAggregates.reduce(0) {
-            $0 + $1.inputTokens + $1.outputTokens
-        }
+        next.todayTokens = todayAggregates.reduce(0) { $0 + $1.tokens.all }
         next.extraUsageUSD = extraUsageUSD
         if next != cached { cached = next }
     }
@@ -322,7 +320,7 @@ struct NowStrip: View {
     private var stats: LiveStats {
         var s = LiveStats()
         for row in recentHourlyRows {
-            s.tokensLastHour += row.inputTokens + row.outputTokens
+            s.tokensLastHour += row.tokens.all
             s.costLastHour += row.totalCostUSD
             s.sampleCount += row.sampleCount
         }

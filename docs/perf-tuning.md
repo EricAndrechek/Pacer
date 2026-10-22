@@ -353,11 +353,9 @@ boundary. `costRecomputeVersion` 5 → 6 clears zeros already written.
 
 ## Known correctness items
 
-- `sessionRecomputerRollsUpPerSession` test fails on `main` (asserts
-  `b.totalTokens == 3` but gets 2). Pre-dates this session's work.
-  Likely a `cacheReadTokens` accounting mismatch in `SessionInfo.totalTokens`
-  vs the test's expectation. Not blocking — every CI run already had it
-  failing before this session.
+- `sessionRecomputerRollsUpPerSession` once asserted `b.totalTokens == 3`
+  against an input + output total of 2. Resolved by #215: the test now reads
+  `b.tokens.all == 3` and `b.tokens.uncached == 2`.
 - TERNARY-IN SwiftData crash spotted once in stderr early in the
   session (`projectPath IN {~50 paths}`) was investigated and traced
   to a **pre-existing** regression test that confirms the crash is

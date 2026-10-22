@@ -54,18 +54,13 @@ struct PerModelTodayCard: View {
     private var rows: [ModelRow] { cached }
 
     private func refreshCache() {
-        let totalTokens = aggregates.reduce(0) {
-            $0 + $1.inputTokens + $1.outputTokens
-        }
+        let totalTokens = aggregates.reduce(0) { $0 + $1.tokens.all }
         cached = aggregates
             .map { agg in
-                let tokens = agg.inputTokens + agg.outputTokens
-                let share = totalTokens > 0 ? Double(tokens) / Double(totalTokens) : 0
+                let share = totalTokens > 0 ? Double(agg.tokens.all) / Double(totalTokens) : 0
                 return ModelRow(
                     model: agg.model,
-                    inputTokens: agg.inputTokens,
-                    outputTokens: agg.outputTokens,
-                    cacheReadTokens: agg.cacheReadTokens,
+                    tokens: agg.tokens,
                     cost: agg.totalCostUSD,
                     share: share
                 )
@@ -92,7 +87,7 @@ struct PerModelTodayCard: View {
         built.reserveCapacity(rows.count)
         var totalTokens: Int64 = 0
         for r in rows {
-            let t = Int64(r.inputTokens + r.outputTokens)
+            let t = r.tokens.all
             running += Double(t)
             totalTokens += t
             built.append((r, running))
@@ -118,7 +113,7 @@ struct PerModelTodayCard: View {
             // `reduce` on every hover tick.
             if let r = hoveredRow {
                 let total = hoverTotalTokens
-                let myTotal = r.inputTokens + r.outputTokens
+                let myTotal = r.tokens.all
                 let pct = total > 0 ? Int(Double(myTotal) / Double(total) * 100) : 0
                 HStack(spacing: 8) {
                     Text(pacerModelDisplayName(r.model))
@@ -161,7 +156,7 @@ struct PerModelTodayCard: View {
     private var donut: some View {
         PacerDonut(
             slices: rows.map {
-                PacerDonutSlice(id: $0.model, value: Double($0.inputTokens + $0.outputTokens),
+                PacerDonutSlice(id: $0.model, value: Double($0.tokens.all),
                                 color: pacerModelColor($0.model))
             },
             innerRatio: 0.62,
@@ -179,8 +174,7 @@ struct PerModelTodayCard: View {
         let total = hoverTotalTokens
         guard total > 0 else { return "no data yet" }
         return rows.prefix(5).map { row in
-            let tokens = row.inputTokens + row.outputTokens
-            let pct = Int(Double(tokens) / Double(total) * 100)
+            let pct = Int(Double(row.tokens.all) / Double(total) * 100)
             return "\(pacerModelDisplayName(row.model)) \(pct) percent"
         }.joined(separator: ", ")
     }
@@ -193,18 +187,18 @@ struct PerModelTodayCard: View {
                     label: pacerModelDisplayName(row.model),
                     labelMaxWidth: 220
                 ) {
-                    Text("in \(pacerTokens(row.inputTokens))")
+                    Text("in \(pacerTokens(row.tokens.inputTokens))")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .monospacedDigit()
                         .frame(width: 88, alignment: .trailing)
-                        .help("\(pacerTokensExact(row.inputTokens)) input tokens")
-                    Text("out \(pacerTokens(row.outputTokens))")
+                        .help("\(pacerTokensExact(row.tokens.inputTokens)) input tokens")
+                    Text("out \(pacerTokens(row.tokens.outputTokens))")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .monospacedDigit()
                         .frame(width: 88, alignment: .trailing)
-                        .help("\(pacerTokensExact(row.outputTokens)) output tokens")
+                        .help("\(pacerTokensExact(row.tokens.outputTokens)) output tokens")
                     Text(pacerCost(row.cost)).help(pacerCostExact(row.cost))
                         .font(.system(size: 12, weight: .semibold, design: .rounded))
                         .monospacedDigit()
@@ -224,9 +218,8 @@ struct PerModelTodayCard: View {
 private struct ModelRow: Identifiable {
     var id: String { model }
     let model: String
-    let inputTokens: Int64
-    let outputTokens: Int64
-    let cacheReadTokens: Int64
+    let tokens: TokenBreakdown
     let cost: Double
+    /// The model's share of today's tokens, all five parts (#215).
     let share: Double
 }

@@ -88,9 +88,4 @@ public final class AccountDailyAggregate {
         self.cacheCreation1hTokens = cacheCreation1hTokens
         self.totalCostUSD = totalCostUSD
     }
-
-    public var totalTokens: Int64 {
-        inputTokens + outputTokens + cacheReadTokens
-            + cacheCreation5mTokens + cacheCreation1hTokens
-    }
 }

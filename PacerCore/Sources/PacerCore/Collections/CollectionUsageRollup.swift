@@ -6,16 +6,40 @@ import Foundation
 /// speak the same totals type instead of each re-summing inline.
 public struct ProjectUsageTotals: Sendable, Equatable {
     public var cost: Double = 0
-    public var inputTokens: Int64 = 0
-    public var outputTokens: Int64 = 0
-    public var cacheReadTokens: Int64 = 0
+    /// All five parts; a total is `tokens.all` (#215). This summed input +
+    /// output + cache reads once, so a project's leaderboard row and its
+    /// detail page disagreed about the same range.
+    public var tokens = TokenBreakdown.zero
     public var sessionCount: Int = 0
     public var lastActive: Date = .distantPast
 
-    public var totalTokens: Int64 { inputTokens + outputTokens + cacheReadTokens }
-
     public static let zero = ProjectUsageTotals()
     public init() {}
+
+    /// Every row folded together, whatever its path: one project's rows give
+    /// that project's totals, which is how Project detail reads its header.
+    public init(rows: [any ProjectDailyReadable]) {
+        self.init()
+        for r in rows { add(r) }
+    }
+
+    /// Fold in one stored day row. The one place a project row's numbers
+    /// become a total, so the Projects list, Project detail and Day detail
+    /// cannot sum it three ways.
+    public mutating func add(_ r: any ProjectDailyReadable) {
+        cost += r.totalCostUSD
+        tokens += r.tokens
+        sessionCount += r.sessionCount
+        if r.lastActive > lastActive { lastActive = r.lastActive }
+    }
+
+    /// Fold in another total — a project into a collection.
+    public mutating func add(_ other: ProjectUsageTotals) {
+        cost += other.cost
+        tokens += other.tokens
+        sessionCount += other.sessionCount
+        if other.lastActive > lastActive { lastActive = other.lastActive }
+    }
 }
 
 /// Folds `ProjectDailyAggregate` rows into per-path and per-collection
@@ -38,14 +62,7 @@ public enum CollectionUsageRollup {
         var map: [String: ProjectUsageTotals] = [:]
         map.reserveCapacity(aggregates.count)
         for r in aggregates {
-            var t = map[r.projectPath] ?? .zero
-            t.cost += r.totalCostUSD
-            t.inputTokens += r.inputTokens
-            t.outputTokens += r.outputTokens
-            t.cacheReadTokens += r.cacheReadTokens
-            t.sessionCount += r.sessionCount
-            if r.lastActive > t.lastActive { t.lastActive = r.lastActive }
-            map[r.projectPath] = t
+            map[r.projectPath, default: .zero].add(r)
         }
         return map
     }
@@ -58,12 +75,7 @@ public enum CollectionUsageRollup {
         var t = ProjectUsageTotals.zero
         for path in paths {
             guard let pt = perPath[path] else { continue }
-            t.cost += pt.cost
-            t.inputTokens += pt.inputTokens
-            t.outputTokens += pt.outputTokens
-            t.cacheReadTokens += pt.cacheReadTokens
-            t.sessionCount += pt.sessionCount
-            if pt.lastActive > t.lastActive { t.lastActive = pt.lastActive }
+            t.add(pt)
         }
         return t
     }

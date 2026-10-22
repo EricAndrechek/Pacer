@@ -163,13 +163,5 @@ public extension DailyRow {
 }
 
 public extension ProjectDailyReadable {
-    var costBreakdown: CostBreakdown {
-        CostBreakdown(
-            cost: costComponents,
-            tokens: TokenBreakdown(
-                inputTokens: inputTokens, outputTokens: outputTokens,
-                cacheReadTokens: cacheReadTokens,
-                cacheCreation5mTokens: cacheCreation5mTokens,
-                cacheCreation1hTokens: cacheCreation1hTokens))
-    }
+    var costBreakdown: CostBreakdown { CostBreakdown(cost: costComponents, tokens: tokens) }
 }

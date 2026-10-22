@@ -405,9 +405,8 @@ private struct ProjectsContent: View {
         let path: String
         let displayName: String
         let cost: Double
-        let inputTokens: Int64
-        let outputTokens: Int64
-        let cacheReadTokens: Int64
+        /// `TokenBreakdown.all` (#215), from `ProjectUsageTotals` — the fold
+        /// Project detail and Day detail use, so all three agree.
         let totalTokens: Int64
         let sessionCount: Int
         let lastActive: Date
@@ -534,24 +533,14 @@ private struct ProjectsContent: View {
     /// re-init, before `.onAppear` fires.
     private func computeAllRowsSync() -> [ProjectRow] {
         struct Acc {
-            var cost: Double = 0
-            var input: Int64 = 0
-            var output: Int64 = 0
-            var cacheRead: Int64 = 0
-            var sessionCount: Int = 0
+            var totals = ProjectUsageTotals.zero
             var modelCount: Int = 0
-            var lastActive: Date = .distantPast
         }
         var byProject: [String: Acc] = [:]
         for r in aggregates {
             var a = byProject[r.projectPath] ?? Acc()
-            a.cost += r.totalCostUSD
-            a.input += r.inputTokens
-            a.output += r.outputTokens
-            a.cacheRead += r.cacheReadTokens
-            a.sessionCount += r.sessionCount
+            a.totals.add(r)
             a.modelCount += r.modelCount
-            if r.lastActive > a.lastActive { a.lastActive = r.lastActive }
             byProject[r.projectPath] = a
         }
         // Index probes once for the badge derivation below. Small
@@ -576,13 +565,10 @@ private struct ProjectsContent: View {
             return ProjectRow(
                 path: key,
                 displayName: names[key] ?? pacerShortPath(key),
-                cost: a.cost,
-                inputTokens: a.input,
-                outputTokens: a.output,
-                cacheReadTokens: a.cacheRead,
-                totalTokens: a.input + a.output + a.cacheRead,
-                sessionCount: a.sessionCount,
-                lastActive: a.lastActive,
+                cost: a.totals.cost,
+                totalTokens: a.totals.tokens.all,
+                sessionCount: a.totals.sessionCount,
+                lastActive: a.totals.lastActive,
                 modelCount: a.modelCount,
                 status: status,
                 colorSeed: metaByPath[key]?.colorSeed,
@@ -1234,7 +1220,7 @@ private struct ProjectsContent: View {
             HStack(spacing: 10) {
                 Circle().fill(hue).frame(width: 10, height: 10)
                 Text(r.name).font(.system(size: 15, weight: .semibold))
-                Text("\(r.memberCount) project\(r.memberCount == 1 ? "" : "s") · \(pacerCost(r.totals.cost)) · \(pacerTokens(r.totals.totalTokens))")
+                Text("\(r.memberCount) project\(r.memberCount == 1 ? "" : "s") · \(pacerCost(r.totals.cost)) · \(pacerTokens(r.totals.tokens.all))")
                     .font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 Button("Edit collection") { onEditCollection(r.id) }

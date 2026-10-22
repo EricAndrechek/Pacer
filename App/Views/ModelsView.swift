@@ -253,10 +253,9 @@ private struct ModelsContent: View {
         let subtitle: String?    // raw id (ungrouped) or "N versions" (grouped)
         let color: Color
         let cost: Double
-        let inputTokens: Int64
-        let outputTokens: Int64
-        let cacheReadTokens: Int64
-        let totalTokens: Int64
+        let tokens: TokenBreakdown
+        /// `tokens.all` (#215) — what the Tokens column, sort and donut show.
+        var totalTokens: Int64 { tokens.all }
         let activeDays: Int
         let firstSeen: String
         let lastSeen: String
@@ -344,9 +343,7 @@ private struct ModelsContent: View {
             var label: String = ""
             var members: Set<String> = []
             var cost: Double = 0
-            var input: Int64 = 0
-            var output: Int64 = 0
-            var cacheRead: Int64 = 0
+            var tokens = TokenBreakdown.zero
             var breakdown: CostBreakdown = .zero
             var dates: Set<String> = []
             var firstSeen: String = "9999-99-99"
@@ -361,9 +358,7 @@ private struct ModelsContent: View {
             a.label = b.label
             a.members.insert(r.model)
             a.cost += r.totalCostUSD
-            a.input += r.inputTokens
-            a.output += r.outputTokens
-            a.cacheRead += r.cacheReadTokens
+            a.tokens += r.tokens
             a.breakdown += r.costBreakdown
             a.dates.insert(r.date)
             if r.date < a.firstSeen { a.firstSeen = r.date }
@@ -381,10 +376,7 @@ private struct ModelsContent: View {
                     : "\(a.members.count) version\(a.members.count == 1 ? "" : "s")",
                 color: colorFor(a.label),
                 cost: a.cost,
-                inputTokens: a.input,
-                outputTokens: a.output,
-                cacheReadTokens: a.cacheRead,
-                totalTokens: a.input + a.output + a.cacheRead,
+                tokens: a.tokens,
                 activeDays: a.dates.count,
                 firstSeen: a.firstSeen,
                 lastSeen: a.lastSeen,
@@ -439,7 +431,7 @@ private struct ModelsContent: View {
             let b = grouping.bucket(r.model)
             let dk = DayKey(date: r.date, key: b.key)
             var e = mix[dk] ?? (label: b.label, tokens: Int64(0))
-            e.tokens += r.inputTokens + r.outputTokens
+            e.tokens += r.tokens.all
             mix[dk] = e
         }
         // `mix` is a Dictionary, so `.map` yields hash order. The trend
@@ -497,10 +489,7 @@ private struct ModelsContent: View {
             subtitle: "\(tail.count) models",
             color: .secondary,
             cost: tail.reduce(0) { $0 + $1.cost },
-            inputTokens: tail.reduce(0) { $0 + $1.inputTokens },
-            outputTokens: tail.reduce(0) { $0 + $1.outputTokens },
-            cacheReadTokens: tail.reduce(0) { $0 + $1.cacheReadTokens },
-            totalTokens: tail.reduce(0) { $0 + $1.totalTokens },
+            tokens: tail.reduce(TokenBreakdown.zero) { $0 + $1.tokens },
             activeDays: 0,
             firstSeen: tail.map(\.firstSeen).min() ?? "",
             lastSeen: tail.map(\.lastSeen).max() ?? "",

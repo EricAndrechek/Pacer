@@ -149,8 +149,8 @@ struct SessionDetailView: View {
                     tooltip: pacerCostExact(session.cumulativeCostUSD)
                 )
                 MetricTile(
-                    value: pacerTokens(session.totalTokens), label: "tokens",
-                    tooltip: pacerTokensExact(session.totalTokens)
+                    value: pacerTokens(session.tokens.all), label: "tokens",
+                    tooltip: pacerTokensExact(session.tokens.all)
                 )
                 MetricTile(value: pacerModelDisplayName(session.topModel), label: "top model", size: .compact)
                 MetricTile(

@@ -187,12 +187,10 @@ struct ProjectDetailView: View {
         )
     }
 
-    private struct Totals {
-        var cost: Double = 0
-        var input: Int64 = 0
-        var output: Int64 = 0
-        var cacheRead: Int64 = 0
-    }
+    /// The shared project fold (#215): the Projects list and Day detail sum
+    /// a project's rows through the same `ProjectUsageTotals`, so all three
+    /// give the same tokens for the same range.
+    private typealias Totals = ProjectUsageTotals
 
     private var totals: Totals { cachedTotals }
 
@@ -240,23 +238,21 @@ struct ProjectDetailView: View {
     /// separate computed-property walks. Reuses one `JSONDecoder` for
     /// the entire pass instead of allocating per row.
     private func refreshDerived() {
-        var t = Totals()
+        let t = Totals(rows: aggregates)
         var breakdown = CostBreakdown.zero
         var byModel: [String: (tokens: Int64, cost: Double)] = [:]
         var days: [DayPoint] = []
         days.reserveCapacity(aggregates.count)
         let decoder = JSONDecoder()
         for r in aggregates {
-            t.cost += r.totalCostUSD
-            t.input += r.inputTokens
-            t.output += r.outputTokens
-            t.cacheRead += r.cacheReadTokens
             breakdown += r.costBreakdown
             days.append(DayPoint(
                 date: r.date,
                 cost: r.totalCostUSD,
-                tokens: r.inputTokens + r.outputTokens
+                tokens: r.tokens.all
             ))
+            // Uncached (input + output) per model: all the stored side-table
+            // holds, so the Models card says so (#215).
             if let tokens = try? decoder.decode([String: Int64].self, from: r.modelTokensJSON) {
                 for (model, tok) in tokens {
                     byModel[model, default: (0, 0)].tokens += tok
@@ -299,7 +295,7 @@ struct ProjectDetailView: View {
         var f = AggregatesFingerprint()
         for r in aggregates {
             f.count += 1
-            f.tokens += r.inputTokens + r.outputTokens + r.cacheReadTokens
+            f.tokens += r.tokens.all
             f.cost += r.totalCostUSD
         }
         return f
@@ -417,7 +413,7 @@ struct ProjectDetailView: View {
             // bucket under the canonical's "root" row.
             let key = s.originalProjectPath ?? projectPath
             var a = byPath[key] ?? Acc()
-            a.tokens += s.inputTokens + s.outputTokens
+            a.tokens += s.breakdown.all
             a.cost += CostCalculator.cost(s, mode: mode, snapshot: pricing)
             if let sid = s.sessionId, !sid.isEmpty { a.sessions.insert(sid) }
             byPath[key] = a
@@ -745,16 +741,16 @@ struct ProjectDetailView: View {
                     tooltip: pacerCostExact(t.cost)
                 )
                 MetricTile(
-                    value: pacerTokens(t.input), label: "input",
-                    tooltip: pacerTokensExact(t.input)
+                    value: pacerTokens(t.tokens.inputTokens), label: "input",
+                    tooltip: pacerTokensExact(t.tokens.inputTokens)
                 )
                 MetricTile(
-                    value: pacerTokens(t.output), label: "output",
-                    tooltip: pacerTokensExact(t.output)
+                    value: pacerTokens(t.tokens.outputTokens), label: "output",
+                    tooltip: pacerTokensExact(t.tokens.outputTokens)
                 )
                 MetricTile(
-                    value: pacerTokens(t.cacheRead), label: "cache read",
-                    tooltip: pacerTokensExact(t.cacheRead)
+                    value: pacerTokens(t.tokens.cacheReadTokens), label: "cache read",
+                    tooltip: pacerTokensExact(t.tokens.cacheReadTokens)
                 )
                 MetricTile(value: "\(aggregates.count)", label: "active days")
             }
@@ -992,14 +988,14 @@ struct ProjectDetailView: View {
 
     private var modelsCard: some View {
         let total = modelSlices.reduce(Int64(0)) { $0 + $1.tokens }
-        return PacerCard("Models", trailing: {
+        return PacerCard("Uncached tokens by model", trailing: {
             if let m = hoveredModelSlice {
                 let pct = total > 0 ? Int(Double(m.tokens) / Double(total) * 100) : 0
                 HStack(spacing: 6) {
                     Text(pacerModelDisplayName(m.model))
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.secondary)
-                    Text(pacerTokens(m.tokens)).help(pacerTokensExact(m.tokens))
+                    Text(pacerTokens(m.tokens)).help("\(pacerTokensExact(m.tokens)) uncached tokens")
                         .font(.system(size: 12, weight: .semibold, design: .rounded))
                         .monospacedDigit()
                     Text("(\(pct)%)")
@@ -1016,7 +1012,7 @@ struct ProjectDetailView: View {
                     },
                     hoveredID: hoveredModelSlice.map { pacerShortModel($0.model) },
                     hoveredAngle: $hoveredModelAngle,
-                    accessibilityLabel: "Model share for \(displayName)",
+                    accessibilityLabel: "Uncached token share by model for \(displayName)",
                     accessibilityValue: modelSlicesSummary(total: total)
                 )
                 VStack(alignment: .leading, spacing: 6) {
@@ -1025,7 +1021,7 @@ struct ProjectDetailView: View {
                             color: pacerModelColor(m.model),
                             label: pacerModelDisplayName(m.model)
                         ) {
-                            Text(pacerTokens(m.tokens)).help(pacerTokensExact(m.tokens))
+                            Text(pacerTokens(m.tokens)).help("\(pacerTokensExact(m.tokens)) uncached tokens")
                                 .font(.system(size: 11))
                                 .foregroundStyle(.secondary)
                                 .monospacedDigit()

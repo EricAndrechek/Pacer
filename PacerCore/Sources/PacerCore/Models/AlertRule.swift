@@ -88,7 +88,15 @@ public enum AlertRuleMetric {
     public static let todayCost = "today_cost"
     /// Total spend over the last 7 calendar days (rolling). USD.
     public static let weeklyCost = "weekly_cost"
-    /// Total tokens today (input + output + cache_read).
+    /// Today's uncached tokens: input + output (`TokenBreakdown.uncached`).
+    ///
+    /// Deliberately not `TokenBreakdown.all`, which every display surface
+    /// counts since #215. A rule stores only its threshold, and every one in
+    /// existence was set against — and has always fired on — input + output.
+    /// Cache reads and writes are most of a day's tokens, so redefining the
+    /// metric would put a threshold chosen for one number under a far larger
+    /// one, and an alert meant for a heavy day would fire every day. The label
+    /// says "uncached" so the rule reads as what it counts.
     public static let todayTokens = "today_tokens"
 
     /// Rate-limit window utilization (0–100%). Unlike the cost/token metrics
@@ -110,7 +118,7 @@ public enum AlertRuleMetric {
         switch metric {
         case todayCost:    return "Today's cost (USD)"
         case weeklyCost:   return "Weekly cost (USD)"
-        case todayTokens:  return "Today's tokens"
+        case todayTokens:  return "Today's uncached tokens"
         case rateLimitPct: return "Rate-limit usage (%)"
         default:           return metric
         }

@@ -75,9 +75,3 @@ public final class SessionInfo {
         self.topModel = topModel
     }
 }
-
-extension SessionInfo {
-    public var totalTokens: Int64 {
-        cumulativeInputTokens + cumulativeOutputTokens
-    }
-}

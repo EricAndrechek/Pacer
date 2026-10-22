@@ -99,7 +99,7 @@ struct DailyCostChartCard: View {
             return DailyTotal(
                 date: date,
                 cost: rows.reduce(0) { $0 + $1.totalCostUSD },
-                tokens: rows.reduce(0) { $0 + $1.inputTokens + $1.outputTokens },
+                tokens: rows.reduce(0) { $0 + $1.tokens.all },
                 parts: parts,
                 topPart: parts.last { $0.usd > 0 }?.component
             )

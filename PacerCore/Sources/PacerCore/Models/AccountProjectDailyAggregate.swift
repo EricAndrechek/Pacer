@@ -132,8 +132,8 @@ public struct ProjectRollupValues: Sendable {
         cost += priced.components
         pricedBy.add(priced.pricedBy)
         if let sid = sample.sessionId, !sid.isEmpty { sessionIds.insert(sid) }
-        modelTokens[sample.model, default: 0] +=
-            sample.breakdown.inputTokens + sample.breakdown.outputTokens
+        // Uncached, as `modelTokensJSON` has always stored (#215).
+        modelTokens[sample.model, default: 0] += sample.breakdown.uncached
         modelCost[sample.model, default: 0] += priced.total
         if sample.sampledAt > lastActive { lastActive = sample.sampledAt }
     }
@@ -224,14 +224,9 @@ public extension ProjectRollupValues {
 /// Lets the Projects view and `CollectionUsageRollup` consume either table
 /// without knowing which, so the account scope is a change of source rather
 /// than a second copy of the view.
-public protocol ProjectDailyReadable {
+public protocol ProjectDailyReadable: RollupTokenColumns {
     var projectPath: String { get }
     var date: String { get }
-    var inputTokens: Int64 { get }
-    var outputTokens: Int64 { get }
-    var cacheReadTokens: Int64 { get }
-    var cacheCreation5mTokens: Int64 { get }
-    var cacheCreation1hTokens: Int64 { get }
     var totalCostUSD: Double { get }
     /// `totalCostUSD` split into its five priced parts (#296); both tables
     /// get it from `RollupCostColumns`.
@@ -241,7 +236,8 @@ public protocol ProjectDailyReadable {
     var lastActive: Date { get }
     /// The side-tables consumers break down by: per-model totals for the
     /// project detail view, and the distinct session ids the CSV export
-    /// counts.
+    /// counts. `modelTokensJSON` holds input + output per model — uncached
+    /// tokens, not `TokenBreakdown.all` (#215).
     var modelTokensJSON: Data { get }
     var modelCostJSON: Data { get }
     var sessionIdsJSON: Data { get }

@@ -81,7 +81,7 @@ struct LiveSessionProvider: TimelineProvider {
                 date: Date(),
                 session: .init(
                     projectDisplayName: pacerShortPath(s.projectPath),
-                    totalTokens: s.totalTokens,
+                    totalTokens: s.tokens.all,
                     costUSD: s.cumulativeCostUSD,
                     topModel: s.topModel,
                     firstSeenAt: s.firstSeenAt,

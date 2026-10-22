@@ -146,9 +146,7 @@ private struct LifetimeSummaryContent: View {
 
     private struct Totals {
         var cost: Double = 0
-        var input: Int64 = 0
-        var output: Int64 = 0
-        var cacheRead: Int64 = 0
+        var tokens = TokenBreakdown.zero
         var distinctDays: Int = 0
         var distinctModels: Int = 0
         var firstDate: String?
@@ -169,9 +167,7 @@ private struct LifetimeSummaryContent: View {
         var minDate: String?
         for row in aggregates {
             t.cost += row.totalCostUSD
-            t.input += row.inputTokens
-            t.output += row.outputTokens
-            t.cacheRead += row.cacheReadTokens
+            t.tokens += row.tokens
             dates.insert(row.date)
             models.insert(row.model)
             if minDate == nil || row.date < minDate! { minDate = row.date }
@@ -242,19 +238,19 @@ private struct LifetimeSummaryContent: View {
                         tooltip: pacerCostExact(t.cost)
                     )
                     MetricTile(
-                        value: pacerTokens(t.input),
+                        value: pacerTokens(t.tokens.inputTokens),
                         label: "input",
-                        tooltip: pacerTokensExact(t.input)
+                        tooltip: pacerTokensExact(t.tokens.inputTokens)
                     )
                     MetricTile(
-                        value: pacerTokens(t.output),
+                        value: pacerTokens(t.tokens.outputTokens),
                         label: "output",
-                        tooltip: pacerTokensExact(t.output)
+                        tooltip: pacerTokensExact(t.tokens.outputTokens)
                     )
                     MetricTile(
-                        value: pacerTokens(t.cacheRead),
+                        value: pacerTokens(t.tokens.cacheReadTokens),
                         label: "cache read",
-                        tooltip: pacerTokensExact(t.cacheRead)
+                        tooltip: pacerTokensExact(t.tokens.cacheReadTokens)
                     )
                     MetricTile(value: "\(t.distinctDays)", label: "active days")
                     MetricTile(value: "\(t.distinctModels)", label: "models")
@@ -477,10 +473,8 @@ private struct MonthlyChartCard: View {
 
 // MARK: - Top days
 
-enum TopDaysSort: String, CaseIterable, Identifiable {
-    case date, tokens, cost
-    var id: String { rawValue }
-}
+// `TopDaysSort` and the ranking itself live in PacerCore (`DayRanking`), so
+// the order "Tokens" produces is tested rather than re-derived here (#215).
 
 private struct TopDaysCard: View {
     @State private var scope = UsageScope.shared
@@ -580,12 +574,7 @@ private struct TopDaysContent: View {
     /// indicating "showing N of M" plus a Show more / Show less link.
     @State private var showAll: Bool = false
 
-    private struct DayRow: Identifiable {
-        let date: String
-        let cost: Double
-        let tokens: Int64
-        var id: String { date }
-    }
+    private typealias DayRow = DayTotal
 
     /// Days inside the active range, sorted by the user's chosen
     /// field. Computed per body fire from the range-scoped `@Query` —
@@ -595,24 +584,7 @@ private struct TopDaysContent: View {
     /// slice (≤ ~5k rows even on .all); HoverRow lives inside each row
     /// so the parent body doesn't re-fire on row hover.
     private var sortedRows: [DayRow] {
-        var byDate: [String: (cost: Double, tokens: Int64)] = [:]
-        for row in aggregates {
-            var v = byDate[row.date] ?? (0, 0)
-            v.cost += row.totalCostUSD
-            v.tokens += row.inputTokens + row.outputTokens
-            byDate[row.date] = v
-        }
-        let rows = byDate.map { DayRow(date: $0.key, cost: $0.value.cost, tokens: $0.value.tokens) }
-        let sorted: [DayRow]
-        switch sort {
-        case .date:
-            sorted = rows.sorted { $0.date < $1.date }
-        case .tokens:
-            sorted = rows.sorted { $0.tokens < $1.tokens }
-        case .cost:
-            sorted = rows.sorted { $0.cost < $1.cost }
-        }
-        return descending ? sorted.reversed() : Array(sorted)
+        DayRanking.ranked(aggregates, by: sort, descending: descending)
     }
 
     private var title: String {
@@ -723,7 +695,7 @@ private struct TopDaysContent: View {
         func value(of row: DayRow) -> Double {
             switch self {
             case .cost:   return row.cost
-            case .tokens: return Double(row.tokens)
+            case .tokens: return Double(row.tokens.all)
             }
         }
     }
@@ -756,7 +728,7 @@ private struct TopDaysContent: View {
                     }
                     .frame(height: 6)
                 }
-                Text(pacerTokens(row.tokens)).help(pacerTokensExact(row.tokens))
+                Text(pacerTokens(row.tokens.all)).help(pacerTokensExact(row.tokens.all))
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .monospacedDigit()

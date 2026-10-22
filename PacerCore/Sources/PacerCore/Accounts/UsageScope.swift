@@ -21,17 +21,6 @@ public struct DailyRow: Sendable, Equatable, Identifiable {
     public let cost: CostComponents
 
     public var id: String { "\(date)|\(model)" }
-    public var totalTokens: Int64 {
-        inputTokens + outputTokens + cacheReadTokens
-            + cacheCreation5mTokens + cacheCreation1hTokens
-    }
-    public var tokens: TokenBreakdown {
-        TokenBreakdown(
-            inputTokens: inputTokens, outputTokens: outputTokens,
-            cacheReadTokens: cacheReadTokens,
-            cacheCreation5mTokens: cacheCreation5mTokens,
-            cacheCreation1hTokens: cacheCreation1hTokens)
-    }
 
     public init(
         date: String, model: String,
@@ -81,6 +70,9 @@ public struct HourlyRow: Sendable, Equatable, Identifiable {
     public let model: String
     public let inputTokens: Int64
     public let outputTokens: Int64
+    public let cacheReadTokens: Int64
+    public let cacheCreation5mTokens: Int64
+    public let cacheCreation1hTokens: Int64
     public let totalCostUSD: Double
     /// Turns in the bucket. Both rollups store it — the per-account one
     /// gained it when the Now tile turned out to gate its whole contents on
@@ -90,13 +82,17 @@ public struct HourlyRow: Sendable, Equatable, Identifiable {
     public var id: String { "\(date)|\(hour)|\(model)" }
 
     public init(date: String, hour: Int, model: String,
-                inputTokens: Int64, outputTokens: Int64, totalCostUSD: Double,
-                sampleCount: Int = 0) {
+                inputTokens: Int64, outputTokens: Int64, cacheReadTokens: Int64,
+                cacheCreation5mTokens: Int64, cacheCreation1hTokens: Int64,
+                totalCostUSD: Double, sampleCount: Int = 0) {
         self.date = date
         self.hour = hour
         self.model = model
         self.inputTokens = inputTokens
         self.outputTokens = outputTokens
+        self.cacheReadTokens = cacheReadTokens
+        self.cacheCreation5mTokens = cacheCreation5mTokens
+        self.cacheCreation1hTokens = cacheCreation1hTokens
         self.totalCostUSD = totalCostUSD
         self.sampleCount = sampleCount
     }
@@ -106,6 +102,9 @@ public extension HourlyAggregate {
     var hourlyRow: HourlyRow {
         HourlyRow(date: date, hour: hour, model: model,
                   inputTokens: inputTokens, outputTokens: outputTokens,
+                  cacheReadTokens: cacheReadTokens,
+                  cacheCreation5mTokens: cacheCreation5mTokens,
+                  cacheCreation1hTokens: cacheCreation1hTokens,
                   totalCostUSD: totalCostUSD, sampleCount: sampleCount)
     }
 }
@@ -114,6 +113,9 @@ public extension AccountHourlyAggregate {
     var hourlyRow: HourlyRow {
         HourlyRow(date: date, hour: hour, model: model,
                   inputTokens: inputTokens, outputTokens: outputTokens,
+                  cacheReadTokens: cacheReadTokens,
+                  cacheCreation5mTokens: cacheCreation5mTokens,
+                  cacheCreation1hTokens: cacheCreation1hTokens,
                   totalCostUSD: totalCostUSD, sampleCount: sampleCount)
     }
 }
@@ -137,10 +139,6 @@ public struct SessionRow: Sendable, Equatable, Identifiable {
     public let topModel: String
 
     public var id: String { sessionId }
-    public var totalTokens: Int64 {
-        cumulativeInputTokens + cumulativeOutputTokens + cumulativeCacheReadTokens
-            + cumulativeCacheCreation5mTokens + cumulativeCacheCreation1hTokens
-    }
 
     public init(
         sessionId: String, firstSeenAt: Date, lastSeenAt: Date, projectPath: String,

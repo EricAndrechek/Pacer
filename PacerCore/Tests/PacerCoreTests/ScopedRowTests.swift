@@ -32,7 +32,7 @@ struct ScopedRowTests {
             cacheCreation5mTokens: 44, cacheCreation1hTokens: 55,
             totalCostUSD: 6.75)
         #expect(global.dailyRow == scoped.dailyRow)
-        #expect(global.dailyRow.totalTokens == 165)
+        #expect(global.dailyRow.tokens.all == 165)
     }
 
     @Test("an hourly row reads the same, except the count only one table stores")
@@ -73,7 +73,7 @@ struct ScopedRowTests {
             cumulativeCacheReadTokens: 3, cumulativeCacheCreation5mTokens: 4,
             cumulativeCacheCreation1hTokens: 5, topModel: "claude-opus-5")
         #expect(global.sessionRow == scoped.sessionRow)
-        #expect(global.sessionRow.totalTokens == 15)
+        #expect(global.sessionRow.tokens.all == 15)
     }
 
     /// Both project rollups satisfy the read protocol the Projects view and
@@ -122,7 +122,7 @@ struct ScopedRowTests {
             totalCostUSD: 5, sessionCount: 1, modelCount: 1, lastActive: at,
             sessionIdsJSON: Data(), modelTokensJSON: Data(), modelCostJSON: Data())])
         #expect(g?.cost == s?.cost)
-        #expect(g?.inputTokens == s?.inputTokens)
+        #expect(g?.tokens == s?.tokens)
         #expect(g?.sessionCount == s?.sessionCount)
     }
 

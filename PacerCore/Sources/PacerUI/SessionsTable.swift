@@ -104,7 +104,7 @@ public struct SessionsTable: View {
         case .project:
             primary = { $0.projectPath.localizedCaseInsensitiveCompare($1.projectPath) == .orderedAscending }
         case .tokens:
-            primary = { $0.totalTokens < $1.totalTokens }
+            primary = { $0.tokens.all < $1.tokens.all }
         case .cost:
             primary = { $0.cumulativeCostUSD < $1.cumulativeCostUSD }
         case .lastSeen:
@@ -197,7 +197,7 @@ public struct SessionsTable: View {
                         .frame(width: 130, alignment: .leading)
                 }
                 Spacer(minLength: 8)
-                Text(pacerTokens(row.totalTokens)).help(pacerTokensExact(row.totalTokens))
+                Text(pacerTokens(row.tokens.all)).help(pacerTokensExact(row.tokens.all))
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .monospacedDigit()

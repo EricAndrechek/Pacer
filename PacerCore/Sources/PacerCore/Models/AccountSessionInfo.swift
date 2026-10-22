@@ -74,11 +74,6 @@ public final class AccountSessionInfo {
         self.cumulativeCacheCreation1hTokens = cumulativeCacheCreation1hTokens
         self.topModel = topModel
     }
-
-    public var totalTokens: Int64 {
-        cumulativeInputTokens + cumulativeOutputTokens + cumulativeCacheReadTokens
-            + cumulativeCacheCreation5mTokens + cumulativeCacheCreation1hTokens
-    }
 }
 
 /// Everything a session bucket contains, computed once from its samples.
@@ -106,8 +101,9 @@ public struct SessionRollupValues: Sendable {
 
     public init() {}
 
-    /// The model with the most tokens, falling back to the first seen — the
-    /// row's `topModel`.
+    /// The model with the most uncached (input + output) tokens, falling back
+    /// to the first seen — the row's `topModel`. Stored on every session row,
+    /// so moving it to `TokenBreakdown.all` would re-pick history (#215).
     public var topModel: String {
         modelTokens.max { $0.value < $1.value }?.key ?? firstModel ?? ""
     }
@@ -129,8 +125,7 @@ public struct SessionRollupValues: Sendable {
         let priced = CostCalculator.sampleCost(sample, mode: mode, snapshot: snapshot)
         cost += priced.components
         pricedBy.add(priced.pricedBy)
-        modelTokens[sample.model, default: 0] +=
-            sample.breakdown.inputTokens + sample.breakdown.outputTokens
+        modelTokens[sample.model, default: 0] += sample.breakdown.uncached
         if firstModel == nil { firstModel = sample.model }
     }
 
@@ -151,7 +146,6 @@ public struct SessionRollupValues: Sendable {
         cacheCreation5mTokens -= sample.breakdown.cacheCreation5mTokens
         cacheCreation1hTokens -= sample.breakdown.cacheCreation1hTokens
         cost -= CostCalculator.sampleCost(sample, mode: mode, snapshot: snapshot).components
-        modelTokens[sample.model, default: 0] -=
-            sample.breakdown.inputTokens + sample.breakdown.outputTokens
+        modelTokens[sample.model, default: 0] -= sample.breakdown.uncached
     }
 }
