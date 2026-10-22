@@ -1,118 +1,159 @@
 import SwiftUI
 import PacerCore
 
-/// The first card of a detail modal (a day, a project): what the period cost
-/// as one big figure with its tokens under it, the screen's facts beside it,
-/// then the shared breakdown, all in one card.
+/// The first card of History and of both detail modals (a day, a project):
+/// what the period cost, its tokens in and out, a few counts, the period as
+/// a strip of days (or hours), then the shared breakdown. One component, so
+/// the three read as one design.
 ///
-/// Round 4's modals opened on a Summary card of two or three tiles in a
-/// four-column grid, a git chip floating on its own row above it, and the
-/// breakdown in a second card under it. The owner found that first card very
-/// bare, with a lot of dead space. Here the facts fill the width beside the
-/// big figure, a chip goes in the title row's trailing slot, and the
-/// breakdown sits under them in the same card, so the card is full.
+/// Round 6. Round 5's cards were eight numbers: a big cost and tokens beside
+/// six facts (History: four tiles over four). The owner wanted something
+/// more visual. Three takes were rendered on the same data (four tiles each
+/// with a small visual; a ring for the active days with sparklines beside the
+/// counts; this one). This one won: the strip is the only visual that shows
+/// *when* as well as how many — the gaps, the busy weeks, the last few idle
+/// days — it reads from a day's 24 hours up to a year, and it replaces three
+/// facts (active days, first active, last active) instead of adding one. The
+/// tiles squeezed it into a barcode, and a ring can say "22 of 31" but not
+/// which 22.
 ///
-/// A fact is printed here and nowhere else on the modal: the cards below
-/// drop the counts they used to carry in their headers ("12 on this day")
-/// rather than say them twice.
-public struct PacerDetailSummaryCard<Trailing: View>: View {
-    public typealias Fact = PacerSummaryFact
+/// Layout: the cost and its tokens in and out on the left, the counts on the right,
+/// the strip across the card under them, then a rule and the breakdown.
+/// Every number here is printed once on the page: the cards below carry no
+/// counts in their headers.
+public struct PacerSummaryCard<Trailing: View>: View {
+    public typealias Model = PacerSummaryModel
 
     private let title: String
-    private let breakdown: CostBreakdown
-    private let facts: [Fact]
+    private let model: Model
     private let trailing: () -> Trailing
 
-    /// Facts per row: a modal's six fill two rows beside the big figure,
-    /// whose two lines are about as tall.
-    static var factsPerRow: Int { 3 }
-
-    /// - Parameters:
-    ///   - breakdown: the period's cost by part. Its total is the big figure
-    ///     and its tokens the line under it, so the figure and the parts
-    ///     below it come from one value and always add up.
-    ///   - facts: in reading order, three to a row.
-    ///   - trailing: the title row's trailing slot (a project's git chip).
-    public init(
-        _ title: String = "Summary",
-        breakdown: CostBreakdown,
-        facts: [Fact],
-        @ViewBuilder trailing: @escaping () -> Trailing
-    ) {
+    /// - Parameter trailing: the title row's trailing slot (a project's git
+    ///   chip, a day's "no data").
+    public init(_ title: String = "Summary", model: Model, @ViewBuilder trailing: @escaping () -> Trailing) {
         self.title = title
-        self.breakdown = breakdown
-        self.facts = facts
+        self.model = model
         self.trailing = trailing
     }
 
     public var body: some View {
+        let m = model
         PacerCard(title, trailing: trailing) {
-            VStack(alignment: .leading, spacing: 18) {
-                HStack(alignment: .top, spacing: 28) {
-                    headline
-                    if !facts.isEmpty {
-                        factGrid
+            VStack(alignment: .leading, spacing: 16) {
+                HStack(alignment: .top, spacing: 24) {
+                    headline(m.breakdown)
+                    Spacer(minLength: 0)
+                    if !m.stats.isEmpty {
+                        stats(m.stats)
                     }
                 }
-                if PacerCostBreakdownView.hasContent(breakdown) {
-                    PacerCostBreakdownView(breakdown)
+                if m.activity.slots > 0 {
+                    PacerActivityStrip(
+                        m.activity, span: m.span, caption: m.activity.hasTrend ? m.trendCaption : nil,
+                        axis: m.axis, cellHelp: m.cellHelp)
+                }
+                if PacerCostBreakdownView.hasContent(m.breakdown) {
+                    // A rule between the strip and the breakdown's bar: two
+                    // rows of colour, and without it they read as one chart.
+                    Divider()
+                    PacerCostBreakdownView(m.breakdown)
                 }
             }
         }
     }
 
-    /// The big figure and its tokens. Never truncated or squeezed: the facts
-    /// beside it give way first.
-    private var headline: some View {
-        let cost: Double = breakdown.total
-        let tokens: Int64 = breakdown.tokens.all
-        return VStack(alignment: .leading, spacing: 2) {
+    /// The big figure, and under it the tokens as they split: in (the
+    /// prompt — cache reads, cache writes and uncached input) and out.
+    /// Never truncated or squeezed: the counts beside it give way first.
+    ///
+    /// One line, not a total over an in/out line: input is ~99.8% of a real
+    /// store's tokens, so "21.9B tokens" over "21.9B in" printed the same
+    /// number twice. The total is in the tooltip.
+    private func headline(_ b: CostBreakdown) -> some View {
+        let cost: Double = b.total
+        return VStack(alignment: .leading, spacing: 4) {
             Text(pacerCost(cost))
                 .font(.system(size: 32, weight: .semibold, design: .rounded))
                 .monospacedDigit()
                 .lineLimit(1)
                 .help(pacerCostExact(cost))
-            Text("\(pacerTokens(tokens)) tokens")
-                .font(.system(size: 13))
-                .foregroundStyle(.secondary)
-                .monospacedDigit()
-                .lineLimit(1)
-                .help("\(pacerTokensExact(tokens)) tokens")
+            HStack(alignment: .firstTextBaseline, spacing: 0) {
+                Text(pacerTokens(b.tokens.promptTokens))
+                    .font(.system(size: 15, weight: .semibold, design: .rounded))
+                Text(" tokens in")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                Text("  ·  ")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.tertiary)
+                Text(pacerTokens(b.tokens.outputTokens))
+                    .font(.system(size: 15, weight: .semibold, design: .rounded))
+                Text(" out")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+            }
+            .monospacedDigit()
+            .lineLimit(1)
+            .help(pacerTokenSplitHelp(b.tokens))
+            .accessibilityElement(children: .combine)
         }
         .fixedSize()
-        .accessibilityElement(children: .combine)
     }
 
-    /// The facts in rows of `factsPerRow`, each column an equal share of the
-    /// width the big figure leaves. A short last row keeps its cells in the
-    /// columns above it.
-    private var factGrid: some View {
-        let perRow: Int = Self.factsPerRow
-        let rows: [[Fact]] = stride(from: 0, to: facts.count, by: perRow).map { start in
-            Array(facts[start..<min(start + perRow, facts.count)])
-        }
-        return Grid(alignment: .topLeading, horizontalSpacing: 16, verticalSpacing: 12) {
-            ForEach(rows.indices, id: \.self) { r in
-                GridRow {
-                    ForEach(rows[r]) { fact in
-                        MetricTile(value: fact.value, label: fact.label, size: .compact, tooltip: fact.help)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    ForEach(rows[r].count..<perRow, id: \.self) { _ in
-                        Color.clear
-                            .frame(maxWidth: .infinity)
-                            .gridCellUnsizedAxes(.vertical)
-                    }
-                }
+    /// The counts side by side, each a compact figure over its label.
+    private func stats(_ stats: [PacerSummaryFact]) -> some View {
+        HStack(alignment: .top, spacing: 22) {
+            ForEach(stats) { fact in
+                MetricTile(value: fact.value, label: fact.label, size: .compact, tooltip: fact.help)
+                    .fixedSize()
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
-/// One labelled number beside a detail modal's big figure: "37" over
+public extension PacerSummaryCard where Trailing == EmptyView {
+    /// With nothing in the title row's trailing slot.
+    init(_ title: String = "Summary", model: Model) {
+        self.init(title, model: model) { EmptyView() }
+    }
+}
+
+/// What a `PacerSummaryCard` shows, as plain values. Outside the card's
+/// generic type so a screen can build it before it knows what goes in the
+/// title row.
+public struct PacerSummaryModel: Equatable {
+    /// The period's cost by part: its total is the big figure, its
+    /// tokens the line under it, and the breakdown below draws it.
+    public var breakdown: CostBreakdown
+    /// The counts at the right, in reading order.
+    public var stats: [PacerSummaryFact]
+    public var activity: PeriodActivity
+    /// After the active count: when use began and ended
+    /// (`pacerActivitySpan`).
+    public var span: String?
+    /// What a column's height is, where the strip has a trend.
+    public var trendCaption: String?
+    public var axis: [PacerActivityStrip.AxisLabel]
+    public var cellHelp: [String]
+
+    public init(
+        breakdown: CostBreakdown, stats: [PacerSummaryFact], activity: PeriodActivity,
+        span: String? = nil, trendCaption: String? = nil,
+        axis: [PacerActivityStrip.AxisLabel] = [], cellHelp: [String] = []
+    ) {
+        self.breakdown = breakdown
+        self.stats = stats
+        self.activity = activity
+        self.span = span
+        self.trendCaption = trendCaption
+        self.axis = axis
+        self.cellHelp = cellHelp
+    }
+}
+
+/// One labelled count beside a summary card's big figure: "37" over
 /// "SESSIONS". Outside the card's generic type so a screen can build its
-/// facts before it knows what goes in the title row.
+/// counts before it knows what goes in the title row.
 public struct PacerSummaryFact: Identifiable, Equatable, Sendable {
     public let label: String
     public let value: String
@@ -124,13 +165,6 @@ public struct PacerSummaryFact: Identifiable, Equatable, Sendable {
         self.label = label
         self.value = value
         self.help = help
-    }
-}
-
-public extension PacerDetailSummaryCard where Trailing == EmptyView {
-    /// With nothing in the title row's trailing slot.
-    init(_ title: String = "Summary", breakdown: CostBreakdown, facts: [Fact]) {
-        self.init(title, breakdown: breakdown, facts: facts) { EmptyView() }
     }
 }
 

@@ -82,6 +82,84 @@ public enum RangeActivityCounts {
         return paths.count
     }
 
+    /// What History's summary reads off the main actor, in one go: the
+    /// distinct projects (`projects`), and the sessions active on each day
+    /// for its activity strip.
+    public struct Activity: Equatable, Sendable {
+        public var projects: Int = 0
+        /// Sessions active on each day (`yyyy-MM-dd`, local), from the
+        /// session rollup: a session counts on every day from its first turn
+        /// to its last, which is what Day detail and the heatmap count for a
+        /// day. Days before the range are left out.
+        public var sessionsByDay: [String: Int] = [:]
+
+        public init(projects: Int = 0, sessionsByDay: [String: Int] = [:]) {
+            self.projects = projects
+            self.sessionsByDay = sessionsByDay
+        }
+    }
+
+    /// `projects`, and the sessions active on each day of the range. Off the
+    /// main actor, as `projects` is: it reads every project-day row and every
+    /// session in the range.
+    public static func activity(
+        _ context: ModelContext, since: Date?, accountId: String?, calendar: Calendar = .current
+    ) -> Activity {
+        let start: Date? = dayStart(since, calendar: calendar)
+        var spans: [(first: Date, last: Date)] = []
+        if let accountId {
+            var descriptor: FetchDescriptor<AccountSessionInfo>
+            if let start {
+                descriptor = FetchDescriptor(predicate: #Predicate<AccountSessionInfo> {
+                    $0.accountId == accountId && $0.lastSeenAt >= start
+                })
+            } else {
+                descriptor = FetchDescriptor(predicate: #Predicate<AccountSessionInfo> {
+                    $0.accountId == accountId
+                })
+            }
+            descriptor.propertiesToFetch = [\.firstSeenAt, \.lastSeenAt]
+            spans = ((try? context.fetch(descriptor)) ?? []).map { ($0.firstSeenAt, $0.lastSeenAt) }
+        } else {
+            var descriptor: FetchDescriptor<SessionInfo>
+            if let start {
+                descriptor = FetchDescriptor(predicate: #Predicate<SessionInfo> { $0.lastSeenAt >= start })
+            } else {
+                descriptor = FetchDescriptor()
+            }
+            descriptor.propertiesToFetch = [\.firstSeenAt, \.lastSeenAt]
+            spans = ((try? context.fetch(descriptor)) ?? []).map { ($0.firstSeenAt, $0.lastSeenAt) }
+        }
+        return Activity(
+            projects: projects(context, since: since, accountId: accountId),
+            sessionsByDay: sessionsByDay(spans, from: start, calendar: calendar))
+    }
+
+    /// Each session counted on every local day from its first turn to its
+    /// last, from `start`'s day on. Pure, so the bucketing is tested without
+    /// a store.
+    public static func sessionsByDay(
+        _ spans: [(first: Date, last: Date)], from start: Date?, calendar: Calendar = .current
+    ) -> [String: Int] {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = calendar
+        formatter.timeZone = calendar.timeZone
+        formatter.dateFormat = "yyyy-MM-dd"
+        var counts: [String: Int] = [:]
+        for span in spans where span.last >= span.first {
+            var day: Date = calendar.startOfDay(for: span.first)
+            if let start, day < start { day = start }
+            let lastDay: Date = calendar.startOfDay(for: span.last)
+            while day <= lastDay {
+                counts[formatter.string(from: day), default: 0] += 1
+                guard let next = calendar.date(byAdding: .day, value: 1, to: day) else { break }
+                day = next
+            }
+        }
+        return counts
+    }
+
     private static func projectDays(since: Date?) -> FetchDescriptor<ProjectDailyAggregate> {
         guard let since else { return FetchDescriptor() }
         let cutoff = TokenSample.formatDate(since)

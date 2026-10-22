@@ -6,9 +6,10 @@ import PacerUI
 /// Drill-down for a single project. Presented as a sheet from
 /// `ProjectsView` (and from a Day detail's projects).
 ///
-/// Laid out like Day detail (round 5), card for card: the first card (what
-/// the project cost over the range, its facts and git status, and the
-/// breakdown), the daily chart, By model, Models, Subprojects, Sessions,
+/// Laid out like Day detail (round 5), card for card: the first card (the
+/// shared `PacerSummaryCard`: what the project cost over the range, its
+/// counts and git status, its days as a strip, and the breakdown), the daily
+/// chart, By model, Models, Subprojects, Sessions,
 /// then the project's own Budget. The shared cards are `DetailModalCards`.
 ///
 /// Reads `ProjectDailyAggregate` and `SessionInfo` — both precomputed by the
@@ -185,6 +186,20 @@ struct ProjectDetailView: View {
         var modelRows: [DetailModalCards.ModelRow] = []
     }
 
+    /// The first card's strip: the range's days, each one's height the
+    /// sessions active that day, with its span and tooltips. Rebuilt when the
+    /// rows (`refreshDerived`) or the sessions change, never in `body`.
+    private struct ActivitySummary {
+        var activity = PeriodActivity.empty
+        var span: String?
+        var axis: [PacerActivityStrip.AxisLabel] = []
+        var cellHelp: [String] = []
+    }
+    @State private var cachedActivity = ActivitySummary()
+    /// Sessions active on each day, from the live session rows: the strip's
+    /// heights, counted the way Day detail counts a day's sessions.
+    @State private var cachedSessionsByDay: [String: Int] = [:]
+
     /// The raw-sample load's values, as rows: only Subprojects needs the
     /// samples, for the cwd each ran in.
     private struct Detail {
@@ -221,6 +236,41 @@ struct ProjectDetailView: View {
             DetailModalCards.modelRow(model: model, tokens: b.tokens, costParts: b.cost, cost: b.total)
         }
         cachedDerived = d
+        refreshActivity()
+    }
+
+    /// The strip from the cached days and sessions. The period runs from the
+    /// range's first day (or, over all time, the project's first active day)
+    /// to today; the modal is closed at midnight (`ContentView`'s
+    /// `.id(dayKey)`), so today cannot turn under an open one.
+    private func refreshActivity() {
+        let d = cachedDerived
+        let today: String = PacerToday.shared.key
+        guard let start = since.map(TokenSample.formatDate) ?? d.firstDay else {
+            cachedActivity = ActivitySummary()
+            return
+        }
+        let sessions = cachedSessionsByDay
+        let end: String = max(today, d.lastDay ?? today)
+        let activity = PeriodActivity.days(
+            active: Set(d.dailySeries.map(\.id)), trend: sessions.mapValues(Double.init),
+            from: start, through: end)
+        let year: Int = Calendar.current.component(.year, from: PacerClock.now)
+        cachedActivity = ActivitySummary(
+            activity: activity,
+            span: pacerActivitySpan(activity) { pacerFactDay($0, currentYear: year) },
+            axis: pacerDayAxis(activity, today: today, currentYear: year),
+            cellHelp: pacerActivityCellHelp(activity, currentYear: year) { cell in
+                sessions[cell.first].map { "\($0) session\($0 == 1 ? "" : "s")" }
+            })
+    }
+
+    /// Sessions active on each day of the range, from the session rows.
+    private func refreshSessionsByDay(_ rows: [SessionRow]) {
+        let spans: [(first: Date, last: Date)] = rows.map { ($0.firstSeenAt, $0.lastSeenAt) }
+        cachedSessionsByDay = RangeActivityCounts.sessionsByDay(
+            spans, from: RangeActivityCounts.dayStart(since))
+        refreshActivity()
     }
 
     /// Changes whenever a row `refreshDerived` reads changes: a new day
@@ -449,7 +499,7 @@ struct ProjectDetailView: View {
         // the same rows built once here, so the card opens full.
         let sessionTable = sessionTableRows.isEmpty && !sessions.isEmpty
             ? PacerSessionsTable.rows(sessions) : sessionTableRows
-        let facts = summaryFacts(derived, models: models.count, sessions: sessions.count)
+        let summary = summaryModel(derived, cachedActivity, models: models.count, sessions: sessions.count)
         let status = detailStatus
         PacerModalContent(
             title: displayName,
@@ -476,7 +526,7 @@ struct ProjectDetailView: View {
         ) {
             // The git chip in the first card's title row, where round 4 gave
             // it a row of its own above the card.
-            PacerDetailSummaryCard(breakdown: derived.breakdown, facts: facts) {
+            PacerSummaryCard(model: summary) {
                 ProjectStatusBadge(state: status)
             }
             if !derived.dailySeries.isEmpty { dailyChartCard(derived.dailySeries) }
@@ -515,6 +565,7 @@ struct ProjectDetailView: View {
         // re-reading the other table); the table's rows follow them.
         .onChange(of: sessions, initial: true) { _, new in
             sessionTableRows = PacerSessionsTable.rows(new)
+            refreshSessionsByDay(new)
         }
         // The first card, the daily chart and By model follow the rows they
         // are built from. See `aggregatesFingerprint`. A re-price changes no
@@ -734,31 +785,29 @@ struct ProjectDetailView: View {
 
     // MARK: - First card
 
-    /// The first card's facts: two counts and the average, then the days.
+    /// The first card: the range's cost, two counts and the average, and
+    /// its days as a strip (which had use, each one's height its sessions).
     /// Sessions come from the live session rows (distinct sessions, which a
     /// sum of per-day session counts is not), the rest from the caches. Each
-    /// is printed here only; the cards below carry no counts in their
+    /// count is printed here only; the cards below carry none in their
     /// headers.
-    private func summaryFacts(_ d: Derived, models: Int, sessions: Int) -> [PacerSummaryFact] {
+    private func summaryModel(
+        _ d: Derived, _ a: ActivitySummary, models: Int, sessions: Int
+    ) -> PacerSummaryModel {
         let perDay: Double = d.activeDays > 0 ? d.breakdown.total / Double(d.activeDays) : 0
-        // The year a day is printed without: this one. The clock is an input,
-        // but the modal is closed at midnight (`ContentView`'s `.id(dayKey)`),
-        // so a year cannot turn under an open one.
-        let year: Int = Calendar.current.component(.year, from: PacerClock.now)
-        return [
-            PacerSummaryFact("sessions", "\(sessions)"),
-            PacerSummaryFact("models", "\(models)"),
-            PacerSummaryFact("per active day", d.activeDays > 0 ? pacerCost(perDay) : "–",
-                             help: d.activeDays > 0 ? pacerCostExact(perDay) : nil),
-            PacerSummaryFact("active days", "\(d.activeDays)"),
-            dayFact("first active", d.firstDay, year: year),
-            dayFact("last active", d.lastDay, year: year),
-        ]
-    }
-
-    private func dayFact(_ label: String, _ ymd: String?, year: Int) -> PacerSummaryFact {
-        guard let ymd else { return PacerSummaryFact(label, "–") }
-        return PacerSummaryFact(label, pacerFactDay(ymd, currentYear: year), help: pacerFactDayExact(ymd))
+        return PacerSummaryModel(
+            breakdown: d.breakdown,
+            stats: [
+                PacerSummaryFact("sessions", "\(sessions)"),
+                PacerSummaryFact("models", "\(models)"),
+                PacerSummaryFact("per active day", d.activeDays > 0 ? pacerCost(perDay) : "–",
+                                 help: d.activeDays > 0 ? pacerCostExact(perDay) : nil),
+            ],
+            activity: a.activity,
+            span: a.span,
+            trendCaption: "sessions a day",
+            axis: a.axis,
+            cellHelp: a.cellHelp)
     }
 
     /// The project's cost per active day, stacked by part — the shared

@@ -8,8 +8,8 @@ import PacerUI
 /// heatmap, and most expensive days. Reads from `DailyAggregate` (the
 /// canonical roll-up; pre-summed, so no per-row cost calc here).
 ///
-/// Order: lifetime hero → 26-week heatmap → monthly bar chart → top
-/// expensive days table.
+/// Order: range summary (with its cost breakdown) → 26-week heatmap →
+/// monthly bar chart → top expensive days table.
 ///
 /// A single time-range picker in the page header scopes the
 /// range-aware cards (LifetimeSummary, TopDays). HeatmapCard and
@@ -69,8 +69,8 @@ struct HistoryView: View {
 
 // MARK: - Range-scoped summary
 
-/// Headline tile-grid summary that re-scopes by the page-level range.
-/// Replaces the pre-redesign "Lifetime"-only card. Range comes from
+/// The range's summary — the shared `PacerSummaryCard`, as the detail
+/// modals open on — re-scoped by the page-level range. Range comes from
 /// `HistoryView`'s single `@AppStorage` so changing it affects this
 /// card and `TopDaysCard` together.
 ///
@@ -115,23 +115,28 @@ private struct LifetimeSummaryContent: View {
     @Query(ScanMetaFetchDescriptor.scanCompletedProbe)
     private var scanMeta: [ClaudeCodeMeta]
 
-    /// Projects and sessions in the range, from the project-day and session
-    /// rollups (`RangeActivityCounts`). A `@Query` over either table would
-    /// re-read every row in range on every store save to answer two
-    /// numbers; sessions are a SQL COUNT instead, and projects — which need
-    /// the rows' paths — are read off the main actor, and only when the
-    /// range's project-day row count moved or attribution changed.
+    /// Projects and sessions in the range, and the sessions on each day, from
+    /// the project-day and session rollups (`RangeActivityCounts`). A `@Query`
+    /// over either table would re-read every row in range on every store save;
+    /// sessions are a SQL COUNT instead, and projects and sessions a day —
+    /// which need the rows themselves — are read off the main actor, and only
+    /// when the range's project-day or session count moved or attribution
+    /// changed.
     private struct ActivityCounts: Equatable {
         var sessions: Int?
         var projects: Int?
-        /// The project-day row count `projects` was last read at.
+        /// The counts the activity read last ran at.
         var projectDays: Int?
+        var sessionsRead: Int?
+        /// Sessions active on each day: the strip's heights. Nil until the
+        /// first read lands.
+        var sessionsByDay: [String: Int]?
     }
     @State private var counts = ActivityCounts()
-    /// One projects read at a time; a trigger during one asks for another
+    /// One activity read at a time; a trigger during one asks for another
     /// after it, rather than starting a second detached read beside it.
-    @State private var projectsLoading = false
-    @State private var projectsRerun = false
+    @State private var activityLoading = false
+    @State private var activityRerun = false
 
     /// Every account, or one. Both queries are live, so switching is a
     /// re-read rather than a recompute.
@@ -175,38 +180,75 @@ private struct LifetimeSummaryContent: View {
         }
     }
 
-    private struct Totals {
-        var cost: Double = 0
-        var tokens = TokenBreakdown.zero
-        var distinctDays: Int = 0
-        var distinctModels: Int = 0
-        var firstDate: String?
+    /// What the card draws, derived from the range's rows and the sessions
+    /// a day (`refreshSummary`), not in `body`: the strip walks every day of
+    /// the range.
+    private struct Summary {
+        var breakdown = CostBreakdown.zero
+        var distinctDays = 0
+        var distinctModels = 0
+        var activity = PeriodActivity.empty
+        var span: String?
+        var axis: [PacerActivityStrip.AxisLabel] = []
+        var cellHelp: [String] = []
+    }
+    @State private var cachedSummary: Summary?
+
+    /// Changes whenever a row the summary is built from changes: a new day
+    /// or model (count), a new turn (tokens, cost), a re-price (cost). The
+    /// scope picks the table, and a scope or range change builds a new copy
+    /// of this view (the parent's `.id`); the page is rebuilt at midnight, so
+    /// "today" cannot move under it.
+    private struct RowsFingerprint: Equatable {
+        var count = 0
+        var tokens: Int64 = 0
+        var cost = 0.0
     }
 
-    /// Computed per body fire from the range-scoped `@Query`. No
-    /// `@State` cache — the previous design populated the cache via
-    /// `.onAppear`, which fires AFTER first body, so every `.id(range)`
-    /// re-init briefly rendered empty tiles before the cache landed.
-    /// The walk is O(aggregates) over a scoped slice (≤ ~5k rows even
-    /// on .all for multi-year users), which is sub-millisecond, and the
-    /// body only re-fires on range / scan-tick / @AppStorage changes
-    /// — no hover state in this card.
-    private var totals: Totals {
-        var t = Totals()
+    private var rowsFingerprint: RowsFingerprint {
+        var f = RowsFingerprint()
+        for row in aggregates {
+            f.count += 1
+            f.tokens += row.tokens.all
+            f.cost += row.totalCostUSD
+        }
+        return f
+    }
+
+    /// The range's cost by part (#225), its days and models, and its strip:
+    /// every day from the range's first (over all time, the first active
+    /// day) to today, each one's height the sessions active that day.
+    private static func derive(
+        _ rows: [DailyRow], since: Date?, sessionsByDay: [String: Int]?
+    ) -> Summary {
+        var s = Summary()
         var dates = Set<String>()
         var models = Set<String>()
-        var minDate: String?
-        for row in aggregates {
-            t.cost += row.totalCostUSD
-            t.tokens += row.tokens
+        for row in rows {
+            s.breakdown += row.costBreakdown
             dates.insert(row.date)
             models.insert(row.model)
-            if minDate == nil || row.date < minDate! { minDate = row.date }
         }
-        t.distinctDays = dates.count
-        t.distinctModels = models.count
-        t.firstDate = minDate
-        return t
+        s.distinctDays = dates.count
+        s.distinctModels = models.count
+        let today: String = PacerToday.shared.key
+        guard let start = since.map(TokenSample.formatDate) ?? dates.min() else { return s }
+        let end: String = max(today, dates.max() ?? today)
+        let sessions: [String: Int] = sessionsByDay ?? [:]
+        let activity = PeriodActivity.days(
+            active: dates, trend: sessions.mapValues(Double.init), from: start, through: end)
+        let year: Int = Calendar.current.component(.year, from: PacerClock.now)
+        s.activity = activity
+        s.span = pacerActivitySpan(activity) { pacerFactDay($0, currentYear: year) }
+        s.axis = pacerDayAxis(activity, today: today, currentYear: year)
+        s.cellHelp = pacerActivityCellHelp(activity, currentYear: year) { cell in
+            sessions[cell.first].map { "\($0) session\($0 == 1 ? "" : "s")" }
+        }
+        return s
+    }
+
+    private func refreshSummary() {
+        cachedSummary = Self.derive(aggregates, since: since, sessionsByDay: counts.sessionsByDay)
     }
 
     /// "1,284"; "—" until the first read lands.
@@ -224,28 +266,48 @@ private struct LifetimeSummaryContent: View {
         }
     }
 
-    /// Which of the five priced parts made up the range's cost (#225). It
-    /// sits here, not on the Models tab, because it answers "where did this
-    /// period's money go", so it follows this page's range and account scope.
-    /// It is summed from the rows the Lifetime card already holds, so it adds
-    /// no query.
-    private var breakdown: CostBreakdown { CostBreakdown.sum(aggregates, \.costBreakdown) }
-
     var body: some View {
-        let t = totals
-        let parts = breakdown
+        // The cached summary, or on the first frame (before `.onAppear` has
+        // run) the same summary built once here, so the card opens full
+        // rather than flashing empty on every range switch.
+        let summary = cachedSummary
+            ?? Self.derive(aggregates, since: since, sessionsByDay: counts.sessionsByDay)
         // Read here and handed down, not read inside `PacerCard`'s stored
         // closures, so a count landing redraws this view (#140).
         let counts = self.counts
-        VStack(alignment: .leading, spacing: PacerDesign.sectionSpacing) {
-            lifetimeCard(t, counts: counts)
-            if t.distinctDays > 0, PacerCostBreakdownView.hasContent(parts) {
-                PacerCard("Cost breakdown") {
-                    PacerCostBreakdownView(parts)
+        let fingerprint = rowsFingerprint
+        Group {
+            if summary.distinctDays == 0 {
+                PacerCard(cardTitle) {
+                    Text(range == .all
+                         ? "No history yet — start using Claude Code and Pacer will catch up."
+                         : "No activity in this range. Try widening the time window.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
                 }
+            } else {
+                // The shared summary card, as Day and Project detail open on.
+                // The breakdown, a card of its own here until round 6, is in
+                // it, as it is in theirs.
+                PacerSummaryCard(cardTitle, model: PacerSummaryModel(
+                    breakdown: summary.breakdown,
+                    stats: [
+                        PacerSummaryFact("sessions", Self.count(counts.sessions)),
+                        PacerSummaryFact("projects", Self.count(counts.projects)),
+                        PacerSummaryFact("models", "\(summary.distinctModels)"),
+                    ],
+                    activity: summary.activity,
+                    span: summary.span,
+                    trendCaption: "sessions a day",
+                    axis: summary.axis,
+                    cellHelp: summary.cellHelp))
             }
         }
-        .onAppear { refreshCounts(force: true) }
+        .onAppear {
+            refreshSummary()
+            refreshCounts(force: true)
+        }
+        .onChange(of: fingerprint) { _, _ in refreshSummary() }
         .onChange(of: scanMeta.first?.value) { _, _ in refreshCounts(force: false) }
         // A merge can fold one project into another without changing how
         // many project-day rows there are, so it re-reads regardless.
@@ -256,107 +318,43 @@ private struct LifetimeSummaryContent: View {
         }
     }
 
-    /// Sessions every time (one COUNT); projects when the range's
-    /// project-day rows moved, or when `force`.
+    /// Sessions every time (one COUNT); projects and sessions a day when
+    /// the range's project-day rows or sessions moved, or when `force`. A new
+    /// session, or a session's first turn on a new day (which brings a new
+    /// project-day row), is what changes the strip.
     private func refreshCounts(force: Bool) {
-        counts.sessions = RangeActivityCounts.sessions(
+        let sessions = RangeActivityCounts.sessions(
             modelContext, since: since, accountId: scopeAccountId)
+        counts.sessions = sessions
         let days = RangeActivityCounts.projectDays(
             modelContext, since: since, accountId: scopeAccountId)
-        guard force || days != counts.projectDays else { return }
+        guard force || days != counts.projectDays || sessions != counts.sessionsRead else { return }
         counts.projectDays = days
-        loadProjects()
+        counts.sessionsRead = sessions
+        loadActivity()
     }
 
-    private func loadProjects() {
-        guard !projectsLoading else {
-            projectsRerun = true
+    private func loadActivity() {
+        guard !activityLoading else {
+            activityRerun = true
             return
         }
-        projectsLoading = true
+        activityLoading = true
         let container = modelContext.container
         let since = self.since, account = scopeAccountId
         Task {
             // Its own context, off the main actor: reading a lifetime of
-            // project-day rows faults every one of them.
-            let projects = await Task.detached(priority: .utility) {
-                RangeActivityCounts.projects(ModelContext(container), since: since, accountId: account)
+            // project-day and session rows faults every one of them.
+            let activity = await Task.detached(priority: .utility) {
+                RangeActivityCounts.activity(ModelContext(container), since: since, accountId: account)
             }.value
-            counts.projects = projects
-            projectsLoading = false
-            if projectsRerun {
-                projectsRerun = false
-                loadProjects()
-            }
-        }
-    }
-
-    private func lifetimeCard(_ t: Totals, counts: ActivityCounts) -> some View {
-        PacerCard(cardTitle, trailing: {
-            if range == .all, let first = t.firstDate {
-                Text("since \(first)")
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(.secondary)
-            }
-        }) {
-            if t.distinctDays == 0 {
-                Text(range == .all
-                     ? "No history yet — start using Claude Code and Pacer will catch up."
-                     : "No activity in this range. Try widening the time window.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-            } else {
-                // The money, then the tokens split the way a request is: the
-                // prompt (cache reads + writes + uncached input) and the
-                // response, so input + output = tokens. Per-part detail is in
-                // the Cost breakdown card below. The second row counts how
-                // much work the range held, which no other card does.
-                VStack(alignment: .leading, spacing: 14) {
-                    LazyVGrid(
-                        columns: Array(
-                            repeating: GridItem(.flexible(), spacing: 16, alignment: .topLeading),
-                            count: 4
-                        ),
-                        alignment: .leading,
-                        spacing: 12
-                    ) {
-                        MetricTile(
-                            value: pacerCost(t.cost),
-                            label: "cost",
-                            size: .hero,
-                            tooltip: pacerCostExact(t.cost)
-                        )
-                        MetricTile(
-                            value: pacerTokens(t.tokens.all),
-                            label: "tokens",
-                            tooltip: pacerTokensExact(t.tokens.all)
-                        )
-                        MetricTile(
-                            value: pacerTokens(t.tokens.promptTokens),
-                            label: "input",
-                            tooltip: "\(pacerTokensExact(t.tokens.promptTokens)) prompt tokens: cache reads, cache writes and uncached input"
-                        )
-                        MetricTile(
-                            value: pacerTokens(t.tokens.outputTokens),
-                            label: "output",
-                            tooltip: pacerTokensExact(t.tokens.outputTokens)
-                        )
-                    }
-                    Divider()
-                    LazyVGrid(
-                        columns: Array(
-                            repeating: GridItem(.flexible(), spacing: 16, alignment: .topLeading),
-                            count: 4
-                        ),
-                        alignment: .leading,
-                        spacing: 12
-                    ) {
-                        MetricTile(value: "\(t.distinctDays)", label: "active days", size: .compact)
-                        MetricTile(value: Self.count(counts.sessions), label: "sessions", size: .compact)
-                        MetricTile(value: Self.count(counts.projects), label: "projects", size: .compact)
-                        MetricTile(value: "\(t.distinctModels)", label: "models", size: .compact)
-                    }
-                }
+            counts.projects = activity.projects
+            counts.sessionsByDay = activity.sessionsByDay
+            refreshSummary()
+            activityLoading = false
+            if activityRerun {
+                activityRerun = false
+                loadActivity()
             }
         }
     }

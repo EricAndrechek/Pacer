@@ -7,9 +7,10 @@ import PacerUI
 /// tab's heatmap (click a cell) and every chart that plots days.
 ///
 /// Laid out like Project detail (round 5), card for card: the first card
-/// (what the day cost, its facts, and the breakdown), By model, Models, the
-/// day's Projects, then its Sessions. The shared cards are
-/// `DetailModalCards`; only the first card's facts are the day's own.
+/// (the shared `PacerSummaryCard`: what the day cost, its counts, its hours
+/// as a strip, and the breakdown), By model, Models, the day's Projects, then
+/// its Sessions. The shared cards are `DetailModalCards`; only the first
+/// card's counts and hours are the day's own.
 struct DayDetailView: View {
     let date: String  // YYYY-MM-DD
 
@@ -48,8 +49,9 @@ struct DayDetailView: View {
     /// numbers stay consistent with Projects / ProjectDetail.
     @Query private var globalProjectsForDay: [ProjectDailyAggregate]
     @Query private var scopedProjectsForDay: [AccountProjectDailyAggregate]
-    /// The day's hours, for the first card's active hours and its first and
-    /// last active hour: at most 24 rows a model, by the indexed date.
+    /// The day's hours, for the first card's strip of the day: which hours
+    /// had a turn and what each cost. At most 24 rows a model, by the indexed
+    /// date.
     @Query private var globalHourly: [HourlyAggregate]
     @Query private var scopedHourly: [AccountHourlyAggregate]
     @Query private var globalSessionRows: [SessionInfo]
@@ -121,19 +123,16 @@ struct DayDetailView: View {
         )
     }()
 
-    /// What the day's hours say: how many had a turn, and the first and
-    /// last of them (0–23, local).
-    private struct Hours: Equatable {
-        var active = 0
-        var first: Int?
-        var last: Int?
-    }
-
     private struct Cached {
         /// The whole day's cost by priced part (#225): the first card's big
         /// figure, its tokens, and its breakdown.
         var breakdown = CostBreakdown.zero
-        var hours = Hours()
+        /// The day's 24 hours for the first card's strip: which had a turn,
+        /// each one's height its cost. With its span ("9 AM – 11 PM") and
+        /// each hour's tooltip, built here rather than in `body`.
+        var activity = PeriodActivity.hours(active: [], trend: [:])
+        var span: String?
+        var hourHelp: [String] = []
         /// By model's and Models' rows, which sort themselves.
         var modelRows: [DetailModalCards.ModelRow] = []
         /// The Projects table's rows, from the same `ProjectUsageTotals`
@@ -145,13 +144,16 @@ struct DayDetailView: View {
     @MainActor
     private func refreshCache() {
         let rows = aggregates
-        var hours = Hours()
         // An hour counts when it had a turn: its samples, or its tokens for a
         // row written before the per-account rollup kept a sample count.
-        let active: [Int] = Set(hourlyRows.filter { $0.sampleCount > 0 || $0.tokens.all > 0 }.map(\.hour)).sorted()
-        hours.active = active.count
-        hours.first = active.first
-        hours.last = active.last
+        var active: Set<Int> = []
+        var costByHour: [Int: Double] = [:]
+        for row in hourlyRows where row.sampleCount > 0 || row.tokens.all > 0 {
+            active.insert(row.hour)
+            costByHour[row.hour, default: 0] += row.totalCostUSD
+        }
+        let activity = PeriodActivity.hours(active: active, trend: costByHour)
+        let year: Int = Calendar.current.component(.year, from: PacerClock.now)
 
         // Per-project rollup read straight from `ProjectDailyAggregate` —
         // one row per (projectPath, date), with totals already summed
@@ -167,7 +169,11 @@ struct DayDetailView: View {
 
         cached = Cached(
             breakdown: CostBreakdown.sum(rows, \.costBreakdown),
-            hours: hours,
+            activity: activity,
+            span: pacerActivitySpan(activity) { pacerHourLabel(Int($0) ?? 0) },
+            hourHelp: pacerActivityCellHelp(activity, currentYear: year) { cell in
+                Int(cell.first).flatMap { costByHour[$0] }.map(pacerCostExact)
+            },
             modelRows: rows.map {
                 DetailModalCards.modelRow(model: $0.model, tokens: $0.tokens, costParts: $0.cost,
                                           cost: $0.totalCostUSD)
@@ -193,7 +199,7 @@ struct DayDetailView: View {
         let projectsSort = DetailModalCards.sort(stored: projectsSortRaw, descending: projectsSortDescending,
                                                  own: [DetailPathExtra.sessions])
         let sessionsSort = PacerSessionsTable.sort(stored: sessionsSortRaw, descending: sessionsSortDescending)
-        let facts = summaryFacts(cached, sessions: sessions.count)
+        let summary = summaryModel(cached, sessions: sessions.count)
         let empty = aggregates.isEmpty
         PacerModalContent(
             title: prettyDate,
@@ -201,7 +207,7 @@ struct DayDetailView: View {
             minWidth: 580, idealWidth: 660,
             minHeight: 480, idealHeight: 620
         ) {
-            PacerDetailSummaryCard(breakdown: cached.breakdown, facts: facts) {
+            PacerSummaryCard(model: summary) {
                 if empty {
                     Text("no data")
                         .font(.system(size: 11))
@@ -241,32 +247,24 @@ struct DayDetailView: View {
         .onChange(of: scope.accountId) { _, _ in refreshCache() }
     }
 
-    /// The first card's facts: three counts, then the day's hours. Sessions
-    /// come from the live session rows, the rest from the cache. Each is
-    /// printed here only; the cards below carry no counts in their headers.
-    private func summaryFacts(_ cached: Cached, sessions: Int) -> [PacerSummaryFact] {
-        let hours = cached.hours
-        return [
-            PacerSummaryFact("sessions", "\(sessions)"),
-            PacerSummaryFact("models", "\(cached.modelRows.count)"),
-            PacerSummaryFact("projects", "\(cached.projectRows.count)"),
-            PacerSummaryFact("active hours", "\(hours.active)", help: "Hours with at least one turn"),
-            hourFact("first active", hours.first),
-            hourFact("last active", hours.last),
-        ]
-    }
-
-    /// "9 AM", with the hour it spans in the tooltip ("9 AM – 10 AM"); "–"
-    /// for a day with no turns.
-    private func hourFact(_ label: String, _ hour: Int?) -> PacerSummaryFact {
-        guard let hour else { return PacerSummaryFact(label, "–") }
-        let start = Self.startOfDay(for: date)
-        let cal = Calendar.current
-        let at = cal.date(byAdding: .hour, value: hour, to: start) ?? start
-        let next = cal.date(byAdding: .hour, value: hour + 1, to: start) ?? start
-        return PacerSummaryFact(
-            label, pacerHour(at, style: .regular),
-            help: "\(pacerHour(at, style: .regular)) – \(pacerHour(next, style: .regular))")
+    /// The first card: the day's cost, three counts, and its hours as a
+    /// strip, each hour's height its cost (the modal has no other picture of
+    /// the day's hours). Sessions come from the live session rows, the rest
+    /// from the cache. Each count is printed here only; the cards below carry
+    /// none in their headers.
+    private func summaryModel(_ cached: Cached, sessions: Int) -> PacerSummaryModel {
+        PacerSummaryModel(
+            breakdown: cached.breakdown,
+            stats: [
+                PacerSummaryFact("sessions", "\(sessions)"),
+                PacerSummaryFact("models", "\(cached.modelRows.count)"),
+                PacerSummaryFact("projects", "\(cached.projectRows.count)"),
+            ],
+            activity: cached.activity,
+            span: cached.span,
+            trendCaption: "cost an hour",
+            axis: pacerHourAxis(),
+            cellHelp: cached.hourHelp)
     }
 
     /// Static formatters used by `prettyDate` and `startOfDay`. The

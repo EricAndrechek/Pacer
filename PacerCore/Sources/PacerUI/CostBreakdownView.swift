@@ -160,8 +160,8 @@ public enum PacerCostBreakdownStyle: Sendable, Equatable {
 }
 
 /// The breakdown for one total: the stacked bar, the five parts with their
-/// dollars, share and tokens, and the cache hit rate as one quiet line of
-/// text under them.
+/// dollars, share and tokens, and under them one quiet line of text: the
+/// cache hit rate and the cost's input/output split.
 ///
 /// One line, not two: tokens are ~98% cache reads, so a token bar would be a
 /// single colour. Each part's token count rides in its legend entry instead,
@@ -199,8 +199,8 @@ public struct PacerCostBreakdownView: View {
                     CompactLegend(parts: breakdown.parts)
                 }
             }
-            if let ratio = breakdown.cacheHitRatio {
-                PacerCacheHitLine(ratio: ratio)
+            if breakdown.cacheHitRatio != nil || breakdown.total > 0 {
+                PacerCacheHitLine(ratio: breakdown.cacheHitRatio, inOut: breakdown.cost)
             }
         }
     }
@@ -515,33 +515,53 @@ public struct PacerCostKey: View {
     }
 }
 
-/// The cache hit rate as one small, secondary line of text — "Cache hits
-/// 98.1%" — under every breakdown.
+/// The cache hit rate and the cost's input/output split as one small,
+/// secondary line of text — "Cache hits 98.1%   In / Out 90 / 10" — under
+/// every breakdown, the hover card's included.
 ///
 /// Kept quiet rather than dropped: a rate that falls on a day of slow turns
 /// is how a cache expiring between turns shows up. Text, not a bar: a filled
 /// track beside the five-part cost bar was a second bar that read as part of
 /// the first. `ratio` is `TokenBreakdown.cacheHitRatio`, the one definition
 /// (Claude Code's own `hit_ratio`).
+///
+/// The split beside it (round 6) is the owner's: where the money went
+/// between sending context and getting work back, the same figure as the
+/// tables' "In / Out" column (`pacerInOutText`). Either half is left out
+/// when it has nothing to say: no prompt tokens, or no cost.
 public struct PacerCacheHitLine: View {
-    private let ratio: Double
+    private let ratio: Double?
+    private let inOut: String?
 
-    public init(ratio: Double) {
+    public init(ratio: Double?, inOut cost: CostComponents? = nil) {
         self.ratio = ratio
+        self.inOut = cost.flatMap(pacerInOutText)
     }
 
     public var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 14) {
+            if let ratio {
+                pair("Cache hits", pacerCacheHitText(ratio))
+                    .help(pacerCacheHitHelp)
+            }
+            if let inOut {
+                pair("In / Out", inOut)
+                    .help(pacerInOutHelp)
+            }
+        }
+        .lineLimit(1)
+    }
+
+    private func pair(_ label: String, _ value: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 4) {
-            Text("Cache hits")
+            Text(label)
                 .font(.system(size: 11))
                 .foregroundStyle(.tertiary)
-            Text(pacerCacheHitText(ratio))
+            Text(value)
                 .font(.system(size: 11, weight: .medium, design: .rounded))
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
         }
-        .lineLimit(1)
-        .help(pacerCacheHitHelp)
         .accessibilityElement(children: .combine)
     }
 }
@@ -568,24 +588,30 @@ extension View {
     }
 }
 
-/// "96.8%" — the cache hit rate at the precision every surface shows it.
-///
-/// Capped at 99.9% short of every prompt token: rounded to one place, a
-/// 99.96% day printed "100.0%", which says the cache missed nothing when it
-/// did.
 /// "87 / 13": how the cost splits between the prompt (cache reads, cache
 /// writes and uncached input) and the output, in whole percent. The one
 /// formatter for the "In / Out" table column and the line beside every
 /// cache hit rate; nil when nothing was spent.
+///
+/// Output's percent is the one the breakdown's legend prints for it ("13% of
+/// cost"): the five parts rounded together so they add up to 100
+/// (`CostBreakdown.Part.percent`). Rounded on its own, a 12.6% output read
+/// "87 / 13" one line under a legend that said "12% of cost".
 public func pacerInOutText(_ cost: CostComponents) -> String? {
-    guard let out = cost.outputShare else { return nil }
-    let outPercent: Int = Int((out * 100).rounded())
+    guard cost.outputShare != nil else { return nil }
+    let parts: [CostBreakdown.Part] = CostBreakdown(cost: cost).parts
+    let outPercent: Int = parts.first { $0.component == .output }?.percent ?? 0
     return "\(100 - outPercent) / \(outPercent)"
 }
 
 /// The tooltip for an "In / Out" figure.
 public let pacerInOutHelp = "Share of the cost: input (cache reads, cache writes and uncached input) / output"
 
+/// "96.8%" — the cache hit rate at the precision every surface shows it.
+///
+/// Capped at 99.9% short of every prompt token: rounded to one place, a
+/// 99.96% day printed "100.0%", which says the cache missed nothing when it
+/// did.
 public func pacerCacheHitText(_ ratio: Double) -> String {
     let percent: Double = ratio * 100
     let shown: Double = ratio < 1 ? min(percent, 99.9) : percent
