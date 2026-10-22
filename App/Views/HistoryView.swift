@@ -115,28 +115,23 @@ private struct LifetimeSummaryContent: View {
     @Query(ScanMetaFetchDescriptor.scanCompletedProbe)
     private var scanMeta: [ClaudeCodeMeta]
 
-    /// Projects and sessions in the range, and the sessions on each day, from
-    /// the project-day and session rollups (`RangeActivityCounts`). A `@Query`
-    /// over either table would re-read every row in range on every store save;
-    /// sessions are a SQL COUNT instead, and projects and sessions a day —
-    /// which need the rows themselves — are read off the main actor, and only
-    /// when the range's project-day or session count moved or attribution
-    /// changed.
+    /// Projects and sessions in the range, from the project-day and session
+    /// rollups (`RangeActivityCounts`). A `@Query` over either table would
+    /// re-read every row in range on every store save; sessions are a SQL
+    /// COUNT instead, and projects — which need the rows themselves — are
+    /// read off the main actor, and only when the range's project-day count
+    /// moved or attribution changed.
     private struct ActivityCounts: Equatable {
         var sessions: Int?
         var projects: Int?
-        /// The counts the activity read last ran at.
+        /// The project-day count the projects read last ran at.
         var projectDays: Int?
-        var sessionsRead: Int?
-        /// Sessions active on each day: the strip's heights. Nil until the
-        /// first read lands.
-        var sessionsByDay: [String: Int]?
     }
     @State private var counts = ActivityCounts()
-    /// One activity read at a time; a trigger during one asks for another
+    /// One projects read at a time; a trigger during one asks for another
     /// after it, rather than starting a second detached read beside it.
-    @State private var activityLoading = false
-    @State private var activityRerun = false
+    @State private var projectsLoading = false
+    @State private var projectsRerun = false
 
     /// Every account, or one. Both queries are live, so switching is a
     /// re-read rather than a recompute.
@@ -180,9 +175,8 @@ private struct LifetimeSummaryContent: View {
         }
     }
 
-    /// What the card draws, derived from the range's rows and the sessions
-    /// a day (`refreshSummary`), not in `body`: the strip walks every day of
-    /// the range.
+    /// What the card draws, derived from the range's rows (`refreshSummary`),
+    /// not in `body`: the strip walks every day of the range.
     private struct Summary {
         var breakdown = CostBreakdown.zero
         var distinctDays = 0
@@ -216,39 +210,37 @@ private struct LifetimeSummaryContent: View {
     }
 
     /// The range's cost by part (#225), its days and models, and its strip:
-    /// every day from the range's first (over all time, the first active
-    /// day) to today, each one's height the sessions active that day.
-    private static func derive(
-        _ rows: [DailyRow], since: Date?, sessionsByDay: [String: Int]?
-    ) -> Summary {
+    /// every day from the range's first (`TimeRange.since`, exactly the
+    /// range's N days; over all time, the first active day) to today, each
+    /// one's height what that day cost. The rows are the daily rollup the
+    /// rest of the card is summed from, so the strip and the big figure are
+    /// the same dollars.
+    private static func derive(_ rows: [DailyRow], since: Date?) -> Summary {
         var s = Summary()
-        var dates = Set<String>()
+        var costByDay: [String: Double] = [:]
         var models = Set<String>()
         for row in rows {
             s.breakdown += row.costBreakdown
-            dates.insert(row.date)
+            costByDay[row.date, default: 0] += row.totalCostUSD
             models.insert(row.model)
         }
+        let dates = Set<String>(costByDay.keys)
         s.distinctDays = dates.count
         s.distinctModels = models.count
         let today: String = PacerToday.shared.key
         guard let start = since.map(TokenSample.formatDate) ?? dates.min() else { return s }
         let end: String = max(today, dates.max() ?? today)
-        let sessions: [String: Int] = sessionsByDay ?? [:]
-        let activity = PeriodActivity.days(
-            active: dates, trend: sessions.mapValues(Double.init), from: start, through: end)
+        let activity = PeriodActivity.days(active: dates, cost: costByDay, from: start, through: end)
         let year: Int = Calendar.current.component(.year, from: PacerClock.now)
         s.activity = activity
         s.span = pacerActivitySpan(activity) { pacerFactDay($0, currentYear: year) }
         s.axis = pacerDayAxis(activity, today: today, currentYear: year)
-        s.cellHelp = pacerActivityCellHelp(activity, currentYear: year) { cell in
-            sessions[cell.first].map { "\($0) session\($0 == 1 ? "" : "s")" }
-        }
+        s.cellHelp = pacerActivityCellHelp(activity, currentYear: year)
         return s
     }
 
     private func refreshSummary() {
-        cachedSummary = Self.derive(aggregates, since: since, sessionsByDay: counts.sessionsByDay)
+        cachedSummary = Self.derive(aggregates, since: since)
     }
 
     /// "1,284"; "—" until the first read lands.
@@ -270,8 +262,7 @@ private struct LifetimeSummaryContent: View {
         // The cached summary, or on the first frame (before `.onAppear` has
         // run) the same summary built once here, so the card opens full
         // rather than flashing empty on every range switch.
-        let summary = cachedSummary
-            ?? Self.derive(aggregates, since: since, sessionsByDay: counts.sessionsByDay)
+        let summary = cachedSummary ?? Self.derive(aggregates, since: since)
         // Read here and handed down, not read inside `PacerCard`'s stored
         // closures, so a count landing redraws this view (#140).
         let counts = self.counts
@@ -298,7 +289,6 @@ private struct LifetimeSummaryContent: View {
                     ],
                     activity: summary.activity,
                     span: summary.span,
-                    trendCaption: "sessions a day",
                     axis: summary.axis,
                     cellHelp: summary.cellHelp))
             }
@@ -318,43 +308,38 @@ private struct LifetimeSummaryContent: View {
         }
     }
 
-    /// Sessions every time (one COUNT); projects and sessions a day when
-    /// the range's project-day rows or sessions moved, or when `force`. A new
-    /// session, or a session's first turn on a new day (which brings a new
-    /// project-day row), is what changes the strip.
+    /// Sessions every time (one COUNT); projects when the range's
+    /// project-day rows moved, or when `force`. A project new to the range
+    /// always brings a project-day row with it.
     private func refreshCounts(force: Bool) {
-        let sessions = RangeActivityCounts.sessions(
+        counts.sessions = RangeActivityCounts.sessions(
             modelContext, since: since, accountId: scopeAccountId)
-        counts.sessions = sessions
         let days = RangeActivityCounts.projectDays(
             modelContext, since: since, accountId: scopeAccountId)
-        guard force || days != counts.projectDays || sessions != counts.sessionsRead else { return }
+        guard force || days != counts.projectDays else { return }
         counts.projectDays = days
-        counts.sessionsRead = sessions
-        loadActivity()
+        loadProjects()
     }
 
-    private func loadActivity() {
-        guard !activityLoading else {
-            activityRerun = true
+    private func loadProjects() {
+        guard !projectsLoading else {
+            projectsRerun = true
             return
         }
-        activityLoading = true
+        projectsLoading = true
         let container = modelContext.container
         let since = self.since, account = scopeAccountId
         Task {
             // Its own context, off the main actor: reading a lifetime of
-            // project-day and session rows faults every one of them.
-            let activity = await Task.detached(priority: .utility) {
-                RangeActivityCounts.activity(ModelContext(container), since: since, accountId: account)
+            // project-day rows faults every one of them.
+            let projects = await Task.detached(priority: .utility) {
+                RangeActivityCounts.projects(ModelContext(container), since: since, accountId: account)
             }.value
-            counts.projects = activity.projects
-            counts.sessionsByDay = activity.sessionsByDay
-            refreshSummary()
-            activityLoading = false
-            if activityRerun {
-                activityRerun = false
-                loadActivity()
+            counts.projects = projects
+            projectsLoading = false
+            if projectsRerun {
+                projectsRerun = false
+                loadProjects()
             }
         }
     }

@@ -73,6 +73,9 @@ struct CostBreakdownTokensTests {
         let parts: [CostBreakdown.Part] = CostBreakdown(cost: cost, tokens: t).parts
         let read: CostBreakdown.Part = try #require(parts.first { $0.component == .cacheRead })
         #expect(pacerPartTokens(read.tokens) == "21.5B tokens")
+        // The fine print under the dollars: tokens and price multiple, one
+        // quiet line (round 7).
+        #expect(pacerPartFinePrint(read) == "21.5B tokens · 0.1×")
         let help: String = pacerPartHelp(read)
         let lines: [String] = help.split(separator: "\n").map(String.init)
         #expect(lines.count == 2)

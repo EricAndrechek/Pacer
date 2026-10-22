@@ -186,9 +186,9 @@ struct ProjectDetailView: View {
         var modelRows: [DetailModalCards.ModelRow] = []
     }
 
-    /// The first card's strip: the range's days, each one's height the
-    /// sessions active that day, with its span and tooltips. Rebuilt when the
-    /// rows (`refreshDerived`) or the sessions change, never in `body`.
+    /// The first card's strip: the range's days, each one's height what the
+    /// project cost that day, with its span and tooltips. Rebuilt with the
+    /// rows (`refreshDerived`), never in `body`.
     private struct ActivitySummary {
         var activity = PeriodActivity.empty
         var span: String?
@@ -196,9 +196,6 @@ struct ProjectDetailView: View {
         var cellHelp: [String] = []
     }
     @State private var cachedActivity = ActivitySummary()
-    /// Sessions active on each day, from the live session rows: the strip's
-    /// heights, counted the way Day detail counts a day's sessions.
-    @State private var cachedSessionsByDay: [String: Int] = [:]
 
     /// The raw-sample load's values, as rows: only Subprojects needs the
     /// samples, for the cwd each ran in.
@@ -239,10 +236,12 @@ struct ProjectDetailView: View {
         refreshActivity()
     }
 
-    /// The strip from the cached days and sessions. The period runs from the
-    /// range's first day (or, over all time, the project's first active day)
-    /// to today; the modal is closed at midnight (`ContentView`'s
-    /// `.id(dayKey)`), so today cannot turn under an open one.
+    /// The strip from the cached daily series: each day's cost, the same
+    /// buckets the daily chart draws. The period runs from the range's first
+    /// day (`TimeRange.since`, exactly the range's N days; over all time, the
+    /// project's first active day) to today; the modal is closed at midnight
+    /// (`ContentView`'s `.id(dayKey)`), so today cannot turn under an open
+    /// one.
     private func refreshActivity() {
         let d = cachedDerived
         let today: String = PacerToday.shared.key
@@ -250,27 +249,17 @@ struct ProjectDetailView: View {
             cachedActivity = ActivitySummary()
             return
         }
-        let sessions = cachedSessionsByDay
+        var costByDay: [String: Double] = [:]
+        for day in d.dailySeries { costByDay[day.id] = day.total }
         let end: String = max(today, d.lastDay ?? today)
         let activity = PeriodActivity.days(
-            active: Set(d.dailySeries.map(\.id)), trend: sessions.mapValues(Double.init),
-            from: start, through: end)
+            active: Set(costByDay.keys), cost: costByDay, from: start, through: end)
         let year: Int = Calendar.current.component(.year, from: PacerClock.now)
         cachedActivity = ActivitySummary(
             activity: activity,
             span: pacerActivitySpan(activity) { pacerFactDay($0, currentYear: year) },
             axis: pacerDayAxis(activity, today: today, currentYear: year),
-            cellHelp: pacerActivityCellHelp(activity, currentYear: year) { cell in
-                sessions[cell.first].map { "\($0) session\($0 == 1 ? "" : "s")" }
-            })
-    }
-
-    /// Sessions active on each day of the range, from the session rows.
-    private func refreshSessionsByDay(_ rows: [SessionRow]) {
-        let spans: [(first: Date, last: Date)] = rows.map { ($0.firstSeenAt, $0.lastSeenAt) }
-        cachedSessionsByDay = RangeActivityCounts.sessionsByDay(
-            spans, from: RangeActivityCounts.dayStart(since))
-        refreshActivity()
+            cellHelp: pacerActivityCellHelp(activity, currentYear: year))
     }
 
     /// Changes whenever a row `refreshDerived` reads changes: a new day
@@ -565,7 +554,6 @@ struct ProjectDetailView: View {
         // re-reading the other table); the table's rows follow them.
         .onChange(of: sessions, initial: true) { _, new in
             sessionTableRows = PacerSessionsTable.rows(new)
-            refreshSessionsByDay(new)
         }
         // The first card, the daily chart and By model follow the rows they
         // are built from. See `aggregatesFingerprint`. A re-price changes no
@@ -805,7 +793,6 @@ struct ProjectDetailView: View {
             ],
             activity: a.activity,
             span: a.span,
-            trendCaption: "sessions a day",
             axis: a.axis,
             cellHelp: a.cellHelp)
     }

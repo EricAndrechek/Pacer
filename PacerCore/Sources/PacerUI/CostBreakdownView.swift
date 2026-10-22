@@ -150,12 +150,13 @@ struct PacerCostBarLayout: Equatable {
 /// How much room a `PacerCostBreakdownView` has.
 public enum PacerCostBreakdownStyle: Sendable, Equatable {
     /// A card's width: the stacked bar, then the five parts side by side in
-    /// equal columns, each with its dollars, share and tokens.
+    /// equal columns, each with its dollars, share, tokens and price
+    /// multiple.
     case regular
-    /// A hover card (~280 pt): the five parts as rows, one line each — dot,
-    /// name, dollars, share, tokens under one-word headings — and no bar. A
-    /// compact breakdown sits beside a chart that already draws the mix, and
-    /// the share column says what a 250 pt bar would.
+    /// A hover card (~300 pt): the five parts as rows, one line each — dot,
+    /// name, dollars, share, tokens (under one heading) and price multiple —
+    /// and no bar. A compact breakdown sits beside a chart that already draws
+    /// the mix, and the share column says what a 250 pt bar would.
     case compact
 }
 
@@ -211,72 +212,61 @@ public struct PacerCostBreakdownView: View {
     /// are proportional, so nothing written over a run of columns can sit
     /// over the part of the bar it names (round 4's "Input" and "Output"
     /// headings did not, and came out in round 5).
-    ///
-    /// Each share reads "56% of cost" where every column has room for it,
-    /// and "56%" where one does not (a Day detail modal). The choice is the
-    /// legend's, not each cell's, so the five never disagree.
     private struct RegularLegend: View {
         let parts: [CostBreakdown.Part]
 
         var body: some View {
-            ViewThatFits(in: .horizontal) {
-                columns(ofCost: true)
-                columns(ofCost: false)
-            }
-        }
-
-        private func columns(ofCost: Bool) -> some View {
             PacerEqualColumns(columns: parts.count, spacing: 12) {
                 ForEach(parts) { part in
-                    PartCell(part: part, ofCost: ofCost)
+                    PartCell(part: part)
                 }
             }
         }
     }
 
+    /// One part, three lines in falling weight: its name, its dollars and
+    /// share, then its tokens and price multiple in fine print.
+    ///
+    /// Round 7. The owner found round 6's legend busy: "$5.1k 55% of cost"
+    /// over "26.7B tokens 0.1×" under every name, the tokens as loud as the
+    /// name. Three takes were rendered at card and modal width, light and
+    /// dark (this one; the multiple beside the name; the dollars above the
+    /// name). This one won. "of cost" is gone, now that a share beside the
+    /// dollars reads as the dollars' share. The tokens and their multiple
+    /// are one tertiary line, quieter than the name rather than level with
+    /// it. And every line starts at the column's edge, the dot hanging,
+    /// which is what lets "242M tokens · 1.25×" fit a Day modal's column
+    /// without truncating. The multiple beside the name truncated "5m cache
+    /// writes" there, and the dollars-first take moved the dot away from
+    /// the bar it keys.
     private struct PartCell: View {
         let part: CostBreakdown.Part
-        let ofCost: Bool
 
         var body: some View {
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 5) {
                     Circle()
                         .fill(part.component.color)
-                        .frame(width: 8, height: 8)
+                        .frame(width: 7, height: 7)
                     Text(part.component.label)
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.85)
                 }
-                VStack(alignment: .leading, spacing: 1) {
-                    // "of cost": the share is of the dollars, and the tokens
-                    // under it are a different story (reads are ~98% of the
-                    // tokens and well under that of the cost).
-                    HStack(alignment: .firstTextBaseline, spacing: 4) {
-                        Text(pacerCost(part.usd))
-                            .font(.system(size: 13, weight: .semibold, design: .rounded))
-                            .monospacedDigit()
-                        Text(ofCost ? "\(part.percentLabel) of cost" : part.percentLabel)
-                            .font(.system(size: 11))
-                            .foregroundStyle(.tertiary)
-                            .monospacedDigit()
-                    }
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.85)
-                    HStack(alignment: .firstTextBaseline, spacing: 4) {
-                        Text(pacerPartTokens(part.tokens))
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                            .monospacedDigit()
-                        PriceMultipleTag(part: part.component)
-                    }
-                    .lineLimit(1)
-                        .minimumScaleFactor(0.85)
+                .padding(.bottom, 1)
+                HStack(alignment: .firstTextBaseline, spacing: 4) {
+                    Text(pacerCost(part.usd))
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    Text(part.percentLabel)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
                 }
-                .padding(.leading, 13)
+                Text(pacerPartFinePrint(part))
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
             }
+            .monospacedDigit()
+            .lineLimit(1)
+            .minimumScaleFactor(0.85)
             // A $0 part stays in its column, quieter, rather than leaving a
             // gap that would shift the others between days.
             .opacity(part.isQuiet ? 0.45 : 1)
@@ -284,23 +274,23 @@ public struct PacerCostBreakdownView: View {
         }
     }
 
-    /// The five parts as rows under "of cost" and "tokens" headings.
+    /// The five parts as rows: the regular legend's three lines laid flat,
+    /// in the same falling weight. A share beside the dollars needs no
+    /// heading here either; the tokens get theirs once, over the column,
+    /// rather than "tokens" on every row.
     private struct CompactLegend: View {
         let parts: [CostBreakdown.Part]
 
         var body: some View {
             Grid(alignment: .leading, horizontalSpacing: PacerCompactColumns.spacing, verticalSpacing: 4) {
-                // Each heading once, over its column, rather than on every
-                // row: five "21.5B tokens" cost the 37 pt that kept
-                // "5m cache writes" from truncating at hover-card width.
                 GridRow {
                     Color.clear
                         .gridCellUnsizedAxes([.horizontal, .vertical])
-                        .gridCellColumns(2)
-                    Heading(text: "of cost")
-                        .pacerCompactColumn(PacerCompactColumns.share)
+                        .gridCellColumns(3)
                     Heading(text: "tokens")
                         .pacerCompactColumn(PacerCompactColumns.tokens)
+                    Color.clear
+                        .gridCellUnsizedAxes([.horizontal, .vertical])
                 }
                 ForEach(parts) { part in
                     PartRow(part: part)
@@ -351,8 +341,13 @@ public struct PacerCostBreakdownView: View {
                     .modifier(PartCellStyle(part: part))
                 Text(pacerTokens(part.tokens))
                     .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.tertiary)
                     .pacerCompactColumn(PacerCompactColumns.tokens)
+                    .modifier(PartCellStyle(part: part))
+                Text(part.component.listPriceMultipleLabel)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .pacerCompactColumn(PacerCompactColumns.multiple)
                     .modifier(PartCellStyle(part: part))
             }
         }
@@ -425,28 +420,18 @@ func pacerPartTokens(_ tokens: Int64) -> String {
     "\(pacerTokens(tokens)) tokens"
 }
 
+/// "21.5B tokens · 0.1×": a legend entry's fine print, its tokens and what
+/// each is billed at against the uncached input price, so the four ways a
+/// prompt token can be billed read as one scale.
+func pacerPartFinePrint(_ part: CostBreakdown.Part) -> String {
+    "\(pacerPartTokens(part.tokens)) · \(part.component.listPriceMultipleLabel)"
+}
+
 /// "Cache reads: $12,603.12 · 21,512,345,678 tokens" — a legend entry's
 /// tooltip, exact where the entry is compact.
 func pacerPartHelp(_ part: CostBreakdown.Part) -> String {
     "\(part.component.label): \(pacerCostExact(part.usd)) · \(pacerTokensExact(part.tokens)) tokens\n"
         + part.component.billingNote
-}
-
-/// "0.1×" after a part's tokens: what each is billed at against the
-/// uncached input price, so the four ways a prompt token can be billed read
-/// as one scale. The compact rows (hover card) leave it to the tooltip:
-/// at ~300pt the tag would cost the part names their last words.
-struct PriceMultipleTag: View {
-    let part: CostComponent
-
-    var body: some View {
-        Text(part.listPriceMultipleLabel)
-            .font(.system(size: 10, weight: .medium).monospacedDigit())
-            .foregroundStyle(.tertiary)
-            .lineLimit(1)
-            .fixedSize()
-            .help(part.billingNote)
-    }
 }
 
 /// One labelled stacked bar — a model's or a project's parts — with a
@@ -516,8 +501,8 @@ public struct PacerCostKey: View {
 }
 
 /// The cache hit rate and the cost's input/output split as one small,
-/// secondary line of text — "Cache hits 98.1%   In / Out 90 / 10" — under
-/// every breakdown, the hover card's included.
+/// secondary line of text — "Cache hits 98.1%   Input 90% · Output 10%" —
+/// under every breakdown, the hover card's included.
 ///
 /// Kept quiet rather than dropped: a rate that falls on a day of slow turns
 /// is how a cache expiring between turns shows up. Text, not a bar: a filled
@@ -526,16 +511,21 @@ public struct PacerCostKey: View {
 /// (Claude Code's own `hit_ratio`).
 ///
 /// The split beside it (round 6) is the owner's: where the money went
-/// between sending context and getting work back, the same figure as the
-/// tables' "In / Out" column (`pacerInOutText`). Either half is left out
-/// when it has nothing to say: no prompt tokens, or no cost.
+/// between sending context and getting work back (`pacerInOutShares`). Round
+/// 6 printed it "In / Out 94 / 6", which the owner found hard to read: two
+/// labels over two numbers, matched up by position. Each number now sits by
+/// its own label, as the hit rate's does. Either half is left out when it
+/// has nothing to say: no prompt tokens, or no cost.
 public struct PacerCacheHitLine: View {
     private let ratio: Double?
-    private let inOut: String?
+    private let split: (input: Int, output: Int)?
+    /// The split as one phrase, which VoiceOver reads.
+    private let splitText: String?
 
     public init(ratio: Double?, inOut cost: CostComponents? = nil) {
         self.ratio = ratio
-        self.inOut = cost.flatMap(pacerInOutText)
+        self.split = cost.flatMap(pacerInOutShares)
+        self.splitText = cost.flatMap(pacerInOutText)
     }
 
     public var body: some View {
@@ -544,9 +534,17 @@ public struct PacerCacheHitLine: View {
                 pair("Cache hits", pacerCacheHitText(ratio))
                     .help(pacerCacheHitHelp)
             }
-            if let inOut {
-                pair("In / Out", inOut)
-                    .help(pacerInOutHelp)
+            if let split {
+                HStack(alignment: .firstTextBaseline, spacing: 5) {
+                    pair("Input", "\(split.input)%")
+                    Text("·")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
+                    pair("Output", "\(split.output)%")
+                }
+                .help(pacerInOutHelp)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(splitText ?? "")
             }
         }
         .lineLimit(1)
@@ -572,11 +570,14 @@ let pacerCacheHitHelp = "Cache reads ÷ every prompt token (reads + cache writes
 /// The compact breakdown's number columns, shared with the hover card's
 /// top-models rows (`PacerCostHoverCard`) so the two grids' dollars, shares
 /// and tokens sit in the same columns. A minimum, not a fixed width: a value
-/// wider than its column widens it rather than truncating.
+/// wider than its column widens it rather than truncating. `multiple` is
+/// wide enough for "1.25×", so the models grid's empty cell under it keeps
+/// the same width without measuring.
 enum PacerCompactColumns {
     static let cost: CGFloat = 44
     static let share: CGFloat = 32
     static let tokens: CGFloat = 40
+    static let multiple: CGFloat = 28
     static let spacing: CGFloat = 6
 }
 
@@ -589,27 +590,36 @@ extension View {
 }
 
 /// Output's whole-percent share of the cost, exactly as the breakdown's
-/// legend prints it ("13% of cost"): the five parts rounded together so
-/// they add up to 100 (`CostBreakdown.Part.percent`). Every surface that
-/// prints output's share reads it here, the Out % column and the In / Out
-/// line alike. Rounded on its own, a 12.6% output read 13 one line under a
-/// legend that said 12. Nil when nothing was spent.
+/// legend prints it ("13%"): the five parts rounded together so they add up
+/// to 100 (`CostBreakdown.Part.percent`). Every surface that prints output's
+/// share reads it here, the Out % column and the input/output line alike.
+/// Rounded on its own, a 12.6% output read 13 one line under a legend that
+/// said 12. Nil when nothing was spent.
 public func pacerOutputPercent(_ cost: CostComponents) -> Int? {
     guard cost.outputShare != nil else { return nil }
     let parts: [CostBreakdown.Part] = CostBreakdown(cost: cost).parts
     return parts.first { $0.component == .output }?.percent ?? 0
 }
 
-/// "87 / 13": how the cost splits between the prompt (cache reads, cache
-/// writes and uncached input) and the output, in whole percent, for the line
-/// beside every cache hit rate. Nil when nothing was spent.
-public func pacerInOutText(_ cost: CostComponents) -> String? {
+/// How the cost splits between the prompt (cache reads, cache writes and
+/// uncached input) and the output, in whole percent adding up to 100, for
+/// the line beside every cache hit rate. Output's is the legend's
+/// (`pacerOutputPercent`), so the two never disagree. Nil when nothing was
+/// spent.
+public func pacerInOutShares(_ cost: CostComponents) -> (input: Int, output: Int)? {
     guard let outPercent = pacerOutputPercent(cost) else { return nil }
-    return "\(100 - outPercent) / \(outPercent)"
+    return (100 - outPercent, outPercent)
 }
 
-/// The tooltip for an "In / Out" figure.
-public let pacerInOutHelp = "Share of the cost: input (cache reads, cache writes and uncached input) / output"
+/// "Input 87% · Output 13%": the split as the line beside the cache hit rate
+/// reads it, and as VoiceOver does. Nil when nothing was spent.
+public func pacerInOutText(_ cost: CostComponents) -> String? {
+    guard let split = pacerInOutShares(cost) else { return nil }
+    return "Input \(split.input)% · Output \(split.output)%"
+}
+
+/// The tooltip for the input/output split.
+public let pacerInOutHelp = "Share of the cost: input is cache reads, cache writes and uncached input; output is the response"
 
 /// "96.8%" — the cache hit rate at the precision every surface shows it.
 ///

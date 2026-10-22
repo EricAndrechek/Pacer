@@ -220,10 +220,8 @@ private struct ModelsContent: View {
         self.rangeBinding = rangeBinding
         self.onSelectDay = onSelectDay
         let acct = scopeAccountId ?? UsageScope.noAccountSentinel
-        if let days = range.days {
-            let cutoffString = TokenSample.formatDate(
-                Calendar.current.date(byAdding: .day, value: -days, to: Date()) ?? .distantPast
-            )
+        if let since = range.since {
+            let cutoffString = TokenSample.formatDate(since)
             _globalAggregates = Query(
                 filter: #Predicate<DailyAggregate> { $0.date >= cutoffString },
                 sort: \.date

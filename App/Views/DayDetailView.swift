@@ -130,7 +130,7 @@ struct DayDetailView: View {
         /// The day's 24 hours for the first card's strip: which had a turn,
         /// each one's height its cost. With its span ("9 AM – 11 PM") and
         /// each hour's tooltip, built here rather than in `body`.
-        var activity = PeriodActivity.hours(active: [], trend: [:])
+        var activity = PeriodActivity.hours(active: [])
         var span: String?
         var hourHelp: [String] = []
         /// By model's and Models' rows, which sort themselves.
@@ -152,7 +152,7 @@ struct DayDetailView: View {
             active.insert(row.hour)
             costByHour[row.hour, default: 0] += row.totalCostUSD
         }
-        let activity = PeriodActivity.hours(active: active, trend: costByHour)
+        let activity = PeriodActivity.hours(active: active, cost: costByHour)
         let year: Int = Calendar.current.component(.year, from: PacerClock.now)
 
         // Per-project rollup read straight from `ProjectDailyAggregate` —
@@ -171,9 +171,7 @@ struct DayDetailView: View {
             breakdown: CostBreakdown.sum(rows, \.costBreakdown),
             activity: activity,
             span: pacerActivitySpan(activity) { pacerHourLabel(Int($0) ?? 0) },
-            hourHelp: pacerActivityCellHelp(activity, currentYear: year) { cell in
-                Int(cell.first).flatMap { costByHour[$0] }.map(pacerCostExact)
-            },
+            hourHelp: pacerActivityCellHelp(activity, currentYear: year),
             modelRows: rows.map {
                 DetailModalCards.modelRow(model: $0.model, tokens: $0.tokens, costParts: $0.cost,
                                           cost: $0.totalCostUSD)
@@ -248,8 +246,9 @@ struct DayDetailView: View {
     }
 
     /// The first card: the day's cost, three counts, and its hours as a
-    /// strip, each hour's height its cost (the modal has no other picture of
-    /// the day's hours). Sessions come from the live session rows, the rest
+    /// strip, each hour's height its cost, as History's and a project's
+    /// strips draw cost per day (the modal has no other picture of the day's
+    /// hours). Sessions come from the live session rows, the rest
     /// from the cache. Each count is printed here only; the cards below carry
     /// none in their headers.
     private func summaryModel(_ cached: Cached, sessions: Int) -> PacerSummaryModel {
@@ -262,7 +261,6 @@ struct DayDetailView: View {
             ],
             activity: cached.activity,
             span: cached.span,
-            trendCaption: "cost an hour",
             axis: pacerHourAxis(),
             cellHelp: cached.hourHelp)
     }

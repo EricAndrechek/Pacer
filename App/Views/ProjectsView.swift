@@ -344,8 +344,7 @@ private struct ProjectsContent: View {
     ) {
         let since: Date?
         let cutoffString: String?
-        if let days = range.days {
-            let cutoffDate = Calendar.current.date(byAdding: .day, value: -days, to: Date()) ?? .distantPast
+        if let cutoffDate = range.since {
             since = cutoffDate
             cutoffString = TokenSample.formatDate(cutoffDate)
         } else {

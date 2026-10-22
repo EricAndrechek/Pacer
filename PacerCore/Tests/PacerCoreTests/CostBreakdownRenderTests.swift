@@ -89,7 +89,8 @@ struct CostBreakdownRenderTests {
                            PacerCostBreakdownView(Self.sliver)
                        })
             // The Day detail modal's width: the narrowest a regular legend
-            // gets, where "of cost" has the least room.
+            // gets, where the fine print ("242M tokens · 1.25×") has the
+            // least room.
             try render("breakdown-sliver-modal", width: 560, dark: dark,
                        PacerCostBreakdownView(Self.sliver))
             try render("breakdown-sliver-bar-zoom", width: 260, dark: dark, scale: 8,

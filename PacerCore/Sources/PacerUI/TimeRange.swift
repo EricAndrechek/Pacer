@@ -50,8 +50,25 @@ public enum TimeRange: String, CaseIterable, Identifiable {
         }
     }
 
+    /// Where "the last N days" starts: local midnight of the first of
+    /// exactly N calendar days, today and the N − 1 before it. `nil` for all
+    /// time.
+    ///
+    /// The one definition every range cut reads (History, Projects, Models,
+    /// the summary strip, the range's session counts), each as
+    /// `date >= formatDate(since)` on the day rollups or `>= since` on an
+    /// instant. It used to be `now − N days`, an instant part-way through a
+    /// day: a date cut on it took that whole day too, so "7 days" read 8
+    /// dates and the strip said "of 366 days" for a year (#342).
     public var since: Date? {
+        since(now: PacerClock.now)
+    }
+
+    /// `since` at a given instant, in a given calendar (its time zone decides
+    /// where a day starts). Separate so the span is tested at fixed instants.
+    public func since(now: Date, calendar: Calendar = .current) -> Date? {
         guard let days else { return nil }
-        return Calendar.current.date(byAdding: .day, value: -days, to: PacerClock.now)
+        let today: Date = calendar.startOfDay(for: now)
+        return calendar.date(byAdding: .day, value: -(days - 1), to: today)
     }
 }

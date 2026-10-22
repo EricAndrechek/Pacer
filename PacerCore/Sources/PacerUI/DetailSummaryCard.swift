@@ -18,7 +18,8 @@ import PacerCore
 /// which 22.
 ///
 /// Layout: the cost and its tokens in and out on the left, the counts on the right,
-/// the strip across the card under them, then a rule and the breakdown.
+/// the strip across the card under them (what that cost was per day, or per
+/// hour of a day), then a rule and the breakdown.
 /// Every number here is printed once on the page: the cards below carry no
 /// counts in their headers.
 public struct PacerSummaryCard<Trailing: View>: View {
@@ -48,9 +49,7 @@ public struct PacerSummaryCard<Trailing: View>: View {
                     }
                 }
                 if m.activity.slots > 0 {
-                    PacerActivityStrip(
-                        m.activity, span: m.span, caption: m.activity.hasTrend ? m.trendCaption : nil,
-                        axis: m.axis, cellHelp: m.cellHelp)
+                    PacerActivityStrip(m.activity, span: m.span, axis: m.axis, cellHelp: m.cellHelp)
                 }
                 if PacerCostBreakdownView.hasContent(m.breakdown) {
                     // A rule between the strip and the breakdown's bar: two
@@ -127,25 +126,26 @@ public struct PacerSummaryModel: Equatable {
     public var breakdown: CostBreakdown
     /// The counts at the right, in reading order.
     public var stats: [PacerSummaryFact]
+    /// The period's slots and what each cost: the strip, which captions
+    /// itself (`pacerActivityCaption`), so every card says the same thing
+    /// about the same picture.
     public var activity: PeriodActivity
     /// After the active count: when use began and ended
     /// (`pacerActivitySpan`).
     public var span: String?
-    /// What a column's height is, where the strip has a trend.
-    public var trendCaption: String?
     public var axis: [PacerActivityStrip.AxisLabel]
+    /// Each column's tooltip (`pacerActivityCellHelp`).
     public var cellHelp: [String]
 
     public init(
         breakdown: CostBreakdown, stats: [PacerSummaryFact], activity: PeriodActivity,
-        span: String? = nil, trendCaption: String? = nil,
+        span: String? = nil,
         axis: [PacerActivityStrip.AxisLabel] = [], cellHelp: [String] = []
     ) {
         self.breakdown = breakdown
         self.stats = stats
         self.activity = activity
         self.span = span
-        self.trendCaption = trendCaption
         self.axis = axis
         self.cellHelp = cellHelp
     }

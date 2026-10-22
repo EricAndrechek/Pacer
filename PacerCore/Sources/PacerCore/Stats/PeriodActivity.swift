@@ -2,16 +2,21 @@ import Foundation
 
 /// A period's activity as a summary card draws it: how many of the period's
 /// slots (days, or a day's hours) had any use, and a strip of cells across the
-/// period, each cell's height the period's trend (sessions a day) where the
-/// screen has one.
+/// period, each cell's height what the period cost per slot there.
 ///
-/// Built from rollup keys only — the days a daily rollup has rows for, the
-/// hours an hourly one does — never from `TokenSample`, and in a screen's
-/// cached derive step rather than its body.
+/// Cost on every strip (round 7): History and a project draw cost per day, a
+/// day draws cost per hour. Round 6 drew sessions a day on History and a
+/// project and cost an hour on a day, and the owner asked why the same green
+/// strip meant two things on two screens. The cards lead with cost, so the
+/// strip under the big figure says where that figure was spent.
+///
+/// Built from rollup rows only — a daily rollup's days and costs, an hourly
+/// one's hours — never from `TokenSample`, and in a screen's cached derive
+/// step rather than its body.
 ///
 /// The period is every slot from its first to its last, inclusive: History's
-/// "Last 30 days" is the 31 calendar days its query reads (the cut-off day
-/// through today), so "N of 31 days" counts exactly the days the card's other
+/// "Last 30 days" is the 30 calendar days its query reads (`TimeRange.since`
+/// through today), so "N of 30 days" counts exactly the days the card's other
 /// numbers were summed over.
 public struct PeriodActivity: Equatable, Sendable {
     public enum Unit: String, Sendable {
@@ -30,11 +35,17 @@ public struct PeriodActivity: Equatable, Sendable {
         public let span: Int
         /// Slots in the cell that had activity.
         public let active: Int
-        /// The trend's value per slot over the cell (its mean, so a short
-        /// oldest cell compares with full ones); 0 when there is no trend.
-        public let value: Double
+        /// What the cell's slots cost, summed.
+        public let cost: Double
 
         public var id: String { first }
+
+        /// The cell's cost per slot: its height. A mean rather than the sum,
+        /// so a short oldest week compares with full ones, and a week's column
+        /// reads on the same scale as a day's ("cost per day").
+        public var costPerSlot: Double {
+            span > 0 ? cost / Double(span) : 0
+        }
 
         /// The share of the cell's slots that had activity, 0...1.
         public var activeShare: Double {
@@ -57,16 +68,13 @@ public struct PeriodActivity: Equatable, Sendable {
     /// The first and last slot with activity.
     public let firstActive: String?
     public let lastActive: String?
-    /// Whether the cells carry a trend (`value`), or only which slots were
-    /// active.
-    public let hasTrend: Bool
 
     public static let empty = PeriodActivity(
         unit: .day, slots: 0, active: 0, cells: [], slotsPerCell: 1,
-        start: nil, end: nil, firstActive: nil, lastActive: nil, hasTrend: false)
+        start: nil, end: nil, firstActive: nil, lastActive: nil)
 
-    /// The most cells a strip draws before it buckets: a 90-day range (91
-    /// days, the cut-off day included) still draws a cell a day.
+    /// The most cells a strip draws before it buckets: a 90-day range still
+    /// draws a cell a day, with a little room for a "Lifetime" of a quarter.
     public static let defaultMaxCells = 92
 
     // MARK: Days
@@ -75,13 +83,14 @@ public struct PeriodActivity: Equatable, Sendable {
     ///
     /// - Parameters:
     ///   - active: the days with any use. Days outside the period are ignored.
-    ///   - trend: a value per day (sessions), or nil for a strip that shows
-    ///     only which days were active.
+    ///     A day can be active at $0 (every model unpriced); it is drawn as a
+    ///     stub, not a gap.
+    ///   - cost: each day's cost; a day without an entry cost nothing.
     ///   - maxCells: above this many days, cells cover a week each (two, four
     ///     … for a very long period), ending on `end`.
     public static func days(
         active: Set<String>,
-        trend: [String: Double]? = nil,
+        cost: [String: Double] = [:],
         from start: String,
         through end: String,
         maxCells: Int = defaultMaxCells
@@ -91,7 +100,7 @@ public struct PeriodActivity: Equatable, Sendable {
         let inPeriod: Set<String> = active.intersection(keys)
         return build(
             unit: .day, keys: keys, isActive: { inPeriod.contains($0) },
-            value: { trend?[$0] ?? 0 }, hasTrend: trend != nil,
+            cost: { cost[$0] ?? 0 },
             bucket: dayBucket(slots: keys.count, maxCells: maxCells))
     }
 
@@ -106,24 +115,24 @@ public struct PeriodActivity: Equatable, Sendable {
 
     // MARK: Hours
 
-    /// A day's 24 hours, 0 through 23, one cell each.
-    public static func hours(active: Set<Int>, trend: [Int: Double]? = nil) -> PeriodActivity {
+    /// A day's 24 hours, 0 through 23, one cell each, with each hour's cost.
+    public static func hours(active: Set<Int>, cost: [Int: Double] = [:]) -> PeriodActivity {
         let keys: [String] = (0..<24).map(String.init)
         return build(
             unit: .hour, keys: keys,
             isActive: { key in Int(key).map(active.contains) ?? false },
-            value: { key in Int(key).flatMap { trend?[$0] } ?? 0 },
-            hasTrend: trend != nil, bucket: 1)
+            cost: { key in Int(key).flatMap { cost[$0] } ?? 0 },
+            bucket: 1)
     }
 
     // MARK: Building
 
     private static func build(
         unit: Unit, keys: [String], isActive: (String) -> Bool,
-        value: (String) -> Double, hasTrend: Bool, bucket: Int
+        cost: (String) -> Double, bucket: Int
     ) -> PeriodActivity {
         let flags: [Bool] = keys.map(isActive)
-        let values: [Double] = keys.map(value)
+        let values: [Double] = keys.map(cost)
         var cells: [Cell] = []
         // Cells end on the period's last slot, so the newest cell is always
         // whole and only the oldest can be short.
@@ -135,7 +144,7 @@ public struct PeriodActivity: Equatable, Sendable {
             let sum: Double = values[lower..<upper].reduce(0, +)
             cells.append(Cell(
                 first: keys[lower], last: keys[upper - 1], span: span,
-                active: active, value: span > 0 ? sum / Double(span) : 0))
+                active: active, cost: sum))
             upper = lower
         }
         cells.reverse()
@@ -143,7 +152,7 @@ public struct PeriodActivity: Equatable, Sendable {
         return PeriodActivity(
             unit: unit, slots: keys.count, active: activeKeys.count, cells: cells,
             slotsPerCell: bucket, start: keys.first, end: keys.last,
-            firstActive: activeKeys.first, lastActive: activeKeys.last, hasTrend: hasTrend)
+            firstActive: activeKeys.first, lastActive: activeKeys.last)
     }
 
     /// `yyyy-MM-dd` keys from `start` through `end`, inclusive; empty when

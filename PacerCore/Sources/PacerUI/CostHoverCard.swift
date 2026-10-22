@@ -4,7 +4,7 @@ import PacerCore
 /// The card a cost chart shows over the hovered bar: the bucket's cost and
 /// tokens, what the cost was made of, and its top models — each with its
 /// dollars, its share of the bucket's cost and its tokens, in the same
-/// columns as the parts above them.
+/// columns and the same falling weight as the parts above them.
 ///
 /// A tooltip, so it is exempt from "never print the same number twice": the
 /// bar's own label may say the same total. It floats over the chart in an
@@ -14,9 +14,9 @@ public struct PacerCostHoverCard: View {
     private let breakdown: CostBreakdown
     private let topModels: [PacerChartModelCost]
 
-    /// The compact breakdown is one row per part, about 217pt wide; this
-    /// leaves room for the header line and padding. A narrower chart gets the
-    /// chart's width.
+    /// The compact breakdown is one row per part, about 250pt wide with its
+    /// price multiples; this leaves room for the header line and padding. A
+    /// narrower chart gets the chart's width.
     nonisolated public static let idealWidth: CGFloat = 300
 
     public init(title: String, breakdown: CostBreakdown, topModels: [PacerChartModelCost] = []) {
@@ -48,7 +48,8 @@ public struct PacerCostHoverCard: View {
                 // Its own grid, but on the compact breakdown's column widths
                 // (`PacerCompactColumns`), so a model's dollars, share and
                 // tokens sit under the parts' and the "tokens" heading above
-                // serves both.
+                // serves both. A model has no price multiple: its last cell
+                // is empty, at the parts' multiple column's width.
                 Grid(alignment: .leading, horizontalSpacing: PacerCompactColumns.spacing, verticalSpacing: 3) {
                     ForEach(topModels) { m in
                         GridRow {
@@ -75,10 +76,12 @@ public struct PacerCostHoverCard: View {
                             // its columns.
                             Text(m.tokens.map(pacerTokens) ?? "")
                                 .font(.system(size: 11))
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(.tertiary)
                                 .monospacedDigit()
                                 .lineLimit(1)
                                 .pacerCompactColumn(PacerCompactColumns.tokens)
+                            Color.clear
+                                .frame(width: PacerCompactColumns.multiple, height: 1)
                         }
                     }
                 }

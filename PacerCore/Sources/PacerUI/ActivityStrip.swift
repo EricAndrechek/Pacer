@@ -1,16 +1,23 @@
 import SwiftUI
 import PacerCore
 
-/// A period drawn as a row of slim columns, one per day (per hour of a day;
-/// per week of a long period), under a line that says how many were active:
-/// the summary card's picture of "22 of 31 days".
+/// A period drawn as a row of columns, one per day (per hour of a day; per
+/// week of a long period), under a line that says how many were active and,
+/// at its right, what a column's height is: the summary card's picture of
+/// "22 of 30 days" and where the money went across them.
 ///
-/// One encoding. With a trend (sessions a day) a column's height is that
-/// day's sessions against the period's busiest day; without one (a day's
-/// hours) it is the share of the cell's slots that were active, which for a
-/// cell of one slot is all or nothing. Every slot has a faint track behind
-/// it, so the period's length reads at a glance and an idle day is a gap in
-/// the row, not a missing column.
+/// One encoding, the same on every card: a column's height is what the
+/// period cost there per slot, against the period's most expensive slot —
+/// cost per day on History and a project, cost per hour on a day
+/// (`PeriodActivity`). The caption says which (`pacerActivityCaption`), and
+/// each column's tooltip has its day or hour and the exact cost. Every slot
+/// has a faint track behind it, so the period's length reads at a glance and
+/// an idle day is a gap in the row, not a missing column.
+///
+/// The columns always share the strip's whole width. Round 6 capped a column
+/// at 24 pt, so a week drew eight narrow columns across the left third of
+/// the card and left the rest empty; the owner wanted the strip to use the
+/// width for every period.
 ///
 /// Green, the heatmap's activity colour, so History's two pictures of when
 /// you worked read as one.
@@ -29,31 +36,25 @@ public struct PacerActivityStrip: View {
 
     private let activity: PeriodActivity
     private let span: String?
-    private let caption: String?
     private let axis: [AxisLabel]
     private let cellHelp: [String]
     private let height: CGFloat
 
-    /// The widest a cell grows: a day's 24 hours and a 31-day month fill a
-    /// modal, and a week stays a row of columns rather than eight slabs.
-    nonisolated static let maxCellWidth: CGFloat = 24
     private static let headerHeight: CGFloat = 15
     private static let axisHeight: CGFloat = 12
 
     /// - Parameters:
     ///   - span: after the count, quieter: when the period's use began and
     ///     ended, where that is not already an end of the axis.
-    ///   - caption: what a column's height is ("sessions a day"), at the
-    ///     strip's right end; left out when the strip is too short to hold it.
     ///   - axis: labels under the strip (`pacerDayAxis`, `pacerHourAxis`).
-    ///   - cellHelp: each cell's tooltip, in cell order.
+    ///   - cellHelp: each cell's tooltip, in cell order
+    ///     (`pacerActivityCellHelp`).
     public init(
-        _ activity: PeriodActivity, span: String? = nil, caption: String? = nil,
+        _ activity: PeriodActivity, span: String? = nil,
         axis: [AxisLabel] = [], cellHelp: [String] = [], height: CGFloat = 34
     ) {
         self.activity = activity
         self.span = span
-        self.caption = caption
         self.axis = axis
         self.cellHelp = cellHelp
         self.height = height
@@ -67,15 +68,13 @@ public struct PacerActivityStrip: View {
     public var body: some View {
         let cells: [PeriodActivity.Cell] = activity.cells
         let fills: [CGFloat] = PacerActivityStripLayout.fills(activity)
+        let caption: String = pacerActivityCaption(activity)
         GeometryReader { geo in
             let width: CGFloat = geo.size.width
-            let layout = PacerActivityStripLayout(count: cells.count, width: width, maxCell: Self.maxCellWidth)
-            // The caption sits at the strip's end, not the card's: a week's
-            // short strip leaves it out rather than floating it far away.
-            let fitsCaption: Bool = caption != nil && layout.used >= width * 0.6
+            let layout = PacerActivityStripLayout(count: cells.count, width: width)
             VStack(alignment: .leading, spacing: 0) {
-                header(showCaption: fitsCaption)
-                    .frame(width: fitsCaption ? layout.used : width, height: Self.headerHeight, alignment: .leading)
+                header(caption: caption)
+                    .frame(width: width, height: Self.headerHeight, alignment: .leading)
                 HStack(alignment: .bottom, spacing: layout.gap) {
                     ForEach(Array(cells.enumerated()), id: \.element.id) { i, _ in
                         column(fill: fills[i], width: layout.cell)
@@ -93,8 +92,9 @@ public struct PacerActivityStrip: View {
         .frame(height: totalHeight)
     }
 
-    /// "22 of 31 days active · Sep 23 – Oct 21", and the caption.
-    private func header(showCaption: Bool) -> some View {
+    /// "22 of 30 days active · Sep 23 – Oct 21", and at the right what a
+    /// column's height is.
+    private func header(caption: String) -> some View {
         let main = HStack(alignment: .firstTextBaseline, spacing: 4) {
             Text("\(activity.active)")
                 .font(.system(size: 13, weight: .semibold, design: .rounded))
@@ -118,13 +118,11 @@ public struct PacerActivityStrip: View {
         return HStack(alignment: .firstTextBaseline, spacing: 0) {
             main
             Spacer(minLength: 8)
-            if showCaption, let caption {
-                Text(caption)
-                    .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-                    .fixedSize()
-            }
+            Text(caption)
+                .font(.system(size: 10))
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
+                .fixedSize()
         }
     }
 
@@ -175,24 +173,30 @@ public struct PacerActivityStrip: View {
 }
 
 /// Where a strip's cells go: each cell's width and the gap between them,
-/// for `count` cells across `width`. Pure, so the sizing is tested without
-/// drawing.
+/// for `count` cells across `width`. The cells always fill the width. Pure,
+/// so the sizing is tested without drawing.
 struct PacerActivityStripLayout: Equatable {
     let cell: CGFloat
     let gap: CGFloat
     let count: Int
 
-    init(count: Int, width: CGFloat, maxCell: CGFloat) {
+    init(count: Int, width: CGFloat) {
         self.count = count
         let n: CGFloat = CGFloat(max(1, count))
         let room: CGFloat = max(0, width)
-        // 2 pt between cells while they are wide enough to keep a gap that
-        // size readable; 1 pt for a 90-day strip at modal width.
-        let roomy: CGFloat = (room - 2 * (n - 1)) / n
-        let gap: CGFloat = roomy >= 5 ? 2 : 1
-        let fit: CGFloat = (room - gap * (n - 1)) / n
+        let gap: CGFloat = Self.gap(pitch: room / n)
         self.gap = gap
-        self.cell = max(1, min(maxCell, fit))
+        self.cell = max(1, (room - gap * (n - 1)) / n)
+    }
+
+    /// The gap for cells `pitch` apart: in step with the cells, so a week's
+    /// wide columns read as seven days rather than one slab, and a 90-day
+    /// strip at modal width keeps most of each slot for its column.
+    static func gap(pitch: CGFloat) -> CGFloat {
+        if pitch >= 40 { return 4 }
+        if pitch >= 14 { return 3 }
+        if pitch >= 7 { return 2 }
+        return 1
     }
 
     /// The x of cell `i`'s leading edge.
@@ -200,26 +204,22 @@ struct PacerActivityStripLayout: Equatable {
         CGFloat(max(0, i)) * (cell + gap)
     }
 
-    /// The width the cells take: less than the strip's once they hit their
-    /// cap.
+    /// The width the cells take: the strip's, but for rounding.
     var used: CGFloat {
         let n: CGFloat = CGFloat(max(0, count))
         return max(0, n * cell + max(0, n - 1) * gap)
     }
 
-    /// Each cell's fill, 0...1: with a trend, its value against the period's
-    /// highest (an active cell with no value yet is a stub); without, the
-    /// share of its slots that were active.
+    /// Each cell's fill, 0...1: its cost per slot against the period's
+    /// highest. An active cell that cost nothing (every model unpriced) is a
+    /// stub, so it still reads as used; an idle one is empty.
     static func fills(_ activity: PeriodActivity) -> [CGFloat] {
         let cells: [PeriodActivity.Cell] = activity.cells
-        guard activity.hasTrend else {
-            return cells.map { CGFloat($0.activeShare) }
-        }
-        let peak: Double = cells.map(\.value).max() ?? 0
+        let peak: Double = cells.map(\.costPerSlot).max() ?? 0
         return cells.map { c -> CGFloat in
             guard c.active > 0 else { return 0 }
-            guard peak > 0, c.value > 0 else { return 0.001 }
-            return CGFloat(c.value / peak)
+            guard peak > 0, c.costPerSlot > 0 else { return 0.001 }
+            return CGFloat(c.costPerSlot / peak)
         }
     }
 }
@@ -292,13 +292,24 @@ public func pacerActivitySpan(_ activity: PeriodActivity, format: (String) -> St
     }
 }
 
-/// Each cell's tooltip: its day, week or hour, and what its column's height
-/// is (`detail`: "14 sessions", "$12.40") for a cell of one active slot.
-/// Tooltips may repeat a number the page prints.
-public func pacerActivityCellHelp(
-    _ activity: PeriodActivity, currentYear: Int,
-    detail: (PeriodActivity.Cell) -> String? = { _ in nil }
-) -> [String] {
+/// What a column's height is, for the strip's caption: "cost per hour",
+/// "cost per day", and for a strip of weeks "cost per day, by week" (a
+/// week's column is its days' mean, so it reads on a day's scale).
+public func pacerActivityCaption(_ activity: PeriodActivity) -> String {
+    switch activity.unit {
+    case .hour:
+        return "cost per hour"
+    case .day:
+        let weeks: Int = activity.slotsPerCell / 7
+        guard activity.slotsPerCell > 1 else { return "cost per day" }
+        return weeks <= 1 ? "cost per day, by week" : "cost per day, by \(weeks) weeks"
+    }
+}
+
+/// Each cell's tooltip: its hour, day or week and the exact cost the column
+/// draws. A week's says its cost a day (the height), its total, and how many
+/// of its days were active. Tooltips may repeat a number the page prints.
+public func pacerActivityCellHelp(_ activity: PeriodActivity, currentYear: Int) -> [String] {
     activity.cells.map { cell -> String in
         let name: String
         switch activity.unit {
@@ -309,13 +320,15 @@ public func pacerActivityCellHelp(
             guard cell.span == 1 else {
                 let from: String = pacerFactDay(cell.first, currentYear: currentYear)
                 let to: String = pacerFactDay(cell.last, currentYear: currentYear)
-                return "\(from) – \(to) · \(cell.active) of \(cell.span) days active"
+                guard cell.active > 0 else { return "\(from) – \(to) · no use" }
+                let perDay: String = pacerCostExact(cell.costPerSlot)
+                let total: String = pacerCostExact(cell.cost)
+                return "\(from) – \(to) · \(perDay) a day, \(total) in all · \(cell.active) of \(cell.span) days active"
             }
             name = pacerFactDayExact(cell.first)
         }
         guard cell.active > 0 else { return "\(name) · no use" }
-        guard let more = detail(cell) else { return name }
-        return "\(name) · \(more)"
+        return "\(name) · \(pacerCostExact(cell.cost))"
     }
 }
 
