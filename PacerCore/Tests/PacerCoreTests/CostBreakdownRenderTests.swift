@@ -86,12 +86,12 @@ struct CostBreakdownRenderTests {
         for dark in [false, true] {
             try render("breakdown-sliver-card", width: 860, dark: dark,
                        PacerCard("Today's traffic") {
-                           PacerCostBreakdownView(Self.sliver) {
-                               Text("52× reuse")
-                                   .font(.system(size: 11))
-                                   .foregroundStyle(.tertiary)
-                           }
+                           PacerCostBreakdownView(Self.sliver)
                        })
+            // The Day detail modal's width: the narrowest a regular legend
+            // gets, where "of cost" has the least room.
+            try render("breakdown-sliver-modal", width: 560, dark: dark,
+                       PacerCostBreakdownView(Self.sliver))
             try render("breakdown-sliver-bar-zoom", width: 260, dark: dark, scale: 8,
                        PacerCostBar(Self.sliver, height: 10))
             // The tables' Mix bar: 6 pt high, so a 3 pt part is a sliver.
@@ -106,15 +106,7 @@ struct CostBreakdownRenderTests {
             try render("breakdown-regular", width: 680, dark: dark,
                        PacerCostBreakdownView(Self.lifetime))
             try render("breakdown-regular-today", width: 680, dark: dark,
-                       // The slot as Today's traffic fills it.
-                       PacerCostBreakdownView(Self.today) {
-                           Text("52× reuse")
-                               .font(.system(size: 11))
-                               .foregroundStyle(.tertiary)
-                           Text("saved $412")
-                               .font(.system(size: 11, weight: .semibold, design: .rounded))
-                               .foregroundStyle(.green)
-                       })
+                       PacerCostBreakdownView(Self.today))
             try render("breakdown-compact", width: 280, dark: dark,
                        PacerCostBreakdownView(Self.lifetime, style: .compact))
             try render("breakdown-compact-today", width: 280, dark: dark,

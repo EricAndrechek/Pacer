@@ -6,9 +6,9 @@ import SwiftUI
 /// dollar axis and never read clearly even with a legend — the calibrated
 /// range and accuracy live in the tooltip instead.
 ///
-/// The Now strip's Today tile draws it labelled, "$X spent" on the left and
-/// the projection on the right. A screen whose own tiles already print both
-/// numbers draws `SpendProgressTrack`, the same bar without the labels.
+/// The Now strip's Today tile and the "This month" card draw it labelled,
+/// "$X spent" on the left and the projection on the right.
+/// `SpendProgressTrack` is the bar without the labels.
 public struct SpendProgressBar: View {
     private let spent: Double
     /// Always ≥ spent (callers clamp).

@@ -7,22 +7,53 @@ import Foundation
 /// place on every row and every day: a bar sorted by share would move cache
 /// reads from one end to the other as a day's mix shifted, and two bars side
 /// by side could not be compared.
+///
+/// It is the order a request's prompt is laid out in, then its reply: the
+/// cached prefix the request read back (cache reads), what it is caching now
+/// (1h writes before 5m ones, which is the order Anthropic requires their
+/// breakpoints in), the uncached tail after the last breakpoint (uncached
+/// input), and then the reply (output). Everything before output is the
+/// prompt, so the two `side`s fall into two runs the screens can split.
+///
+/// The case order is only a drawing order. Nothing persists a part by its
+/// position, and the raw values are the stable names.
 public enum CostComponent: String, CaseIterable, Sendable, Identifiable {
+    case cacheRead
+    case cacheWrite1h
+    case cacheWrite5m
     case input
     case output
-    case cacheRead
-    case cacheWrite5m
-    case cacheWrite1h
 
     public var id: String { rawValue }
 
+    /// "Uncached input" rather than "Input": all four prompt parts are
+    /// input, and this one is the part that missed the cache.
     public var label: String {
         switch self {
-        case .input:        return "Input"
+        case .input:        return "Uncached input"
         case .output:       return "Output"
         case .cacheRead:    return "Cache reads"
         case .cacheWrite5m: return "5m cache writes"
         case .cacheWrite1h: return "1h cache writes"
+        }
+    }
+
+    /// Which half of the request the part prices: the prompt it sent or
+    /// the reply it got.
+    public var side: CostSide { self == .output ? .output : .input }
+}
+
+/// The two halves of a request a cost is split into: the prompt (four
+/// parts) and the reply (one). The bar, the stacked chart and the legend
+/// put a wider break between the two than between parts of one side.
+public enum CostSide: String, CaseIterable, Sendable {
+    case input
+    case output
+
+    public var label: String {
+        switch self {
+        case .input:  return "Input"
+        case .output: return "Output"
         }
     }
 }

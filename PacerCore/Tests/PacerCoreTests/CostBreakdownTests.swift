@@ -37,6 +37,22 @@ struct CostBreakdownTests {
         #expect(parts.first { $0.component == .cacheRead }?.usd == 649.96)
     }
 
+    @Test("the parts run in prompt order, then output")
+    func promptOrderThenOutput() {
+        // The cached prefix, what is being cached now (1h before 5m, as
+        // Anthropic orders breakpoints), the uncached tail, then the reply.
+        let order: [CostComponent] = CostComponent.allCases
+        #expect(order == [.cacheRead, .cacheWrite1h, .cacheWrite5m, .input, .output])
+        // Every prompt part comes before output, so the sides are two runs.
+        let sides: [CostSide] = order.map(\.side)
+        #expect(sides == [.input, .input, .input, .input, .output])
+        // Only the drawing order moved: the raw values are the stable names.
+        let raw: [String] = order.map(\.rawValue)
+        #expect(raw == ["cacheRead", "cacheWrite1h", "cacheWrite5m", "input", "output"])
+        #expect(CostComponent.input.label == "Uncached input")
+        #expect(CostSide.allCases.map(\.label) == ["Input", "Output"])
+    }
+
     @Test("the order does not follow size")
     func orderIsFixed() {
         let outputHeavy = CostBreakdown(cost: CostComponents(input: 1, output: 90, cacheRead: 9))
@@ -48,11 +64,12 @@ struct CostBreakdownTests {
     func percentsSumTo100() {
         let parts = CostBreakdown(cost: realMix).parts
         #expect(parts.map(\.percent).reduce(0, +) == 100)
-        #expect(parts.map(\.percent) == [0, 7, 65, 15, 13])
+        // Reads, 1h writes, 5m writes, uncached input, output.
+        #expect(parts.map(\.percent) == [65, 13, 15, 0, 7])
         // Input is real money, just under a whole percent: it says so rather
         // than claiming 0%.
-        #expect(parts[0].percentLabel == "<1%")
-        #expect(parts[2].percentLabel == "65%")
+        #expect(parts[3].percentLabel == "<1%")
+        #expect(parts[0].percentLabel == "65%")
 
         // Three equal thirds would floor to 33 + 33 + 33 = 99; the leftover
         // point goes to one of them, not nowhere.
@@ -283,6 +300,16 @@ struct CostBreakdownTests {
         for (line, part) in zip(lines, CostComponent.allCases) {
             #expect(line.hasPrefix(part.label + ": "))
         }
-        #expect(lines[2].hasSuffix("(65%)"))
+        #expect(lines[0].hasSuffix("(65%)"))
+    }
+
+    @Test("the hit rate never rounds up to a perfect 100%")
+    func cacheHitTextCapsShortOfEverything() {
+        #expect(pacerCacheHitText(0.981) == "98.1%")
+        // 99.96% would round to "100.0%", claiming the cache missed nothing.
+        #expect(pacerCacheHitText(0.9996) == "99.9%")
+        #expect(pacerCacheHitText(0.99949) == "99.9%")
+        #expect(pacerCacheHitText(1) == "100.0%")
+        #expect(pacerCacheHitText(0) == "0.0%")
     }
 }

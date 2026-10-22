@@ -10,6 +10,10 @@ import PacerCore
 /// A stacked horizontal bar: one segment per priced part, sized by its share
 /// of the cost, in `CostComponent` order. The exact dollars are in its
 /// tooltip.
+///
+/// The four prompt parts come first and output last, with a wider break
+/// between the two sides than between parts of one side, so where the
+/// prompt ends and the reply starts can be read off any bar.
 public struct PacerCostBar: View {
     private let breakdown: CostBreakdown
     private let height: CGFloat
@@ -19,11 +23,20 @@ public struct PacerCostBar: View {
         self.height = height
     }
 
-    /// The gap between two parts, in points. Neighbouring parts never meet
-    /// colour to colour: the card shows through between them, so two hues a
-    /// colour-blind reader sees as close still have an edge (the data-viz
-    /// mark spec's 2px surface gap).
-    nonisolated static let gap: CGFloat = 2
+    /// The gap between two parts of one side, and the wider one between the
+    /// prompt and the reply, for a bar `height` tall: 3 pt and 7 pt on the
+    /// breakdown's 10 pt bar, in proportion on the thinner ones (the tables'
+    /// 6 pt Mix bar would lose a sixth of its width to fixed 3 pt gaps).
+    ///
+    /// Neighbouring parts never meet colour to colour: the card shows through
+    /// between them, so two hues a colour-blind reader sees as close still
+    /// have an edge. Round 3's 2 pt was a hairline next to colours that
+    /// close; 3 pt reads as a gap.
+    nonisolated static func gaps(height: CGFloat) -> (part: CGFloat, side: CGFloat) {
+        let part: CGFloat = height * 3 / 10
+        let side: CGFloat = height * 7 / 10
+        return (part, side)
+    }
 
     public var body: some View {
         let parts = breakdown.parts
@@ -31,10 +44,11 @@ public struct PacerCostBar: View {
         // The bar's corner radius is also the narrowest part worth a gap: a
         // part thinner than the rounding sits inside the curve of the end.
         let radius: CGFloat = height / 2
+        let gaps = Self.gaps(height: height)
         GeometryReader { geo in
             let layout = PacerCostBarLayout(
-                shares: parts.map(\.share), width: geo.size.width,
-                gap: Self.gap, sliver: radius)
+                shares: parts.map(\.share), sides: parts.map(\.component.side),
+                width: geo.size.width, gap: gaps.part, sideGap: gaps.side, sliver: radius)
             HStack(spacing: 0) {
                 // Every part gets a segment, zero-width when it is $0, so the
                 // row's identity does not change as a part comes and goes.
@@ -59,21 +73,59 @@ public struct PacerCostBar: View {
     }
 }
 
-/// Where each part of a `PacerCostBar` goes: its width, and the gap after it.
-/// Pure, so where the gaps fall is tested without drawing a bar.
+/// Which boundaries between the parts of one stacked bar get a gap, and how
+/// wide — the one rule `PacerCostBar` and the stacked chart both follow.
 ///
-/// A gap goes between two shown parts only when both are wide enough to
-/// read. A sliver — narrower than `sliver` — gets no gap on either side and
-/// sits flush against its neighbours. Gapping it drew a hairline of colour,
-/// then a gap, then the next part: at the bar's end that hairline is all
-/// that fills the rounded corner, and the end looked cut off rather than
+/// - Between two parts of one side: `gap`, when both are at least `sliver`.
+/// - Between the prompt and the reply: `sideGap`, when both sides are at
+///   least `sliver` in all. It is judged on the sides, not on the two parts
+///   that meet there: uncached input, the last prompt part, is usually a
+///   twentieth of a point, and judging it would lose the split on nearly
+///   every bar. The sliver still sits flush against the prompt part before
+///   it, at the near edge of the break.
+///
+/// A sliver gets no gap beside it within its side. Gapping it drew a hairline
+/// of colour between two gaps, and at the bar's end that hairline was all
+/// that filled the rounded corner, so the end looked cut off rather than
 /// round. Flush, the neighbour fills the curve and the sliver is a thin edge
-/// on it.
+/// on it. A side thinner than `sliver` is treated the same way.
+enum PacerPartGaps {
+    /// - Parameters:
+    ///   - values: each part's size in the bar's own unit (points across a
+    ///     bar, dollars up a chart), in drawing order; 0 for a part that is
+    ///     not drawn, which is skipped when finding a part's neighbour.
+    ///   - sides: each part's side, in the same order.
+    /// - Returns: the gap after each part, 0 after the last drawn one.
+    static func trailing(
+        _ values: [Double], sides: [CostSide], gap: Double, sideGap: Double, sliver: Double
+    ) -> [Double] {
+        let shown: [Int] = values.indices.filter { values[$0] > 0 }
+        var sideTotal: [CostSide: Double] = [:]
+        for i in shown { sideTotal[sides[i], default: 0] += values[i] }
+        var trailing: [Double] = Array(repeating: 0, count: values.count)
+        for (a, b) in zip(shown, shown.dropFirst()) {
+            if sides[a] == sides[b] {
+                if values[a] >= sliver && values[b] >= sliver { trailing[a] = gap }
+            } else {
+                let left: Double = sideTotal[sides[a]] ?? 0
+                let right: Double = sideTotal[sides[b]] ?? 0
+                if left >= sliver && right >= sliver { trailing[a] = sideGap }
+            }
+        }
+        return trailing
+    }
+}
+
+/// Where each part of a `PacerCostBar` goes: its width, and the gap after it.
+/// Pure, so where the gaps fall is tested without drawing a bar. The gaps
+/// follow `PacerPartGaps`; the parts share what is left, each in proportion
+/// to its share, so the bar still reads the true mix.
 struct PacerCostBarLayout: Equatable {
     struct Segment: Equatable {
         let width: CGFloat
         /// The gap after this part: the bar's gap between two readable
-        /// parts, 0 beside a sliver, after the last part, or for a $0 part.
+        /// parts of one side, the wider one between the two sides, 0 beside
+        /// a sliver, after the last part, or for a $0 part.
         let trailingGap: CGFloat
     }
 
@@ -82,31 +134,26 @@ struct PacerCostBarLayout: Equatable {
     /// - Parameters:
     ///   - shares: every part's share of the cost in bar order, 0 for a part
     ///     with nothing (it keeps a zero-width segment).
+    ///   - sides: every part's side, in the same order.
     ///   - width: the bar's width.
-    ///   - gap: the gap between two readable parts.
+    ///   - gap: the gap between two readable parts of one side.
+    ///   - sideGap: the gap between the prompt and the reply.
     ///   - sliver: the narrowest a part can be and still get a gap. Judged at
     ///     the bar's full width, before the gaps are taken out, so whether a
     ///     part is a sliver does not depend on how many gaps there are.
-    init(shares: [Double], width: CGFloat, gap: CGFloat, sliver: CGFloat) {
+    init(
+        shares: [Double], sides: [CostSide], width: CGFloat,
+        gap: CGFloat, sideGap: CGFloat, sliver: CGFloat
+    ) {
         let full: CGFloat = max(0, width)
-        // The shown parts, in order; $0 parts are skipped when finding a
-        // part's neighbour.
-        let shown: [Int] = shares.indices.filter { shares[$0] > 0 }
-        var trailing: [CGFloat] = Array(repeating: 0, count: shares.count)
-        var gaps: Int = 0
-        for (a, b) in zip(shown, shown.dropFirst()) {
-            let left: CGFloat = full * CGFloat(shares[a])
-            let right: CGFloat = full * CGFloat(shares[b])
-            if left >= sliver && right >= sliver {
-                trailing[a] = gap
-                gaps += 1
-            }
-        }
-        let taken: CGFloat = gap * CGFloat(gaps)
-        let room: CGFloat = max(0, full - taken)
+        let points: [Double] = shares.map { Double(full) * max(0, $0) }
+        let trailing: [Double] = PacerPartGaps.trailing(
+            points, sides: sides, gap: Double(gap), sideGap: Double(sideGap), sliver: Double(sliver))
+        let taken: Double = trailing.reduce(0, +)
+        let room: CGFloat = max(0, full - CGFloat(taken))
         segments = shares.indices.map { i -> Segment in
             let share: CGFloat = CGFloat(max(0, shares[i]))
-            return Segment(width: room * share, trailingGap: trailing[i])
+            return Segment(width: room * share, trailingGap: CGFloat(trailing[i]))
         }
     }
 }
@@ -114,18 +161,20 @@ struct PacerCostBarLayout: Equatable {
 /// How much room a `PacerCostBreakdownView` has.
 public enum PacerCostBreakdownStyle: Sendable, Equatable {
     /// A card's width: the stacked bar, then the five parts side by side in
-    /// equal columns, each with its dollars, share and tokens.
+    /// equal columns, each with its dollars, share and tokens, under an
+    /// "Input" and an "Output" heading.
     case regular
     /// A hover card (~280 pt): the five parts as rows, one line each — dot,
-    /// name, dollars, share, tokens under a one-word "tokens" heading — and
-    /// no bar. A compact breakdown sits beside a chart that already draws
-    /// the mix, and the share column says what a 250 pt bar would.
+    /// name, dollars, share, tokens under one-word headings — with a rule
+    /// between the prompt's rows and output's, and no bar. A compact
+    /// breakdown sits beside a chart that already draws the mix, and the
+    /// share column says what a 250 pt bar would.
     case compact
 }
 
 /// The breakdown for one total: the stacked bar, the five parts with their
-/// dollars, share and tokens, and the cache hit rate as one line of text
-/// under them.
+/// dollars, share and tokens, and the cache hit rate as one quiet line of
+/// text under them.
 ///
 /// One line, not two: tokens are ~98% cache reads, so a token bar would be a
 /// single colour. Each part's token count rides in its legend entry instead,
@@ -135,22 +184,18 @@ public enum PacerCostBreakdownStyle: Sendable, Equatable {
 /// has the total in its summary, and the parts are what this adds. With no
 /// cost to split (every model unpriced) it is only the hit rate: five $0
 /// parts would say nothing.
-///
-/// `cacheHitTrailing` goes after the hit rate on its line, for a screen that
-/// has something of its own to say about the cache (Today's savings).
-public struct PacerCostBreakdownView<CacheHitTrailing: View>: View {
+public struct PacerCostBreakdownView: View {
     private let breakdown: CostBreakdown
     private let style: PacerCostBreakdownStyle
-    private let cacheHitTrailing: CacheHitTrailing
 
-    public init(
-        _ breakdown: CostBreakdown,
-        style: PacerCostBreakdownStyle = .regular,
-        @ViewBuilder cacheHitTrailing: () -> CacheHitTrailing
-    ) {
+    public init(_ breakdown: CostBreakdown, style: PacerCostBreakdownStyle = .regular) {
         self.breakdown = breakdown
         self.style = style
-        self.cacheHitTrailing = cacheHitTrailing()
+    }
+
+    /// Whether there is anything to show — callers hide the card otherwise.
+    public static func hasContent(_ breakdown: CostBreakdown) -> Bool {
+        breakdown.total > 0 || breakdown.cacheHitRatio != nil
     }
 
     public var body: some View {
@@ -162,45 +207,67 @@ public struct PacerCostBreakdownView<CacheHitTrailing: View>: View {
                         // The bar-to-legend gap the stack had before the hit
                         // rate became a line of text and the stack tightened.
                         .padding(.bottom, 2)
-                    LazyVGrid(
-                        columns: Array(
-                            repeating: GridItem(.flexible(), spacing: 12, alignment: .topLeading),
-                            count: CostComponent.allCases.count),
-                        alignment: .leading,
-                        spacing: 8
-                    ) {
-                        ForEach(breakdown.parts) { part in
-                            PartCell(part: part)
-                        }
-                    }
+                    RegularLegend(parts: breakdown.parts)
                 case .compact:
-                    Grid(alignment: .leading, horizontalSpacing: PacerCompactColumns.spacing, verticalSpacing: 4) {
-                        // "tokens" once, over its column, rather than on every
-                        // row: five "21.5B tokens" cost the 37 pt that kept
-                        // "5m cache writes" from truncating at hover-card width.
-                        GridRow {
-                            Color.clear
-                                .gridCellUnsizedAxes([.horizontal, .vertical])
-                                .gridCellColumns(3)
-                            Text("tokens")
-                                .font(.system(size: 10, weight: .medium))
-                                .foregroundStyle(.tertiary)
-                                .pacerCompactColumn(PacerCompactColumns.tokens)
-                        }
-                        ForEach(breakdown.parts) { part in
-                            PartRow(part: part)
-                        }
-                    }
+                    CompactLegend(parts: breakdown.parts)
                 }
             }
             if let ratio = breakdown.cacheHitRatio {
-                PacerCacheHitLine(ratio: ratio) { cacheHitTrailing }
+                PacerCacheHitLine(ratio: ratio)
+            }
+        }
+    }
+
+    /// The five parts in equal columns, under a quiet heading per side: the
+    /// prompt's four under "Input", the reply under "Output", each heading a
+    /// rule across its own columns, so the split the bar draws is in the
+    /// legend too.
+    ///
+    /// Each share reads "56% of cost" where every column has room for it,
+    /// and "56%" where one does not (a Day detail modal). The choice is the
+    /// legend's, not each cell's, so the five never disagree.
+    private struct RegularLegend: View {
+        let parts: [CostBreakdown.Part]
+
+        var body: some View {
+            ViewThatFits(in: .horizontal) {
+                columns(ofCost: true)
+                columns(ofCost: false)
+            }
+        }
+
+        private func columns(ofCost: Bool) -> some View {
+            let prompt: Int = parts.filter { $0.component.side == .input }.count
+            return PacerEqualColumns(columns: parts.count, spacing: 12, rowSpacing: 7) {
+                SideHeading(side: .input)
+                    .layoutValue(key: PacerColumnSpan.self, value: prompt)
+                SideHeading(side: .output)
+                    .layoutValue(key: PacerColumnSpan.self, value: parts.count - prompt)
+                ForEach(parts) { part in
+                    PartCell(part: part, ofCost: ofCost)
+                }
+            }
+        }
+    }
+
+    /// "INPUT ────────" over the columns of one side.
+    private struct SideHeading: View {
+        let side: CostSide
+
+        var body: some View {
+            HStack(spacing: 6) {
+                Eyebrow(text: side.label, color: .secondary)
+                    .fixedSize()
+                Rectangle()
+                    .fill(Color.primary.opacity(0.12))
+                    .frame(height: 1)
             }
         }
     }
 
     private struct PartCell: View {
         let part: CostBreakdown.Part
+        let ofCost: Bool
 
         var body: some View {
             VStack(alignment: .leading, spacing: 3) {
@@ -215,15 +282,20 @@ public struct PacerCostBreakdownView<CacheHitTrailing: View>: View {
                         .minimumScaleFactor(0.85)
                 }
                 VStack(alignment: .leading, spacing: 1) {
+                    // "of cost": the share is of the dollars, and the tokens
+                    // under it are a different story (reads are ~98% of the
+                    // tokens and well under that of the cost).
                     HStack(alignment: .firstTextBaseline, spacing: 4) {
                         Text(pacerCost(part.usd))
                             .font(.system(size: 13, weight: .semibold, design: .rounded))
                             .monospacedDigit()
-                        Text(part.percentLabel)
+                        Text(ofCost ? "\(part.percentLabel) of cost" : part.percentLabel)
                             .font(.system(size: 11))
                             .foregroundStyle(.tertiary)
                             .monospacedDigit()
                     }
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
                     Text(pacerPartTokens(part.tokens))
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
@@ -237,6 +309,54 @@ public struct PacerCostBreakdownView<CacheHitTrailing: View>: View {
             // gap that would shift the others between days.
             .opacity(part.isQuiet ? 0.45 : 1)
             .help(pacerPartHelp(part))
+        }
+    }
+
+    /// The five parts as rows under "of cost" and "tokens" headings, with a
+    /// rule between the prompt's rows and output's.
+    private struct CompactLegend: View {
+        let parts: [CostBreakdown.Part]
+
+        var body: some View {
+            Grid(alignment: .leading, horizontalSpacing: PacerCompactColumns.spacing, verticalSpacing: 4) {
+                // Each heading once, over its column, rather than on every
+                // row: five "21.5B tokens" cost the 37 pt that kept
+                // "5m cache writes" from truncating at hover-card width.
+                GridRow {
+                    Color.clear
+                        .gridCellUnsizedAxes([.horizontal, .vertical])
+                        .gridCellColumns(2)
+                    Heading(text: "of cost")
+                        .pacerCompactColumn(PacerCompactColumns.share)
+                    Heading(text: "tokens")
+                        .pacerCompactColumn(PacerCompactColumns.tokens)
+                }
+                ForEach(parts) { part in
+                    // The prompt ends before output: a rule, not a heading
+                    // row, because every row the card spends is chart it
+                    // covers.
+                    if part.component.side == .output, part.id != parts.first?.id {
+                        Divider()
+                            // Without this a divider makes every column of
+                            // the grid as wide as it can be, and the names
+                            // truncate to make room.
+                            .gridCellUnsizedAxes(.horizontal)
+                            .padding(.vertical, 1)
+                    }
+                    PartRow(part: part)
+                }
+            }
+        }
+    }
+
+    private struct Heading: View {
+        let text: String
+
+        var body: some View {
+            Text(text)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
         }
     }
 
@@ -291,14 +411,100 @@ public struct PacerCostBreakdownView<CacheHitTrailing: View>: View {
     }
 }
 
-public extension PacerCostBreakdownView where CacheHitTrailing == EmptyView {
-    init(_ breakdown: CostBreakdown, style: PacerCostBreakdownStyle = .regular) {
-        self.init(breakdown, style: style) { EmptyView() }
+/// How many of `PacerEqualColumns`' columns a child spans; 1 by default.
+struct PacerColumnSpan: LayoutValueKey {
+    static let defaultValue: Int = 1
+}
+
+/// Children in equal-width columns, left to right, wrapping into rows; a
+/// child spans `PacerColumnSpan` columns.
+///
+/// Not a `Grid`: a grid's ideal width is the sum of its columns' widest
+/// cells, but laid out these columns are equal, so the widest cell of all
+/// decides whether the content fits. This reports that as its ideal width
+/// (the widest single-column child times the columns), so a `ViewThatFits`
+/// around it chooses exactly.
+struct PacerEqualColumns: Layout {
+    let columns: Int
+    let spacing: CGFloat
+    let rowSpacing: CGFloat
+
+    private struct Item {
+        let index: Int
+        let column: Int
+        let span: Int
     }
 
-    /// Whether there is anything to show — callers hide the card otherwise.
-    static func hasContent(_ breakdown: CostBreakdown) -> Bool {
-        breakdown.total > 0 || breakdown.cacheHitRatio != nil
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let width: CGFloat = proposal.width ?? idealWidth(subviews)
+        let column: CGFloat = columnWidth(width)
+        var height: CGFloat = 0
+        for (r, row) in rows(subviews).enumerated() {
+            if r > 0 { height += rowSpacing }
+            height += rowHeight(row, subviews: subviews, column: column)
+        }
+        return CGSize(width: width, height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let column: CGFloat = columnWidth(bounds.width)
+        var y: CGFloat = bounds.minY
+        for row in rows(subviews) {
+            for item in row {
+                let x: CGFloat = bounds.minX + CGFloat(item.column) * (column + spacing)
+                let size = ProposedViewSize(width: spanWidth(item.span, column: column), height: nil)
+                subviews[item.index].place(at: CGPoint(x: x, y: y), anchor: .topLeading, proposal: size)
+            }
+            y += rowHeight(row, subviews: subviews, column: column) + rowSpacing
+        }
+    }
+
+    private func columnWidth(_ width: CGFloat) -> CGFloat {
+        let n: CGFloat = CGFloat(max(1, columns))
+        let gaps: CGFloat = spacing * (n - 1)
+        return max(0, (width - gaps) / n)
+    }
+
+    private func spanWidth(_ span: Int, column: CGFloat) -> CGFloat {
+        let n: CGFloat = CGFloat(max(1, span))
+        return column * n + spacing * (n - 1)
+    }
+
+    /// The widest any child needs its columns to be, times the columns.
+    private func idealWidth(_ subviews: Subviews) -> CGFloat {
+        var widest: CGFloat = 0
+        for child in subviews {
+            let n: CGFloat = CGFloat(max(1, child[PacerColumnSpan.self]))
+            let ideal: CGFloat = child.sizeThatFits(.unspecified).width
+            widest = max(widest, (ideal - spacing * (n - 1)) / n)
+        }
+        let n: CGFloat = CGFloat(max(1, columns))
+        return widest * n + spacing * (n - 1)
+    }
+
+    private func rowHeight(_ row: [Item], subviews: Subviews, column: CGFloat) -> CGFloat {
+        row.map { item -> CGFloat in
+            let size = ProposedViewSize(width: spanWidth(item.span, column: column), height: nil)
+            return subviews[item.index].sizeThatFits(size).height
+        }.max() ?? 0
+    }
+
+    private func rows(_ subviews: Subviews) -> [[Item]] {
+        var rows: [[Item]] = []
+        var row: [Item] = []
+        var column: Int = 0
+        for (i, child) in subviews.enumerated() {
+            let span: Int = min(max(1, child[PacerColumnSpan.self]), max(1, columns))
+            if column + span > columns, !row.isEmpty {
+                rows.append(row)
+                row = []
+                column = 0
+            }
+            row.append(Item(index: i, column: column, span: span))
+            column += span
+        }
+        if !row.isEmpty { rows.append(row) }
+        return rows
     }
 }
 
@@ -358,45 +564,73 @@ public extension PacerCostBreakdownRow where Trailing == EmptyView {
     }
 }
 
-/// The cache hit rate as one quiet line of text — "Cache hits 98.1%" — with
-/// a caller-supplied trailing slot.
-///
-/// Text, not a bar: a filled track beside the five-part cost bar was a second
-/// bar that read as part of the first, and it spent a row on one number. As a
-/// line under the legend it starts where the legend does and costs one line.
-/// `ratio` is `TokenBreakdown.cacheHitRatio`, the one definition.
-public struct PacerCacheHitLine<Trailing: View>: View {
-    private let ratio: Double
-    private let trailing: Trailing
+/// The parts' colour key on one line, for a chart stacked by part:
+/// "● Cache reads  ● 1h cache writes  ● 5m cache writes  ● Uncached input
+/// │ ● Output", with a hairline where the prompt ends, as the bars break
+/// there.
+public struct PacerCostKey: View {
+    public init() {}
 
-    public init(ratio: Double, @ViewBuilder trailing: () -> Trailing) {
+    public var body: some View {
+        let parts: [CostComponent] = CostComponent.allCases
+        HStack(spacing: 12) {
+            ForEach(Array(parts.enumerated()), id: \.element) { i, part in
+                if i > 0, parts[i - 1].side != part.side {
+                    Rectangle()
+                        .fill(Color.primary.opacity(0.2))
+                        .frame(width: 1, height: 11)
+                }
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(part.color)
+                        .frame(width: 7, height: 7)
+                    Text(part.label)
+                        .font(.system(size: 11))
+                        // `Color.secondary`, not the hierarchical
+                        // `.secondary`: a chart's legend sets the tint as
+                        // its foreground, and `.secondary` of that is blue.
+                        .foregroundStyle(Color.secondary)
+                }
+            }
+        }
+        .lineLimit(1)
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// The cache hit rate as one small, secondary line of text — "Cache hits
+/// 98.1%" — under every breakdown.
+///
+/// Kept quiet rather than dropped: a rate that falls on a day of slow turns
+/// is how a cache expiring between turns shows up. Text, not a bar: a filled
+/// track beside the five-part cost bar was a second bar that read as part of
+/// the first. `ratio` is `TokenBreakdown.cacheHitRatio`, the one definition
+/// (Claude Code's own `hit_ratio`).
+public struct PacerCacheHitLine: View {
+    private let ratio: Double
+
+    public init(ratio: Double) {
         self.ratio = ratio
-        self.trailing = trailing()
     }
 
     public var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 10) {
-            HStack(alignment: .firstTextBaseline, spacing: 4) {
-                Text("Cache hits")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary)
-                Text(pacerCacheHitText(ratio))
-                    .font(.system(size: 11, weight: .semibold, design: .rounded))
-                    .monospacedDigit()
-            }
-            .help("\(pacerCacheHitText(ratio)) of prompt tokens served from cache")
-            .accessibilityElement(children: .combine)
-            trailing
+        HStack(alignment: .firstTextBaseline, spacing: 4) {
+            Text("Cache hits")
+                .font(.system(size: 11))
+                .foregroundStyle(.tertiary)
+            Text(pacerCacheHitText(ratio))
+                .font(.system(size: 11, weight: .medium, design: .rounded))
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
         }
         .lineLimit(1)
+        .help(pacerCacheHitHelp)
+        .accessibilityElement(children: .combine)
     }
 }
 
-public extension PacerCacheHitLine where Trailing == EmptyView {
-    init(ratio: Double) {
-        self.init(ratio: ratio) { EmptyView() }
-    }
-}
+/// The hit rate's tooltip: what it measures, and what a low one means.
+let pacerCacheHitHelp = "Share of prompt tokens read from cache · low when the cache expired between turns"
 
 /// The compact breakdown's number columns, shared with the hover card's
 /// top-models rows (`PacerCostHoverCard`) so the two grids' dollars, shares
@@ -418,8 +652,14 @@ extension View {
 }
 
 /// "96.8%" — the cache hit rate at the precision every surface shows it.
+///
+/// Capped at 99.9% short of every prompt token: rounded to one place, a
+/// 99.96% day printed "100.0%", which says the cache missed nothing when it
+/// did.
 public func pacerCacheHitText(_ ratio: Double) -> String {
-    String(format: "%.1f%%", ratio * 100)
+    let percent: Double = ratio * 100
+    let shown: Double = ratio < 1 ? min(percent, 99.9) : percent
+    return String(format: "%.1f%%", shown)
 }
 
 /// The tooltip for a cost bar: each part with its exact dollars and share.

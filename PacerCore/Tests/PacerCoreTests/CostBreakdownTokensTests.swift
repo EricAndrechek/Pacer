@@ -33,7 +33,8 @@ struct CostBreakdownTokensTests {
             input: 0.5, output: 2, cacheRead: 3, cacheWrite5m: 4, cacheWrite1h: 5)
         let parts: [CostBreakdown.Part] = CostBreakdown(cost: cost, tokens: tokens).parts
         let perPart: [Int64] = parts.map(\.tokens)
-        #expect(perPart == [1, 20, 300, 4_000, 50_000])
+        // Reads, 1h writes, 5m writes, uncached input, output.
+        #expect(perPart == [300, 50_000, 4_000, 1, 20])
         let sum: Int64 = perPart.reduce(0, +)
         #expect(sum == tokens.all)
     }
@@ -56,7 +57,7 @@ struct CostBreakdownTokensTests {
         let b = CostBreakdown(cost: CostComponents(output: 2), tokens: tokens)
         let parts: [CostBreakdown.Part] = (a + b).parts
         let perPart: [Int64] = parts.map(\.tokens)
-        #expect(perPart == [2, 40, 600, 8_000, 100_000])
+        #expect(perPart == [600, 100_000, 8_000, 2, 40])
     }
 
     @Test("an empty breakdown has zero tokens in every part")
@@ -66,28 +67,26 @@ struct CostBreakdownTokensTests {
     }
 
     @Test("the legend text names the tokens; the tooltip has them exact")
-    func legendAndTooltipText() {
+    func legendAndTooltipText() throws {
         let t = TokenBreakdown(cacheReadTokens: 21_512_345_678)
         let cost = CostComponents(cacheRead: 12_603.12)
         let parts: [CostBreakdown.Part] = CostBreakdown(cost: cost, tokens: t).parts
-        let read: CostBreakdown.Part = parts[2]
+        let read: CostBreakdown.Part = try #require(parts.first { $0.component == .cacheRead })
         #expect(pacerPartTokens(read.tokens) == "21.5B tokens")
         let help: String = pacerPartHelp(read)
         #expect(help.hasPrefix("Cache reads: "))
         #expect(help.hasSuffix(" · \(pacerTokensExact(21_512_345_678)) tokens"))
     }
 
-    @Test("the one-argument init and hasContent stay source-compatible")
+    @Test("the breakdown and the hit line take no trailing slot")
     func publicAPIShape() {
         let b = CostBreakdown(cost: CostComponents(output: 1), tokens: tokens)
-        let regular: PacerCostBreakdownView<EmptyView> = PacerCostBreakdownView(b)
-        let compact: PacerCostBreakdownView<EmptyView> = PacerCostBreakdownView(b, style: .compact)
-        let slotted = PacerCostBreakdownView(b) { Text("saved") }
-        _ = (regular, compact, slotted)
+        let regular: PacerCostBreakdownView = PacerCostBreakdownView(b)
+        let compact: PacerCostBreakdownView = PacerCostBreakdownView(b, style: .compact)
+        _ = (regular, compact)
         #expect(PacerCostBreakdownView.hasContent(b))
         #expect(!PacerCostBreakdownView.hasContent(.zero))
-        let line: PacerCacheHitLine<EmptyView> = PacerCacheHitLine(ratio: 0.5)
-        let slottedLine = PacerCacheHitLine(ratio: 0.5) { Text("saved") }
-        _ = (line, slottedLine)
+        let line: PacerCacheHitLine = PacerCacheHitLine(ratio: 0.5)
+        _ = line
     }
 }

@@ -126,6 +126,19 @@ struct StackedPartChartRender {
         try render(card("Last 30 days", PacerStackedPartChart(buckets, kind: .day)), width: 760, name: "days-30")
     }
 
+    /// The owner's real mix: uncached input 0.008% (a sliver on every bar),
+    /// output 10.5%, reads 56.2%, 5m writes 13.2%, 1h writes 20.1%.
+    @Test func thirtyDaysSliverMix() throws {
+        let buckets: [PacerChartBucket] = Self.days(30).map { b -> PacerChartBucket in
+            let t: Double = b.total
+            let cost = CostComponents(
+                input: t * 0.00008, output: t * 0.105, cacheRead: t * 0.562,
+                cacheWrite5m: t * 0.132, cacheWrite1h: t * 0.201)
+            return PacerChartBucket(id: b.id, breakdown: CostBreakdown(cost: cost, tokens: b.breakdown.tokens))
+        }
+        try render(card("Last 30 days", PacerStackedPartChart(buckets, kind: .day)), width: 760, name: "days-30-sliver-mix")
+    }
+
     @Test func thirtyDaysHovered() throws {
         let buckets: [PacerChartBucket] = Self.days(30)
         let left = PacerStackedPartChart(buckets, kind: .day, hovering: buckets[6].id)
@@ -162,55 +175,57 @@ struct StackedPartChartRender {
         try render(card("Daily activity", chart), width: 600, name: "days-90-narrow-hover")
     }
 
-    /// The dashboard's merged card, as `DailyCostChartCard.body` lays it out:
-    /// the 30-day chart, then the real month section. `monthDays` of the
-    /// buckets are this month's; a month with none is the 1st before any use.
-    private func thirtyDayCard(
+    /// The "This month" card, the real `PacerMonthSummary`, for `monthDays`
+    /// of the buckets; a month with none is the 1st before any use.
+    private func monthCard(
         _ buckets: [PacerChartBucket], monthDays: Int, name: String, daysLeft: Int,
         projection: PacerMonthSummary.Projection
     ) -> some View {
         let month: [PacerChartBucket] = Array(buckets.suffix(monthDays))
         let breakdown: CostBreakdown = month.reduce(CostBreakdown.zero) { $0 + $1.breakdown }
-        let total: Double = buckets.reduce(0) { $0 + $1.total }
         let model = PacerMonthSummary.Model(
             name: name, daysLeft: daysLeft, breakdown: breakdown,
             activeDays: month.count, projection: projection)
-        return PacerCard("Last 30 days", trailing: {
-            Text("total \(pacerCost(total))")
-                .font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
-        }) {
-            VStack(alignment: .leading, spacing: 16) {
-                PacerStackedPartChart(buckets, kind: .day)
-                Divider()
-                PacerMonthSummary(model)
-            }
-        }
+        return PacerMonthSummary(model)
     }
 
-    /// Mid-month: the 22nd, every tile and the spent → projected bar.
-    @Test func thirtyDaysAndThisMonth() throws {
+    /// The dashboard's two cards, as `DashboardView` stacks them: the last
+    /// 30 days, then this month mid-month (the 22nd), with the projection
+    /// and its bar.
+    @Test func thirtyDaysThenThisMonth() throws {
         let buckets: [PacerChartBucket] = Self.days(30, endingDay: 22)
         let spent: Double = buckets.suffix(22).reduce(0) { $0 + $1.total }
         let projected: Double = spent / 22 * 31
-        let card = thirtyDayCard(
+        let total: Double = buckets.reduce(0) { $0 + $1.total }
+        let month = monthCard(
             buckets, monthDays: 22, name: "October", daysLeft: 9,
             projection: .estimate(usd: projected, label: "≈\(pacerCost(projected))", help: ""))
-        try render(card, width: 860, name: "dashboard-30-days-and-month")
+        let page = VStack(spacing: 16) {
+            PacerCard("Last 30 days", trailing: {
+                Text("total \(pacerCost(total))")
+                    .font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
+            }) {
+                PacerStackedPartChart(buckets, kind: .day)
+            }
+            month
+        }
+        try render(page, width: 860, name: "dashboard-30-days-then-month")
+        try render(month, width: 860, name: "month-card")
     }
 
-    /// The 1st: the month is today, every tile still drawn; the engine has
-    /// too little of the month to project, so there is no bar yet.
-    @Test func thirtyDaysAndTheFirst() throws {
+    /// The 1st: the month is today, every number still drawn; the engine has
+    /// too little of the month to project, so the bar's room is held empty.
+    @Test func thisMonthOnTheFirst() throws {
         let buckets: [PacerChartBucket] = Self.days(30, endingMonth: 11, endingDay: 1)
-        let card = thirtyDayCard(
+        let card = monthCard(
             buckets, monthDays: 1, name: "November", daysLeft: 29,
             projection: .unavailable(help: "Not enough of this month yet to project"))
-        try render(card, width: 860, name: "dashboard-30-days-and-the-1st")
+        try render(card, width: 860, name: "month-card-the-1st")
         // Just past midnight on the 1st, before any use: zeros, not a blank.
         let before: [PacerChartBucket] = Self.days(30, endingDay: 31)
-        let empty = thirtyDayCard(
+        let empty = monthCard(
             before, monthDays: 0, name: "November", daysLeft: 29, projection: .pending)
-        try render(empty, width: 860, name: "dashboard-30-days-and-the-1st-no-use")
+        try render(empty, width: 860, name: "month-card-the-1st-no-use")
     }
 
     @Test func hoverCardAlone() throws {

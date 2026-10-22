@@ -94,26 +94,37 @@ public struct PacerChartBucket: Sendable, Equatable, Identifiable {
     /// `nil` for a $0 bucket.
     public var stackTop: CostComponent? { segments.last?.component }
 
-    /// The drawn segments as y spans, stacked in order. Between two
-    /// neighbouring parts the lower one gives up `gap` (cost units) off its
-    /// top, so the card shows between them and two hues a colour-blind reader
-    /// sees as close still get an edge.
+    /// The drawn segments as y spans, stacked in order, with the card
+    /// showing between them: `gap` (cost units) between two parts of one
+    /// side, `sideGap` between the prompt and the reply, placed by
+    /// `PacerPartGaps` — the rule `PacerCostBar` follows, so a sliver (under
+    /// twice `gap`) sits flush against its neighbours rather than floating
+    /// as a hairline between two gaps, and the prompt/reply break is judged
+    /// on the two sides, not on the uncached-input sliver that usually tops
+    /// the prompt.
     ///
-    /// A sliver — shorter than twice the gap — gets no gap above or below it
-    /// and sits flush against its neighbours, the rule `PacerCostBar` follows.
-    /// Gapped, it was a hairline of colour floating under a gap at the foot
-    /// of the bar. The top segment is never trimmed, so the bar's height is
-    /// still the total its label prints.
-    public func spans(gap: Double) -> [PacerStackSpan] {
-        let sliver: Double = gap * 2
+    /// The gaps come out of the bar in proportion: every segment is drawn at
+    /// the same fraction of its value, so a bar's parts keep their true
+    /// shares, and the top segment still ends at the total its label prints.
+    /// Taking each gap off the part below it, as round 3 did, would shrink
+    /// whichever part sits at the wider break by the whole break.
+    public func spans(gap: Double, sideGap: Double) -> [PacerStackSpan] {
+        let values: [Double] = segments.map(\.usd)
+        let trailing: [Double] = PacerPartGaps.trailing(
+            values, sides: segments.map(\.component.side),
+            gap: gap, sideGap: sideGap, sliver: gap * 2)
+        let total: Double = values.reduce(0, +)
+        let taken: Double = trailing.reduce(0, +)
+        // The sliver rule keeps the gaps well under the bar's height (each
+        // sits beside parts at least twice the gap tall); this is a backstop.
+        let scale: Double = total > taken ? (total - taken) / total : 1
+        let gapped: [Double] = total > taken ? trailing : trailing.map { _ in 0 }
         var spans: [PacerStackSpan] = []
-        var start = 0.0
+        var y: Double = 0
         for (i, part) in segments.enumerated() {
-            let end: Double = start + part.usd
-            let next: CostBreakdown.Part? = i + 1 < segments.count ? segments[i + 1] : nil
-            let gapped: Bool = next.map { part.usd >= sliver && $0.usd >= sliver } ?? false
-            spans.append(PacerStackSpan(part: part, start: start, end: gapped ? end - gap : end))
-            start = end
+            let end: Double = y + values[i] * scale
+            spans.append(PacerStackSpan(part: part, start: y, end: end))
+            y = end + gapped[i]
         }
         return spans
     }
@@ -277,9 +288,11 @@ public struct PacerStackedPartChart: View {
     /// the data's max. (Not `chartPlotStyle` padding: that moves the marks
     /// and leaves the gridlines and axis labels where they were.)
     nonisolated static let labelRoom: CGFloat = 14
-    /// Points of card between two stacked parts (see `PacerChartBucket.spans`,
-    /// which leaves it out beside a part under twice this tall).
-    nonisolated static let segmentGap: Double = 1.5
+    /// Points of card between two stacked parts of one side, and between the
+    /// prompt and the reply (see `PacerChartBucket.spans`, which leaves a gap
+    /// out beside a part under twice `segmentGap` tall).
+    nonisolated static let segmentGap: Double = 2.5
+    nonisolated static let sideGap: Double = 6
 
     public var body: some View {
         let axis = PacerChartXAxis(kind: kind, ids: buckets.map(\.id))
@@ -293,7 +306,9 @@ public struct PacerStackedPartChart: View {
         // legend. An estimate, close enough for a hairline.
         // Typed in steps: Xcode 16 finds `-` ambiguous across CGFloat/Double.
         let plotPoints: CGFloat = max(40, height - Self.labelRoom - 44)
-        let gap: Double = yMax * Self.segmentGap / Double(plotPoints)
+        let pointUnits: Double = yMax / Double(plotPoints)
+        let gap: Double = pointUnits * Self.segmentGap
+        let sideGap: Double = pointUnits * Self.sideGap
         Chart {
             ForEach(buckets) { bucket in
                 // Once per bar, not per segment: it runs a date formatter.
@@ -301,7 +316,7 @@ public struct PacerStackedPartChart: View {
                 // One segment per priced part, stacked in `CostComponent`
                 // order (the style scale's domain below), so a part sits in
                 // the same band on every bar.
-                ForEach(bucket.spans(gap: gap)) { span in
+                ForEach(bucket.spans(gap: gap, sideGap: sideGap)) { span in
                     let part = span.part
                     BarMark(
                         x: .value("Bucket", bucket.id),
@@ -338,7 +353,11 @@ public struct PacerStackedPartChart: View {
             domain: PacerCostPalette.chartDomain,
             range: PacerCostPalette.chartRange
         )
-        .chartLegend(position: .bottom, alignment: .leading, spacing: 8)
+        // Its own legend rather than Charts' generated one, which cannot
+        // show the prompt/reply split the bars draw.
+        .chartLegend(position: .bottom, alignment: .leading, spacing: 8) {
+            PacerCostKey()
+        }
         .chartYAxis {
             AxisMarks(position: .leading) { value in
                 AxisGridLine().foregroundStyle(.secondary.opacity(0.18))

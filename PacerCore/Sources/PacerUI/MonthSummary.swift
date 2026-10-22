@@ -1,30 +1,31 @@
 import SwiftUI
 import PacerCore
 
-/// The month so far, under the dashboard's 30-day chart: cost, tokens, active
-/// days and the month-end projection as point tiles, the spent → projected
-/// bar under the projection, then the shared breakdown — what "This week" is
-/// for its seven days.
+/// The dashboard's "This month" card: the month so far as one big figure
+/// with the month-end projection beside it, its tokens and active days, the
+/// labelled spent → projected bar across the card, then the shared
+/// breakdown.
 ///
-/// A section of a card, not a card. It opens with a quiet eyebrow ("THIS
-/// MONTH  October · 9 days left") rather than a second bold title, so the
-/// card it sits in reads as one card with one title.
+/// Its own card again, under "Last 30 days" rather than inside it: the month
+/// and the last 30 days are different periods, and the owner chose the
+/// original's roomy layout — the card-wide labelled bar especially — over
+/// round 3's tiles with the bar squeezed into a column.
 ///
-/// Every tile is always drawn, from the 1st on. On the 1st the month's
-/// numbers are today's, and in its first week they are this week's; the
-/// owner chose a section that looks the same every day over hiding them.
+/// Every number is always drawn, from the 1st on: on the 1st before any use
+/// the card reads $0, 0 tokens and 0 active days rather than going blank,
+/// and the projection reads "—" until the engine has an answer. The bar's
+/// room is held until there is a projection to fill towards, so the card is
+/// the same height before and after the engine answers.
 ///
-/// The bar sits in the projection's column, where the active-days tile has
-/// its hint, and fills by spent over projected. It has no labels of its own:
-/// both numbers are tiles in the same row. Card-wide, it sat right above the
-/// breakdown's bar and read as a second bar of the same thing.
+/// The bar's two labels repeat the big figure and the projection. That one
+/// repeat is the owner's call: he asked for the labelled bar back.
 public struct PacerMonthSummary: View {
-    /// What the section shows, as plain values.
+    /// What the card shows, as plain values.
     public struct Model: Equatable, Sendable {
         /// "October"
         public var name: String
         public var daysLeft: Int
-        /// The month so far, by priced part; its total is the cost tile.
+        /// The month so far, by priced part; its total is the big figure.
         public var breakdown: CostBreakdown
         public var activeDays: Int
         public var projection: Projection
@@ -50,8 +51,8 @@ public struct PacerMonthSummary: View {
     /// The month-end projection, already formatted by the caller (it owns the
     /// engine and its wording).
     public enum Projection: Equatable, Sendable {
-        /// No answer yet: "—", and the bar's room is held so the section
-        /// does not grow when the answer lands.
+        /// No answer yet: "—", and the bar's room is held so the card does
+        /// not grow when the answer lands.
         case pending
         /// Not enough of the month to project: "—", with why in the tooltip.
         case unavailable(help: String)
@@ -67,70 +68,98 @@ public struct PacerMonthSummary: View {
 
     public var body: some View {
         let m = model
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Eyebrow(text: "This month")
-                Text("\(m.name) · \(m.daysLeft) day\(m.daysLeft == 1 ? "" : "s") left")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-            }
-            tiles(m)
-            if PacerCostBreakdownView.hasContent(m.breakdown) {
-                PacerCostBreakdownView(m.breakdown)
-                    .padding(.top, 6)
-            }
-        }
-    }
-
-    private func tiles(_ m: Model) -> some View {
-        LazyVGrid(
-            columns: Array(
-                repeating: GridItem(.flexible(), spacing: 16, alignment: .topLeading),
-                count: 4
-            ),
-            alignment: .leading,
-            spacing: 12
-        ) {
-            MetricTile(value: pacerCost(m.cost), label: "cost", tooltip: pacerCostExact(m.cost))
-            MetricTile(value: pacerTokens(m.tokens), label: "tokens", tooltip: pacerTokensExact(m.tokens))
-            MetricTile(
-                value: "\(m.activeDays)",
-                label: "active days",
-                hint: m.activeDays > 0 ? "avg \(pacerCost(m.averageActiveDayCost)) each" : nil,
-                tooltip: m.activeDays > 0
-                    ? "\(pacerCostExact(m.averageActiveDayCost)) per active day" : nil
-            )
-            // Always drawn, "—" until there is an answer: a tile that
-            // appeared seconds after the card would grow it.
-            VStack(alignment: .leading, spacing: 7) {
-                switch m.projection {
-                case .pending:
-                    MetricTile(value: "—", label: "by month end")
-                case .unavailable(let help):
-                    MetricTile(value: "—", label: "by month end", tooltip: help)
-                case .estimate(_, let label, let help):
-                    MetricTile(value: label, label: "by month end", tooltip: help)
+        PacerCard("This month", trailing: {
+            Text("\(m.name) · \(m.daysLeft) day\(m.daysLeft == 1 ? "" : "s") left")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+        }) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    Text(pacerCost(m.cost))
+                        .font(.system(size: 26, weight: .semibold, design: .rounded))
+                        .monospacedDigit()
+                        .help(pacerCostExact(m.cost))
+                    projectionChip(m.projection)
+                    Spacer(minLength: 8)
+                    detail(m)
                 }
                 bar(m)
+                if PacerCostBreakdownView.hasContent(m.breakdown) {
+                    // A rule between the two bars: the spend bar is the month
+                    // against its projection, the breakdown's is the month's
+                    // mix, and without it they read as one bar of two parts.
+                    Divider()
+                        .padding(.vertical, 6)
+                    PacerCostBreakdownView(m.breakdown)
+                }
             }
         }
     }
 
-    /// The spent → projected bar. Its room is always there, the bar drawn only
-    /// once there is a projection to fill towards, so the section is the same
-    /// height before and after the engine answers.
-    private func bar(_ m: Model) -> some View {
-        let projected: Double? = {
-            if case .estimate(let usd, _, _) = m.projection { return max(usd, m.cost) }
-            return nil
-        }()
-        let help: String? = projected.map {
-            "\(pacerCostExact(m.cost)) spent of \(pacerCostExact($0)) by month end"
+    /// "≈$774 by month end"; "— by month end" until there is an answer, so
+    /// the chip is there from the first frame and nothing beside it moves.
+    private func projectionChip(_ p: Projection) -> some View {
+        let text: String
+        let help: String?
+        switch p {
+        case .pending:
+            text = "— by month end"
+            help = nil
+        case .unavailable(let why):
+            text = "— by month end"
+            help = why
+        case .estimate(_, let label, let why):
+            text = "\(label) by month end"
+            help = why
         }
-        return SpendProgressTrack(spent: m.cost, projected: projected ?? 1)
-            .opacity(projected == nil ? 0 : 1)
-            .allowsHitTesting(projected != nil)
-            .accessibilityHidden(projected == nil)
-            .modifier(OptionalHelp(text: help))
+        return Chip(
+            text: text,
+            systemImage: "chart.line.uptrend.xyaxis",
+            tint: .secondary,
+            size: .compact
+        )
+        .fixedSize()
+        .modifier(OptionalHelp(text: help))
+    }
+
+    /// "1.1B tokens · avg $25.0 per active day (22)": the month's other
+    /// numbers, quiet, on the big figure's line.
+    private func detail(_ m: Model) -> some View {
+        HStack(spacing: 0) {
+            Text("\(pacerTokens(m.tokens)) tokens")
+                .help("\(pacerTokensExact(m.tokens)) tokens")
+            Text(" · ")
+            if m.activeDays > 0 {
+                Text("avg \(pacerCost(m.averageActiveDayCost)) per active day (\(m.activeDays))")
+                    .help("\(pacerCostExact(m.averageActiveDayCost)) per active day, \(m.activeDays) active day\(m.activeDays == 1 ? "" : "s")")
+            } else {
+                Text("0 active days")
+            }
+        }
+        .font(.system(size: 11))
+        .foregroundStyle(.secondary)
+        .monospacedDigit()
+        .lineLimit(1)
+    }
+
+    /// The labelled spent → projected bar across the card. Its room is always
+    /// there, the bar drawn only once there is a projection to fill towards:
+    /// held open, not left out, because the engine's first answer lands
+    /// seconds after the card draws, and a bar arriving then grew the card
+    /// and moved everything under it.
+    private func bar(_ m: Model) -> some View {
+        var estimate: (usd: Double, label: String, help: String)?
+        if case .estimate(let usd, let label, let help) = m.projection {
+            estimate = (max(usd, m.cost), label, help)
+        }
+        let shown: Bool = estimate != nil
+        return SpendProgressBar(
+            spent: m.cost,
+            projected: estimate?.usd ?? 1,
+            projectedLabel: estimate?.label ?? " ",
+            help: estimate?.help ?? "")
+            .opacity(shown ? 1 : 0)
+            .allowsHitTesting(shown)
+            .accessibilityHidden(!shown)
     }
 }

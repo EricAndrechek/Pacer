@@ -16,7 +16,7 @@ import PacerUI
 ///      projection is decision-useful.
 ///
 /// The time-bucket ladder continues down the page (today's breakdowns →
-/// week → the last 30 days with this month, in the trend cards).
+/// week → the last 30 days → this month, in the trend cards).
 struct NowStrip: View {
     /// Open today's day-detail modal (Today tile click).
     let onTodayTap: (() -> Void)?
