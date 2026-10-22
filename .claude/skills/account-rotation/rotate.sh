@@ -498,6 +498,7 @@ while :; do
       # switch, resetting before the active's own.
       if [ "$l5" != - ] && [ "$l5" -le "$EXPIRE_WINDOW" ] && [ "$room" -ge "$xneed" ] \
          && [ $(( burn * l5 )) -ge $(( EXPIRE_MIN_PTS * 3600 )) ] \
+         && [ $(( $(wkmax "$s") - w )) -gt "$(need7 $(( l5 / 60 )))" ] \
          && { [ "$myleft" = - ] || [ "$l5" -lt "$myleft" ]; }; then
         if [ -z "$exp" ] || [ "$k" -lt "$expkey" ]; then exp=$s; expkey=$k; expv=$v; exproom=$room; expleft=$l5; fi
       fi

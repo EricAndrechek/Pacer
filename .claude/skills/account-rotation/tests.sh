@@ -145,6 +145,14 @@ AUTO=1 BURN7=2.3 t "9e stagger skips idle 1 with 2 weekly points (bar 6)" '^[0-9
   2 "1:0:-:88:ok:6600 2:40:149:36:ok:9300 3:13:100:97:ok:3900 4:0:-:100:ok" 'WEEK_MAX_1=90'
 AUTO=1 BURN7=0.3 t "9f stagger takes idle 1 when 2 points last 150 min" 'WOULD SWITCH → 1 .*\[stagger: 1 is idle' \
   2 "1:0:-:88:ok:6600 2:40:149:36:ok:9300 3:13:100:97:ok:3900 4:0:-:100:ok" 'WEEK_MAX_1=90'
+# Expiring 5h room is only worth a switch if the week can pay for it until the
+# reset: 2 weekly points at 2.5 %/h last 48 min, but 44 min of burn needs 2
+# and the bar is strict (2026-10-22 22:25Z: 66 points of 5h room on an
+# account 2 points under its weekly limit).
+AUTO=1 BURN=20 BURN7=2.5 t "9g expiring skips 5h room the week cannot pay for" '^[0-9:]{8} no switch: 4 at 15%' \
+  4 "1:0:-:90:ok 2:31:44:95:ok:7680 3:0:-:97:ok:2300 4:15:214:6:ok:9720" 'WEEK_MAX_1=90'
+AUTO=1 BURN=20 BURN7=2.5 t "9h expiring takes it when the week has room" 'WOULD SWITCH → 2 .*\[expiring: 2 has' \
+  4 "1:0:-:90:ok 2:31:44:90:ok:7680 3:0:-:97:ok:2300 4:15:214:6:ok:9720" 'WEEK_MAX_1=90'
 t "9d limit keeps a target expiring within 45m (stagger yields there)" 'WOULD SWITCH → 3 .*\[limit: 1 at 95%' \
   1 "1:95:200:30:ok 2:0:-:10:ok:8640 3:50:30:20:ok:600 4:0:-:100:ok"
 t "10a missing 5h reading is not room" '^[0-9:]{8} HOLD 1 .*2: -% room -, reset unknown, 7d 10% \[no reading\]' \
