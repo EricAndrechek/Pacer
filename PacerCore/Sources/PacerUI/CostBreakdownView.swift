@@ -573,6 +573,19 @@ extension View {
 /// Capped at 99.9% short of every prompt token: rounded to one place, a
 /// 99.96% day printed "100.0%", which says the cache missed nothing when it
 /// did.
+/// "87 / 13": how the cost splits between the prompt (cache reads, cache
+/// writes and uncached input) and the output, in whole percent. The one
+/// formatter for the "In / Out" table column and the line beside every
+/// cache hit rate; nil when nothing was spent.
+public func pacerInOutText(_ cost: CostComponents) -> String? {
+    guard let out = cost.outputShare else { return nil }
+    let outPercent: Int = Int((out * 100).rounded())
+    return "\(100 - outPercent) / \(outPercent)"
+}
+
+/// The tooltip for an "In / Out" figure.
+public let pacerInOutHelp = "Share of the cost: input (cache reads, cache writes and uncached input) / output"
+
 public func pacerCacheHitText(_ ratio: Double) -> String {
     let percent: Double = ratio * 100
     let shown: Double = ratio < 1 ? min(percent, 99.9) : percent
