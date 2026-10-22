@@ -46,8 +46,11 @@ enum DetailModalCards {
             onSort: onSort)
     }
 
-    /// Every model, in the usage table's narrow form (Total, Hit %, Out %,
-    /// Cost; the token parts and Mix one right-click away).
+    /// Every model, in the usage table's narrow form: Tokens, Hit %, Out %
+    /// and Cost, the token parts and Mix one right-click away. More than the
+    /// By model list above it, which has only each model's shares: round 5
+    /// opened this on Tokens and Cost alone, and the owner found it repeating
+    /// the donut card.
     static func modelsTableCard(
         rows: [ModelRow], tableId: String, sort: PacerUsageSort,
         onSort: @escaping (PacerUsageSort) -> Void
@@ -64,11 +67,12 @@ enum DetailModalCards {
         }
     }
 
-    /// A day's projects or a project's subprojects: the usage table in the
-    /// narrow form the Models table has (the wide one's four token parts do
-    /// not fit beside a Sessions column at a Day modal's width), with how
-    /// many sessions ran in each path, capped at `maxVisibleRows` with its
-    /// own scroll.
+    /// A day's projects or a project's subprojects: the usage table as it
+    /// stands on its own (Tokens, Hit %, Out %, Cost and Mix), with how many
+    /// sessions ran in each path, seven columns, capped at `maxVisibleRows`
+    /// with its own scroll. No donut card lists these, so the table has the
+    /// Mix bar the page tables have. Both modals' path tables are this one,
+    /// so Project detail's subprojects open as Day detail's projects do.
     static func pathsTableCard<RowMenu: View>(
         _ title: String,
         labelTitle: String,
@@ -88,7 +92,7 @@ enum DetailModalCards {
                 onSort: onSort,
                 onOpen: onOpen,
                 maxVisibleRows: maxVisibleRows,
-                defaultColumns: UsageColumn.narrowDefaults,
+                defaultColumns: UsageColumn.wideDefaults,
                 extraColumns: {
                     PacerUsageColumns.extra(DetailPathExtra.sessions, title: "Sessions",
                                             of: DetailPathExtra.self,

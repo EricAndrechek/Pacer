@@ -690,13 +690,17 @@ private struct ModelsContent: View {
                 labelTitle: grouping.label,
                 sort: sort,
                 onSort: onSort,
-                // Model, Tokens, Cost, Days, Last active and the Mix bar:
-                // six. The token parts are in the header's menu.
+                // Model, Tokens, Hit %, Out %, Cost, Last active and the Mix
+                // bar: seven. Days and the token parts are in the header's
+                // menu: of the two counts of its own, Last active says more
+                // on a list that keeps models long retired, and Projects
+                // keeps the same one.
                 defaultColumns: UsageColumn.wideDefaults,
                 extraColumns: {
                     PacerUsageColumns.extra(ModelTableExtra.days, title: "Days",
                                             of: ModelTableExtra.self,
-                                            minWidth: 28, idealWidth: 36) { row in
+                                            minWidth: 28, idealWidth: 36,
+                                            visibleByDefault: false) { row in
                         Text("\(row.extra.activeDays)")
                             .font(.system(size: 12))
                             .foregroundStyle(.secondary)

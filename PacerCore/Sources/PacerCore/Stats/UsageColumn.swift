@@ -47,10 +47,11 @@ import Foundation
 ///   Relative to now ("2h ago"), the exact time in its tooltip; a row known
 ///   only to the day (a model, from the daily rollup) prints the day relative
 ///   to today ("yesterday").
-/// - **Six columns by default, at most.** A table opens on the label,
-///   Tokens, Cost and Mix (`wideDefaults`; `narrowDefaults` leaves out Mix),
-///   plus at most two columns of the screen's own (`maxDefaultColumns`).
-///   Everything else is one right-click on the header away.
+/// - **Seven columns by default, at most.** A table opens on the label,
+///   Tokens, Hit %, Out %, Cost and Mix (`wideDefaults`; `narrowDefaults`
+///   leaves out Mix), plus at most one column of the screen's own on a wide
+///   table, two on a narrow one (`maxDefaultColumns`). Everything else is one
+///   right-click on the header away.
 /// - **A donut list holds only amounts that add up**, the kind a ring can be
 ///   made of: cost, tokens, a token part, a screen's own count
 ///   (`UsageAmount`). Never a ratio: Hit % and Out % are not shares of
@@ -79,8 +80,13 @@ public enum UsageColumn: String, CaseIterable, Sendable {
     /// and on Haiku. A token ratio means the same thing on every model.
     /// "writeShare" still decodes, as this column (`init(storedId:)`).
     case cacheHitRate = "hitRate"
-    /// "Out %": output's share of the row's cost. For a table too narrow for
-    /// the token columns: how much of the money went on the response.
+    /// "Out %": output's share of the row's cost, one whole percent. How
+    /// much of the money went on the response, without the token columns.
+    ///
+    /// Round 6 tried it as "In / Out" printing both halves ("87 / 13"), and
+    /// the owner kept the one number: it is cleaner, and plain about what the
+    /// column sorts on. The two-part form stays beside the cache hit figures
+    /// (`pacerInOutText`), not in a table.
     case outputShare = "outShare"
     case cost
     /// "Mix": the five cost parts as one 100% bar. Declared after a
@@ -161,25 +167,30 @@ public enum UsageColumn: String, CaseIterable, Sendable {
     /// label A to Z.
     public var sortsDescendingFirst: Bool { self != .name }
 
-    /// What a table shows until its user changes it: the label, Tokens, Cost
-    /// and the Mix bar. A screen adds at most two of its own (Models' Days
-    /// and Last active, Projects' Sessions and Last active), which is six;
-    /// the token parts, Hit % and Out % are in the header's menu.
+    /// What a table that stands on its own shows until its user changes it:
+    /// the label, Tokens, Hit %, Out %, Cost and the Mix bar. Top days, All
+    /// projects, All models and Day detail's projects. A screen adds at most
+    /// one of its own (Models' and Projects' Last active, a modal's Sessions),
+    /// which is seven; the rest of a screen's own (Models' Days, Projects'
+    /// Sessions) and the token parts are in the header's menu.
     ///
-    /// Round 4 opened every wide table on all four token parts as well, and
-    /// the owner found it too many columns to read at a glance. A table that
-    /// opened that way before keeps nothing of it: its saved layout is
-    /// cleared once (`PacerUsageTableMetrics.layoutDefaultsVersions`).
-    public static let wideDefaults: Set<UsageColumn> = [.name, .tokens, .cost, .mix]
+    /// Round 6: the owner wanted "a sortable cache and in/out column by
+    /// default too", and to keep Mix ("that mix column is awesome visually
+    /// there"). Round 4 opened every wide table on all four token parts, which
+    /// was too many to read at a glance; round 5 cut them to Tokens, Cost and
+    /// Mix. Each change clears a table's saved layout once, so its users see
+    /// the new defaults (`PacerUsageTableMetrics.layoutDefaultsVersions`).
+    public static let wideDefaults: Set<UsageColumn> = [.name, .tokens, .cacheHitRate, .outputShare, .cost, .mix]
 
-    /// What a table in a tight space shows: the label, Tokens and Cost. The
-    /// Mix bar waits in the menu with the rest. Day detail's models (whose
-    /// mix the Cost breakdown card above them draws) and the sessions lists.
-    public static let narrowDefaults: Set<UsageColumn> = [.name, .tokens, .cost]
+    /// What a table in a tight space shows: the label, Tokens, Hit %, Out %
+    /// and Cost. A modal's Models (under its By model donut, whose list has
+    /// only the shares, so the table shows more than the list: round 6) and
+    /// the sessions lists. The Mix bar waits in the menu with the parts.
+    public static let narrowDefaults: Set<UsageColumn> = [.name, .tokens, .cacheHitRate, .outputShare, .cost]
 
     /// The most columns a table opens on, label and the screen's own
     /// columns included (`UsageTableLayoutTests` checks every screen's).
-    public static let maxDefaultColumns = 6
+    public static let maxDefaultColumns = 7
 
     /// The column showing one priced part's tokens. The two write tiers
     /// have their own columns; Cache write is both of them together.

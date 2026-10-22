@@ -98,6 +98,42 @@ struct UsageColumnTests {
         #expect(residue.outputShare == 0.25)
     }
 
+    @Test("Out % stays one number under its stored id: output's share of the cost, a whole percent")
+    func outShareColumn() throws {
+        // The owner kept the one number over "87 / 13": "cleaner and more
+        // clear as to what it sorts on".
+        #expect(UsageColumn.outputShare.title(label: "Model") == "Out %")
+        #expect(UsageColumn.outputShare.rawValue == "outShare")
+        #expect(UsageColumn(storedId: "outShare") == .outputShare)
+        #expect(PacerUsageSort(column: "outShare", descending: true) == PacerUsageSort(.outputShare, descending: true))
+        #expect(TopDaysSort(stored: "outShare") == .outShare)
+        // The header says what the one number is.
+        #expect(UsageColumn.outputShare.headerHelp == "Output's share of the cost")
+        // The cell is that share, whole, and what it sorts by is the same
+        // share: 23 of 100 dollars.
+        let cell = try #require(UsageColumn.outputShare.cellText(tokens: Self.distinct, cost: 100,
+                                                                 costParts: Self.parts))
+        #expect(cell.text == "23%")
+        #expect(!cell.text.contains("/"))
+        let row = Values(tokens: Self.distinct, cost: 100, costParts: Self.parts)
+        #expect(UsageColumn.outputShare.ratio(of: row) == Self.parts.outputShare)
+        #expect(UsageColumn.outputShare.sortsDescendingFirst)
+    }
+
+    @Test("every header tooltip names what its column is; the label has none")
+    func headerHelp() {
+        #expect(UsageColumn.cacheHitRate.headerHelp != nil)
+        #expect(UsageColumn.mix.headerHelp != nil)
+        #expect(UsageColumn.tokens.headerHelp != nil)
+        #expect(UsageColumn.name.headerHelp == nil)
+        #expect(UsageColumn.cost.headerHelp == nil)
+        // The titles the tooltips are matched by are distinct.
+        let titles: [String] = UsageColumn.allCases.filter { $0 != .name }.map { $0.title(label: "") }
+        #expect(Set(titles).count == titles.count)
+        #expect(PacerTableHeaderHelp.byTitle["Out %"] == "Output's share of the cost")
+        #expect(PacerTableHeaderHelp.byTitle["Cost"] == nil)
+    }
+
     @Test("Hit % prints a tenth of a percent, as every hit rate does; Out % a whole one")
     func shareCells() {
         let t = Self.distinct
@@ -245,18 +281,23 @@ struct UsageColumnTests {
         #expect(UsageColumn.displayOrder.count == UsageColumn.allCases.count)
     }
 
-    @Test("a table opens on its label, Tokens, Cost and Mix (narrow: no Mix), room for two of its own")
+    @Test("a table opens on its label, Tokens, Hit %, Out %, Cost and Mix (narrow: no Mix)")
     func defaults() {
         let wide: [UsageColumn] = UsageColumn.displayOrder.filter { UsageColumn.wideDefaults.contains($0) }
         let narrow: [UsageColumn] = UsageColumn.displayOrder.filter { UsageColumn.narrowDefaults.contains($0) }
-        #expect(wide == [.name, .tokens, .cost, .mix])
-        #expect(narrow == [.name, .tokens, .cost])
-        // No token part and no ratio opens shown: they are in the menu.
+        // Round 6: "a sortable cache and in/out column by default too", and
+        // the Mix bar on the tables that stand on their own.
+        #expect(wide == [.name, .tokens, .cacheHitRate, .outputShare, .cost, .mix])
+        #expect(narrow == [.name, .tokens, .cacheHitRate, .outputShare, .cost])
+        #expect(UsageColumn.wideDefaults == UsageColumn.narrowDefaults.union([.mix]))
+        // No token part opens shown: they are in the menu.
         #expect(UsageColumn.wideDefaults.isDisjoint(with: UsageColumn.partColumns))
-        #expect(!UsageColumn.wideDefaults.contains { $0.isRatio && $0 != .mix })
-        // Six at most, with a screen's two own columns.
-        #expect(UsageColumn.maxDefaultColumns == 6)
-        #expect(UsageColumn.wideDefaults.count + 2 <= UsageColumn.maxDefaultColumns)
+        #expect(UsageColumn.narrowDefaults.isDisjoint(with: UsageColumn.partColumns))
+        // Seven at most: a wide table with one column of its screen's, a
+        // narrow one with two (a sessions list's Project and Last active).
+        #expect(UsageColumn.maxDefaultColumns == 7)
+        #expect(UsageColumn.wideDefaults.count + 1 <= UsageColumn.maxDefaultColumns)
+        #expect(UsageColumn.narrowDefaults.count + 2 <= UsageColumn.maxDefaultColumns)
         let ascendingFirst: [UsageColumn] = UsageColumn.allCases.filter { !$0.sortsDescendingFirst }
         #expect(ascendingFirst == [.name])
         #expect(PacerUsageSort.costDescending == PacerUsageSort(column: "cost", descending: true))
@@ -543,9 +584,9 @@ struct SessionsTableTests {
         #expect(early.sortKey(forColumn: "cost") == nil)
     }
 
-    @Test("by default a sessions table shows its label, the total and the cost")
+    @Test("by default a sessions table shows a modal table's columns: Tokens, Hit %, Out %, Cost")
     func defaults() {
         let shown: [UsageColumn] = UsageColumn.allCases.filter { PacerSessionsTable.defaultColumns.contains($0) }
-        #expect(shown == [.name, .tokens, .cost])
+        #expect(shown == [.name, .tokens, .cacheHitRate, .outputShare, .cost])
     }
 }

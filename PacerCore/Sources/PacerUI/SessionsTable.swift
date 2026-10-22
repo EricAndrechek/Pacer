@@ -7,8 +7,8 @@ import PacerCore
 // They were the last hand-rolled table: a header row of `SortableColumnHeader`s
 // over `HoverRow`s, with its own sort, its own fonts and only two of the
 // numbers. Now a session is a row like a model or a project: the same header,
-// sort, column menu and saved layout, and every token part, Hit %, Out % and
-// the Mix bar one right-click away. A screen shows it as its own card
+// sort, column menu and saved layout, and every token part and the Mix bar
+// one right-click away. A screen shows it as its own card
 // (`PacerTableCard`).
 
 /// What a sessions table shows beyond the standard columns: the session's
@@ -47,9 +47,9 @@ public struct PacerSessionExtra: PacerUsageExtra, Sendable, Equatable {
 }
 
 /// A sessions table: the session's top model over its short id, the Project
-/// column when the list spans projects, Tokens, Cost and a Last active that
-/// keeps ticking. Duration, every token part, Hit %, Out % and Mix are in the
-/// header's menu.
+/// column when the list spans projects, Tokens, Hit %, Out %, Cost and a Last
+/// active that keeps ticking: seven at most. Duration, every token part and
+/// Mix are in the header's menu.
 public struct PacerSessionsTable: View {
     public typealias Row = PacerUsageRow<PacerSessionExtra>
 
@@ -66,9 +66,18 @@ public struct PacerSessionsTable: View {
     public static let maxVisibleRows = 8
 
     /// The standard columns a sessions table shows by default, the narrow
-    /// table's: a session's line is long enough with its label, project and
-    /// times, so the parts, ratios and Mix wait in the column menu.
+    /// table's, as every table in a modal has them: a session's line is long
+    /// enough with its label, project and times, so the parts and Mix wait
+    /// in the column menu.
     public static let defaultColumns: Set<UsageColumn> = UsageColumn.narrowDefaults
+
+    /// Where Day detail's sessions table starts its Project and Last active
+    /// columns. With Hit % and Out % among the defaults (round 6) it opens on
+    /// seven columns in a 612pt card, and at round 5's 100 and 70 the Last
+    /// active title lost its end ("Last a…") whenever it was the sort, its
+    /// chevron beside it. `UsageTableLayoutTests` measures both titles.
+    static let projectIdealWidth: CGFloat = 88
+    static let lastActiveIdealWidth: CGFloat = 84
 
     /// - `rows`: from `rows(_:)`, cached by the screen.
     /// - `showProject`: the Project column, for a list that spans projects
@@ -109,7 +118,8 @@ public struct PacerSessionsTable: View {
             if showProject {
                 PacerUsageColumns.extra(PacerSessionExtra.project, title: "Project",
                                         of: PacerSessionExtra.self, numeric: false,
-                                        minWidth: 40, idealWidth: 100, descendingFirst: false) { row in
+                                        minWidth: 40, idealWidth: Self.projectIdealWidth,
+                                        descendingFirst: false) { row in
                     Text(row.extra.projectName)
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
@@ -133,7 +143,7 @@ public struct PacerSessionsTable: View {
             // (`UsageColumn`'s conventions).
             PacerUsageColumns.extra(PacerSessionExtra.lastSeen, title: "Last active",
                                     of: PacerSessionExtra.self,
-                                    minWidth: 36, idealWidth: 70) { row in
+                                    minWidth: 36, idealWidth: Self.lastActiveIdealWidth) { row in
                 // Judged against the clock, so it needs one: nothing else
                 // redraws an open detail on an idle machine, and "2 min ago"
                 // stayed "2 min ago".

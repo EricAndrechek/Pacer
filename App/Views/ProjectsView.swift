@@ -904,9 +904,11 @@ private struct ProjectsContent: View {
     }
 
     /// Every project, in the shared usage table as its own card: Tokens,
-    /// Cost, Sessions, Last active and the Mix bar, six columns with the
-    /// label (`UsageColumn.wideDefaults`); the token parts and ratios are in
-    /// the header's menu. Click a row for Project detail; right-click for
+    /// Hit %, Out %, Cost, Last active and the Mix bar, seven columns with
+    /// the label (`UsageColumn.wideDefaults`); Sessions and the token parts
+    /// are in the header's menu. Of its two columns of its own, Last active
+    /// stays, as it does on Models: which projects are current reads at a
+    /// glance, and the session count is one right-click away. Click a row for Project detail; right-click for
     /// collections, merges and copying. The range picker and the alias
     /// manager live in the page header, and the search field in the window
     /// toolbar (`.searchable` on the parent view).
@@ -939,7 +941,8 @@ private struct ProjectsContent: View {
                 extraColumns: {
                     PacerUsageColumns.extra(ProjectRow.sessionsColumn, title: "Sessions",
                                             of: ProjectRow.self,
-                                            minWidth: 28, idealWidth: 58) { row in
+                                            minWidth: 28, idealWidth: 58,
+                                            visibleByDefault: false) { row in
                         Text("\(row.extra.sessionCount)")
                             .font(.system(size: 12))
                             .foregroundStyle(.secondary)

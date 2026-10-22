@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import Testing
 @testable import PacerCore
@@ -202,5 +203,121 @@ struct ShareListTests {
         let few = data(.costDescending, rows: Self.manyRows(6), columns: shares, maxSlices: 5)
         #expect(few.rows.count == 6)
         #expect(few.other == nil)
+    }
+
+    @Test("the Mix bar is display only: no sort, no ring, no number, and a sort stored by it runs by cost")
+    func mixBar() throws {
+        let column = PacerShareListColumn.mixBar
+        #expect(!column.isSortable)
+        #expect(column.isFlexible)
+        #expect(column.title == "Mix")
+        #expect(column.help == UsageColumn.mix.headerHelp)
+        // No usage column's id: nothing reads it as one.
+        #expect(UsageColumn(storedId: column.id) == nil)
+        let columns: [PacerShareListColumn] = Self.columns + [.mixBar]
+        // The ring follows only amounts: a sort by the bar, or by the
+        // table's Mix, runs by cost.
+        for id in [column.id, UsageColumn.mix.rawValue] {
+            let list = data(PacerUsageSort(column: id, descending: true), columns: columns)
+            #expect(list.sort == .costDescending)
+            #expect(list.donut.metric == .cost)
+        }
+        let list = data(.costDescending, columns: columns)
+        let b = try #require(list.rows.first)
+        #expect(list.cell(column, row: b).text == "")
+        // The other columns are as they were without it.
+        #expect(list.cell(.ringShare, row: b).text == "50%")
+        #expect(list.columns.filter(\.isSortable).map(\.id) == ["tokens", "cost"])
+    }
+
+    @Test("the label column is as wide as its longest label, its title's at least, and no wider than its cap")
+    func labelWidth() {
+        func width(_ labels: [String], title: String = "Model") -> CGFloat {
+            let rows: [Row] = labels.enumerated().map { i, label in
+                Row(id: "r\(i)", label: label, tokens: TokenBreakdown(inputTokens: 1),
+                    costParts: CostComponents(input: Double(i + 1)),
+                    extra: Project(sessions: 1, lastActive: .distantPast))
+            }
+            return PacerShareList(data: data(.costDescending, rows: rows), labelTitle: title,
+                                  onSort: { _ in }).labelWidth
+        }
+        let font = NSFont.systemFont(ofSize: 12, weight: .medium)
+        let longest: CGFloat = ("Sonnet 4.6" as NSString).size(withAttributes: [.font: font]).width
+        let short: CGFloat = width(["Opus 4.7", "Sonnet 4.6", "Haiku 4.5"])
+        // Room for the longest label, and not much more: the numbers sit
+        // beside the names, not at the card's far edge.
+        #expect(short >= longest)
+        #expect(short <= longest + 4)
+        #expect(short < width(["Opus 4.7", "Sonnet 4.6 with a much longer name"]))
+        // Never under the title, never over the cap.
+        #expect(width(["A"], title: "Project") >= width(["A"], title: "Model"))
+        #expect(width([String(repeating: "x", count: 200)]) == PacerShareList<Project>.maxLabelWidth)
+        #expect(width(["A"]) >= PacerShareList<Project>.minLabelWidth)
+    }
+
+    /// The list alone, and what its columns add up to.
+    @MainActor
+    private func listWidth(_ columns: [PacerShareListColumn]) -> (measured: CGFloat, expected: CGFloat) {
+        let list = PacerShareList(data: data(.costDescending, columns: columns), labelTitle: "Project",
+                                  onSort: { _ in })
+        // Its ideal width, which is what it takes when offered more.
+        let measured: CGFloat = NSHostingView(rootView: list).fittingSize.width
+        let mix: CGFloat = PacerShareList<Project>.maxMixWidth
+        let fixed: CGFloat = columns.reduce(CGFloat(0)) { $0 + ($1.isFlexible ? mix : $1.width) }
+        let spacing: CGFloat = PacerShareList<Project>.columnSpacing * CGFloat(columns.count + 1)
+        let insets: EdgeInsets = PacerShareList<Project>.rowPadding
+        let padding: CGFloat = insets.leading + insets.trailing
+        let dot: CGFloat = 8
+        let label: CGFloat = list.labelWidth
+        let expected: CGFloat = padding + dot + label + spacing + fixed
+        return (measured, expected)
+    }
+
+    @Test("the list is as wide as its columns, not the card: a dashboard's width leaves no gap after the names")
+    @MainActor
+    func listHugs() {
+        // A card a table follows: the shares, no Mix.
+        let shares = listWidth(PacerShareListColumn.shares)
+        #expect(abs(shares.measured - shares.expected) <= 1, "\(shares)")
+        // Today by model: the standard columns and the Mix bar, which grows
+        // to its cap and no further.
+        let today = listWidth(PacerShareListColumn.standard + [.mixBar])
+        #expect(abs(today.measured - today.expected) <= 1, "\(today)")
+        #expect(today.measured < 2_000 / 2)
+    }
+
+    @Test("the donut card fits a modal and the narrowest window without overflowing", arguments: [CGFloat(612), 601])
+    @MainActor
+    func donutCardFits(width: CGFloat) throws {
+        let long: [Row] = (0..<8).map { i in
+            Row(id: "r\(i)", label: "a-project-with-a-very-long-name-\(i)", color: .orange,
+                tokens: TokenBreakdown(inputTokens: 1_000, outputTokens: 2_000_000, cacheReadTokens: 900_000_000),
+                costParts: CostComponents(input: 1, output: Double(800 - i), cacheRead: 400),
+                extra: Project(sessions: 1, lastActive: .distantPast))
+        }
+        for columns in [PacerShareListColumn.shares, PacerShareListColumn.standard + [.mixBar]] {
+            let card = PacerDonutListCard("Card", data: data(.costDescending, rows: long, columns: columns),
+                                          labelTitle: "Project", accessibilityLabel: "", onSort: { _ in })
+                .frame(width: width)
+            let host = NSHostingView(rootView: card)
+            host.frame = NSRect(x: 0, y: 0, width: width, height: 400)
+            host.layoutSubtreeIfNeeded()
+            // The card takes the width it is given; nothing inside asks for
+            // more than that.
+            #expect(host.fittingSize.width <= width + 0.5)
+            // What the figure needs at its narrowest, typed step by step
+            // (Xcode 16 times out on one long mixed expression).
+            let content: CGFloat = width - 2 * PacerDesign.cardPadding
+            let donut: CGFloat = PacerDonutListCard<Project, EmptyView>.donutSize
+                + PacerDonutListCard<Project, EmptyView>.spacing
+            let insets: EdgeInsets = PacerShareList<Project>.rowPadding
+            let padding: CGFloat = insets.leading + insets.trailing
+            let gaps: CGFloat = PacerShareList<Project>.columnSpacing * CGFloat(columns.count + 1)
+            let numbers: CGFloat = columns.reduce(CGFloat(0)) { $0 + $1.width }
+            let dot: CGFloat = 8
+            let label: CGFloat = PacerShareList<Project>.minLabelWidth
+            let least: CGFloat = donut + padding + dot + label + gaps + numbers
+            #expect(least <= content, "the list's least, \(least)pt, overflows \(content)pt")
+        }
     }
 }

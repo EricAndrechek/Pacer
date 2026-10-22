@@ -22,9 +22,10 @@ import PacerCore
 // included: they are how a Mac table says its columns resize. The right-click
 // column menu, reordering, resizing and the saved layout are all SwiftUI's.
 //
-// It opens on at most six columns (`UsageColumn.wideDefaults`, plus at most
-// two of the screen's own): the owner found every token part at once too many
-// to read. Everything else is in the header's menu.
+// It opens on at most seven columns (`UsageColumn.wideDefaults`, plus at most
+// one of the screen's own): the owner found every token part at once too many
+// to read. Everything else is in the header's menu, which also resets the
+// layout (`PacerTableHeaderMenu`).
 //
 // It never scrolls sideways. Columns start at widths their content needs
 // (`UsageColumn.idealWidth`), and each screen's defaults fit its card at the
@@ -67,6 +68,20 @@ public extension UsageColumn {
         case .outputShare:  return "Out %"
         case .cost:         return "Cost"
         case .mix:          return "Mix"
+        }
+    }
+
+    /// The header's tooltip, for a title that does not say it all. Set on
+    /// the `NSTableColumn` (`PacerTableHeaderHelp`): SwiftUI's `TableColumn`
+    /// takes a title, and nothing for its header's tooltip.
+    var headerHelp: String? {
+        switch self {
+        case .tokens:       return "Every token: cached, uncached and output"
+        case .cacheWrite:   return "5m and 1h cache writes"
+        case .cacheHitRate: return "Share of the prompt tokens read from the cache"
+        case .outputShare:  return "Output's share of the cost"
+        case .mix:          return "The cost by part"
+        default:            return nil
         }
     }
 
@@ -515,16 +530,24 @@ public enum PacerUsageTableMetrics {
     ///
     /// Bump a table's version, deliberately, when its defaults change enough
     /// that a user should see them; the cost is that table's widths, order
-    /// and shown columns, once. Version 1 is round 5, which cut every wide
-    /// table from up to ten columns to six (`UsageColumn.wideDefaults`): the
-    /// tables that opened on the token parts. The sessions tables' defaults
-    /// did not change, so their layouts are kept.
+    /// and shown columns, once.
+    ///
+    /// - Round 5 (version 1) cut every wide table from up to ten columns to
+    ///   six: the tables that opened on the token parts.
+    /// - Round 6 put Hit % and Out % into every table's defaults
+    ///   (`UsageColumn.wideDefaults`, `.narrowDefaults`), so every table moves
+    ///   on one: the round-5 tables to 2, the rest to 1. Models and Projects
+    ///   also hide one of their own columns (Days, Sessions) to stay at seven.
     static let layoutDefaultsVersions: [String: Int] = [
-        "models": 1,
-        "projects": 1,
-        "topDays": 1,
-        "dayDetail.models": 1,
-        "dayDetail.projects": 1,
+        "models": 2,
+        "projects": 2,
+        "topDays": 2,
+        "dayDetail.models": 2,
+        "dayDetail.projects": 2,
+        "dayDetail.sessions": 1,
+        "projectDetail.models": 1,
+        "projectDetail.subprojects": 1,
+        "projectDetail.sessions": 1,
     ]
 
     /// Where the layout-defaults version a table's saved layout is at is
@@ -553,8 +576,8 @@ public enum PacerUsageTableMetrics {
 
     /// Puts the table `tableId` back to its defaults: its default columns,
     /// in declaration order, at their starting widths. The sort is the
-    /// screen's and stays. What "Reset columns" in the table's context menu
-    /// does; every table on screen with that id follows.
+    /// screen's and stays. What "Reset Columns" in the header's menu and the
+    /// table's context menu does; every table on screen with that id follows.
     @MainActor
     public static func resetColumns(tableId: String) {
         NotificationCenter.default.post(name: .pacerResetTableColumns, object: tableId)
@@ -589,8 +612,9 @@ extension Notification.Name {
 /// - `extraColumns`: the screen's own columns, built with
 ///   `PacerUsageColumns.extra`, after Cost and before Mix.
 /// - `labelAccessory`: views after the label (Projects' git badge).
-/// - `rowMenu`: the row's context menu. "Reset columns" follows it on every
-///   table, and is the whole menu of a table with none.
+/// - `rowMenu`: the row's context menu. "Reset Columns" follows it on every
+///   table, and is the whole menu of a table with none. It is in the
+///   header's menu too, after AppKit's own column items.
 public struct PacerUsageTable<Extra: PacerUsageExtra, Leading: TableColumnContent,
                               Extras: TableColumnContent, Accessory: View, RowMenu: View>: View
 where Leading.TableRowValue == PacerUsageRow<Extra>,
@@ -617,7 +641,7 @@ where Leading.TableRowValue == PacerUsageRow<Extra>,
     /// stores `TableColumnCustomization` in `AppStorage` itself.
     @AppStorage private var columns: TableColumnCustomization<Row>
     @State private var selection: Row.ID?
-    /// Bumped by "Reset columns" to build the table afresh at its starting
+    /// Bumped by "Reset Columns" to build the table afresh at its starting
     /// widths: SwiftUI applies an emptied layout's visibility and order to
     /// the table it already has, but not its widths.
     @State private var layoutGeneration = 0
@@ -711,7 +735,9 @@ where Leading.TableRowValue == PacerUsageRow<Extra>,
                 rowMenu(row)
                 Divider()
             }
-            Button("Reset columns") { PacerUsageTableMetrics.resetColumns(tableId: tableId) }
+            // Also in the header's own menu (`PacerTableHeaderMenu`), where
+            // the owner looked for it first.
+            Button(PacerTableHeaderMenu.resetTitle) { PacerUsageTableMetrics.resetColumns(tableId: tableId) }
         } primaryAction: { ids in
             // Return, or a double-click. A click has already opened its row
             // (below), so only the keyboard's reaches `onOpen` here.
@@ -765,8 +791,9 @@ where Leading.TableRowValue == PacerUsageRow<Extra>,
             .frame(height: PacerUsageTableMetrics.labelHeight(twoLine: twoLine), alignment: .leading)
             .help(row.subtitle ?? row.label)
             // Inside a cell, so it can find the table it is in by walking up
-            // (`PacerTableFitter`), and keep it fitted to its width.
-            .background(PacerTableFitter())
+            // (`PacerTableFitter`): it keeps the table fitted to its width,
+            // gives the header its tooltips and "Reset Columns".
+            .background(PacerTableFitter(tableId: tableId))
         }
         .width(min: UsageColumn.name.minWidth, ideal: UsageColumn.name.idealWidth)
         .customizationID(UsageColumn.name.rawValue)

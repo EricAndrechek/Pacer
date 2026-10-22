@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import PacerCore
 
@@ -21,6 +22,11 @@ import PacerCore
 // disagreeing with each other and with the tables. A list takes only amounts
 // that add up (`UsageAmount`, a screen's own count): Hit % and Out % are not
 // shares of anything, so they cannot be a ring or be compared as one.
+//
+// A card that no table follows (Today by model) adds each row's Mix bar after
+// the numbers (`PacerShareListColumn.mixBar`, round 6): display only, never a
+// sort, so the ring still follows only amounts. A card a table follows leaves
+// it to the table, whose Mix column draws the same bars.
 
 // MARK: - Columns
 
@@ -44,6 +50,10 @@ public struct PacerShareListColumn: Identifiable, Sendable, Equatable {
         case share(Format)
         /// Each row's share of what the ring measures.
         case ringShare
+        /// The row's cost by part as one slim bar (`PacerCostBar`), as a
+        /// table's Mix column draws it. Display only: not a sort, and never
+        /// what the ring measures.
+        case mixBar
     }
 
     /// What the column sorts by: a `UsageColumn` raw value or one of the
@@ -57,8 +67,13 @@ public struct PacerShareListColumn: Identifiable, Sendable, Equatable {
     let kind: Kind
 
     /// Whether a click on the title sorts by it. The ring's share does not:
-    /// sorting by it is sorting by whatever the ring measures.
-    public var isSortable: Bool { kind != .ringShare }
+    /// sorting by it is sorting by whatever the ring measures. Nor does the
+    /// Mix bar: the ring follows the sort, and only an amount can be a ring.
+    public var isSortable: Bool { kind != .ringShare && kind != .mixBar }
+
+    /// Whether the column takes the list's spare width (the Mix bar) rather
+    /// than its own fixed `width`, which is then its least.
+    var isFlexible: Bool { kind == .mixBar }
 
     /// The columns every donut list shows: Tokens, Cost, Share, under the
     /// titles and in the order a table gives them. Sorted by cost unless the
@@ -136,6 +151,13 @@ public struct PacerShareListColumn: Identifiable, Sendable, Equatable {
     /// sorted by when that adds up, and cost otherwise.
     public static let ringShare = Self(id: "__ringShare__", title: "Share", help: nil, width: 44,
                                        kind: .ringShare)
+
+    /// Each row's cost by part, as the Mix bar every table has, after the
+    /// numbers. For a donut card no table follows (Today by model): a table
+    /// that follows has its own Mix, and a page draws a thing once. Its id is
+    /// no usage column's, so nothing reads it as one.
+    public static let mixBar = Self(id: "__mixBar__", title: UsageColumn.mix.title(label: ""),
+                                    help: UsageColumn.mix.headerHelp, width: 60, kind: .mixBar)
 }
 
 // MARK: - Data
@@ -255,6 +277,8 @@ public struct PacerShareListData<Extra: PacerUsageExtra> {
         case .ringShare:
             let ring: Double = Self.value(of: row, column: donut.metric.column)
             return ringShareText(ring)
+        case .mixBar:
+            return PacerUsageCellText(text: "", help: "")
         }
     }
 
@@ -271,6 +295,8 @@ public struct PacerShareListData<Extra: PacerUsageExtra> {
                              format, title: column.title)
         case .ringShare:
             return ringShareText(otherAmount(other, column: donut.metric.column))
+        case .mixBar:
+            return PacerUsageCellText(text: "", help: "")
         }
     }
 
@@ -322,6 +348,21 @@ public struct PacerShareListData<Extra: PacerUsageExtra> {
 // MARK: - Card
 
 /// A share donut beside its list, as one card. See the top of this file.
+///
+/// The donut and the list are one figure, centred in the card and centred on
+/// each other. The list is as wide as it needs: its label column as wide as
+/// its longest label, the numbers just past the names, and a Mix bar, where
+/// the screen lists one, taking what the card has left up to
+/// `PacerShareList.maxMixWidth`.
+///
+/// Round 5's list took every point the donut left, its label column
+/// stretching, so at a dashboard's width the numbers sat at the card's far
+/// edge with a wide gap after the names, and a short list left a band under
+/// its last row. The owner: "this pie chart card just feels like it has so
+/// much empty space". Round 6 rendered five layouts at 3 to 8 rows, light and
+/// dark: the list hugging and left-aligned left half the card empty, the Mix
+/// bar running to the card's edge grew without limit in a wide window, and
+/// this one read as one deliberate figure at every width.
 ///
 /// - `data`: the ring and the rows (`PacerShareListData`).
 /// - `labelTitle`: the label column's title ("Model", "Project").
@@ -377,14 +418,18 @@ public struct PacerDonutListCard<Extra: PacerUsageExtra, Trailing: View>: View {
         self.trailing = trailing
     }
 
+    /// Between the ring and the list.
+    static var spacing: CGFloat { 28 }
+
     public var body: some View {
         let data = self.data
         PacerCard(title, trailing: trailing) {
-            HStack(alignment: .top, spacing: 24) {
+            HStack(alignment: .center, spacing: Self.spacing) {
                 PacerShareDonut(data.donut, size: Self.donutSize,
                                 accessibilityLabel: accessibilityLabel, hoveredAngle: hoveredAngle)
                 PacerShareList(data: data, labelTitle: labelTitle, onSort: onSort, onOpen: onOpen)
             }
+            .frame(maxWidth: .infinity, alignment: .center)
         }
     }
 }
@@ -402,6 +447,14 @@ public struct PacerShareList<Extra: PacerUsageExtra>: View {
 
     static var columnSpacing: CGFloat { 10 }
     static var rowPadding: EdgeInsets { EdgeInsets(top: 4, leading: 8, bottom: 4, trailing: 8) }
+    /// The narrowest a label column goes before its labels shorten.
+    static var minLabelWidth: CGFloat { 48 }
+    /// The widest a label column grows to hold its longest label.
+    static var maxLabelWidth: CGFloat { 200 }
+    /// The widest the Mix bar grows: at a dashboard's default width it takes
+    /// what the card has left; in a wider window it stops here and the
+    /// figure centres, rather than a bar running across the screen.
+    static var maxMixWidth: CGFloat { 320 }
 
     public init(data: PacerShareListData<Extra>, labelTitle: String,
                 onSort: @escaping (PacerUsageSort) -> Void,
@@ -412,30 +465,50 @@ public struct PacerShareList<Extra: PacerUsageExtra>: View {
         self.onOpen = onOpen
     }
 
-    public var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            header
-            ForEach(data.rows) { row in
-                line(row)
-            }
-            if let other = data.other {
-                otherLine(other)
-            }
+    /// How wide the label column is: as wide as the longest label it holds,
+    /// its title included, up to `maxLabelWidth`. Measured with the font the
+    /// lines draw in, so the numbers sit just past the names rather than at
+    /// the far edge of the card. A handful of labels, so measured per body.
+    var labelWidth: CGFloat {
+        let labels: [String] = data.rows.map(\.label) + (data.other.map { [$0.label] } ?? [])
+        let font = NSFont.systemFont(ofSize: 12, weight: .medium)
+        var widest: CGFloat = 0
+        for label in labels {
+            let width: CGFloat = (label as NSString).size(withAttributes: [.font: font]).width
+            widest = Swift.max(widest, width)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        // The title, semibold with its sort chevron when it is the sort.
+        let titleFont = NSFont.systemFont(ofSize: 11, weight: .semibold)
+        let title: CGFloat = (labelTitle as NSString).size(withAttributes: [.font: titleFont]).width + 14
+        let needed: CGFloat = Swift.max(widest, title).rounded(.up) + 2
+        return Swift.min(Self.maxLabelWidth, Swift.max(Self.minLabelWidth, needed))
     }
 
-    private var header: some View {
+    public var body: some View {
+        let columns = data.columns
+        let labelWidth = self.labelWidth
+        VStack(alignment: .leading, spacing: 0) {
+            header(columns, labelWidth: labelWidth)
+            ForEach(data.rows) { row in
+                line(row, columns: columns, labelWidth: labelWidth)
+            }
+            if let other = data.other {
+                otherLine(other, columns: columns, labelWidth: labelWidth)
+            }
+        }
+    }
+
+    private func header(_ columns: [PacerShareListColumn], labelWidth: CGFloat) -> some View {
         HStack(spacing: Self.columnSpacing) {
             // The colour dot's width, so the label's title sits over the
             // labels rather than over the dots.
             Color.clear.frame(width: 8, height: 1)
             title(labelTitle, id: UsageColumn.name.rawValue, sortable: true, help: nil, trailing: false)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            ForEach(data.columns) { column in
+                .modifier(LabelColumn(width: labelWidth))
+            ForEach(columns) { column in
                 title(column.title, id: column.id, sortable: column.isSortable, help: column.help,
-                      trailing: true)
-                    .frame(width: column.width, alignment: .trailing)
+                      trailing: !column.isFlexible)
+                    .modifier(NumberColumn(column: column))
             }
         }
         .padding(Self.rowPadding)
@@ -470,8 +543,9 @@ public struct PacerShareList<Extra: PacerUsageExtra>: View {
     }
 
     @ViewBuilder
-    private func line(_ row: PacerUsageRow<Extra>) -> some View {
-        let content = lineContent(color: row.color ?? .gray, label: row.label, help: row.subtitle ?? row.label) { column in
+    private func line(_ row: PacerUsageRow<Extra>, columns: [PacerShareListColumn], labelWidth: CGFloat) -> some View {
+        let content = lineContent(color: row.color ?? .gray, label: row.label, help: row.subtitle ?? row.label,
+                                  breakdown: row.breakdown, columns: columns, labelWidth: labelWidth) { column in
             data.cell(column, row: row)
         }
         if let onOpen {
@@ -481,14 +555,18 @@ public struct PacerShareList<Extra: PacerUsageExtra>: View {
         }
     }
 
-    private func otherLine(_ other: PacerShareListData<Extra>.Other) -> some View {
-        lineContent(color: .secondary, label: other.label, help: other.label) { column in
+    private func otherLine(_ other: PacerShareListData<Extra>.Other, columns: [PacerShareListColumn],
+                           labelWidth: CGFloat) -> some View {
+        lineContent(color: .secondary, label: other.label, help: other.label,
+                    breakdown: CostBreakdown(cost: other.costParts, tokens: other.tokens),
+                    columns: columns, labelWidth: labelWidth) { column in
             data.otherCell(column, other)
         }
         .padding(Self.rowPadding)
     }
 
-    private func lineContent(color: Color, label: String, help: String,
+    private func lineContent(color: Color, label: String, help: String, breakdown: CostBreakdown,
+                             columns: [PacerShareListColumn], labelWidth: CGFloat,
                              cell: @escaping (PacerShareListColumn) -> PacerUsageCellText) -> some View {
         let sorted = data.sort.column
         return HStack(spacing: Self.columnSpacing) {
@@ -497,23 +575,53 @@ public struct PacerShareList<Extra: PacerUsageExtra>: View {
                 .font(.system(size: 12, weight: .medium))
                 .lineLimit(1)
                 .truncationMode(.tail)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .modifier(LabelColumn(width: labelWidth))
                 .help(help)
-            ForEach(data.columns) { column in
-                let text = cell(column)
-                let emphasised = column.id == sorted
-                Text(text.text)
-                    .font(emphasised
-                          ? .system(size: 12, weight: .semibold, design: .rounded)
-                          : .system(size: 12))
-                    .foregroundStyle(emphasised ? Color.primary : Color.secondary)
-                    .monospacedDigit()
-                    .lineLimit(1)
-                    .frame(width: column.width, alignment: .trailing)
-                    .help(text.help)
+            ForEach(columns) { column in
+                if column.kind == .mixBar {
+                    PacerCostBar(breakdown, height: 6)
+                        .modifier(NumberColumn(column: column))
+                } else {
+                    let text = cell(column)
+                    let emphasised = column.id == sorted
+                    Text(text.text)
+                        .font(emphasised
+                              ? .system(size: 12, weight: .semibold, design: .rounded)
+                              : .system(size: 12))
+                        .foregroundStyle(emphasised ? Color.primary : Color.secondary)
+                        .monospacedDigit()
+                        .lineLimit(1)
+                        .modifier(NumberColumn(column: column))
+                        .help(text.help)
+                }
             }
         }
         .accessibilityElement(children: .combine)
+    }
+}
+
+/// The label column: `width` (its longest label's), shortening below it
+/// when the card is too narrow for the list, never wider. The header's title
+/// and every line take the same frame, so the columns line up.
+private struct LabelColumn: ViewModifier {
+    let width: CGFloat
+    func body(content: Content) -> some View {
+        content.frame(minWidth: PacerShareList<PacerUsageNoExtra>.minLabelWidth, idealWidth: width,
+                      maxWidth: width, alignment: .leading)
+    }
+}
+
+/// A number column at its width, or the Mix bar taking what the card has
+/// left, from its `width` up to `PacerShareList.maxMixWidth`.
+private struct NumberColumn: ViewModifier {
+    let column: PacerShareListColumn
+    func body(content: Content) -> some View {
+        if column.isFlexible {
+            let most: CGFloat = PacerShareList<PacerUsageNoExtra>.maxMixWidth
+            content.frame(minWidth: column.width, idealWidth: most, maxWidth: most, alignment: .leading)
+        } else {
+            content.frame(width: column.width, alignment: .trailing)
+        }
     }
 }
 

@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import PacerCore
 
 // A usage table never scrolls sideways. Autoresizing keeps the columns
 // filling the table as the window changes size, and each screen's defaults
@@ -114,13 +115,25 @@ public enum PacerTableFit {
 }
 
 /// An empty view, placed in every label cell, that keeps the table it is in
-/// fitted to its width (see the top of this file). In every cell rather than
+/// fitted to its width (see the top of this file), and gives its header the
+/// tooltips (`PacerTableHeaderHelp`) and the Reset Columns item
+/// (`PacerTableHeaderMenu`) SwiftUI has no API for. In every cell rather than
 /// one: cells are reused as rows scroll and re-sort, and whichever are on
 /// screen keep watching. Their fits are coalesced to one per table per turn
 /// of the run loop (`PacerTableFitQueue`).
 struct PacerTableFitter: NSViewRepresentable {
-    func makeNSView(context: Context) -> PacerTableFitterView { PacerTableFitterView() }
-    func updateNSView(_ view: PacerTableFitterView, context: Context) {}
+    /// The table's layout id, which "Reset Columns" resets.
+    let tableId: String
+
+    func makeNSView(context: Context) -> PacerTableFitterView {
+        let view = PacerTableFitterView()
+        view.tableId = tableId
+        return view
+    }
+
+    func updateNSView(_ view: PacerTableFitterView, context: Context) {
+        view.tableId = tableId
+    }
 }
 
 /// The tables with a fit already scheduled this turn of the run loop.
@@ -147,6 +160,7 @@ enum PacerTableFitQueue {
 }
 
 final class PacerTableFitterView: NSView {
+    var tableId: String = ""
     private weak var table: NSTableView?
     /// Removed when the view leaves its window; `deinit` is the backstop,
     /// and runs where nothing else can touch them.
@@ -171,7 +185,10 @@ final class PacerTableFitterView: NSView {
         for observer in observers { NotificationCenter.default.removeObserver(observer) }
         observers = []
         table = found
-        guard let found, let clip = found.enclosingScrollView?.contentView else { return }
+        guard let found else { return }
+        PacerTableHeaderHelp.apply(to: found)
+        if !tableId.isEmpty { PacerTableHeaderMenu.install(on: found, tableId: tableId) }
+        guard let clip = found.enclosingScrollView?.contentView else { return }
         // The table's width changes when a column's does (a restored layout,
         // a column shown or hidden); the clip view's when the window's does.
         found.postsFrameChangedNotifications = true
@@ -195,5 +212,152 @@ final class PacerTableFitterView: NSView {
             view = current.superview
         }
         return nil
+    }
+}
+
+// MARK: - The header: tooltips and Reset Columns
+
+/// The header tooltips of the standard columns (`UsageColumn.headerHelp`),
+/// on the `NSTableColumn`s SwiftUI made for them.
+///
+/// SwiftUI names its columns with identifiers of its own (a fresh UUID per
+/// column), so a column is matched by its title, which is the one thing both
+/// sides set. A title no standard column has (the label, a screen's own
+/// column) is left alone.
+enum PacerTableHeaderHelp {
+    /// Title to tooltip, for every standard column that has one. The titles
+    /// of all but the label column do not depend on the table.
+    static let byTitle: [String: String] = {
+        var help: [String: String] = [:]
+        for column in UsageColumn.allCases where column != .name {
+            if let text = column.headerHelp { help[column.title(label: "")] = text }
+        }
+        return help
+    }()
+
+    @MainActor
+    static func apply(to table: NSTableView) {
+        for column in table.tableColumns {
+            guard let help = byTitle[column.title], column.headerToolTip != help else { continue }
+            column.headerToolTip = help
+        }
+    }
+}
+
+/// The header's right-click menu: AppKit's own column menu, every column the
+/// user may show or hide and Show All, then "Reset Columns".
+///
+/// The owner looked for a way to reset a table where he had changed it, on
+/// the header, and found it only in the body's context menu. The header's
+/// menu is AppKit's automatic one (macOS 14+, which SwiftUI's
+/// `TableColumnCustomization` turns on): `NSTableHeaderView` builds a fresh
+/// one each time it is asked, but only while its `menu` is nil, and an
+/// explicit `menu` replaces it outright. So this is the header's `menu`, and
+/// each time it is about to open it asks the header for AppKit's menu (with
+/// its own `menu` set aside for the moment) and takes that menu's items as
+/// they are. Their targets and actions stay AppKit's and SwiftUI's, so
+/// showing, hiding and Show All work exactly as before; only the item after
+/// them is Pacer's. All of it is public API: `NSView.menu`,
+/// `NSView.menu(for:)` and `NSMenuDelegate`.
+///
+/// If AppKit stops offering a menu there, this one holds Reset Columns alone;
+/// if something else sets the header's menu first, Reset Columns is added to
+/// the end of that one instead, and nothing of it is removed.
+@MainActor
+final class PacerTableHeaderMenu: NSMenu, NSMenuDelegate {
+    /// The item's title, in the header's menu and the body's alike: title
+    /// case, as AppKit's own Show All beside it.
+    nonisolated static let resetTitle = "Reset Columns"
+
+    let tableId: String
+    private weak var header: NSTableHeaderView?
+
+    init(tableId: String, header: NSTableHeaderView) {
+        self.tableId = tableId
+        self.header = header
+        super.init(title: "")
+        delegate = self
+    }
+
+    required init(coder: NSCoder) {
+        fatalError("not decoded")
+    }
+
+    /// Makes `table`'s header menu this one, once per header. A table SwiftUI
+    /// builds afresh (a reset, a re-sort that rebuilds it) has a new header,
+    /// which the next cell to attach installs it on.
+    static func install(on table: NSTableView, tableId: String) {
+        guard let header = table.headerView else { return }
+        switch header.menu {
+        case let mine as PacerTableHeaderMenu:
+            guard mine.tableId != tableId else { return }
+            header.menu = PacerTableHeaderMenu(tableId: tableId, header: header)
+        case let other?:
+            // Someone else's menu: keep it whole, and add the item to it.
+            guard !other.items.contains(where: { $0 is ResetItem }) else { return }
+            if !other.items.isEmpty { other.addItem(.separator()) }
+            other.addItem(ResetItem(tableId: tableId))
+        case nil:
+            header.menu = PacerTableHeaderMenu(tableId: tableId, header: header)
+        }
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        removeAllItems()
+        let automatic: [NSMenuItem] = Self.automaticItems(of: header)
+        for item in automatic { addItem(item) }
+        if !automatic.isEmpty { addItem(.separator()) }
+        addItem(ResetItem(tableId: tableId))
+    }
+
+    /// The items of the menu AppKit would have shown on `header`, taken out
+    /// of it.
+    static func automaticItems(of header: NSTableHeaderView?) -> [NSMenuItem] {
+        guard let header else { return [] }
+        let own: NSMenu? = header.menu
+        header.menu = nil
+        defer { header.menu = own }
+        guard let event = event(for: header), let automatic = header.menu(for: event) else { return [] }
+        let items: [NSMenuItem] = automatic.items
+        automatic.removeAllItems()
+        return items
+    }
+
+    /// The event to ask the header with: the click that is opening the menu,
+    /// or, when there is none (a test, VoiceOver's menu action), one made up
+    /// over the header's middle. Made, never posted: nothing but the header
+    /// sees it. AppKit's menu lists every column whichever was clicked.
+    private static func event(for header: NSTableHeaderView) -> NSEvent? {
+        if let current = NSApplication.shared.currentEvent, current.window === header.window,
+           [.rightMouseDown, .leftMouseDown, .otherMouseDown].contains(current.type) {
+            return current
+        }
+        let middle = NSPoint(x: header.bounds.midX, y: header.bounds.midY)
+        return NSEvent.mouseEvent(
+            with: .rightMouseDown, location: header.convert(middle, to: nil), modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: header.window?.windowNumber ?? 0, context: nil,
+            eventNumber: 0, clickCount: 1, pressure: 1)
+    }
+
+    /// "Reset Columns": what the body's context menu item does
+    /// (`PacerUsageTableMetrics.resetColumns`).
+    @MainActor
+    final class ResetItem: NSMenuItem {
+        let tableId: String
+
+        init(tableId: String) {
+            self.tableId = tableId
+            super.init(title: PacerTableHeaderMenu.resetTitle, action: #selector(reset(_:)), keyEquivalent: "")
+            target = self
+        }
+
+        required init(coder: NSCoder) {
+            fatalError("not decoded")
+        }
+
+        @objc private func reset(_ sender: Any?) {
+            PacerUsageTableMetrics.resetColumns(tableId: tableId)
+        }
     }
 }
