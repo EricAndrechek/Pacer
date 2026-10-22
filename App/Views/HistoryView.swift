@@ -8,8 +8,8 @@ import PacerUI
 /// heatmap, and most expensive days. Reads from `DailyAggregate` (the
 /// canonical roll-up; pre-summed, so no per-row cost calc here).
 ///
-/// Order: lifetime hero → 26-week heatmap → monthly bar chart → top
-/// expensive days table.
+/// Order: range summary (with its cost breakdown) → 26-week heatmap →
+/// monthly bar chart → top expensive days table.
 ///
 /// A single time-range picker in the page header scopes the
 /// range-aware cards (LifetimeSummary, TopDays). HeatmapCard and
@@ -69,8 +69,8 @@ struct HistoryView: View {
 
 // MARK: - Range-scoped summary
 
-/// Headline tile-grid summary that re-scopes by the page-level range.
-/// Replaces the pre-redesign "Lifetime"-only card. Range comes from
+/// The range's summary — the shared `PacerSummaryCard`, as the detail
+/// modals open on — re-scoped by the page-level range. Range comes from
 /// `HistoryView`'s single `@AppStorage` so changing it affects this
 /// card and `TopDaysCard` together.
 ///
@@ -99,10 +99,39 @@ private struct LifetimeSummaryCard: View {
 
 private struct LifetimeSummaryContent: View {
     let range: TimeRange
+    /// The range's start and the account, as this copy was built with them:
+    /// the Projects and Sessions counts fetch with these. Both are in the
+    /// parent's `.id`, so a change builds a new copy rather than leaving
+    /// this one counting the old range or account.
+    private let since: Date?
+    private let scopeAccountId: String?
 
     @Query private var globalAggregates: [DailyAggregate]
     @Query private var scopedAggregates: [AccountDailyAggregate]
     @State private var scope = UsageScope.shared
+    @Environment(\.modelContext) private var modelContext
+    /// Fires once per scan cycle: the counts' refresh trigger. They are
+    /// fetched, not `@Query`-bound — see `ActivityCounts`.
+    @Query(ScanMetaFetchDescriptor.scanCompletedProbe)
+    private var scanMeta: [ClaudeCodeMeta]
+
+    /// Projects and sessions in the range, from the project-day and session
+    /// rollups (`RangeActivityCounts`). A `@Query` over either table would
+    /// re-read every row in range on every store save; sessions are a SQL
+    /// COUNT instead, and projects — which need the rows themselves — are
+    /// read off the main actor, and only when the range's project-day count
+    /// moved or attribution changed.
+    private struct ActivityCounts: Equatable {
+        var sessions: Int?
+        var projects: Int?
+        /// The project-day count the projects read last ran at.
+        var projectDays: Int?
+    }
+    @State private var counts = ActivityCounts()
+    /// One projects read at a time; a trigger during one asks for another
+    /// after it, rather than starting a second detached read beside it.
+    @State private var projectsLoading = false
+    @State private var projectsRerun = false
 
     /// Every account, or one. Both queries are live, so switching is a
     /// re-read rather than a recompute.
@@ -114,6 +143,8 @@ private struct LifetimeSummaryContent: View {
 
     init(range: TimeRange, scopeAccountId: String? = nil) {
         self.range = range
+        self.since = range.since
+        self.scopeAccountId = scopeAccountId
         let acct = scopeAccountId ?? UsageScope.noAccountSentinel
         if let since = range.since {
             let cutoffString = TokenSample.formatDate(since)
@@ -144,42 +175,77 @@ private struct LifetimeSummaryContent: View {
         }
     }
 
-    private struct Totals {
-        var cost: Double = 0
-        var input: Int64 = 0
-        var output: Int64 = 0
-        var cacheRead: Int64 = 0
-        var distinctDays: Int = 0
-        var distinctModels: Int = 0
-        var firstDate: String?
+    /// What the card draws, derived from the range's rows (`refreshSummary`),
+    /// not in `body`: the strip walks every day of the range.
+    private struct Summary {
+        var breakdown = CostBreakdown.zero
+        var distinctDays = 0
+        var distinctModels = 0
+        var activity = PeriodActivity.empty
+        var span: String?
+        var axis: [PacerActivityStrip.AxisLabel] = []
+        var cellHelp: [String] = []
+    }
+    @State private var cachedSummary: Summary?
+
+    /// Changes whenever a row the summary is built from changes: a new day
+    /// or model (count), a new turn (tokens, cost), a re-price (cost). The
+    /// scope picks the table, and a scope or range change builds a new copy
+    /// of this view (the parent's `.id`); the page is rebuilt at midnight, so
+    /// "today" cannot move under it.
+    private struct RowsFingerprint: Equatable {
+        var count = 0
+        var tokens: Int64 = 0
+        var cost = 0.0
     }
 
-    /// Computed per body fire from the range-scoped `@Query`. No
-    /// `@State` cache — the previous design populated the cache via
-    /// `.onAppear`, which fires AFTER first body, so every `.id(range)`
-    /// re-init briefly rendered empty tiles before the cache landed.
-    /// The walk is O(aggregates) over a scoped slice (≤ ~5k rows even
-    /// on .all for multi-year users), which is sub-millisecond, and the
-    /// body only re-fires on range / scan-tick / @AppStorage changes
-    /// — no hover state in this card.
-    private var totals: Totals {
-        var t = Totals()
-        var dates = Set<String>()
-        var models = Set<String>()
-        var minDate: String?
+    private var rowsFingerprint: RowsFingerprint {
+        var f = RowsFingerprint()
         for row in aggregates {
-            t.cost += row.totalCostUSD
-            t.input += row.inputTokens
-            t.output += row.outputTokens
-            t.cacheRead += row.cacheReadTokens
-            dates.insert(row.date)
-            models.insert(row.model)
-            if minDate == nil || row.date < minDate! { minDate = row.date }
+            f.count += 1
+            f.tokens += row.tokens.all
+            f.cost += row.totalCostUSD
         }
-        t.distinctDays = dates.count
-        t.distinctModels = models.count
-        t.firstDate = minDate
-        return t
+        return f
+    }
+
+    /// The range's cost by part (#225), its days and models, and its strip:
+    /// every day from the range's first (`TimeRange.since`, exactly the
+    /// range's N days; over all time, the first active day) to today, each
+    /// one's height what that day cost. The rows are the daily rollup the
+    /// rest of the card is summed from, so the strip and the big figure are
+    /// the same dollars.
+    private static func derive(_ rows: [DailyRow], since: Date?) -> Summary {
+        var s = Summary()
+        var costByDay: [String: Double] = [:]
+        var models = Set<String>()
+        for row in rows {
+            s.breakdown += row.costBreakdown
+            costByDay[row.date, default: 0] += row.totalCostUSD
+            models.insert(row.model)
+        }
+        let dates = Set<String>(costByDay.keys)
+        s.distinctDays = dates.count
+        s.distinctModels = models.count
+        let today: String = PacerToday.shared.key
+        guard let start = since.map(TokenSample.formatDate) ?? dates.min() else { return s }
+        let end: String = max(today, dates.max() ?? today)
+        let activity = PeriodActivity.days(active: dates, cost: costByDay, from: start, through: end)
+        let year: Int = Calendar.current.component(.year, from: PacerClock.now)
+        s.activity = activity
+        s.span = pacerActivitySpan(activity) { pacerFactDay($0, currentYear: year) }
+        s.axis = pacerDayAxis(activity, today: today, currentYear: year)
+        s.cellHelp = pacerActivityCellHelp(activity, currentYear: year)
+        return s
+    }
+
+    private func refreshSummary() {
+        cachedSummary = Self.derive(aggregates, since: since)
+    }
+
+    /// "1,284"; "—" until the first read lands.
+    private static func count(_ n: Int?) -> String {
+        n.map { $0.formatted() } ?? "—"
     }
 
     private var cardTitle: String {
@@ -192,73 +258,88 @@ private struct LifetimeSummaryContent: View {
         }
     }
 
-    /// Which of the five priced parts made up the range's cost (#225). It
-    /// sits here, not on the Models tab, because it answers "where did this
-    /// period's money go", so it follows this page's range and account scope.
-    /// It is summed from the rows the Lifetime card already holds, so it adds
-    /// no query.
-    private var breakdown: CostBreakdown { CostBreakdown.sum(aggregates, \.costBreakdown) }
-
     var body: some View {
-        let t = totals
-        let parts = breakdown
-        VStack(alignment: .leading, spacing: PacerDesign.sectionSpacing) {
-            lifetimeCard(t)
-            if t.distinctDays > 0, PacerCostBreakdownView.hasContent(parts) {
-                PacerCard("Cost breakdown") {
-                    PacerCostBreakdownView(parts)
+        // The cached summary, or on the first frame (before `.onAppear` has
+        // run) the same summary built once here, so the card opens full
+        // rather than flashing empty on every range switch.
+        let summary = cachedSummary ?? Self.derive(aggregates, since: since)
+        // Read here and handed down, not read inside `PacerCard`'s stored
+        // closures, so a count landing redraws this view (#140).
+        let counts = self.counts
+        let fingerprint = rowsFingerprint
+        Group {
+            if summary.distinctDays == 0 {
+                PacerCard(cardTitle) {
+                    Text(range == .all
+                         ? "No history yet — start using Claude Code and Pacer will catch up."
+                         : "No activity in this range. Try widening the time window.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
                 }
+            } else {
+                // The shared summary card, as Day and Project detail open on.
+                // The breakdown, a card of its own here until round 6, is in
+                // it, as it is in theirs.
+                PacerSummaryCard(cardTitle, model: PacerSummaryModel(
+                    breakdown: summary.breakdown,
+                    stats: [
+                        PacerSummaryFact("sessions", Self.count(counts.sessions)),
+                        PacerSummaryFact("projects", Self.count(counts.projects)),
+                        PacerSummaryFact("models", "\(summary.distinctModels)"),
+                    ],
+                    activity: summary.activity,
+                    span: summary.span,
+                    axis: summary.axis,
+                    cellHelp: summary.cellHelp))
             }
+        }
+        .onAppear {
+            refreshSummary()
+            refreshCounts(force: true)
+        }
+        .onChange(of: fingerprint) { _, _ in refreshSummary() }
+        .onChange(of: scanMeta.first?.value) { _, _ in refreshCounts(force: false) }
+        // A merge can fold one project into another without changing how
+        // many project-day rows there are, so it re-reads regardless.
+        .onReceive(NotificationCenter.default.publisher(for: .pacerScanCycleDidComplete)) { note in
+            guard let summary = note.object as? ScanCycleSummary,
+                  summary.projectAttributionChanged else { return }
+            refreshCounts(force: true)
         }
     }
 
-    private func lifetimeCard(_ t: Totals) -> some View {
-        PacerCard(cardTitle, trailing: {
-            if range == .all, let first = t.firstDate {
-                Text("since \(first)")
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(.secondary)
-            }
-        }) {
-            if t.distinctDays == 0 {
-                Text(range == .all
-                     ? "No history yet — start using Claude Code and Pacer will catch up."
-                     : "No activity in this range. Try widening the time window.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-            } else {
-                LazyVGrid(
-                    columns: Array(
-                        repeating: GridItem(.flexible(), spacing: 16, alignment: .topLeading),
-                        count: 6
-                    ),
-                    alignment: .leading,
-                    spacing: 12
-                ) {
-                    MetricTile(
-                        value: pacerCost(t.cost),
-                        label: "cost",
-                        size: .hero,
-                        tooltip: pacerCostExact(t.cost)
-                    )
-                    MetricTile(
-                        value: pacerTokens(t.input),
-                        label: "input",
-                        tooltip: pacerTokensExact(t.input)
-                    )
-                    MetricTile(
-                        value: pacerTokens(t.output),
-                        label: "output",
-                        tooltip: pacerTokensExact(t.output)
-                    )
-                    MetricTile(
-                        value: pacerTokens(t.cacheRead),
-                        label: "cache read",
-                        tooltip: pacerTokensExact(t.cacheRead)
-                    )
-                    MetricTile(value: "\(t.distinctDays)", label: "active days")
-                    MetricTile(value: "\(t.distinctModels)", label: "models")
-                }
+    /// Sessions every time (one COUNT); projects when the range's
+    /// project-day rows moved, or when `force`. A project new to the range
+    /// always brings a project-day row with it.
+    private func refreshCounts(force: Bool) {
+        counts.sessions = RangeActivityCounts.sessions(
+            modelContext, since: since, accountId: scopeAccountId)
+        let days = RangeActivityCounts.projectDays(
+            modelContext, since: since, accountId: scopeAccountId)
+        guard force || days != counts.projectDays else { return }
+        counts.projectDays = days
+        loadProjects()
+    }
+
+    private func loadProjects() {
+        guard !projectsLoading else {
+            projectsRerun = true
+            return
+        }
+        projectsLoading = true
+        let container = modelContext.container
+        let since = self.since, account = scopeAccountId
+        Task {
+            // Its own context, off the main actor: reading a lifetime of
+            // project-day rows faults every one of them.
+            let projects = await Task.detached(priority: .utility) {
+                RangeActivityCounts.projects(ModelContext(container), since: since, accountId: account)
+            }.value
+            counts.projects = projects
+            projectsLoading = false
+            if projectsRerun {
+                projectsRerun = false
+                loadProjects()
             }
         }
     }
@@ -303,55 +384,32 @@ private struct MonthlyChartCard: View {
         )
     }
 
-    /// Debounced selection (chart RuleMark / annotations + trailing slot).
-    /// Updated from `rawSelectedMonth` only once the pointer settles, so a
-    /// scroll sweeping the bars doesn't re-lay-out the chart per pointer
-    /// event. See docs/perf-tuning.md.
-    @State private var selectedMonth: String?
-    /// Raw `chartXSelection` binding (immediate); feeds the debounce.
-    @State private var rawSelectedMonth: String?
-    @State private var selectedMonthDebounce: Task<Void, Never>?
-    @State private var cachedMonthly: [MonthBucket] = []
+    /// Each month's bar, with its breakdown and top models precomputed for
+    /// the hover card, and the header's total.
+    @State private var cachedMonthly: [PacerChartBucket] = []
     @State private var cachedTotal: Double = 0
 
-    private struct MonthBucket: Identifiable {
-        let month: String  // YYYY-MM
-        let cost: Double
-        var id: String { month }
-    }
+    private var monthly: [PacerChartBucket] { cachedMonthly }
 
-    private var monthly: [MonthBucket] { cachedMonthly }
-
-    /// Rebuild `cachedMonthly` from a Dictionary-grouping walk over
-    /// every aggregate. Used to run on every body render — and the
-    /// `chart` view referenced `monthly` independently from `body`,
-    /// effectively doubling the cost. Now runs once per scan tick.
+    /// Roll the days up into months, once per scan tick or scope switch
+    /// rather than on every body render.
     private func refreshMonthly() {
-        var totals: [String: Double] = [:]
+        var builder = PacerChartBucketBuilder()
         for row in aggregates {
-            guard row.date.count >= 7 else { continue }
-            let key = String(row.date.prefix(7))
-            totals[key, default: 0] += row.totalCostUSD
+            guard let month = PacerChartBucket.monthKey(row.date) else { continue }
+            builder.add(month, row.costBreakdown, model: row.model)
         }
-        let sorted = totals.keys.sorted()
-        let last12 = sorted.suffix(12)
-        cachedMonthly = last12.map { MonthBucket(month: $0, cost: totals[$0] ?? 0) }
-        cachedTotal = cachedMonthly.reduce(0) { $0 + $1.cost }
+        cachedMonthly = builder.buckets(last: 12)
+        cachedTotal = cachedMonthly.reduce(0) { $0 + $1.total }
     }
 
     var body: some View {
         let total = cachedTotal
+        let monthly = self.monthly
         PacerCard("Last 12 months", trailing: {
-            if let selectedMonth, let row = monthly.first(where: { $0.month == selectedMonth }) {
-                HStack(spacing: 8) {
-                    Text(longMonth(row.month))
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
-                    Text(pacerCost(row.cost)).help(pacerCostExact(row.cost))
-                        .font(.system(size: 12, weight: .semibold, design: .rounded))
-                        .monospacedDigit()
-                }
-            } else if !monthly.isEmpty {
+            // The hovered month's numbers are in the card floating over the
+            // chart; this slot never swaps.
+            if !monthly.isEmpty {
                 Text("total \(pacerCost(total))")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
@@ -364,7 +422,10 @@ private struct MonthlyChartCard: View {
                     .foregroundStyle(.secondary)
                     .frame(height: 200)
             } else {
-                chart
+                // Every month keeps its total on top, as before: a dozen
+                // labels fit, and the month-to-month read is the point.
+                PacerStackedPartChart(monthly, kind: .month, annotating: monthly.count)
+                    .accessibilityLabel("Cost by month for the last 12 months")
             }
         }
         .onAppear { refreshMonthly() }
@@ -375,112 +436,14 @@ private struct MonthlyChartCard: View {
         // and looks exactly like a very slow render rather than a stale one.
         .onChange(of: scope.accountId) { _, _ in refreshMonthly() }
     }
-
-    private var chart: some View {
-        Chart {
-            ForEach(monthly) { m in
-                // Capped for the same reason `DailyCostChartCard` caps its
-                // bars: an account one month old drew a single slab across the
-                // whole card.
-                BarMark(
-                    x: .value("Month", m.month),
-                    y: .value("Cost", m.cost),
-                    width: PacerSparseBars.width(count: monthly.count, cap: 56)
-                )
-                .foregroundStyle(.tint)
-                .cornerRadius(2)
-                .annotation(position: .top, alignment: .center, spacing: 2) {
-                    if m.cost > 0 && m.month != selectedMonth {
-                        Text(pacerCost(m.cost)).help(pacerCostExact(m.cost))
-                            .font(.system(size: 9, weight: .medium))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .accessibilityLabel("\(longMonth(m.month))")
-                .accessibilityValue(pacerCostExact(m.cost))
-            }
-            // Selection callout moved to the card header so the chart
-            // doesn't reflow on hover. Just keep a thin dashed rule
-            // to mark the selected bar.
-            if selectedMonth != nil,
-               let m = selectedMonth,
-               monthly.contains(where: { $0.month == m }) {
-                RuleMark(x: .value("Selected", m))
-                    .foregroundStyle(.secondary.opacity(0.5))
-                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 2]))
-            }
-        }
-        .frame(height: 220)
-        .chartXSelection(value: $rawSelectedMonth)
-        .onChange(of: rawSelectedMonth) { _, newValue in
-            selectedMonthDebounce?.cancel()
-            selectedMonthDebounce = Task { @MainActor in
-                try? await Task.sleep(for: .milliseconds(40))
-                guard !Task.isCancelled else { return }
-                selectedMonth = newValue
-            }
-        }
-        .chartYAxis {
-            AxisMarks(position: .leading) { value in
-                AxisGridLine().foregroundStyle(.secondary.opacity(0.18))
-                AxisValueLabel {
-                    if let d = value.as(Double.self) {
-                        Text(pacerCost(d)).help(pacerCostExact(d))
-                            .font(.system(size: 9))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-        }
-        .chartXAxis {
-            AxisMarks { value in
-                AxisValueLabel {
-                    if let m = value.as(String.self) {
-                        Text(shortMonth(m))
-                            .font(.system(size: 9))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-        }
-        .accessibilityLabel("Cost by month for the last 12 months")
-    }
-
-    /// `2026-04` → `Apr` (or `Apr '26` when the visible window straddles
-    /// a year boundary). Previously this rendered as "Apr 26" which
-    /// looked like the 26th of April rather than April 2026 — confusing
-    /// when the cells are big.
-    private func shortMonth(_ ym: String) -> String {
-        guard ym.count == 7,
-              let yearInt = Int(ym.prefix(4)),
-              let monthInt = Int(ym.suffix(2))
-        else { return ym }
-        let names = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
-        guard monthInt >= 1 && monthInt <= 12 else { return ym }
-        let yearsInWindow = Set(monthly.map { String($0.month.prefix(4)) }).count
-        if yearsInWindow > 1 {
-            return "\(names[monthInt - 1]) ’\(String(format: "%02d", yearInt % 100))"
-        }
-        return names[monthInt - 1]
-    }
-
-    private func longMonth(_ ym: String) -> String {
-        guard ym.count == 7,
-              let yearInt = Int(ym.prefix(4)),
-              let monthInt = Int(ym.suffix(2))
-        else { return ym }
-        let names = ["January","February","March","April","May","June","July","August","September","October","November","December"]
-        guard monthInt >= 1 && monthInt <= 12 else { return ym }
-        return "\(names[monthInt - 1]) \(yearInt)"
-    }
 }
 
 // MARK: - Top days
 
-enum TopDaysSort: String, CaseIterable, Identifiable {
-    case date, tokens, cost
-    var id: String { rawValue }
-}
+// `TopDaysSort` and the ranking itself live in PacerCore (`DayRanking`), so
+// the order "Tokens" produces is tested rather than re-derived here (#215).
+// The days it picks are shown in the shared usage table, which sorts by the
+// same column; `TopDaysSort` raw values are what the sort is stored as.
 
 private struct TopDaysCard: View {
     @State private var scope = UsageScope.shared
@@ -492,10 +455,9 @@ private struct TopDaysCard: View {
     @AppStorage("pacer.history.topDaysSortDescending", store: PacerSettings.store)
     private var descending: Bool = true
 
-    private var sort: TopDaysSort { TopDaysSort(rawValue: sortRaw) ?? .cost }
-    private var sortBinding: Binding<TopDaysSort> {
-        Binding(get: { sort }, set: { sortRaw = $0.rawValue })
-    }
+    /// A sort stored under a retired column id ("writeShare") ranks by its
+    /// successor.
+    private var sort: TopDaysSort { TopDaysSort(stored: sortRaw) }
 
     var body: some View {
         // The `.id()` value is prefixed per-card so it can't collide
@@ -507,8 +469,10 @@ private struct TopDaysCard: View {
             sort: sort,
             descending: descending,
             onDayTap: onDayTap,
-            sortBinding: sortBinding,
-            descendingBinding: $descending
+            onSort: { new in
+                sortRaw = TopDaysSort(column: UsageColumn(rawValue: new.column) ?? .cost).rawValue
+                descending = new.descending
+            }
         )
         .id("top-days-\(range.rawValue)-\(scope.accountId ?? "all")")
     }
@@ -519,8 +483,7 @@ private struct TopDaysContent: View {
     let sort: TopDaysSort
     let descending: Bool
     let onDayTap: (String) -> Void
-    let sortBinding: Binding<TopDaysSort>
-    let descendingBinding: Binding<Bool>
+    let onSort: (PacerUsageSort) -> Void
 
     @Query private var globalAggregates: [DailyAggregate]
     @Query private var scopedAggregates: [AccountDailyAggregate]
@@ -540,15 +503,13 @@ private struct TopDaysContent: View {
         sort: TopDaysSort,
         descending: Bool,
         onDayTap: @escaping (String) -> Void,
-        sortBinding: Binding<TopDaysSort>,
-        descendingBinding: Binding<Bool>
+        onSort: @escaping (PacerUsageSort) -> Void
     ) {
         self.range = range
         self.sort = sort
         self.descending = descending
         self.onDayTap = onDayTap
-        self.sortBinding = sortBinding
-        self.descendingBinding = descendingBinding
+        self.onSort = onSort
         let acct = scopeAccountId ?? UsageScope.noAccountSentinel
         if let since = range.since {
             let cutoffString = TokenSample.formatDate(since)
@@ -580,12 +541,7 @@ private struct TopDaysContent: View {
     /// indicating "showing N of M" plus a Show more / Show less link.
     @State private var showAll: Bool = false
 
-    private struct DayRow: Identifiable {
-        let date: String
-        let cost: Double
-        let tokens: Int64
-        var id: String { date }
-    }
+    private typealias DayRow = DayTotal
 
     /// Days inside the active range, sorted by the user's chosen
     /// field. Computed per body fire from the range-scoped `@Query` —
@@ -595,31 +551,23 @@ private struct TopDaysContent: View {
     /// slice (≤ ~5k rows even on .all); HoverRow lives inside each row
     /// so the parent body doesn't re-fire on row hover.
     private var sortedRows: [DayRow] {
-        var byDate: [String: (cost: Double, tokens: Int64)] = [:]
-        for row in aggregates {
-            var v = byDate[row.date] ?? (0, 0)
-            v.cost += row.totalCostUSD
-            v.tokens += row.inputTokens + row.outputTokens
-            byDate[row.date] = v
-        }
-        let rows = byDate.map { DayRow(date: $0.key, cost: $0.value.cost, tokens: $0.value.tokens) }
-        let sorted: [DayRow]
-        switch sort {
-        case .date:
-            sorted = rows.sorted { $0.date < $1.date }
-        case .tokens:
-            sorted = rows.sorted { $0.tokens < $1.tokens }
-        case .cost:
-            sorted = rows.sorted { $0.cost < $1.cost }
-        }
-        return descending ? sorted.reversed() : Array(sorted)
+        DayRanking.ranked(aggregates, by: sort, descending: descending)
     }
 
     private var title: String {
         switch sort {
-        case .cost:    return "Most expensive days"
-        case .tokens:  return "Heaviest token days"
-        case .date:    return descending ? "Most recent days" : "Earliest days"
+        case .cost:         return "Most expensive days"
+        case .tokens:       return "Heaviest token days"
+        case .date:         return descending ? "Most recent days" : "Earliest days"
+        case .input:        return "Heaviest input days"
+        case .output:       return "Heaviest output days"
+        case .cacheRead:    return "Heaviest cache-read days"
+        case .cacheWrite:   return "Heaviest cache-write days"
+        case .cacheWrite5m: return "Heaviest 5m-write days"
+        case .cacheWrite1h: return "Heaviest 1h-write days"
+        case .hitRate:      return descending ? "Best-cached days" : "Least-cached days"
+        case .outShare:     return descending ? "Most output-heavy days" : "Least output-heavy days"
+        case .mix:          return descending ? "Most uncached days" : "Most cached days"
         }
     }
 
@@ -628,69 +576,46 @@ private struct TopDaysContent: View {
         let visible: [DayRow] = showAll
             ? Array(all.prefix(min(all.count, 100)))
             : Array(all.prefix(10))
-        return PacerCard(title, trailing: {
-            if !all.isEmpty {
-                Text("showing \(visible.count) of \(all.count)")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-            }
-        }) {
+        // Ranked here, over every day, and only then cut to 10 (or 100): the
+        // table sorts what it is given by the same column, ties included
+        // (`DayRanking`), so it shows these days in this order.
+        let tableRows: [PacerUsageRow<PacerUsageNoExtra>] = visible.map { day in
+            PacerUsageRow(id: day.date, label: prettyDate(day.date), sortLabel: day.date,
+                          tokens: day.tokens, costParts: day.costParts, cost: day.cost)
+        }
+        let tableSort = PacerUsageSort(sort.column, descending: descending)
+        let trailing = Text(all.isEmpty ? "" : "showing \(visible.count) of \(all.count)")
+            .font(.system(size: 11))
+            .foregroundStyle(.secondary)
+        return Group {
             if all.isEmpty {
-                Text("No data yet.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+                PacerCard(title, trailing: { trailing }) {
+                    Text("No data yet.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
             } else {
-                // The bar encodes whatever the list is ranked BY. It was
-                // hard-wired to cost while the sort switched between cost,
-                // tokens and date — so under "Heaviest token days" the rows
-                // read 13.2M, 10.5M, 9.8M downwards while the bars beside them
-                // went 58%, 68%, 63%: the length was the day's cost. A bar
-                // that disagrees with the number next to it is worse than no
-                // bar. Date-sorted there is no ranking magnitude, so it keeps
-                // cost — the bolder of the two numbers on the row.
-                let barMetric: DayBarMetric = sort == .tokens ? .tokens : .cost
-                let maxValue = visible.map { barMetric.value(of: $0) }.max() ?? 1
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 12) {
-                        // Empty rank column header
-                        Spacer().frame(width: 28)
-                        SortableColumnHeader(
-                            "Date",
-                            field: TopDaysSort.date,
-                            alignment: .leading,
-                            active: sortBinding,
-                            descending: descendingBinding,
-                            defaultDescending: false
-                        ).frame(width: 140, alignment: .leading)
-                        Spacer()
-                        SortableColumnHeader(
-                            "Tokens",
-                            field: TopDaysSort.tokens,
-                            alignment: .trailing,
-                            active: sortBinding,
-                            descending: descendingBinding
-                        ).frame(width: 80)
-                        SortableColumnHeader(
-                            "Cost",
-                            field: TopDaysSort.cost,
-                            alignment: .trailing,
-                            active: sortBinding,
-                            descending: descendingBinding
-                        ).frame(width: 80)
-                        // Reserve space for the row's chevron column.
-                        Spacer().frame(width: 16)
-                    }
-                    Divider().padding(.vertical, 2)
-                    // Lazy inner stack so the "Show top 100" expansion
-                    // doesn't realize all 100 `HoverRow`s + context
-                    // menus at once. Same pattern applied to
-                    // `ProjectsView`'s row list — defers off-screen
-                    // rows until scrolled into view.
-                    LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(Array(visible.enumerated()), id: \.element.id) { idx, row in
-                            topRow(idx: idx, row: row, maxValue: maxValue, metric: barMetric)
-                        }
-                    }
+                // The table is the card: its title over the native header.
+                // The rank number and the bar that used to lead each row
+                // are gone: the table's order is the rank, and the bar drew
+                // the number printed beside it a second time.
+                PacerTableCard(title, trailing: { trailing }) {
+                    PacerUsageTable(
+                        rows: tableRows,
+                        tableId: "topDays",
+                        labelTitle: "Date",
+                        sort: tableSort,
+                        onSort: onSort,
+                        onOpen: { row in onDayTap(row.id) },
+                        rowMenu: { row in
+                            Button("Open day") { onDayTap(row.id) }
+                            Divider()
+                            Button("Copy date") { pacerCopyToPasteboard(row.id) }
+                            // Copy the exact dollars-and-cents — the row shows
+                            // "$10.8k" but a copy-to-paste should be the precise value.
+                            Button("Copy cost") { pacerCopyToPasteboard(pacerCostExact(row.cost)) }
+                        })
+                } footer: {
                     if all.count > 10 {
                         HStack {
                             Spacer()
@@ -710,82 +635,18 @@ private struct TopDaysContent: View {
                             .buttonStyle(.plain)
                             Spacer()
                         }
-                        .padding(.top, 8)
+                        .padding(.top, 4)
                     }
                 }
             }
-        }
-    }
-
-    /// Which of the row's two numbers the bar draws.
-    private enum DayBarMetric {
-        case cost, tokens
-        func value(of row: DayRow) -> Double {
-            switch self {
-            case .cost:   return row.cost
-            case .tokens: return Double(row.tokens)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func topRow(
-        idx: Int, row: DayRow, maxValue: Double, metric: DayBarMetric
-    ) -> some View {
-        HoverRow(action: { onDayTap(row.date) }) {
-            HStack(alignment: .center, spacing: 12) {
-                Text("#\(idx + 1)")
-                    .font(.system(size: 10, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.tertiary)
-                    .frame(width: 28, alignment: .leading)
-                Text(prettyDate(row.date))
-                    .font(.system(size: 12, weight: .medium))
-                    .frame(width: 140, alignment: .leading)
-                ZStack(alignment: .leading) {
-                    RoundedRectangle(cornerRadius: 3)
-                        .fill(Color.primary.opacity(0.06))
-                        .frame(height: 6)
-                    GeometryReader { geo in
-                        RoundedRectangle(cornerRadius: 3)
-                            .fill(Color.accentColor.opacity(0.85))
-                            .frame(
-                                width: geo.size.width
-                                    * CGFloat(metric.value(of: row) / max(maxValue, 0.0001)),
-                                height: 6
-                            )
-                    }
-                    .frame(height: 6)
-                }
-                Text(pacerTokens(row.tokens)).help(pacerTokensExact(row.tokens))
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-                    .frame(width: 80, alignment: .trailing)
-                Text(pacerCost(row.cost)).help(pacerCostExact(row.cost))
-                    .font(.system(size: 13, weight: .semibold, design: .rounded))
-                    .monospacedDigit()
-                    .frame(width: 80, alignment: .trailing)
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(.tertiary)
-                    .frame(width: 16, alignment: .trailing)
-            }
-        }
-        .contextMenu {
-            Button("Open day") { onDayTap(row.date) }
-            Divider()
-            Button("Copy date") { pacerCopyToPasteboard(row.date) }
-            // Copy the exact dollars-and-cents — the row shows
-            // "$10.8k" but a copy-to-paste should be the precise value.
-            Button("Copy cost") { pacerCopyToPasteboard(pacerCostExact(row.cost)) }
         }
     }
 
     /// `2026-04-30` → `Thu Apr 30`. Compact + day-of-week so the user
     /// can spot patterns ("oh I always burn on Wednesdays"). The two
     /// `DateFormatter` instances are now static — previously this
-    /// function allocated both per call, and `topRow` calls it for
-    /// every row on every render. With up to 100 visible rows under
+    /// function allocated both per call, and the body calls it for
+    /// every visible row on every render. With up to 100 visible rows under
     /// "Show top 100" plus context-menu re-evaluations, that was
     /// thousands of allocations per scroll.
     private static let prettyDateInFmt: DateFormatter = {

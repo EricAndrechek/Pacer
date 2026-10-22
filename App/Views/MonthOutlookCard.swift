@@ -3,12 +3,38 @@ import SwiftData
 import PacerCore
 import PacerUI
 
-/// Month-to-date spend and the engine's month-end projection, down in the
-/// trends zone with the weekly/30-day cards (a planning number, not a
-/// "right now" one). One slim row: hero month-to-date, the projection
-/// chip, the spent→projected bar, and the pace context — the calibrated
-/// range and exact figures live in tooltips.
+/// "This month": month-to-date spend with the engine's month-end projection,
+/// the labelled spent → projected bar, the month's tokens and active days,
+/// and the shared breakdown. Drawn by `PacerMonthSummary`, which takes a
+/// plain value, so the render suite draws the real card.
+///
+/// Its own card under "Last 30 days" again. For a round the two were one
+/// card, reading the same rows; but they are different periods, and the
+/// owner chose two cards.
 struct MonthOutlookCard: View {
+    init(scopeAccountId: String? = nil) {
+        // From the 1st of the month, captured here: ContentView's
+        // `.id(dayKey)` rebuilds the page at midnight, so a new month gets a
+        // new lower bound. Until it does, `refreshDerived` keeps only the
+        // current month's rows, so the card is right either way. ≤ 31 days ×
+        // N models, on the `(date)` index.
+        let now = Date()
+        let firstOfMonth = Calendar.current.dateInterval(of: .month, for: now)?.start ?? now
+        let lower = TokenSample.formatDate(firstOfMonth)
+        _globalAggregates = Query(
+            filter: #Predicate<DailyAggregate> { $0.date >= lower }
+        )
+        // Taken as a parameter rather than read from `UsageScope` here, so a
+        // scope change re-runs this initialiser: a `@Query` predicate is
+        // captured once at init.
+        let acct = scopeAccountId ?? UsageScope.noAccountSentinel
+        _scopedAggregates = Query(
+            filter: #Predicate<AccountDailyAggregate> {
+                $0.date >= lower && $0.accountId == acct
+            }
+        )
+    }
+
     @Query private var globalAggregates: [DailyAggregate]
     /// The same rollup sliced to one account. Which of the two is
     /// rendered is the scope switch; the card's layout does not change.
@@ -22,61 +48,53 @@ struct MonthOutlookCard: View {
             ? globalAggregates.map(\.dailyRow)
             : scopedAggregates.map(\.dailyRow)
     }
-    @Query(MonthOutlookCard.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
+    /// Singleton-row probe — fires once per scan cycle, the "data changed"
+    /// signal the cached totals refresh on.
+    @Query(ScanMetaFetchDescriptor.scanCompletedProbe)
+    private var scanMeta: [ClaudeCodeMeta]
 
     @Environment(\.usageEngines) private var engines
 
-    @State private var cached = MonthFacts()
+    @State private var cached = MonthTotals()
+    /// The engine's month-end cost for this card's scope; `nil` until it
+    /// answers.
     @State private var projection: Estimate?
 
-    struct MonthFacts: Equatable {
-        var monthSoFar: Double = 0
-        var averageDailyCost: Double = 0
-        var daysWithData: Int = 0
-        var daysInMonth: Int = 30
-        var dayOfMonth: Int = 1
-        var hasAnyData: Bool = false
+    /// The month so far, summed once per refresh rather than on every body
+    /// pass.
+    ///
+    /// The clock is an input (the month, its days left, the day of the month
+    /// the pace hint divides by), read at each refresh and nowhere else. The
+    /// refresh is keyed on the day (`PacerToday`), so the month rolls over at
+    /// midnight even before `ContentView`'s `.id(dayKey)` rebuilds the page.
+    struct MonthTotals: Equatable {
+        var breakdown = CostBreakdown.zero
+        var activeDays = 0
+        var dayOfMonth = 1
+        var daysInMonth = 30
+        /// "October"
+        var name = ""
+
+        var cost: Double { breakdown.total }
+        var daysLeft: Int { max(0, daysInMonth - dayOfMonth) }
     }
 
-    init(scopeAccountId: String? = nil) {
-        let cal = Calendar.current
+    private func refreshDerived() {
         let now = Date()
-        let firstOfMonth = cal.dateInterval(of: .month, for: now)?.start ?? now
-        let lowerStr = TokenSample.formatDate(firstOfMonth)
-        _globalAggregates = Query(
-            filter: #Predicate<DailyAggregate> { $0.date >= lowerStr }
-        )
-        let acct = scopeAccountId ?? UsageScope.noAccountSentinel
-        _scopedAggregates = Query(
-            filter: #Predicate<AccountDailyAggregate> {
-                $0.date >= lowerStr && $0.accountId == acct
-            }
-        )
-    }
-
-    private static let scanMetaProbe: FetchDescriptor<ClaudeCodeMeta> = {
-        let key = ClaudeCodeMetaKey.lastIncrementalScanAt
-        return FetchDescriptor<ClaudeCodeMeta>(
-            predicate: #Predicate<ClaudeCodeMeta> { $0.key == key }
-        )
-    }()
-
-    private func refreshFacts() {
         let cal = Calendar.current
-        let now = Date()
-        var byDate: [String: Double] = [:]
-        for row in aggregates {
-            byDate[row.date, default: 0] += row.totalCostUSD
+        let today = TokenSample.formatDate(now)
+        let monthStart = TokenSample.formatDate(cal.dateInterval(of: .month, for: now)?.start ?? now)
+        var month = MonthTotals()
+        var monthDays = Set<String>()
+        for row in aggregates where row.date >= monthStart && row.date <= today {
+            month.breakdown += row.costBreakdown
+            monthDays.insert(row.date)
         }
-        var next = MonthFacts()
-        next.monthSoFar = byDate.values.reduce(0, +)
-        let active = byDate.values.filter { $0 > 0 }
-        next.daysWithData = active.count
-        next.averageDailyCost = active.isEmpty ? 0 : active.reduce(0, +) / Double(active.count)
-        next.daysInMonth = cal.range(of: .day, in: .month, for: now)?.count ?? 30
-        next.dayOfMonth = cal.component(.day, from: now)
-        next.hasAnyData = !active.isEmpty
-        cached = next
+        month.activeDays = monthDays.count
+        month.dayOfMonth = cal.component(.day, from: now)
+        month.daysInMonth = cal.range(of: .day, in: .month, for: now)?.count ?? 30
+        month.name = Self.monthName.string(from: now)
+        cached = month
     }
 
     private func refreshProjection() async {
@@ -92,98 +110,81 @@ struct MonthOutlookCard: View {
     }
 
     var body: some View {
-        // Read here as well as inside `PacerCard`'s stored closures (#140).
-        let _ = (cached, projection)
-        PacerCard("This month", trailing: {
-            Text(monthCaption)
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-        }) {
-            if cached.hasAnyData {
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack(alignment: .firstTextBaseline, spacing: 10) {
-                        Text(pacerCost(cached.monthSoFar)).help(pacerCostExact(cached.monthSoFar))
-                            .font(.system(size: 26, weight: .semibold, design: .rounded))
-                            .monospacedDigit()
-                        if let p = projection, !p.isInsufficient {
-                            Chip(
-                                text: "≈\(IntelligenceFormatting.approxCost(p.value)) by month end",
-                                systemImage: "chart.line.uptrend.xyaxis",
-                                tint: .secondary,
-                                size: .compact
-                            )
-                            .fixedSize()
-                            .help(projectionHelp(p))
-                        }
-                        Spacer(minLength: 0)
-                        Text(detailCaption)
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-                    if let p = projection, !p.isInsufficient,
-                       p.value >= cached.monthSoFar * 0.98 {
-                        SpendProgressBar(
-                            spent: cached.monthSoFar,
-                            projected: max(p.value, cached.monthSoFar),
-                            projectedLabel: "≈\(IntelligenceFormatting.approxCost(max(p.value, cached.monthSoFar)))",
-                            help: projectionHelp(p)
-                        )
-                    } else if projection == nil {
-                        // Held open until the engine answers — its first answer
-                        // after launch lands seconds after the card draws, and
-                        // the bar arriving then grew the card 31 pt. Below the
-                        // fold, but it still changed the page's height and
-                        // flashed the scroller. Collapses only if the answer
-                        // turns out not to warrant a bar.
-                        SpendProgressBar(spent: 0, projected: 1, projectedLabel: " ", help: "")
-                            .hidden()
-                            .accessibilityHidden(true)
-                    }
-                }
-            } else {
-                Text("Not enough data yet — a projection appears once Pacer has seen some usage this month.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+        // Read here, not only inside `PacerCard`'s stored closures (#140).
+        let month = cached
+        let projection = self.projection
+        // Read in body so a new day is a tracked input (see `MonthTotals`).
+        let day = PacerToday.shared.key
+        PacerMonthSummary(monthModel(month, projection: projection))
+            .onAppear { refreshDerived() }
+            .onChange(of: scanMeta.first?.value) { _, _ in refreshDerived() }
+            // The clock: the month, its days left and the pace hint's day.
+            .onChange(of: day) { _, _ in refreshDerived() }
+            // The scope is an input to the cache like the data is: without
+            // this the card kept the previous account after a switch until a
+            // scan ingested something, which on an idle machine may be never
+            // (#141).
+            .onChange(of: scope.accountId) { _, _ in refreshDerived() }
+            // Keyed on the scope for the same reason: the month-end projection
+            // is that account's engine's, and kept the old one's until a
+            // refit. And on the day: a new month is a new question.
+            .task(id: ProjectionKey(account: scope.accountId, day: day)) {
+                self.projection = nil
+                await refreshProjection()
             }
-        }
-        .onAppear { refreshFacts() }
-        .onChange(of: scanMeta.first?.value) { _, _ in refreshFacts() }
-        // The scope is an input to the cache like the data is: without this
-        // the card kept the previous account after a switch until a scan
-        // ingested something, which on an idle machine may be never (#141).
-        .onChange(of: scope.accountId) { _, _ in refreshFacts() }
-        // Keyed on the scope for the same reason: the month-end projection
-        // is that account's engine's, and kept the old one's until a refit.
-        .task(id: scope.accountId) {
-            projection = nil
-            await refreshProjection()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .pacerEngineDidRecompute)) { _ in
-            Task { await refreshProjection() }
-        }
+            .onReceive(NotificationCenter.default.publisher(for: .pacerEngineDidRecompute)) { _ in
+                Task { await refreshProjection() }
+            }
     }
 
-    /// "June · 18 days left"
-    private var monthCaption: String {
-        let fmt = DateFormatter()
-        fmt.dateFormat = "MMMM"
-        let daysLeft = max(0, cached.daysInMonth - cached.dayOfMonth)
-        return "\(fmt.string(from: Date())) · \(daysLeft) day\(daysLeft == 1 ? "" : "s") left"
+    /// What the projection task is keyed on.
+    private struct ProjectionKey: Equatable {
+        let account: String?
+        let day: String
     }
 
-    /// "avg $126 per active day (11)"
-    private var detailCaption: String {
-        "avg \(pacerCost(cached.averageDailyCost)) per active day (\(cached.daysWithData))"
+    /// The card's plain value: the cached totals and the engine's answer,
+    /// formatted. O(1), so it is built in `body`.
+    private func monthModel(_ month: MonthTotals, projection p: Estimate?) -> PacerMonthSummary.Model {
+        let state: PacerMonthSummary.Projection
+        if let p, !p.isInsufficient {
+            // A point value, never below what the month has already spent.
+            let usd = max(p.value, month.cost)
+            state = .estimate(
+                usd: usd,
+                label: "≈\(IntelligenceFormatting.approxCost(usd))",
+                help: projectionHelp(p, usd: usd, month: month))
+        } else if p != nil {
+            state = .unavailable(help: "Not enough of this month yet to project")
+        } else {
+            state = .pending
+        }
+        return PacerMonthSummary.Model(
+            name: month.name,
+            daysLeft: month.daysLeft,
+            breakdown: month.breakdown,
+            activeDays: month.activeDays,
+            projection: state)
+    }
+
+    /// The exact projection, its calibrated range and how it compares with
+    /// the month's pace so far.
+    private func projectionHelp(_ p: Estimate, usd: Double, month: MonthTotals) -> String {
+        var parts: [String] = [pacerCostExact(usd)]
+        if let band = p.interval80 {
+            parts.append(IntelligenceFormatting.anchors(band))
+        }
+        if let hint = paceHint(p, month: month) { parts.append(hint) }
+        return parts.joined(separator: " · ")
     }
 
     /// "↑ 18% above pace" — the engine's projection vs a pure linear
     /// forward-fill of the current run rate. Only meaningful past the
-    /// first few days.
-    private var paceHint: String? {
-        guard let p = projection, !p.isInsufficient else { return nil }
-        guard cached.dayOfMonth >= 3 else { return "if rate holds" }
-        let purePace = cached.monthSoFar / Double(cached.dayOfMonth) * Double(cached.daysInMonth)
+    /// first few days. The day of the month is the cached one, so no clock
+    /// is read here.
+    private func paceHint(_ p: Estimate, month: MonthTotals) -> String? {
+        guard month.dayOfMonth >= 3 else { return "if rate holds" }
+        let purePace = month.cost / Double(month.dayOfMonth) * Double(month.daysInMonth)
         guard purePace > 0.01 else { return "if rate holds" }
         let ratio = p.value / purePace
         if ratio > 1.05 {
@@ -195,12 +196,10 @@ struct MonthOutlookCard: View {
         return "on pace"
     }
 
-    private func projectionHelp(_ p: Estimate) -> String {
-        var parts = [pacerCostExact(p.value)]
-        if let band = p.interval80 {
-            parts.append(IntelligenceFormatting.anchors(band))
-        }
-        if let hint = paceHint { parts.append(hint) }
-        return parts.joined(separator: " · ")
-    }
+    /// Built once: the card used to allocate a formatter on every body pass.
+    private static let monthName: DateFormatter = {
+        let f = DateFormatter()
+        f.setLocalizedDateFormatFromTemplate("MMMM")
+        return f
+    }()
 }

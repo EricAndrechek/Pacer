@@ -9,7 +9,8 @@ import PacerUI
 ///   2. Now strip — Live (last-hour burn) + Today (spend, outlook, budget).
 ///   3. PaceChart card (full width, the two big 5h/7d charts with their
 ///      status + burn chips).
-///   4. Today's breakdowns, weekly comparison, 30-day cost, month outlook.
+///   4. Today's breakdowns, weekly comparison, the last 30 days, then this
+///      month.
 ///
 /// Each card is its own `View` and owns its own `@Query` so SwiftData
 /// updates stay incremental: a new TokenSample only invalidates the

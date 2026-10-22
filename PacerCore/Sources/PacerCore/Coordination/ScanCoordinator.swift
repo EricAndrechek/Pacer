@@ -181,7 +181,26 @@ public final class ScanCoordinator {
     ///          rebuild also fills the global rollups' `pricedByRecordIds`
     ///          (#217), from which later price changes rebuild only what they
     ///          touch. One bump for all of it, so the store is rebuilt once.
-    public static let currentCostRecomputeVersion = "17"
+    /// - "18" — PR #340: a stored cost (Claude Code's `costUSD`) is split
+    ///          into the five parts by the ledger's own weights in `.display`
+    ///          mode too, as `.auto` already did, and an unpriced model's
+    ///          split uses list-price ratios rather than token counts. Only
+    ///          the per-part columns move; every total is unchanged.
+    /// - "19" — 2026-10-22: the project rollups (global and per account)
+    ///          store every model's five token parts and the cost of each
+    ///          (`modelBreakdownJSON`), replacing a per-model input + output
+    ///          count and a per-model cost total, so a project's By model
+    ///          card can show what its models really used. Session rows'
+    ///          `topModel` is re-picked by all five parts rather than by
+    ///          input + output (#215). Existing rows carry no split until
+    ///          rebuilt — the incremental path declines such a row and
+    ///          rebuilds it, but only this pass reaches buckets nothing
+    ///          writes to again. Every column total is unchanged. The same
+    ///          pass re-keys unattributed rows to `~unattributed`: the old
+    ///          U+0000-prefixed sentinel was cut short by SQLite, which
+    ///          collapsed each account rollup's unattributed rows into one.
+    ///          Each rebuilt bucket deletes the old row as an orphan.
+    public static let currentCostRecomputeVersion = "19"
 
     /// Generation of the duplicate-turn repair.
     ///

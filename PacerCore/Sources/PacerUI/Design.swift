@@ -217,8 +217,9 @@ public struct MetricTile: View {
 
 /// Apply `.help(text)` only when `text` is non-nil. SwiftUI's
 /// `.help(_:)` always installs a tooltip; passing the empty string
-/// shows an empty bubble on hover, which reads as broken.
-private struct OptionalHelp: ViewModifier {
+/// shows an empty bubble on hover, which reads as broken. Shared by
+/// every PacerUI view with a tooltip that is sometimes empty.
+struct OptionalHelp: ViewModifier {
     let text: String?
     func body(content: Content) -> some View {
         if let text, !text.isEmpty {

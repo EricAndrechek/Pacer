@@ -1,15 +1,21 @@
 import SwiftUI
 import SwiftData
-import Charts
 import PacerCore
 import PacerUI
 
-/// Today's per-model breakdown. Donut on the left shows the share of
-/// total tokens by model; the table on the right lists each model with
-/// input, output, cost, and percentage. Pulls from `DailyAggregate`
-/// filtered to today — same source as `TodayDetailsCard` but kept as
-/// its own card so the @Query stays scoped (a model-only view doesn't
-/// need to invalidate when the total-cost number changes).
+/// Today's per-model breakdown: the shared donut card (`PacerDonutListCard`),
+/// the ring beside the list every donut card has: Mix, Tokens, Cost and Share
+/// (`PacerShareListColumn.standard`). Pulls from
+/// `DailyAggregate` filtered to today — same source as `TodayDetailsCard` but
+/// kept as its own card so the @Query stays scoped (a model-only view
+/// doesn't need to invalidate when the total-cost number changes).
+///
+/// Clicking a column title sorts the list, and the ring measures that column
+/// (cost by default, or tokens) and names it in its centre; Share is each
+/// model's share of what the ring measures. A hovered wedge shows its share
+/// and name there instead. Hit % and Out %, which round 4 listed here, are
+/// not shares of anything and are in no donut list (`UsageAmount`); a sort
+/// stored by one of them sorts by cost.
 struct PerModelTodayCard: View {
     @Query private var globalAggregates: [DailyAggregate]
     /// The same rollup sliced to one account. Which of the two is
@@ -25,7 +31,14 @@ struct PerModelTodayCard: View {
             : scopedAggregates.map(\.dailyRow)
     }
     @Query(PerModelTodayCard.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
-    @State private var cached: [ModelRow] = []
+    /// The table's rows, built once per scan tick or scope switch.
+    @State private var rows: [PacerUsageRow<PacerUsageNoExtra>] = []
+
+    @AppStorage("pacer.todayByModel.sortField", store: PacerSettings.store)
+    private var sortRaw: String = UsageColumn.cost.rawValue
+
+    @AppStorage("pacer.todayByModel.sortDescending", store: PacerSettings.store)
+    private var sortDescending: Bool = true
 
     init(scopeAccountId: String? = nil) {
         let todayString = TokenSample.formatDate(Date())
@@ -51,182 +64,46 @@ struct PerModelTodayCard: View {
         )
     }()
 
-    private var rows: [ModelRow] { cached }
-
-    private func refreshCache() {
-        let totalTokens = aggregates.reduce(0) {
-            $0 + $1.inputTokens + $1.outputTokens
+    private func refreshRows() {
+        rows = aggregates.map { agg in
+            PacerUsageRow(
+                id: agg.model,
+                label: pacerModelDisplayName(agg.model),
+                color: pacerModelColor(agg.model),
+                tokens: agg.tokens,
+                costParts: agg.cost,
+                cost: agg.totalCostUSD)
         }
-        cached = aggregates
-            .map { agg in
-                let tokens = agg.inputTokens + agg.outputTokens
-                let share = totalTokens > 0 ? Double(tokens) / Double(totalTokens) : 0
-                return ModelRow(
-                    model: agg.model,
-                    inputTokens: agg.inputTokens,
-                    outputTokens: agg.outputTokens,
-                    cacheReadTokens: agg.cacheReadTokens,
-                    cost: agg.totalCostUSD,
-                    share: share
-                )
-            }
-            .sorted { $0.cost > $1.cost }
-    }
-
-    /// Selected wedge in the donut. Bound via `chartAngleSelection`
-    /// — Charts hands us the angle clicked/hovered, we map it back to
-    /// a row by accumulating slice widths.
-    @State private var hoveredAngle: Double?
-
-    /// Pre-computed cumulative-angle table for hover lookups + total
-    /// for the percent calculation. Refreshed when `cached` changes
-    /// (which only happens on a scan tick), so per-pixel hover work
-    /// is O(rows) over an already-built array — no `reduce` per move.
-    @State private var hoverCumulative: [(row: ModelRow, max: Double)] = []
-    @State private var hoverTotalTokens: Int64 = 0
-
-    @MainActor
-    private func refreshHoverIndex() {
-        var running = 0.0
-        var built: [(row: ModelRow, max: Double)] = []
-        built.reserveCapacity(rows.count)
-        var totalTokens: Int64 = 0
-        for r in rows {
-            let t = Int64(r.inputTokens + r.outputTokens)
-            running += Double(t)
-            totalTokens += t
-            built.append((r, running))
-        }
-        hoverCumulative = built
-        hoverTotalTokens = totalTokens
-    }
-
-    private var hoveredRow: ModelRow? {
-        guard let angle = hoveredAngle, !hoverCumulative.isEmpty else { return nil }
-        for entry in hoverCumulative where angle <= entry.max {
-            return entry.row
-        }
-        return hoverCumulative.last?.row
     }
 
     var body: some View {
-        // Read here as well as inside `PacerCard`'s stored closures (#140).
-        let _ = (cached, hoveredAngle)
-        PacerCard("Today by model", trailing: {
-            // Hover-reveal of the selected wedge. Reads pre-computed
-            // total from `hoverTotalTokens` instead of doing a fresh
-            // `reduce` on every hover tick.
-            if let r = hoveredRow {
-                let total = hoverTotalTokens
-                let myTotal = r.inputTokens + r.outputTokens
-                let pct = total > 0 ? Int(Double(myTotal) / Double(total) * 100) : 0
-                HStack(spacing: 8) {
-                    Text(pacerModelDisplayName(r.model))
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
-                    Text("\(pct)%")
-                        .font(.system(size: 12, weight: .semibold, design: .rounded))
-                        .monospacedDigit()
-                }
-            }
-        }) {
+        let rows = self.rows
+        let sort = PacerUsageSort(column: sortRaw, descending: sortDescending)
+        // Built in the body: a day has a handful of models, and the ring
+        // must follow the sort the moment a title is clicked. The hover
+        // lives inside the donut, so it does not run this again.
+        let data = PacerShareListData(rows: rows, sort: sort, maxSlices: 8)
+        Group {
             if rows.isEmpty {
-                Text("No usage logged today yet.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-            } else {
-                HStack(alignment: .top, spacing: 24) {
-                    donut
-                    table
+                PacerCard("Today by model") {
+                    Text("No usage logged today yet.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
                 }
+            } else {
+                PacerDonutListCard(
+                    "Today by model",
+                    data: data,
+                    labelTitle: "Model",
+                    accessibilityLabel: "Today's \(data.donut.metric.title.lowercased()) by model",
+                    onSort: { sortRaw = $0.column; sortDescending = $0.descending })
             }
         }
-        .onAppear {
-            refreshCache()
-            refreshHoverIndex()
-        }
-        .onChange(of: scanMeta.first?.value) { _, _ in
-            refreshCache()
-            refreshHoverIndex()
-        }
-        // The scope is an input to the cache like the data is: without this
+        .onAppear { refreshRows() }
+        .onChange(of: scanMeta.first?.value) { _, _ in refreshRows() }
+        // The scope is an input to the rows like the data is: without this
         // the card kept the previous account after a switch until a scan
         // ingested something, which on an idle machine may be never (#141).
-        .onChange(of: scope.accountId) { _, _ in
-            refreshCache()
-            refreshHoverIndex()
-        }
+        .onChange(of: scope.accountId) { _, _ in refreshRows() }
     }
-
-    private var donut: some View {
-        PacerDonut(
-            slices: rows.map {
-                PacerDonutSlice(id: $0.model, value: Double($0.inputTokens + $0.outputTokens),
-                                color: pacerModelColor($0.model))
-            },
-            innerRatio: 0.62,
-            hoveredID: hoveredRow?.model,
-            hoveredAngle: $hoveredAngle,
-            accessibilityLabel: "Today's token share by model",
-            accessibilityValue: perModelShareSummary
-        )
-    }
-
-    /// Summary string read aloud by VoiceOver in place of the donut.
-    /// Spells out each model's share so a screen-reader user gets the
-    /// same information sighted users get from the wedges + legend.
-    private var perModelShareSummary: String {
-        let total = hoverTotalTokens
-        guard total > 0 else { return "no data yet" }
-        return rows.prefix(5).map { row in
-            let tokens = row.inputTokens + row.outputTokens
-            let pct = Int(Double(tokens) / Double(total) * 100)
-            return "\(pacerModelDisplayName(row.model)) \(pct) percent"
-        }.joined(separator: ", ")
-    }
-
-    private var table: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ForEach(rows) { row in
-                PacerDonutLegendRow(
-                    color: pacerModelColor(row.model),
-                    label: pacerModelDisplayName(row.model),
-                    labelMaxWidth: 220
-                ) {
-                    Text("in \(pacerTokens(row.inputTokens))")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
-                        .frame(width: 88, alignment: .trailing)
-                        .help("\(pacerTokensExact(row.inputTokens)) input tokens")
-                    Text("out \(pacerTokens(row.outputTokens))")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
-                        .frame(width: 88, alignment: .trailing)
-                        .help("\(pacerTokensExact(row.outputTokens)) output tokens")
-                    Text(pacerCost(row.cost)).help(pacerCostExact(row.cost))
-                        .font(.system(size: 12, weight: .semibold, design: .rounded))
-                        .monospacedDigit()
-                        .frame(width: 76, alignment: .trailing)
-                    Text("\(Int((row.share * 100).rounded()))%")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.tertiary)
-                        .monospacedDigit()
-                        .frame(width: 36, alignment: .trailing)
-                }
-            }
-        }
-    }
-
-}
-
-private struct ModelRow: Identifiable {
-    var id: String { model }
-    let model: String
-    let inputTokens: Int64
-    let outputTokens: Int64
-    let cacheReadTokens: Int64
-    let cost: Double
-    let share: Double
 }

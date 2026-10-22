@@ -21,17 +21,6 @@ public struct DailyRow: Sendable, Equatable, Identifiable {
     public let cost: CostComponents
 
     public var id: String { "\(date)|\(model)" }
-    public var totalTokens: Int64 {
-        inputTokens + outputTokens + cacheReadTokens
-            + cacheCreation5mTokens + cacheCreation1hTokens
-    }
-    public var tokens: TokenBreakdown {
-        TokenBreakdown(
-            inputTokens: inputTokens, outputTokens: outputTokens,
-            cacheReadTokens: cacheReadTokens,
-            cacheCreation5mTokens: cacheCreation5mTokens,
-            cacheCreation1hTokens: cacheCreation1hTokens)
-    }
 
     public init(
         date: String, model: String,
@@ -81,24 +70,37 @@ public struct HourlyRow: Sendable, Equatable, Identifiable {
     public let model: String
     public let inputTokens: Int64
     public let outputTokens: Int64
+    public let cacheReadTokens: Int64
+    public let cacheCreation5mTokens: Int64
+    public let cacheCreation1hTokens: Int64
     public let totalCostUSD: Double
     /// Turns in the bucket. Both rollups store it — the per-account one
     /// gained it when the Now tile turned out to gate its whole contents on
     /// this field, and read "Nothing running." under every scope.
     public let sampleCount: Int
+    /// `totalCostUSD` split into its five priced parts (#296), as on
+    /// `DailyRow`, so the hour chart stacks by part from the row the total
+    /// came from.
+    public let cost: CostComponents
 
     public var id: String { "\(date)|\(hour)|\(model)" }
 
     public init(date: String, hour: Int, model: String,
-                inputTokens: Int64, outputTokens: Int64, totalCostUSD: Double,
-                sampleCount: Int = 0) {
+                inputTokens: Int64, outputTokens: Int64, cacheReadTokens: Int64,
+                cacheCreation5mTokens: Int64, cacheCreation1hTokens: Int64,
+                totalCostUSD: Double, sampleCount: Int = 0,
+                cost: CostComponents = .zero) {
         self.date = date
         self.hour = hour
         self.model = model
         self.inputTokens = inputTokens
         self.outputTokens = outputTokens
+        self.cacheReadTokens = cacheReadTokens
+        self.cacheCreation5mTokens = cacheCreation5mTokens
+        self.cacheCreation1hTokens = cacheCreation1hTokens
         self.totalCostUSD = totalCostUSD
         self.sampleCount = sampleCount
+        self.cost = cost
     }
 }
 
@@ -106,7 +108,11 @@ public extension HourlyAggregate {
     var hourlyRow: HourlyRow {
         HourlyRow(date: date, hour: hour, model: model,
                   inputTokens: inputTokens, outputTokens: outputTokens,
-                  totalCostUSD: totalCostUSD, sampleCount: sampleCount)
+                  cacheReadTokens: cacheReadTokens,
+                  cacheCreation5mTokens: cacheCreation5mTokens,
+                  cacheCreation1hTokens: cacheCreation1hTokens,
+                  totalCostUSD: totalCostUSD, sampleCount: sampleCount,
+                  cost: costComponents)
     }
 }
 
@@ -114,7 +120,11 @@ public extension AccountHourlyAggregate {
     var hourlyRow: HourlyRow {
         HourlyRow(date: date, hour: hour, model: model,
                   inputTokens: inputTokens, outputTokens: outputTokens,
-                  totalCostUSD: totalCostUSD, sampleCount: sampleCount)
+                  cacheReadTokens: cacheReadTokens,
+                  cacheCreation5mTokens: cacheCreation5mTokens,
+                  cacheCreation1hTokens: cacheCreation1hTokens,
+                  totalCostUSD: totalCostUSD, sampleCount: sampleCount,
+                  cost: costComponents)
     }
 }
 
@@ -135,19 +145,20 @@ public struct SessionRow: Sendable, Equatable, Identifiable {
     public let cumulativeCacheCreation5mTokens: Int64
     public let cumulativeCacheCreation1hTokens: Int64
     public let topModel: String
+    /// `cumulativeCostUSD` split into its five priced parts (#296), carried
+    /// like `DailyRow.cost` so a sessions table can show what the money went
+    /// on.
+    public let cost: CostComponents
 
     public var id: String { sessionId }
-    public var totalTokens: Int64 {
-        cumulativeInputTokens + cumulativeOutputTokens + cumulativeCacheReadTokens
-            + cumulativeCacheCreation5mTokens + cumulativeCacheCreation1hTokens
-    }
 
     public init(
         sessionId: String, firstSeenAt: Date, lastSeenAt: Date, projectPath: String,
         ccVersion: String?, cumulativeCostUSD: Double,
         cumulativeInputTokens: Int64, cumulativeOutputTokens: Int64,
         cumulativeCacheReadTokens: Int64, cumulativeCacheCreation5mTokens: Int64,
-        cumulativeCacheCreation1hTokens: Int64, topModel: String
+        cumulativeCacheCreation1hTokens: Int64, topModel: String,
+        cost: CostComponents = .zero
     ) {
         self.sessionId = sessionId
         self.firstSeenAt = firstSeenAt
@@ -161,6 +172,7 @@ public struct SessionRow: Sendable, Equatable, Identifiable {
         self.cumulativeCacheCreation5mTokens = cumulativeCacheCreation5mTokens
         self.cumulativeCacheCreation1hTokens = cumulativeCacheCreation1hTokens
         self.topModel = topModel
+        self.cost = cost
     }
 }
 
@@ -175,7 +187,7 @@ public extension SessionInfo {
             cumulativeCacheReadTokens: cumulativeCacheReadTokens,
             cumulativeCacheCreation5mTokens: cumulativeCacheCreation5mTokens,
             cumulativeCacheCreation1hTokens: cumulativeCacheCreation1hTokens,
-            topModel: topModel)
+            topModel: topModel, cost: costComponents)
     }
 }
 
@@ -190,7 +202,7 @@ public extension AccountSessionInfo {
             cumulativeCacheReadTokens: cumulativeCacheReadTokens,
             cumulativeCacheCreation5mTokens: cumulativeCacheCreation5mTokens,
             cumulativeCacheCreation1hTokens: cumulativeCacheCreation1hTokens,
-            topModel: topModel)
+            topModel: topModel, cost: costComponents)
     }
 }
 

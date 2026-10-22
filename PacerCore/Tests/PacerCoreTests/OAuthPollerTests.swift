@@ -125,6 +125,47 @@ import Testing
         #expect(rows.allSatisfy { $0.source == "oauth" })
     }
 
+    // MARK: - The post-install `ok keychain` line (#325)
+
+    @Test("reading Claude Code's keychain token marks the launch's ok-keychain line")
+    func keychainReadIsRecorded() async throws {
+        let container = try Self.makeContainer()
+        let client = Self.sequencedClient([.success(jsonBody: #"{"five_hour":{"utilization":3}}"#)])
+        let poller = OAuthPoller(client: client, container: container,
+                                 configuration: .init(), clock: TestClock())
+        #expect(await poller.snapshot().keychainTokenRead == false)
+
+        _ = await poller.runOnce()
+
+        #expect(await poller.snapshot().keychainTokenRead)
+    }
+
+    @Test("no token in the keychain never claims the keychain read works")
+    func missingKeychainItemIsNotRecorded() async throws {
+        let container = try Self.makeContainer()
+        let client = OAuthClient(keychain: KeychainOAuth(rawReader: { .failure(.notFound) }),
+                                 transport: { _ in throw URLError(.notConnectedToInternet) },
+                                 desktopEnabled: { false })
+        let poller = OAuthPoller(client: client, container: container,
+                                 configuration: .init(), clock: TestClock())
+
+        _ = await poller.runOnce()
+
+        #expect(await poller.snapshot().keychainTokenRead == false)
+    }
+
+    @Test("a token the server refuses was still read: the line reports the read, not the poll")
+    func refusedTokenWasStillRead() async throws {
+        let container = try Self.makeContainer()
+        let client = Self.sequencedClient([.status(401)])
+        let poller = OAuthPoller(client: client, container: container,
+                                 configuration: .init(), clock: TestClock())
+
+        #expect(await poller.runOnce() == .unauthorized)
+
+        #expect(await poller.snapshot().keychainTokenRead)
+    }
+
     @Test func successPersistsSingleWindow() async throws {
         let container = try Self.makeContainer()
         let client = Self.sequencedClient([.success(jsonBody: """

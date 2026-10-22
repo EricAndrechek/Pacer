@@ -1,22 +1,22 @@
 import SwiftUI
 import SwiftData
-import Charts
 import PacerCore
 import PacerUI
 
-// Sort enum was forked into the shared SessionsTable component; this
-// view now reuses `SessionsTableSort` directly.
-
 /// Drill-down for a single project. Presented as a sheet from
-/// `ProjectsView`. Shows:
-///   - Cost / tokens summary headline
-///   - Daily-cost mini-chart over the visible range
-///   - Models-used pie chart
-///   - Recent sessions list (sessionId, last seen, model)
+/// `ProjectsView` (and from a Day detail's projects).
 ///
-/// Reads `ProjectDailyAggregate` and `SessionInfo` directly — both are
-/// precomputed by the in-process scan's recomputers, so the view never
-/// iterates raw `TokenSample`s.
+/// Laid out like Day detail (round 5), card for card: the first card (the
+/// shared `PacerSummaryCard`: what the project cost over the range, its
+/// counts and git status, its days as a strip, and the breakdown), the daily
+/// chart, By model, Models, Subprojects, Sessions,
+/// then the project's own Budget. The shared cards are `DetailModalCards`.
+///
+/// Reads `ProjectDailyAggregate` and `SessionInfo` — both precomputed by the
+/// in-process scan's recomputers. The one exception is the raw-sample load
+/// behind Subprojects and the Models table (`loadDetail`): modal-only, off
+/// the main actor, and bounded by this project's path, the range and the
+/// account.
 struct ProjectDetailView: View {
     let projectPath: String
     let displayName: String
@@ -40,9 +40,9 @@ struct ProjectDetailView: View {
     }
     @Query private var globalSessionRows: [SessionInfo]
     @Query private var scopedSessionRows: [AccountSessionInfo]
-    /// Probe row for this project, if any. Drives the status badge
-    /// under the modal subtitle. Scoped via `init` so SwiftData
-    /// only fetches the one row we care about (path-keyed unique).
+    /// Probe row for this project, if any. Drives the git chip in the first
+    /// card's title row. Scoped via `init` so SwiftData only fetches the one
+    /// row we care about (path-keyed unique).
     @Query private var probesForThisProject: [ProjectPathProbe]
     /// Every project path Pacer has seen, bar `(unknown)` — drives the
     /// "Merge this into…" submenu and the bulk-merge sheet. Fetched on
@@ -60,46 +60,27 @@ struct ProjectDetailView: View {
     /// this…"). Preseeds this project as the canonical.
     @State private var bulkMergeDraft: BulkMergeDraft?
     @State private var mergeError: String?
-    /// Scan-completion trigger. The detail view doesn't subscribe to
-    /// the meta probe because the modal lifecycle is short and we
-    /// already refresh on `aggregates` change — but caching the
-    /// expensive computed properties below still pays off on chart
-    /// hover, range filter, and other in-modal re-renders.
 
-    /// Cached output of the per-row `JSONDecoder` walk that builds
-    /// `modelSlices`. The previous computed-property version decoded
-    /// two JSON blobs per `ProjectDailyAggregate` row (one for tokens,
-    /// one for costs) on every body render — and any chart hover or
-    /// state change re-evaluates the body. With ~90 rows per project
-    /// that's 180 decoder allocations per hover tick.
-    @State private var cachedModelSlices: [ModelSlice] = []
-    /// Cached output of the per-row `.map` that builds the chart's
-    /// daily series. Cheap to compute, but cached for the same
-    /// reason — avoids redundant work on chart hover.
-    @State private var cachedDailySeries: [DayPoint] = []
-    /// Cached totals. The summary tile-grid reads from this; the
-    /// previous version walked every aggregate on every render.
-    @State private var cachedTotals = Totals()
-    /// The project's cost by priced part over the range (#225), summed in
-    /// the same pass as the totals so it follows the same rows.
-    @State private var cachedBreakdown = CostBreakdown.zero
-    /// Bucket sums keyed by `originalProjectPath`. Computed in one
-    /// pass over the fetched samples, same shape as the other cached
-    /// derivations. Empty / one-element when there's no drill-down
-    /// to show.
-    @State private var cachedSubprojects: [SubprojectRow] = []
-    /// One Subprojects load at a time; a trigger that lands while one is
-    /// running sets `subprojectsRerun` and gets one more load afterwards.
+    /// What the rollup-backed cards draw, derived in one pass over the
+    /// project's rows (`refreshDerived`) rather than on every body pass: a
+    /// chart hover, a sort click or any other state change re-runs the body.
+    @State private var cachedDerived = Derived()
+    /// What the raw-sample load gives (`refreshDetail`): the Subprojects
+    /// rows, and the Models rows with every token part, which the rollup does
+    /// not keep per model. Empty until the first load lands.
+    @State private var cachedDetail = Detail()
+    /// One raw-sample load at a time; a trigger that lands while one is
+    /// running sets `detailRerun` and gets one more load afterwards.
     /// Cancelling is not an option: the load is a detached task, which is not
     /// cancelled with its parent, so "cancel and restart" left every
     /// superseded fetch running — overlapping raw-sample reads on a busy
     /// project, all competing with the scan for the store.
-    @State private var subprojectsLoading = false
-    @State private var subprojectsRerun = false
-    @State private var subprojectsClosed = false
-    /// Cost mode. Reactive @AppStorage so the Subprojects card
-    /// re-buckets immediately when the user toggles modes in
-    /// Settings (same pattern NowStrip uses).
+    @State private var detailLoading = false
+    @State private var detailRerun = false
+    @State private var detailClosed = false
+    /// Cost mode. Reactive @AppStorage so the raw-sample cards re-price
+    /// immediately when the user toggles modes in Settings (same pattern
+    /// NowStrip uses).
     @AppStorage(PacerSettings.Key.costMode, store: PacerSettings.store)
     private var costModeRaw: String = CostMode.auto.rawValue
 
@@ -108,7 +89,7 @@ struct ProjectDetailView: View {
     /// because the predicate is path-keyed unique.
     @Query private var budgetRows: [ProjectBudget]
 
-    /// The account the modal is scoped to, when it is — the Subprojects load
+    /// The account the modal is scoped to, when it is — the raw-sample load
     /// filters by it like every other card here.
     private let scopeAccountId: String?
 
@@ -187,96 +168,98 @@ struct ProjectDetailView: View {
         )
     }
 
-    private struct Totals {
-        var cost: Double = 0
-        var input: Int64 = 0
-        var output: Int64 = 0
-        var cacheRead: Int64 = 0
-    }
-
-    private var totals: Totals { cachedTotals }
-
-    private struct DayPoint: Identifiable {
-        let date: String
-        let cost: Double
-        let tokens: Int64
-        var id: String { date }
-    }
-
-    private var dailySeries: [DayPoint] { cachedDailySeries }
-
-    private struct ModelSlice: Identifiable {
-        let model: String
-        let tokens: Int64
-        let cost: Double
-        var id: String { model }
-    }
-
-    private var modelSlices: [ModelSlice] { cachedModelSlices }
-
-    /// One bucket of the Subprojects card. Built by walking
-    /// `samples` once and grouping on `originalProjectPath` — what
-    /// the JSONL's cwd was BEFORE worktree-strip/alias rewriting,
-    /// preserved on `TokenSample` exactly so we can drill back down.
-    struct SubprojectRow: Identifiable, Sendable {
-        /// The original cwd verbatim — used to bucket and as the
-        /// stable id.
-        let originalPath: String
-        /// Path relative to the canonical project root, e.g.
-        /// `local/potato`. Empty string for samples whose original
-        /// path IS the canonical (runs at repo root, or legacy
-        /// samples backfilled to canonical).
-        let relativeSubpath: String
-        let totalTokens: Int64
-        let cost: Double
-        let sessionCount: Int
-        var id: String { originalPath }
-    }
-
-    private var subprojects: [SubprojectRow] { cachedSubprojects }
-
-    /// Single derivation pass over `aggregates`. Builds totals,
-    /// daily series, and model slices in one shot rather than three
-    /// separate computed-property walks. Reuses one `JSONDecoder` for
-    /// the entire pass instead of allocating per row.
-    private func refreshDerived() {
-        var t = Totals()
+    /// The rollup-backed cards' values.
+    private struct Derived {
+        /// The project's cost by priced part over the range (#225): the
+        /// first card's big figure, its tokens and its breakdown.
         var breakdown = CostBreakdown.zero
-        var byModel: [String: (tokens: Int64, cost: Double)] = [:]
-        var days: [DayPoint] = []
-        days.reserveCapacity(aggregates.count)
-        let decoder = JSONDecoder()
-        for r in aggregates {
-            t.cost += r.totalCostUSD
-            t.input += r.inputTokens
-            t.output += r.outputTokens
-            t.cacheRead += r.cacheReadTokens
-            breakdown += r.costBreakdown
-            days.append(DayPoint(
-                date: r.date,
-                cost: r.totalCostUSD,
-                tokens: r.inputTokens + r.outputTokens
-            ))
-            if let tokens = try? decoder.decode([String: Int64].self, from: r.modelTokensJSON) {
-                for (model, tok) in tokens {
-                    byModel[model, default: (0, 0)].tokens += tok
-                }
-            }
-            if let costs = try? decoder.decode([String: Double].self, from: r.modelCostJSON) {
-                for (model, c) in costs {
-                    byModel[model, default: (0, 0)].cost += c
-                }
+        /// Days with a row, and the first and last of them (`yyyy-MM-dd`).
+        var activeDays = 0
+        var firstDay: String?
+        var lastDay: String?
+        /// The daily chart's bars, each with its breakdown and top models
+        /// precomputed for the hover card, so a hover decodes nothing.
+        var dailySeries: [PacerChartBucket] = []
+        /// Each model's five token parts and cost by part over the range,
+        /// summed from the rollup's per-model split (`modelBreakdowns`): By
+        /// model and the Models table, drawn with the rest of the modal.
+        var modelRows: [DetailModalCards.ModelRow] = []
+    }
+
+    /// The first card's strip: the range's days, each one's height what the
+    /// project cost that day, with its span and tooltips. Rebuilt with the
+    /// rows (`refreshDerived`), never in `body`.
+    private struct ActivitySummary {
+        var activity = PeriodActivity.empty
+        var span: String?
+        var axis: [PacerActivityStrip.AxisLabel] = []
+        var cellHelp: [String] = []
+    }
+    @State private var cachedActivity = ActivitySummary()
+
+    /// The raw-sample load's values, as rows: only Subprojects needs the
+    /// samples, for the cwd each ran in.
+    private struct Detail {
+        var subprojects: [PacerUsageRow<DetailPathExtra>] = []
+    }
+
+    /// The models By model and the Models table draw.
+    private var modelRows: [DetailModalCards.ModelRow] { cachedDerived.modelRows }
+
+    /// Single derivation pass over `aggregates`: the breakdown, the facts,
+    /// the daily series and each model's totals.
+    private func refreshDerived() {
+        let rows = aggregates
+        var d = Derived()
+        var byModel: [String: CostBreakdown] = [:]
+        var days = PacerChartBucketBuilder()
+        for r in rows {
+            d.breakdown += r.costBreakdown
+            // Decoded once per row; its models sum to the row, so the day's
+            // bar is the sum of its models' parts.
+            for (model, b) in r.modelBreakdowns {
+                days.add(r.date, b, model: model)
+                byModel[model, default: .zero] += b
             }
         }
-        cachedTotals = t
-        cachedBreakdown = breakdown
-        // Sort by date explicitly rather than leaning on the `@Query(sort:)`
-        // staying put — the band-date chart that plots this needs a
-        // chronological x-domain (same invariant as the Models trend).
-        cachedDailySeries = days.sorted { $0.date < $1.date }
-        cachedModelSlices = byModel.map { (model, v) in
-            ModelSlice(model: model, tokens: v.tokens, cost: v.cost)
-        }.sorted { $0.tokens > $1.tokens }
+        // The builder orders by date rather than leaning on the
+        // `@Query(sort:)` staying put — the band-date chart that plots this
+        // needs a chronological x-domain (same invariant as the Models trend).
+        d.dailySeries = days.buckets()
+        d.activeDays = d.dailySeries.count
+        d.firstDay = d.dailySeries.first?.id
+        d.lastDay = d.dailySeries.last?.id
+        d.modelRows = byModel.map { model, b in
+            DetailModalCards.modelRow(model: model, tokens: b.tokens, costParts: b.cost, cost: b.total)
+        }
+        cachedDerived = d
+        refreshActivity()
+    }
+
+    /// The strip from the cached daily series: each day's cost, the same
+    /// buckets the daily chart draws. The period runs from the range's first
+    /// day (`TimeRange.since`, exactly the range's N days; over all time, the
+    /// project's first active day) to today; the modal is closed at midnight
+    /// (`ContentView`'s `.id(dayKey)`), so today cannot turn under an open
+    /// one.
+    private func refreshActivity() {
+        let d = cachedDerived
+        let today: String = PacerToday.shared.key
+        guard let start = since.map(TokenSample.formatDate) ?? d.firstDay else {
+            cachedActivity = ActivitySummary()
+            return
+        }
+        var costByDay: [String: Double] = [:]
+        for day in d.dailySeries { costByDay[day.id] = day.total }
+        let end: String = max(today, d.lastDay ?? today)
+        let activity = PeriodActivity.days(
+            active: Set(costByDay.keys), cost: costByDay, from: start, through: end)
+        let year: Int = Calendar.current.component(.year, from: PacerClock.now)
+        cachedActivity = ActivitySummary(
+            activity: activity,
+            span: pacerActivitySpan(activity) { pacerFactDay($0, currentYear: year) },
+            axis: pacerDayAxis(activity, today: today, currentYear: year),
+            cellHelp: pacerActivityCellHelp(activity, currentYear: year))
     }
 
     /// Changes whenever a row `refreshDerived` reads changes: a new day
@@ -293,25 +276,31 @@ struct ProjectDetailView: View {
         var count = 0
         var tokens: Int64 = 0
         var cost = 0.0
+
+        /// The same rows and tokens at a new cost: a re-price, which the
+        /// raw-sample load must follow too (no sample changed, so no scan
+        /// notification says so).
+        func isRepricing(of old: AggregatesFingerprint) -> Bool {
+            count == old.count && tokens == old.tokens && cost != old.cost
+        }
     }
 
     private var aggregatesFingerprint: AggregatesFingerprint {
         var f = AggregatesFingerprint()
         for r in aggregates {
             f.count += 1
-            f.tokens += r.inputTokens + r.outputTokens + r.cacheReadTokens
+            f.tokens += r.tokens.all
             f.cost += r.totalCostUSD
         }
         return f
     }
 
-    /// Bucket `TokenSample`s for this project by `originalProjectPath`
-    /// to build the Subprojects card. Cost uses the shared
-    /// `effectiveCostUSD(mode:)` helper — same path
-    /// `ProjectDailyAggregate.totalCostUSD` follows — so subprojects
-    /// don't undercount when Claude Code didn't write `sourceCostUSD`
-    /// on the JSONL line (older builds, some entry types). Without
-    /// this every row of a `calculate`-mode user reads as $0.
+    /// Loads this project's raw samples for the two cards the rollups cannot
+    /// fill: Subprojects (by each sample's original cwd) and the Models table
+    /// (every token part per model; the rollup keeps only cost and uncached
+    /// tokens per model). Cost goes through `CostCalculator.sampleCost`, the
+    /// function the rollups are written with, so a model's cost here is the
+    /// cost By model and the first card add up.
     ///
     /// Why a manual fetch instead of `@Query`: a `@Query` for samples
     /// was the cause of a freeze-the-whole-modal bug. SwiftData's
@@ -319,10 +308,10 @@ struct ProjectDetailView: View {
     /// set on every body access (`samples.getter` was 67% of
     /// main-thread time in a `sample` trace), and the modal's body
     /// re-evaluates on every scan-cycle save (~2s) via the other
-    /// @Query bindings. A manual fetch driven by `.onAppear`,
-    /// aggregate count changes, the cost-mode setting, and the
-    /// `pacerScanCycleDidComplete` notification gives the same live-
-    /// update behavior with zero per-render cost.
+    /// @Query bindings. A manual fetch driven by `.onAppear`, the scope,
+    /// the cost-mode setting, a re-price and the `pacerScanCycleDidComplete`
+    /// notification gives the same live-update behavior with zero
+    /// per-render cost.
     ///
     /// Off the main actor, in its own `ModelContext`. This is the one read
     /// in the app that materializes raw samples, and a busy project over
@@ -331,13 +320,13 @@ struct ProjectDetailView: View {
     /// once as the modal opened (the click that "does nothing" for a
     /// second, then lands with every queued click behind it) and again on
     /// every scan cycle while the modal stayed open.
-    private func refreshSubprojects() {
-        guard !subprojectsClosed else { return }
-        guard !subprojectsLoading else {
-            subprojectsRerun = true
+    private func refreshDetail() {
+        guard !detailClosed else { return }
+        guard !detailLoading else {
+            detailRerun = true
             return
         }
-        subprojectsLoading = true
+        detailLoading = true
         let container = modelContext.container
         let path = projectPath
         let since = since
@@ -348,28 +337,46 @@ struct ProjectDetailView: View {
         let account = scope.accountId
         let mode = CostMode(rawValue: costModeRaw) ?? .auto
         Task {
-            let rows = await Task.detached(priority: .userInitiated) {
-                Self.loadSubprojects(container: container, projectPath: path,
-                                     since: since, accountId: account, mode: mode)
+            let load = await Task.detached(priority: .userInitiated) {
+                Self.loadDetail(container: container, projectPath: path,
+                                since: since, accountId: account, mode: mode)
             }.value
-            subprojectsLoading = false
-            guard !subprojectsClosed else { return }
-            cachedSubprojects = rows
-            if subprojectsRerun {
-                subprojectsRerun = false
-                refreshSubprojects()
+            detailLoading = false
+            guard !detailClosed else { return }
+            cachedDetail = Self.rows(load)
+            if detailRerun {
+                detailRerun = false
+                refreshDetail()
             }
         }
     }
 
-    private nonisolated static func loadSubprojects(
+    /// What `loadDetail` sums, as plain values: it runs off the main actor.
+    struct DetailLoad: Sendable {
+        struct Path: Sendable {
+            /// Where in the repo the work ran, worktrees folded in
+            /// (`ProjectPathCanonicalizer.subproject`), e.g. `packages/api`.
+            /// Empty for the repo root. The bucket and the row's id.
+            let subpath: String
+            /// Worktrees (other checkouts) that contributed to this subpath.
+            let worktrees: Int
+            let tokens: TokenBreakdown
+            let costParts: CostComponents
+            let sessions: Int
+        }
+
+        var paths: [Path] = []
+    }
+
+    private nonisolated static func loadDetail(
         container: ModelContainer, projectPath: String, since: Date?,
         accountId: String?, mode: CostMode
-    ) -> [SubprojectRow] {
+    ) -> DetailLoad {
         struct Acc {
-            var tokens: Int64 = 0
-            var cost: Double = 0
+            var tokens = TokenBreakdown.zero
+            var cost = CostComponents.zero
             var sessions: Set<String> = []
+            var worktrees: Set<String> = []
         }
         let context = ModelContext(container)
         let path = projectPath
@@ -401,8 +408,11 @@ struct ProjectDetailView: View {
             \.cacheCreation1hTokens,
             \.sourceCostUSD,
             \.sessionId,
-            // Priced at the rate in effect when each turn was made.
+            // Priced at the rate in effect when each turn was made, for its
+            // speed and residency, as the rollups price it.
             \.sampledAt,
+            \.speed,
+            \.inferenceGeo,
         ]
         let samples = (try? context.fetch(sampleDesc)) ?? []
         // What `TokenSample.effectiveCostUSD(mode:)` computes, which is
@@ -410,70 +420,76 @@ struct ProjectDetailView: View {
         let pricing = SampleCostCache.current()
         var byPath: [String: Acc] = [:]
         for s in samples {
-            // Fall back to the canonical when originalProjectPath
-            // is nil (rows inserted before the field existed and
-            // missed the migration somehow). This keeps them
-            // counted instead of silently dropped — they just
-            // bucket under the canonical's "root" row.
-            let key = s.originalProjectPath ?? projectPath
-            var a = byPath[key] ?? Acc()
-            a.tokens += s.inputTokens + s.outputTokens
-            a.cost += CostCalculator.cost(s, mode: mode, snapshot: pricing)
+            let tokens = s.breakdown
+            let cost = CostCalculator.sampleCost(s, mode: mode, snapshot: pricing).components
+            // Bucket by where in the repo the work ran, with worktrees folded
+            // into the subfolder they are a checkout of: one row per real
+            // subproject, not one per worktree. A nil originalProjectPath
+            // (a row from before the field existed that missed the
+            // backfill) counts as the root rather than being dropped.
+            let place = ProjectPathCanonicalizer.subproject(
+                of: s.originalProjectPath ?? projectPath, in: projectPath)
+            var a = byPath[place.subpath] ?? Acc()
+            a.tokens += tokens
+            a.cost += cost
             if let sid = s.sessionId, !sid.isEmpty { a.sessions.insert(sid) }
-            byPath[key] = a
+            if let w = place.worktree { a.worktrees.insert(w) }
+            byPath[place.subpath] = a
         }
-        let rows: [SubprojectRow] = byPath.map { (key, a) in
-            SubprojectRow(
-                originalPath: key,
-                relativeSubpath: relativeSubpath(canonical: projectPath, from: key),
-                totalTokens: a.tokens,
-                cost: a.cost,
-                sessionCount: a.sessions.count
-            )
+        var load = DetailLoad()
+        load.paths = byPath.map { key, a in
+            DetailLoad.Path(
+                subpath: key, worktrees: a.worktrees.count,
+                tokens: a.tokens, costParts: a.cost, sessions: a.sessions.count)
         }
-        // Highest-cost subdir first — matches the natural "what did
-        // I spend my budget on" reading order. Stable tiebreaker on
-        // path so a re-derivation doesn't shuffle equal-cost rows.
-        return rows.sorted { lhs, rhs in
-            if lhs.cost != rhs.cost { return lhs.cost > rhs.cost }
-            if lhs.totalTokens != rhs.totalTokens { return lhs.totalTokens > rhs.totalTokens }
-            return lhs.originalPath < rhs.originalPath
-        }
+        return load
     }
 
-    /// Trim the canonical project's prefix off a sample's original
-    /// path. `/Users/.../support-infra/local/potato` → `local/potato`
-    /// when called with canonical `/Users/.../support-infra`. Empty
-    /// string when the paths are equal (sample was taken at repo
-    /// root, not a subdir).
-    private nonisolated static func relativeSubpath(canonical: String, from descendant: String) -> String {
-        guard canonical != descendant else { return "" }
-        let normalizedCanon = canonical.hasSuffix("/") ? String(canonical.dropLast()) : canonical
-        let prefix = normalizedCanon + "/"
-        if descendant.hasPrefix(prefix) {
-            return String(descendant.dropFirst(prefix.count))
-        }
-        // Doesn't share the canonical's prefix — fall back to the
-        // path's basename so the user has something readable.
-        return (descendant as NSString).lastPathComponent
+    /// The load as table rows; the tables sort them themselves.
+    private static func rows(_ load: DetailLoad) -> Detail {
+        Detail(
+            subprojects: load.paths.map { p in
+                // An empty subpath is work at the repo root; label it so the
+                // row reads as intentional, not as a missing field.
+                PacerUsageRow(
+                    id: p.subpath,
+                    label: p.subpath.isEmpty ? "(root)" : p.subpath,
+                    subtitle: p.worktrees == 0 ? nil
+                        : "+\(p.worktrees) worktree\(p.worktrees == 1 ? "" : "s")",
+                    tokens: p.tokens, costParts: p.costParts,
+                    extra: DetailPathExtra(sessions: p.sessions))
+            })
     }
 
     var body: some View {
         // Every cache the cards draw from, read here in this view's own body.
         // The cards read them inside `PacerModalContent`'s stored content
         // closure, and a read there may not make this view depend on them,
-        // which is the shape of the modal bug #150 fixed. Subprojects most of
-        // all: it fills in asynchronously, after the modal is on screen, and
-        // the other three now change while it's open (#145). (#140)
-        let _ = (cachedTotals, cachedBreakdown, cachedDailySeries, cachedModelSlices, cachedSubprojects)
+        // which is the shape of the modal bug #150 fixed. The raw-sample
+        // cards most of all: they fill in asynchronously, after the modal is
+        // on screen, and the rest change while it's open (#145). (#140)
+        let derived = cachedDerived
+        let detail = cachedDetail
+        let models = modelRows
         // Presentation state, read here so setting it redraws this view and
         // what it presents opens at once. Passed only as a binding, nothing
         // read it: the collections sheet opened only after an unrelated
         // redraw, seconds later (#140; AGENTS.md, "SwiftUI state and data flow").
         let _ = (bulkMergeDraft?.id, mergeError)
-        // The Sessions sort reaches its table only as bindings; read here so
-        // clicking a header re-sorts at once.
-        let _ = (sessionsSortRaw, sessionsSortDescending)
+        // The sorts are read inside the cards, in that stored closure; read
+        // here so clicking a header re-sorts at once.
+        let modelShareSort = DetailModalCards.sort(stored: modelShareSortRaw, descending: modelShareSortDescending)
+        let modelsSort = DetailModalCards.sort(stored: modelsSortRaw, descending: modelsSortDescending)
+        let subprojectsSort = DetailModalCards.sort(stored: subprojectsSortRaw, descending: subprojectsSortDescending,
+                                                    own: [DetailPathExtra.sessions])
+        let sessionsSort = PacerSessionsTable.sort(stored: sessionsSortRaw, descending: sessionsSortDescending)
+        let sessions = sessionRows
+        // The cached rows, or on the first frame (before `.onChange` has run)
+        // the same rows built once here, so the card opens full.
+        let sessionTable = sessionTableRows.isEmpty && !sessions.isEmpty
+            ? PacerSessionsTable.rows(sessions) : sessionTableRows
+        let summary = summaryModel(derived, cachedActivity, models: models.count, sessions: sessions.count)
+        let status = detailStatus
         PacerModalContent(
             title: displayName,
             subtitle: projectPath,
@@ -497,64 +513,80 @@ struct ProjectDetailView: View {
                 }
             }
         ) {
-            // Status badge — same shape as the Projects-list pill.
-            // Sits above the summary card so the user sees "git /
-            // on-disk / missing" at the same glance as the cost
-            // headline. Lightweight (one HStack, one badge) so it
-            // doesn't compete with the cards below.
-            HStack(spacing: 6) {
-                ProjectStatusBadge(state: detailStatus)
-                Spacer()
+            // The git chip in the first card's title row, where round 4 gave
+            // it a row of its own above the card.
+            PacerSummaryCard(model: summary) {
+                ProjectStatusBadge(state: status)
             }
-            summaryCard
-            if PacerCostBreakdownView.hasContent(cachedBreakdown) { breakdownCard }
+            if !derived.dailySeries.isEmpty { dailyChartCard(derived.dailySeries) }
+            if !models.isEmpty {
+                DetailModalCards.modelShareCard(
+                    rows: models, sort: modelShareSort, subject: displayName,
+                    onSort: { modelShareSortRaw = $0.column; modelShareSortDescending = $0.descending })
+            }
+            // From the rollup's per-model split, so it draws with the rest.
+            if !models.isEmpty {
+                DetailModalCards.modelsTableCard(
+                    rows: models, tableId: "projectDetail.models", sort: modelsSort,
+                    onSort: { modelsSortRaw = $0.column; modelsSortDescending = $0.descending })
+            }
+            // Hidden when there's only one bucket (no drill-down value).
+            if detail.subprojects.count > 1 { subprojectsCard(detail.subprojects, sort: subprojectsSort) }
+            if !sessions.isEmpty {
+                DetailModalCards.sessionsCard(
+                    rows: sessionTable, tableId: "projectDetail.sessions", showProject: false,
+                    sort: sessionsSort,
+                    onSort: { sessionsSortRaw = $0.column; sessionsSortDescending = $0.descending },
+                    onOpen: { row in
+                        push(.session(sessionId: row.id, projectDisplayName: displayName))
+                    })
+            }
+            // The project's own settings, after everything the two modals
+            // share, so the shared cards keep one order.
             budgetCard
-            if !dailySeries.isEmpty { dailyChartCard }
-            // Subprojects card lands between the daily chart and the
-            // model breakdown — it's a structural break-out ("what
-            // parts of this project ate the budget") so it reads
-            // naturally between "when did I work" and "with which
-            // model." Hidden when there's only one bucket (no
-            // drill-down value).
-            if subprojects.count > 1 { subprojectsCard }
-            if !modelSlices.isEmpty { modelsCard }
-            if !sessionRows.isEmpty { sessionsCard }
         }
         .onAppear {
             refreshDerived()
-            refreshSubprojects()
+            refreshDetail()
             refreshKnownProjectPaths()
         }
-        // Totals, daily series and model slices follow the rows they are
-        // built from. See `aggregatesFingerprint`.
-        .onChange(of: aggregatesFingerprint) { _, _ in refreshDerived() }
+        // The session rows are live `@Query` results (scans, a scope switch
+        // re-reading the other table); the table's rows follow them.
+        .onChange(of: sessions, initial: true) { _, new in
+            sessionTableRows = PacerSessionsTable.rows(new)
+        }
+        // The first card, the daily chart and By model follow the rows they
+        // are built from. See `aggregatesFingerprint`. A re-price changes no
+        // sample, so the raw-sample cards hear about it here too.
+        .onChange(of: aggregatesFingerprint) { old, new in
+            refreshDerived()
+            if new.isRepricing(of: old) { refreshDetail() }
+        }
         // The scope picks which table `aggregates` reads (so the fingerprint
-        // follows it) and filters Subprojects, which needs telling. It only
-        // refreshed on a scope switch because the switch usually changed the
-        // row count and `refreshDerived` used to chain into it.
-        .onChange(of: scope.accountId) { _, _ in refreshSubprojects() }
+        // follows it) and filters the raw-sample load, which needs telling.
+        .onChange(of: scope.accountId) { _, _ in refreshDetail() }
         // Live updates within an existing day: the scan coordinator
         // posts `pacerScanCycleDidComplete` whenever a cycle actually
         // wrote new data. Filter to cycles that touched samples or
         // re-attributed projects — rate-limit-only cycles don't
-        // change the Subprojects card. Subprojects needs this explicit
-        // refresh because its source (raw TokenSample) is not a @Query
-        // (see refreshSubprojects); the rollup-backed cards follow
+        // change the raw-sample cards. They need this explicit refresh
+        // because their source (raw TokenSample) is not a @Query (see
+        // refreshDetail); the rollup-backed cards follow
         // `aggregatesFingerprint`.
         .onReceive(NotificationCenter.default.publisher(
             for: .pacerScanCycleDidComplete
         )) { note in
             guard let summary = note.object as? ScanCycleSummary else { return }
             if summary.samplesChanged || summary.projectAttributionChanged {
-                refreshSubprojects()
+                refreshDetail()
             }
             if summary.projectAttributionChanged { refreshKnownProjectPaths() }
         }
-        // Cost-mode toggle in Settings must re-bucket the
-        // Subprojects card — `effectiveCostUSD(mode:)` flips between
-        // stored / calculated / auto fallbacks.
-        .onChange(of: costModeRaw) { _, _ in refreshSubprojects() }
-        .onDisappear { subprojectsClosed = true }
+        // Cost-mode toggle in Settings must re-price the raw-sample cards —
+        // `CostCalculator.sampleCost(mode:)` flips between stored /
+        // calculated / auto fallbacks.
+        .onChange(of: costModeRaw) { _, _ in refreshDetail() }
+        .onDisappear { detailClosed = true }
         .sheet(item: $bulkMergeDraft) { draft in
             BulkMergeSheet(
                 knownPaths: knownProjectPathsForBulkMerge,
@@ -574,7 +606,7 @@ struct ProjectDetailView: View {
             Button("Merge") { quickMerge(into: target) }
             Button("Cancel", role: .cancel) { pendingMergeTarget = nil }
         } message: { target in
-            Text("Existing samples for \(pacerShortPath(projectPath)) will be re-attributed to \(pacerShortPath(target)) on the next scan cycle. You can undo from Settings → Project Aliases.")
+            Text(Self.mergeMessage(from: projectPath, into: target))
         }
         .alert(
             "Could not merge",
@@ -584,6 +616,15 @@ struct ProjectDetailView: View {
         } message: {
             Text(mergeError ?? "")
         }
+    }
+
+    /// The quick-merge dialog's message, built outside `body`'s modifier
+    /// chain: inline, its interpolation pushed that one long expression past
+    /// the type checker's time limit.
+    private static func mergeMessage(from source: String, into target: String) -> String {
+        let from: String = pacerShortPath(source)
+        let to: String = pacerShortPath(target)
+        return "Existing samples for \(from) will be re-attributed to \(to) on the next scan cycle. You can undo from Settings → Project Aliases."
     }
 
     // MARK: - Project status
@@ -729,355 +770,97 @@ struct ProjectDetailView: View {
         })
     }
 
-    private var summaryCard: some View {
-        let t = totals
-        return PacerCard("Summary") {
-            LazyVGrid(
-                columns: Array(
-                    repeating: GridItem(.flexible(), spacing: 16, alignment: .topLeading),
-                    count: 5
-                ),
-                alignment: .leading,
-                spacing: 12
-            ) {
-                MetricTile(
-                    value: pacerCost(t.cost), label: "cost", size: .hero,
-                    tooltip: pacerCostExact(t.cost)
-                )
-                MetricTile(
-                    value: pacerTokens(t.input), label: "input",
-                    tooltip: pacerTokensExact(t.input)
-                )
-                MetricTile(
-                    value: pacerTokens(t.output), label: "output",
-                    tooltip: pacerTokensExact(t.output)
-                )
-                MetricTile(
-                    value: pacerTokens(t.cacheRead), label: "cache read",
-                    tooltip: pacerTokensExact(t.cacheRead)
-                )
-                MetricTile(value: "\(aggregates.count)", label: "active days")
-            }
-        }
+
+    // MARK: - First card
+
+    /// The first card: the range's cost, two counts and the average, and
+    /// its days as a strip (which had use, each one's height its sessions).
+    /// Sessions come from the live session rows (distinct sessions, which a
+    /// sum of per-day session counts is not), the rest from the caches. Each
+    /// count is printed here only; the cards below carry none in their
+    /// headers.
+    private func summaryModel(
+        _ d: Derived, _ a: ActivitySummary, models: Int, sessions: Int
+    ) -> PacerSummaryModel {
+        let perDay: Double = d.activeDays > 0 ? d.breakdown.total / Double(d.activeDays) : 0
+        return PacerSummaryModel(
+            breakdown: d.breakdown,
+            stats: [
+                PacerSummaryFact("sessions", "\(sessions)"),
+                PacerSummaryFact("models", "\(models)"),
+                PacerSummaryFact("per active day", d.activeDays > 0 ? pacerCost(perDay) : "–",
+                                 help: d.activeDays > 0 ? pacerCostExact(perDay) : nil),
+            ],
+            activity: a.activity,
+            span: a.span,
+            axis: a.axis,
+            cellHelp: a.cellHelp)
     }
 
-    /// Which of the five priced parts made up the project's cost over the
-    /// range (#225) — the shared `PacerCostBreakdownView`, the same one Day
-    /// detail and the Models tab use.
-    private var breakdownCard: some View {
-        PacerCard("Cost breakdown") {
-            PacerCostBreakdownView(cachedBreakdown)
-        }
-    }
-
-    // MARK: - Subprojects card
-
-    private var subprojectsCard: some View {
-        let totalTokens = subprojects.reduce(Int64(0)) { $0 + $1.totalTokens }
-        return PacerCard("Subprojects", trailing: {
-            Text("\(subprojects.count) sub-paths")
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-        }) {
-            VStack(alignment: .leading, spacing: 6) {
-                subprojectsHeader
-                Divider().padding(.vertical, 2)
-                ForEach(subprojects) { row in
-                    subprojectRow(row, totalTokens: totalTokens)
-                }
-            }
-        } footer: {
-            Text("Sub-paths come from each sample's original cwd (before alias/worktree canonicalization). Cost shown is what Claude Code reported in the JSONL — historical lines without a stored cost contribute $0 here.")
-        }
-    }
-
-    private var subprojectsHeader: some View {
-        HStack(alignment: .firstTextBaseline) {
-            Eyebrow(text: "Subpath")
-                .frame(maxWidth: .infinity, alignment: .leading)
-            Eyebrow(text: "Tokens")
-                .frame(width: 100, alignment: .trailing)
-            Eyebrow(text: "Sessions")
-                .frame(width: 70, alignment: .trailing)
-            Eyebrow(text: "Cost")
-                .frame(width: 84, alignment: .trailing)
-        }
-        .padding(.horizontal, 4)
-    }
-
-    @ViewBuilder
-    private func subprojectRow(_ row: SubprojectRow, totalTokens: Int64) -> some View {
-        HStack(alignment: .firstTextBaseline) {
-            VStack(alignment: .leading, spacing: 2) {
-                // Empty `relativeSubpath` means "samples taken at
-                // the repo root, not a subdir" — label it
-                // explicitly so a (root) row reads as
-                // intentional, not as a missing field.
-                Text(row.relativeSubpath.isEmpty ? "(root)" : row.relativeSubpath)
-                    .font(.system(size: 12, weight: .medium))
-                    .lineLimit(1)
-                Text(row.originalPath)
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-            Spacer(minLength: 8)
-            VStack(alignment: .trailing, spacing: 2) {
-                Text(pacerTokens(row.totalTokens)).help(pacerTokensExact(row.totalTokens))
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-                if totalTokens > 0 {
-                    Text("\(Int((Double(row.totalTokens) / Double(totalTokens) * 100).rounded()))%")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.tertiary)
-                        .monospacedDigit()
-                }
-            }
-            .frame(width: 100, alignment: .trailing)
-            Text("\(row.sessionCount)")
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-                .monospacedDigit()
-                .frame(width: 70, alignment: .trailing)
-            Text(pacerCost(row.cost)).help(pacerCostExact(row.cost))
-                .font(.system(size: 13, weight: .semibold, design: .rounded))
-                .monospacedDigit()
-                .frame(width: 84, alignment: .trailing)
-        }
-        .padding(.vertical, 2)
-        .padding(.horizontal, 4)
-    }
-
-    /// Debounced hover (chart RuleMark + reads). Updated from
-    /// `rawHoveredDate` only once the pointer settles, so a scroll sweeping
-    /// the bars doesn't re-lay-out the chart per pointer event. See
-    /// docs/perf-tuning.md.
-    @State private var hoveredDate: String?
-    /// Raw `chartXSelection` binding (immediate); feeds the debounce + tap.
-    @State private var rawHoveredDate: String?
-    @State private var hoveredDateDebounce: Task<Void, Never>?
-
-    private var dailyChartCard: some View {
-        PacerCard("Daily activity", trailing: {
-            // Hover swaps the trailing slot to show the selected
-            // bar's date + cost — same pattern as DailyCostChartCard.
-            // Keeps the chart's plot area a fixed height regardless of
-            // hover state; the previous "annotation on rule mark" path
-            // pushed the bars up and down on every hover.
-            if let d = hoveredDate, let row = dailySeries.first(where: { $0.date == d }) {
-                HStack(spacing: 8) {
-                    Text(row.date)
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                    Text(pacerCost(row.cost)).help(pacerCostExact(row.cost))
-                        .font(.system(size: 12, weight: .semibold, design: .rounded))
-                        .monospacedDigit()
-                }
-            }
-        }) {
-            Chart {
-                ForEach(dailySeries) { d in
-                    BarMark(
-                        x: .value("Date", d.date),
-                        y: .value("Cost", d.cost)
-                    )
-                    .foregroundStyle(.tint)
-                    .cornerRadius(1.5)
-                }
-                if let h = hoveredDate, dailySeries.contains(where: { $0.date == h }) {
-                    RuleMark(x: .value("Selected", h))
-                        .foregroundStyle(.secondary.opacity(0.5))
-                        .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 2]))
-                }
-            }
-            .frame(height: 160)
-            .chartYAxis {
-                AxisMarks(position: .leading) { value in
-                    AxisGridLine().foregroundStyle(.secondary.opacity(0.18))
-                    AxisValueLabel {
-                        if let v = value.as(Double.self) {
-                            Text(pacerCost(v)).help(pacerCostExact(v))
-                                .font(.system(size: 9))
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
-            }
-            .chartXAxis {
-                // Show every Nth date label so the axis isn't crowded
-                // on long ranges. With ~90 days at default range, 10
-                // strides ≈ 9 labels; reads well at the card's width.
-                AxisMarks(values: stridedDailySeriesDates(every: max(dailySeries.count / 9, 1))) { value in
-                    AxisValueLabel {
-                        if let date = value.as(String.self),
-                           dailyAxisMarks.contains(date) {
-                            Text(shortDailyDate(date))
-                                .font(.system(size: 9))
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
-            }
-            .chartXSelection(value: $rawHoveredDate)
-            .onChange(of: rawHoveredDate) { _, newValue in
-                hoveredDateDebounce?.cancel()
-                hoveredDateDebounce = Task { @MainActor in
-                    try? await Task.sleep(for: .milliseconds(40))
-                    guard !Task.isCancelled else { return }
-                    hoveredDate = newValue
-                }
-            }
-            // Arrow cursor (default) per macOS HIG — clickable charts
-            // don't warrant the link cursor.
-            .contentShape(Rectangle())
-            .onTapGesture {
-                // Immediate selection, not the debounced one — the 40ms
-                // debounce may not have committed `hoveredDate` yet on tap.
-                if let d = rawHoveredDate {
-                    push(.day(date: d))
-                }
-            }
+    /// The project's cost per active day, stacked by part — the shared
+    /// `PacerStackedPartChart`, with the same hover card as every cost chart.
+    /// Its top models are by cost, from the rollup's per-model split.
+    /// Clicking a bar opens that day.
+    private func dailyChartCard(_ series: [PacerChartBucket]) -> some View {
+        PacerCard("Daily activity") {
+            PacerStackedPartChart(series, kind: .day, onTap: { date in
+                push(.day(date: date))
+            })
             .accessibilityLabel("Daily cost for \(displayName)")
             .accessibilityHint("Click a bar to drill into that day")
         }
     }
 
-    private func stridedDailySeriesDates(every n: Int) -> [String] {
-        guard !dailySeries.isEmpty, n > 0 else { return [] }
-        return stride(from: 0, to: dailySeries.count, by: n).map { dailySeries[$0].date }
-    }
+    // MARK: - Tables
 
-    /// The same dates as a set, for deciding label-by-label whether to draw.
-    ///
-    /// `AxisMarks(values:)` is not honoured on a band axis from macOS 26 on —
-    /// every date gets a mark — so the stride has to be enforced in the label
-    /// content too or a long range renders every date overlapping. Same
-    /// reasoning as `PacerDateAxis.labelIfMarked`, which the charts built on
-    /// the shared helper use.
-    private var dailyAxisMarks: Set<String> {
-        Set(stridedDailySeriesDates(every: max(dailySeries.count / 9, 1)))
-    }
+    /// By model's sort (which also turns its ring), and the Models and
+    /// Subprojects tables' sorts. The Models table keeps the key By model
+    /// used to have: a stored sort on its old "In + out" column falls back
+    /// to cost (`DetailModalCards.sort`).
+    @AppStorage("pacer.projectDetail.modelShareSort", store: PacerSettings.store)
+    private var modelShareSortRaw: String = UsageColumn.cost.rawValue
+    @AppStorage("pacer.projectDetail.modelShareSortDescending", store: PacerSettings.store)
+    private var modelShareSortDescending: Bool = true
 
-    /// `2026-04-30` → `04-30`. Year omitted at this density; user
-    /// already has page context (the project detail header shows the
-    /// time range).
-    private func shortDailyDate(_ ymd: String) -> String {
-        guard ymd.count == 10 else { return ymd }
-        return String(ymd.suffix(5))
-    }
+    @AppStorage("pacer.projectDetail.modelsSort", store: PacerSettings.store)
+    private var modelsSortRaw: String = UsageColumn.cost.rawValue
+    @AppStorage("pacer.projectDetail.modelsSortDescending", store: PacerSettings.store)
+    private var modelsSortDescending: Bool = true
 
-    @State private var hoveredModelAngle: Double?
+    @AppStorage("pacer.projectDetail.subprojectsSort", store: PacerSettings.store)
+    private var subprojectsSortRaw: String = UsageColumn.cost.rawValue
+    @AppStorage("pacer.projectDetail.subprojectsSortDescending", store: PacerSettings.store)
+    private var subprojectsSortDescending: Bool = true
 
-    /// VoiceOver alternative to the model donut — per-model token share
-    /// read as a comma list.
-    private func modelSlicesSummary(total: Int64) -> String {
-        guard total > 0 else { return "no data" }
-        return modelSlices.prefix(5).map { m in
-            let pct = Int(Double(m.tokens) / Double(total) * 100)
-            return "\(pacerModelDisplayName(m.model)) \(pct) percent"
-        }.joined(separator: ", ")
-    }
-
-    private var hoveredModelSlice: ModelSlice? {
-        guard let angle = hoveredModelAngle, !modelSlices.isEmpty else { return nil }
-        var cumulative = 0.0
-        for slice in modelSlices {
-            cumulative += Double(slice.tokens)
-            if angle <= cumulative { return slice }
-        }
-        return modelSlices.last
-    }
-
-    private var modelsCard: some View {
-        let total = modelSlices.reduce(Int64(0)) { $0 + $1.tokens }
-        return PacerCard("Models", trailing: {
-            if let m = hoveredModelSlice {
-                let pct = total > 0 ? Int(Double(m.tokens) / Double(total) * 100) : 0
-                HStack(spacing: 6) {
-                    Text(pacerModelDisplayName(m.model))
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
-                    Text(pacerTokens(m.tokens)).help(pacerTokensExact(m.tokens))
-                        .font(.system(size: 12, weight: .semibold, design: .rounded))
-                        .monospacedDigit()
-                    Text("(\(pct)%)")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.tertiary)
+    /// Where in the project the cost went, by each turn's original cwd
+    /// (before alias and worktree canonicalization): the shared paths table,
+    /// as Day detail lists its projects.
+    private func subprojectsCard(_ rows: [PacerUsageRow<DetailPathExtra>], sort: PacerUsageSort) -> some View {
+        DetailModalCards.pathsTableCard(
+            "Subprojects",
+            labelTitle: "Subpath",
+            rows: rows,
+            tableId: "projectDetail.subprojects",
+            sort: sort,
+            onSort: { subprojectsSortRaw = $0.column; subprojectsSortDescending = $0.descending },
+            rowMenu: { row in
+                Button("Reveal in Finder") {
+                    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: row.id)])
                 }
-            }
-        }) {
-            HStack(alignment: .top, spacing: 24) {
-                PacerDonut(
-                    slices: modelSlices.map {
-                        PacerDonutSlice(id: pacerShortModel($0.model), value: Double($0.tokens),
-                                        color: pacerModelColor($0.model))
-                    },
-                    hoveredID: hoveredModelSlice.map { pacerShortModel($0.model) },
-                    hoveredAngle: $hoveredModelAngle,
-                    accessibilityLabel: "Model share for \(displayName)",
-                    accessibilityValue: modelSlicesSummary(total: total)
-                )
-                VStack(alignment: .leading, spacing: 6) {
-                    ForEach(modelSlices) { m in
-                        PacerDonutLegendRow(
-                            color: pacerModelColor(m.model),
-                            label: pacerModelDisplayName(m.model)
-                        ) {
-                            Text(pacerTokens(m.tokens)).help(pacerTokensExact(m.tokens))
-                                .font(.system(size: 11))
-                                .foregroundStyle(.secondary)
-                                .monospacedDigit()
-                            if total > 0 {
-                                Text("\(Int(Double(m.tokens) / Double(total) * 100))%")
-                                    .font(.system(size: 11))
-                                    .foregroundStyle(.tertiary)
-                                    .monospacedDigit()
-                                    .frame(width: 36, alignment: .trailing)
-                            }
-                        }
-                    }
-                }
-            }
-        }
+                Divider()
+                Button("Copy path") { pacerCopyToPasteboard(row.id) }
+                Button("Copy cost") { pacerCopyToPasteboard(pacerCostExact(row.cost)) }
+            })
     }
 
     @AppStorage("pacer.projectDetail.sessionsSortField", store: PacerSettings.store)
-    private var sessionsSortRaw: String = SessionsTableSort.lastSeen.rawValue
+    private var sessionsSortRaw: String = PacerSessionExtra.lastSeen
     @AppStorage("pacer.projectDetail.sessionsSortDescending", store: PacerSettings.store)
     private var sessionsSortDescending: Bool = true
 
-    private var sessionsSort: SessionsTableSort {
-        SessionsTableSort(rawValue: sessionsSortRaw) ?? .lastSeen
-    }
-    private var sessionsSortBinding: Binding<SessionsTableSort> {
-        Binding(get: { sessionsSort }, set: { sessionsSortRaw = $0.rawValue })
-    }
-
-    private var sessionsCard: some View {
-        PacerCard("Sessions", trailing: {
-            Text("\(sessionRows.count) total")
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-        }) {
-            // Single shared sortable table. Project-detail hides the
-            // "Project" column since the modal is already scoped to
-            // one project; day-detail enables the same column.
-            SessionsTable(
-                rows: sessionRows,
-                showProjectColumn: false,
-                sort: sessionsSortBinding,
-                sortDescending: $sessionsSortDescending,
-                onSessionTap: { session in
-                    push(.session(
-                        sessionId: session.sessionId,
-                        projectDisplayName: displayName
-                    ))
-                }
-            )
-        }
-    }
+    /// The Sessions table's rows, rebuilt when the project's sessions change
+    /// (a scan, a scope switch) rather than on every body pass.
+    @State private var sessionTableRows: [PacerSessionsTable.Row] = []
 }
 
 // MARK: - Budget editor

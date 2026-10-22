@@ -71,7 +71,7 @@ public enum AccountParallelism {
         let today = TokenSample.formatDate(now)
         let rows = (try? context.fetch(FetchDescriptor<AccountDailyAggregate>(
             predicate: #Predicate { $0.date == today }))) ?? []
-        return Set(rows.filter { $0.totalTokens > 0 }.map(\.accountId)).count
+        return Set(rows.filter { $0.tokens.all > 0 }.map(\.accountId)).count
     }
 
     /// The activation trail. A small table — one row per switch — so this is a

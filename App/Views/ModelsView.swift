@@ -14,8 +14,12 @@ struct ModelsView: View {
     @AppStorage("pacer.models.range", store: PacerSettings.store)
     private var rangeRaw: String = TimeRange.ninetyDays.rawValue
 
+    /// The table's sort: a column id (`UsageColumn` raw value, or "days" /
+    /// "lastSeen" / "mix") and a direction. Same keys as before the shared
+    /// table, whose column ids reuse the old raw values, so a stored sort
+    /// carries over.
     @AppStorage("pacer.models.sortField", store: PacerSettings.store)
-    private var sortRaw: String = ModelsSort.cost.rawValue
+    private var sortRaw: String = UsageColumn.cost.rawValue
 
     @AppStorage("pacer.models.sortDescending", store: PacerSettings.store)
     private var sortDescending: Bool = true
@@ -23,25 +27,26 @@ struct ModelsView: View {
     @State private var modalRoot: PacerModalDestination?
 
     private var range: TimeRange { TimeRange(rawValue: rangeRaw) ?? .ninetyDays }
-    private var sort: ModelsSort { ModelsSort(rawValue: sortRaw) ?? .cost }
 
     private var rangeBinding: Binding<TimeRange> {
         Binding(get: { range }, set: { rangeRaw = $0.rawValue })
     }
-    private var sortFieldBinding: Binding<ModelsSort> {
-        Binding(get: { sort }, set: { sortRaw = $0.rawValue })
-    }
 
+    /// The Share card's sort: what its list ranks by and its ring measures.
+    /// The key is the old metric picker's, whose values ("tokens", "cost")
+    /// are the column ids the list sorts by, so the metric a user picked is
+    /// the column the card opens sorted by.
     @AppStorage("pacer.models.metric", store: PacerSettings.store)
-    private var metricRaw: String = ModelMetric.tokens.rawValue
+    private var shareSortRaw: String = UsageColumn.tokens.rawValue
+    @AppStorage("pacer.models.shareSortDescending", store: PacerSettings.store)
+    private var shareSortDescending: Bool = true
     @AppStorage("pacer.models.grouping", store: PacerSettings.store)
     private var groupingRaw: String = ModelGrouping.none.rawValue
 
-    private var metric: ModelMetric { ModelMetric(rawValue: metricRaw) ?? .tokens }
-    private var grouping: ModelGrouping { ModelGrouping(rawValue: groupingRaw) ?? .none }
-    private var metricBinding: Binding<ModelMetric> {
-        Binding(get: { metric }, set: { metricRaw = $0.rawValue })
+    private var shareSort: PacerUsageSort {
+        PacerUsageSort(column: shareSortRaw, descending: shareSortDescending)
     }
+    private var grouping: ModelGrouping { ModelGrouping(rawValue: groupingRaw) ?? .none }
     private var groupingBinding: Binding<ModelGrouping> {
         Binding(get: { grouping }, set: { groupingRaw = $0.rawValue })
     }
@@ -49,16 +54,17 @@ struct ModelsView: View {
     var body: some View {
         // Read in this body and captured below, not read inside
         // `PageScaffold`'s stored closures. See `ProjectsView.body` (#140).
-        let range = self.range, scopeAccountId = scope.accountId, sort = self.sort
-        let descending = sortDescending, metric = self.metric, grouping = self.grouping
+        let range = self.range, scopeAccountId = scope.accountId
+        let sort = PacerUsageSort(column: sortRaw, descending: sortDescending)
+        let shareSort = self.shareSort, grouping = self.grouping
         PageScaffold(
             "Models",
             subtitle: "How traffic splits across Claude models.",
             trailing: {
-                // Page-header controls scope every card on the tab (Token
-                // share, Trend, the list): group-by folds versions together,
-                // the range picker windows the data. The donut's metric
-                // (tokens/cost) lives on its own card header, like Projects.
+                // Page-header controls scope every card on the tab (Share,
+                // Trend, the list): group-by folds versions together, the
+                // range picker windows the data. What the donut measures is
+                // its list's sort, like Top projects.
                 HStack(spacing: 10) {
                     Picker("Group by", selection: groupingBinding) {
                         ForEach(ModelGrouping.allCases) { Text($0.label).tag($0) }
@@ -81,13 +87,11 @@ struct ModelsView: View {
                 range: range,
                 scopeAccountId: scopeAccountId,
                 sort: sort,
-                descending: descending,
-                metric: metric,
+                onSort: { sortRaw = $0.column; sortDescending = $0.descending },
+                shareSort: shareSort,
+                onShareSort: { shareSortRaw = $0.column; shareSortDescending = $0.descending },
                 grouping: grouping,
                 rangeBinding: rangeBinding,
-                sortFieldBinding: sortFieldBinding,
-                sortDescendingBinding: $sortDescending,
-                metricBinding: metricBinding,
                 onSelectDay: { date in
                     modalRoot = .day(date: date)
                 }
@@ -98,35 +102,29 @@ struct ModelsView: View {
     }
 }
 
-enum ModelsSort: String, CaseIterable, Identifiable {
-    case name
-    case tokens
-    case days
-    case lastSeen
-    case cost
+/// What the Models table shows beyond the standard columns: the model id
+/// to copy, its active days and the day it was last active. Its Mix bar is
+/// the shared table's Mix column now (`UsageColumn.mix`), under the same id
+/// and sorting the same way, so a saved sort or layout carries over.
+struct ModelTableExtra: PacerUsageExtra {
+    static let days = "days"
+    /// The Last active column. "lastSeen", the id it had as "Last seen", so
+    /// a stored sort carries over.
+    static let lastSeen = "lastSeen"
 
-    var id: String { rawValue }
-    var label: String {
-        switch self {
-        case .name:     return "Model"
-        case .tokens:   return "Tokens"
-        case .days:     return "Days"
-        case .lastSeen: return "Last seen"
-        case .cost:     return "Cost"
+    /// Raw id to copy; empty when the row is a class.
+    let model: String
+    let activeDays: Int
+    /// `YYYY-MM-DD`, so it sorts as text in date order.
+    let lastSeen: String
+
+    func sortKey(forColumn id: String) -> PacerUsageSortKey? {
+        switch id {
+        case Self.days:     return .number(Double(activeDays))
+        case Self.lastSeen: return .text(lastSeen)
+        default:            return nil
         }
     }
-}
-
-/// Which metric sizes the share donut (mirrors ProjectsView's overview
-/// metric). Sessions-per-model isn't offered: unlike projects, our per-model
-/// rollup carries no session count, and the only proxy (a session's single
-/// dominant model) would misattribute mixed-model sessions.
-enum ModelMetric: String, CaseIterable, Identifiable {
-    case tokens
-    case cost
-
-    var id: String { rawValue }
-    var label: String { self == .cost ? "Cost" : "Tokens" }
 }
 
 /// How the Models tab buckets rows. `.none` is one row per model, colored by
@@ -180,14 +178,16 @@ private struct ModelsContent: View {
     @Query(ScanMetaFetchDescriptor.scanCompletedProbe)
     private var scanMeta: [ClaudeCodeMeta]
 
-    let sort: ModelsSort
-    let descending: Bool
-    let metric: ModelMetric
+    /// The table's sort. The table sorts the cached rows itself, so this is
+    /// not an input to the cache.
+    let sort: PacerUsageSort
+    let onSort: (PacerUsageSort) -> Void
+    /// The Share card's sort: Tokens, Cost or the label, the titles every
+    /// donut list has.
+    let shareSort: PacerUsageSort
+    let onShareSort: (PacerUsageSort) -> Void
     let grouping: ModelGrouping
     let rangeBinding: Binding<TimeRange>
-    let sortFieldBinding: Binding<ModelsSort>
-    let sortDescendingBinding: Binding<Bool>
-    let metricBinding: Binding<ModelMetric>
     /// Callback to the page-level modal navigator when a chart bar
     /// is tapped — opens that day's day-detail modal.
     let onSelectDay: (String) -> Void
@@ -204,30 +204,24 @@ private struct ModelsContent: View {
     init(
         range: TimeRange,
         scopeAccountId: String? = nil,
-        sort: ModelsSort,
-        descending: Bool,
-        metric: ModelMetric,
+        sort: PacerUsageSort,
+        onSort: @escaping (PacerUsageSort) -> Void,
+        shareSort: PacerUsageSort,
+        onShareSort: @escaping (PacerUsageSort) -> Void,
         grouping: ModelGrouping,
         rangeBinding: Binding<TimeRange>,
-        sortFieldBinding: Binding<ModelsSort>,
-        sortDescendingBinding: Binding<Bool>,
-        metricBinding: Binding<ModelMetric>,
         onSelectDay: @escaping (String) -> Void
     ) {
         self.sort = sort
-        self.descending = descending
-        self.metric = metric
+        self.onSort = onSort
+        self.shareSort = shareSort
+        self.onShareSort = onShareSort
         self.grouping = grouping
         self.rangeBinding = rangeBinding
-        self.sortFieldBinding = sortFieldBinding
-        self.sortDescendingBinding = sortDescendingBinding
-        self.metricBinding = metricBinding
         self.onSelectDay = onSelectDay
         let acct = scopeAccountId ?? UsageScope.noAccountSentinel
-        if let days = range.days {
-            let cutoffString = TokenSample.formatDate(
-                Calendar.current.date(byAdding: .day, value: -days, to: Date()) ?? .distantPast
-            )
+        if let since = range.since {
+            let cutoffString = TokenSample.formatDate(since)
             _globalAggregates = Query(
                 filter: #Predicate<DailyAggregate> { $0.date >= cutoffString },
                 sort: \.date
@@ -253,10 +247,9 @@ private struct ModelsContent: View {
         let subtitle: String?    // raw id (ungrouped) or "N versions" (grouped)
         let color: Color
         let cost: Double
-        let inputTokens: Int64
-        let outputTokens: Int64
-        let cacheReadTokens: Int64
-        let totalTokens: Int64
+        let tokens: TokenBreakdown
+        /// `tokens.all` (#215) — what the Tokens column, sort and donut show.
+        var totalTokens: Int64 { tokens.all }
         let activeDays: Int
         let firstSeen: String
         let lastSeen: String
@@ -275,6 +268,9 @@ private struct ModelsContent: View {
 
     private struct DerivedData {
         var rows: [ModelRow] = []
+        /// `rows` as the shared table's plain values, built here so a body
+        /// pass (a donut hover) does not rebuild them.
+        var tableRows: [PacerUsageRow<ModelTableExtra>] = []
         var dailyMix: [DailyMix] = []
         /// Distinct days in `dailyMix` — the bar-width input. Cached with the
         /// mix rather than derived from it at render time: computed in the
@@ -283,11 +279,9 @@ private struct ModelsContent: View {
         /// avoid paying on every hover.
         var trendDayCount: Int = 0
         var trendBuckets: [String: [(model: String, tokens: Int64)]] = [:]
-        /// `rows` re-sorted by the metric the donut is *showing*, largest
-        /// first. The donut, its legend and its hover table all read this one
-        /// array — see `shareCumulative` for what happens when they don't.
-        var shareRows: [ModelRow] = []
-        var shareCumulative: [(row: ModelRow, max: Double)] = []
+        /// The Share card: its ring and list, ranked by `shareSort`. Rebuilt
+        /// with the rows, and on its own when the sort changes.
+        var share: PacerShareListData<ModelTableExtra>?
     }
 
     /// What body reads. Resolves to the cached snapshot when populated,
@@ -334,7 +328,8 @@ private struct ModelsContent: View {
         }
     }
 
-    /// Pure computation over `aggregates` + `sort` + `descending`.
+    /// Pure computation over `aggregates`, `grouping` and `shareSort`. The
+    /// table's sort is not an input: the table sorts these rows itself.
     /// Called both from `refreshDerived` (writes to `@State`) and from
     /// the `derived` fallback when the cache hasn't landed yet. Body
     /// invokes `derived` once via a `let`, so even the fallback path
@@ -344,9 +339,7 @@ private struct ModelsContent: View {
             var label: String = ""
             var members: Set<String> = []
             var cost: Double = 0
-            var input: Int64 = 0
-            var output: Int64 = 0
-            var cacheRead: Int64 = 0
+            var tokens = TokenBreakdown.zero
             var breakdown: CostBreakdown = .zero
             var dates: Set<String> = []
             var firstSeen: String = "9999-99-99"
@@ -361,9 +354,7 @@ private struct ModelsContent: View {
             a.label = b.label
             a.members.insert(r.model)
             a.cost += r.totalCostUSD
-            a.input += r.inputTokens
-            a.output += r.outputTokens
-            a.cacheRead += r.cacheReadTokens
+            a.tokens += r.tokens
             a.breakdown += r.costBreakdown
             a.dates.insert(r.date)
             if r.date < a.firstSeen { a.firstSeen = r.date }
@@ -381,54 +372,29 @@ private struct ModelsContent: View {
                     : "\(a.members.count) version\(a.members.count == 1 ? "" : "s")",
                 color: colorFor(a.label),
                 cost: a.cost,
-                inputTokens: a.input,
-                outputTokens: a.output,
-                cacheReadTokens: a.cacheRead,
-                totalTokens: a.input + a.output + a.cacheRead,
+                tokens: a.tokens,
                 activeDays: a.dates.count,
                 firstSeen: a.firstSeen,
                 lastSeen: a.lastSeen,
                 breakdown: a.breakdown
             )
         }
-        let primary: (ModelRow, ModelRow) -> Bool
-        switch sort {
-        case .name:
-            primary = { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
-        case .tokens:
-            primary = { $0.totalTokens < $1.totalTokens }
-        case .days:
-            primary = { $0.activeDays < $1.activeDays }
-        case .lastSeen:
-            primary = { $0.lastSeen < $1.lastSeen }
-        case .cost:
-            primary = { $0.cost < $1.cost }
+        // Cost, largest first, with the bucket key breaking ties: a stable
+        // base order. The table re-sorts by whatever column the user picked.
+        let rows: [ModelRow] = unsorted.sorted { lhs, rhs in
+            lhs.cost != rhs.cost ? lhs.cost > rhs.cost : lhs.key < rhs.key
         }
-        // Stable tiebreaker on the bucket key so equal-value rows don't
-        // reshuffle each refresh.
-        let sorted = unsorted.sorted { lhs, rhs in
-            if primary(lhs, rhs) { return true }
-            if primary(rhs, lhs) { return false }
-            return lhs.key < rhs.key
-        }
-        let rows: [ModelRow] = descending ? sorted.reversed() : sorted
-
-        // The donut is drawn largest-wedge-first, which is not the table's
-        // sort — the table can be ordered by name, or by days, or ascending.
-        // Both the wedges and the cumulative-angle table below must walk the
-        // SAME array: when they disagreed, hovering a wedge named whichever
-        // model happened to sort first in the table.
-        let shareRows = Self.foldedShareRows(
-            rows.sorted { metricValue($0) > metricValue($1) })
-
-        // Share-donut cumulative-angle table, sized by the chosen metric so a
-        // per-hover `body` doesn't have to walk it.
-        var running = 0.0
-        var cumulative: [(row: ModelRow, max: Double)] = []
-        cumulative.reserveCapacity(shareRows.count)
-        for r in shareRows {
-            running += metricValue(r)
-            cumulative.append((r, running))
+        let tableRows: [PacerUsageRow<ModelTableExtra>] = rows.map { r in
+            PacerUsageRow(
+                id: r.key,
+                label: r.displayName,
+                subtitle: r.subtitle,
+                color: r.color,
+                tokens: r.tokens,
+                costParts: r.breakdown.cost,
+                cost: r.cost,
+                extra: ModelTableExtra(model: r.model, activeDays: r.activeDays,
+                                       lastSeen: r.lastSeen))
         }
 
         // Daily token mix, folded by the grouping so each (day, group) is one
@@ -439,7 +405,7 @@ private struct ModelsContent: View {
             let b = grouping.bucket(r.model)
             let dk = DayKey(date: r.date, key: b.key)
             var e = mix[dk] ?? (label: b.label, tokens: Int64(0))
-            e.tokens += r.inputTokens + r.outputTokens
+            e.tokens += r.tokens.all
             mix[dk] = e
         }
         // `mix` is a Dictionary, so `.map` yields hash order. The trend
@@ -466,60 +432,22 @@ private struct ModelsContent: View {
 
         return DerivedData(
             rows: rows,
+            tableRows: tableRows,
             dailyMix: dailyMix,
             trendDayCount: Set(dailyMix.map(\.date)).count,
             trendBuckets: buckets,
-            shareRows: shareRows,
-            shareCumulative: cumulative
+            share: Self.share(tableRows, sort: shareSort)
         )
     }
 
-    /// How many models the share legend names before it starts folding.
-    private static let shareLegendCap = 8
-
-    /// The legend used to stop at `shareLegendCap` while the donut kept
-    /// drawing every row, so with nine models the ninth was an unlabelled
-    /// sliver and the legend's percentages summed to less than 100. The tail
-    /// is now one real wedge, so the two always agree.
-    ///
-    /// Folding a *single* row into "Other" would be worse than showing it, so
-    /// the fold only starts once at least two rows would be hidden.
-    /// Both metrics are summed, so the folded row is correct whichever one
-    /// the picker is showing.
-    private static func foldedShareRows(_ ordered: [ModelRow]) -> [ModelRow] {
-        guard ordered.count > shareLegendCap + 1 else { return ordered }
-        let head = Array(ordered.prefix(shareLegendCap))
-        let tail = ordered.dropFirst(shareLegendCap)
-        let other = ModelRow(
-            key: "__other__",
-            model: "",
-            displayName: "Other",
-            subtitle: "\(tail.count) models",
-            color: .secondary,
-            cost: tail.reduce(0) { $0 + $1.cost },
-            inputTokens: tail.reduce(0) { $0 + $1.inputTokens },
-            outputTokens: tail.reduce(0) { $0 + $1.outputTokens },
-            cacheReadTokens: tail.reduce(0) { $0 + $1.cacheReadTokens },
-            totalTokens: tail.reduce(0) { $0 + $1.totalTokens },
-            activeDays: 0,
-            firstSeen: tail.map(\.firstSeen).min() ?? "",
-            lastSeen: tail.map(\.lastSeen).max() ?? "",
-            breakdown: CostBreakdown.sum(tail, \.breakdown)
-        )
-        return head + [other]
+    /// Eight models with a wedge and a line of their own, and the rest as
+    /// one: the legend used to stop at eight while the donut drew every row,
+    /// so a ninth was an unlabelled sliver.
+    private static func share(_ rows: [PacerUsageRow<ModelTableExtra>],
+                              sort: PacerUsageSort) -> PacerShareListData<ModelTableExtra> {
+        PacerShareListData(rows: rows, sort: sort, maxSlices: 8)
     }
 
-    /// The metric that sizes the donut for a row.
-    private func metricValue(_ row: ModelRow) -> Double {
-        metric == .cost ? row.cost : Double(row.totalTokens)
-    }
-    /// Compact metric label / exact tooltip for legends + hover readouts.
-    private func metricLabel(_ row: ModelRow) -> String {
-        metric == .cost ? pacerCost(row.cost) : pacerTokens(row.totalTokens)
-    }
-    private func metricHelp(_ row: ModelRow) -> String {
-        metric == .cost ? pacerCostExact(row.cost) : pacerTokensExact(row.totalTokens)
-    }
     /// Color for a slice/label. Ungrouped uses the curated blend palette; a
     /// class-grouped view uses each family's class-center color, so a class
     /// reads the same color it does in the per-model view (and stays on the
@@ -558,9 +486,10 @@ private struct ModelsContent: View {
         // happens to fire — which on an idle machine is seven to ten seconds,
         // and looks exactly like a very slow render rather than a stale one.
         .onChange(of: scope.accountId) { _, _ in refreshDerived() }
-        .onChange(of: sort) { _, _ in refreshDerived() }
-        .onChange(of: descending) { _, _ in refreshDerived() }
-        .onChange(of: metric) { _, _ in refreshDerived() }
+        // The card's sort re-ranks its list and ring without a rows refresh.
+        .onChange(of: shareSort) { _, sort in
+            cachedDerived?.share = Self.share(derived.tableRows, sort: sort)
+        }
         .onChange(of: grouping) { _, _ in refreshDerived() }
     }
 
@@ -572,109 +501,23 @@ private struct ModelsContent: View {
         }
     }
 
-    @State private var hoveredShareAngle: Double?
-
-    /// Sorted-by-cumulative-angle table for the share donut. Built
-    /// once in `computeDerived` alongside the per-model rollup.
-    private var shareCumulative: [(row: ModelRow, max: Double)] {
-        derived.shareCumulative
-    }
-
-    private var shareTotal: Double {
-        rows.reduce(0) { $0 + metricValue($1) }
-    }
-
-    /// VoiceOver summary read in place of the donut. Lists the top 5
-    /// rows with their share percentage so screen-reader users get the
-    /// same info sighted users get from wedges + legend.
-    private var shareSummary: String {
-        let total = shareTotal
-        guard total > 0 else { return "no data yet" }
-        return derived.shareRows.prefix(5).map { r in
-            let pct = Int(metricValue(r) / total * 100)
-            return "\(r.displayName) \(pct) percent"
-        }.joined(separator: ", ")
-    }
-
-    private var hoveredShareRow: ModelRow? {
-        let cumulative = shareCumulative
-        guard let angle = hoveredShareAngle, !cumulative.isEmpty else { return nil }
-        // Linear scan over a precomputed table; cheap because N is
-        // small (handful of models). Could binary-search but the
-        // wins don't show up at this size.
-        for entry in cumulative where angle <= entry.max {
-            return entry.row
-        }
-        return cumulative.last?.row
-    }
-
+    /// How the models divide the cost and the tokens: the shared donut card,
+    /// with every donut list's columns (Mix, Tokens, Cost, Share). Clicking
+    /// Cost or Tokens ranks the list by it and turns the ring to it, where a
+    /// picker in the header used to.
     private var shareCard: some View {
-        let total = shareTotal
-        let title = metric == .cost ? "Cost share" : "Token share"
-        return PacerCard(title, trailing: {
-            HStack(spacing: 10) {
-                if let r = hoveredShareRow {
-                    let pct = total > 0 ? Int(metricValue(r) / total * 100) : 0
-                    HStack(spacing: 6) {
-                        Text(r.displayName)
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(.secondary)
-                        Text(metricLabel(r)).help(metricHelp(r))
-                            .font(.system(size: 12, weight: .semibold, design: .rounded))
-                            .monospacedDigit()
-                        Text("(\(pct)%)")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.tertiary)
-                    }
-                }
-                Picker("Metric", selection: metricBinding) {
-                    ForEach(ModelMetric.allCases) { Text($0.label).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                .pacerDenseControl()
-                .labelsHidden()
-            }
-        }) {
-            HStack(alignment: .top, spacing: 24) {
-                // Ordered by the metric the donut is *showing*, not by the
-                // table's sort. They are different controls: the table was
-                // sorted by cost while this showed tokens, so the legend read
-                // 5.6B, 661M, 795M — a list of token counts in cost order,
-                // which just looks broken.
-                let shareRows = derived.shareRows
-                PacerDonut(
-                    slices: shareRows.map {
-                        PacerDonutSlice(id: $0.key, value: metricValue($0), color: $0.color)
-                    },
-                    size: 180,
-                    hoveredID: hoveredShareRow?.key,
-                    hoveredAngle: $hoveredShareAngle,
-                    accessibilityLabel: "\(title) across models",
-                    accessibilityValue: shareSummary
-                )
-                VStack(alignment: .leading, spacing: 6) {
-                    ForEach(shareRows) { row in
-                        PacerDonutLegendRow(
-                            color: row.color,
-                            label: row.displayName
-                        ) {
-                            Text(metricLabel(row)).help(metricHelp(row))
-                                .font(.system(size: 11))
-                                .foregroundStyle(.secondary)
-                                .monospacedDigit()
-                                .frame(width: 90, alignment: .trailing)
-                            if total > 0 {
-                                Text("\(Int(metricValue(row) / total * 100))%")
-                                    .font(.system(size: 11))
-                                    .foregroundStyle(.tertiary)
-                                    .monospacedDigit()
-                                    .frame(width: 40, alignment: .trailing)
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        let derived = self.derived
+        // Compared with the sort the list runs in, which for a sort it has
+        // no column for is not the stored one.
+        let effective = PacerShareListData<ModelTableExtra>.effectiveSort(shareSort)
+        let share = derived.share.flatMap { $0.sort == effective ? $0 : nil }
+            ?? Self.share(derived.tableRows, sort: shareSort)
+        return PacerDonutListCard(
+            "Share",
+            data: share,
+            labelTitle: grouping.label,
+            accessibilityLabel: "\(share.donut.metric.title) across models",
+            onSort: onShareSort)
     }
 
     /// Debounced hover (chart RuleMark + per-day breakdown reads). Updated
@@ -826,122 +669,63 @@ private struct ModelsContent: View {
     private var listCard: some View {
         // Range picker moved to the page header (it scopes the whole tab,
         // not just this list) — see `ModelsView.body`.
-        PacerCard("All models") {
-            VStack(alignment: .leading, spacing: 0) {
-                tableHeader
-                Divider().padding(.vertical, 4)
-                ForEach(rows) { row in
-                    modelRow(row)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 6)
-                        .contextMenu {
-                            if !row.model.isEmpty {
-                                Button("Copy model name") { pacerCopyToPasteboard(row.model) }
-                            }
-                            Button("Copy display name") { pacerCopyToPasteboard(row.displayName) }
-                            Divider()
-                            // Copy precise dollars so a paste into a
-                            // spreadsheet keeps full cents.
-                            Button("Copy cost") { pacerCopyToPasteboard(pacerCostExact(row.cost)) }
-                            Button("Copy token total") {
-                                pacerCopyToPasteboard(pacerTokensExact(row.totalTokens))
-                            }
-                        }
-                }
-                HStack {
-                    Text("\(rows.count) \(grouping == .none ? "model" : "group")\(rows.count == 1 ? "" : "s")")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.tertiary)
-                    Spacer()
-                }
-                .padding(.top, 8)
-            }
-        }
-    }
-
-    private var tableHeader: some View {
-        HStack {
-            SortableColumnHeader(
-                "Model",
-                field: ModelsSort.name,
-                alignment: .leading,
-                active: sortFieldBinding,
-                descending: sortDescendingBinding,
-                defaultDescending: false
-            )
-            .padding(.leading, 8)
-            Spacer()
-            SortableColumnHeader(
-                "Tokens",
-                field: ModelsSort.tokens,
-                alignment: .trailing,
-                active: sortFieldBinding,
-                descending: sortDescendingBinding
-            ).frame(width: 100)
-            SortableColumnHeader(
-                "Days",
-                field: ModelsSort.days,
-                alignment: .trailing,
-                active: sortFieldBinding,
-                descending: sortDescendingBinding
-            ).frame(width: 60)
-            SortableColumnHeader(
-                "Last seen",
-                field: ModelsSort.lastSeen,
-                alignment: .trailing,
-                active: sortFieldBinding,
-                descending: sortDescendingBinding
-            ).frame(width: 100)
-            Eyebrow(text: "Mix")
-                .frame(width: 110, alignment: .leading)
-                .padding(.leading, 12)
-            SortableColumnHeader(
-                "Cost",
-                field: ModelsSort.cost,
-                alignment: .trailing,
-                active: sortFieldBinding,
-                descending: sortDescendingBinding
-            ).frame(width: 84)
-        }
-        .padding(.trailing, 8)
-        .padding(.bottom, 4)
-    }
-
-    @ViewBuilder
-    private func modelRow(_ row: ModelRow) -> some View {
-        HStack(alignment: .firstTextBaseline) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(row.displayName)
-                    .font(.system(size: 13, weight: .medium))
-                if let subtitle = row.subtitle {
-                    Text(subtitle)
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
-                }
-            }
-            Spacer(minLength: 8)
-            Text(pacerTokens(row.totalTokens)).help(pacerTokensExact(row.totalTokens))
-                .font(.system(size: 12))
+        let tableRows = derived.tableRows
+        let count = "\(tableRows.count) \(grouping == .none ? "model" : "group")\(tableRows.count == 1 ? "" : "s")"
+        return PacerTableCard("All models", trailing: {
+            Text(count)
+                .font(.system(size: 11))
                 .foregroundStyle(.secondary)
-                .monospacedDigit()
-                .frame(width: 100, alignment: .trailing)
-            Text("\(row.activeDays)")
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-                .monospacedDigit()
-                .frame(width: 60, alignment: .trailing)
-            Text(row.lastSeen)
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .frame(width: 100, alignment: .trailing)
-            PacerCostBar(row.breakdown)
-                .frame(width: 110)
-                .padding(.leading, 12)
-            Text(pacerCost(row.cost)).help(pacerCostExact(row.cost))
-                .font(.system(size: 13, weight: .semibold, design: .rounded))
-                .monospacedDigit()
-                .frame(width: 84, alignment: .trailing)
+        }) {
+            PacerUsageTable(
+                rows: tableRows,
+                tableId: "models",
+                labelTitle: grouping.label,
+                sort: sort,
+                onSort: onSort,
+                // Model, Tokens, Hit %, Out %, Cost, Last active and the Mix
+                // bar: seven. Days and the token parts are in the header's
+                // menu: of the two counts of its own, Last active says more
+                // on a list that keeps models long retired, and Projects
+                // keeps the same one.
+                extraColumns: {
+                    PacerUsageColumns.extra(ModelTableExtra.days, title: "Days",
+                                            of: ModelTableExtra.self,
+                                            minWidth: 28, idealWidth: 36,
+                                            visibleByDefault: false) { row in
+                        Text("\(row.extra.activeDays)")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                            .lineLimit(1)
+                    }
+                    // Known to the day only (the daily rollup), so the day,
+                    // relative to today, as Projects prints its Last active
+                    // relative to now. The page is rebuilt at midnight
+                    // (`ContentView`'s day key), so "today" rolls over.
+                    PacerUsageColumns.extra(ModelTableExtra.lastSeen, title: "Last active",
+                                            of: ModelTableExtra.self,
+                                            minWidth: 36, idealWidth: 70) { row in
+                        let day = pacerLastActiveDay(row.extra.lastSeen)
+                        Text(day.text)
+                            .help(day.help)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                },
+                rowMenu: { row in
+                    if !row.extra.model.isEmpty {
+                        Button("Copy model name") { pacerCopyToPasteboard(row.extra.model) }
+                    }
+                    Button("Copy display name") { pacerCopyToPasteboard(row.label) }
+                    Divider()
+                    // Copy precise dollars so a paste into a
+                    // spreadsheet keeps full cents.
+                    Button("Copy cost") { pacerCopyToPasteboard(pacerCostExact(row.cost)) }
+                    Button("Copy token total") {
+                        pacerCopyToPasteboard(pacerTokensExact(row.tokens.all))
+                    }
+                })
         }
     }
 }

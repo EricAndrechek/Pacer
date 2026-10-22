@@ -5,9 +5,10 @@ import SwiftData
 ///
 /// Third in the pattern `AccountDailyAggregate` established, and the first
 /// where the rollup carries more than sums: session and model counts, a last-
-/// active timestamp, and three JSON side-tables. Those are computed by one
-/// algorithm — `ProjectRollupValues.compute` — which both this and the global
-/// rollup call, so the two cannot disagree about what a bucket contains.
+/// active timestamp, and two JSON side-tables (session ids, and the bucket
+/// split by model). Those are computed by one algorithm — `ProjectRollupValues`
+/// — which both this and the global rollup call, so the two cannot disagree
+/// about what a bucket contains.
 ///
 /// See `AccountDailyAggregate` for why the global rollup's key is left alone,
 /// and `make verify-data` for the check that keeps the two in step.
@@ -38,8 +39,8 @@ public final class AccountProjectDailyAggregate {
     public var modelCount: Int
     public var lastActive: Date
     public var sessionIdsJSON: Data
-    public var modelTokensJSON: Data
-    public var modelCostJSON: Data
+    /// See `ProjectDailyAggregate.modelBreakdownJSON`.
+    public var modelBreakdownJSON: Data?
 
     #Index<AccountProjectDailyAggregate>(
         [\.accountProjectDateKey],
@@ -58,8 +59,7 @@ public final class AccountProjectDailyAggregate {
         inputTokens: Int64, outputTokens: Int64, cacheReadTokens: Int64,
         cacheCreation5mTokens: Int64, cacheCreation1hTokens: Int64,
         totalCostUSD: Double, sessionCount: Int, modelCount: Int,
-        lastActive: Date, sessionIdsJSON: Data, modelTokensJSON: Data,
-        modelCostJSON: Data
+        lastActive: Date, sessionIdsJSON: Data, modelBreakdownJSON: Data?
     ) {
         self.accountProjectDateKey = Self.makeKey(
             accountId: accountId, projectPath: projectPath, date: date)
@@ -76,8 +76,7 @@ public final class AccountProjectDailyAggregate {
         self.modelCount = modelCount
         self.lastActive = lastActive
         self.sessionIdsJSON = sessionIdsJSON
-        self.modelTokensJSON = modelTokensJSON
-        self.modelCostJSON = modelCostJSON
+        self.modelBreakdownJSON = modelBreakdownJSON
     }
 }
 
@@ -102,15 +101,25 @@ public struct ProjectRollupValues: Sendable {
     /// the per-account rows are rebuilt with their global bucket).
     public var pricedBy = PricedBy()
     public var sessionIds: Set<String> = []
-    public var modelTokens: [String: Int64] = [:]
-    public var modelCost: [String: Double] = [:]
+    /// The bucket split by model: all five token parts and the cost of each.
+    /// Summed per sample from the same `sample.breakdown` and the same priced
+    /// components as the columns above, so the models add up to the row.
+    public var modelBreakdowns: [String: CostBreakdown] = [:]
     public var lastActive: Date = .distantPast
 
     public var sessionCount: Int { sessionIds.count }
-    public var modelCount: Int { modelTokens.count }
+    public var modelCount: Int { modelBreakdowns.count }
     public var sessionIdsJSON: Data { (try? JSONEncoder().encode(Array(sessionIds))) ?? Data() }
-    public var modelTokensJSON: Data { (try? JSONEncoder().encode(modelTokens)) ?? Data() }
-    public var modelCostJSON: Data { (try? JSONEncoder().encode(modelCost)) ?? Data() }
+    public var modelBreakdownJSON: Data { ProjectModelBreakdowns.encode(modelBreakdowns) }
+
+    /// The five token columns as one value.
+    public var tokens: TokenBreakdown {
+        TokenBreakdown(
+            inputTokens: inputTokens, outputTokens: outputTokens,
+            cacheReadTokens: cacheReadTokens,
+            cacheCreation5mTokens: cacheCreation5mTokens,
+            cacheCreation1hTokens: cacheCreation1hTokens)
+    }
 
     public init() {}
 
@@ -122,19 +131,22 @@ public struct ProjectRollupValues: Sendable {
     public mutating func add<S: AggregatableSample>(
         _ sample: S, mode: CostMode, snapshot: PricingTable.Snapshot
     ) {
-        inputTokens += sample.breakdown.inputTokens
-        outputTokens += sample.breakdown.outputTokens
-        cacheReadTokens += sample.breakdown.cacheReadTokens
-        cacheCreation5mTokens += sample.breakdown.cacheCreation5mTokens
-        cacheCreation1hTokens += sample.breakdown.cacheCreation1hTokens
+        let tokens = sample.breakdown
+        inputTokens += tokens.inputTokens
+        outputTokens += tokens.outputTokens
+        cacheReadTokens += tokens.cacheReadTokens
+        cacheCreation5mTokens += tokens.cacheCreation5mTokens
+        cacheCreation1hTokens += tokens.cacheCreation1hTokens
 
         let priced = CostCalculator.sampleCost(sample, mode: mode, snapshot: snapshot)
         cost += priced.components
         pricedBy.add(priced.pricedBy)
         if let sid = sample.sessionId, !sid.isEmpty { sessionIds.insert(sid) }
-        modelTokens[sample.model, default: 0] +=
-            sample.breakdown.inputTokens + sample.breakdown.outputTokens
-        modelCost[sample.model, default: 0] += priced.total
+        // All five parts and their costs, as the columns take them. This was
+        // input + output and a total only, so a project's By model card could
+        // show neither its models' real tokens nor what each part cost.
+        modelBreakdowns[sample.model, default: .zero] += CostBreakdown(
+            cost: priced.components, tokens: tokens)
         if sample.sampledAt > lastActive { lastActive = sample.sampledAt }
     }
 }
@@ -156,8 +168,7 @@ public protocol ProjectRollupRow: RollupCostColumns {
     var modelCount: Int { get set }
     var lastActive: Date { get set }
     var sessionIdsJSON: Data { get set }
-    var modelTokensJSON: Data { get set }
-    var modelCostJSON: Data { get set }
+    var modelBreakdownJSON: Data? { get set }
 }
 
 extension ProjectDailyAggregate: ProjectRollupRow {}
@@ -167,11 +178,15 @@ public extension ProjectRollupValues {
     /// Rebuild the running totals from a stored row, so new samples can be
     /// folded in without re-reading the bucket's whole history.
     ///
-    /// Empty or corrupt JSON decodes to nothing, which makes the bucket behave
-    /// as though it had no prior contributors — the same result a first insert
-    /// would produce, and the same tolerance the path had before this was
-    /// shared.
-    init(hydrating row: some ProjectRollupRow) {
+    /// Nil when the row's split by model cannot be advanced exactly: it does
+    /// not decode, or its models' tokens do not add up to the row's own
+    /// columns — a row written before the split was stored, or a corrupt one.
+    /// Folding new samples into it would leave the models summing to less
+    /// than the row for good, so the caller rebuilds the bucket from its
+    /// samples instead. Corrupt session ids still decode to none, as they
+    /// always have: an empty set is a legal value there (a bucket whose
+    /// samples carried no session id), so emptiness proves nothing.
+    init?(hydrating row: some ProjectRollupRow) {
         self.init()
         inputTokens = row.inputTokens
         outputTokens = row.outputTokens
@@ -183,19 +198,15 @@ public extension ProjectRollupValues {
             pricedBy = PricedBy(stored: global.pricedByRecordIds)
         }
         lastActive = row.lastActive
-        let decoder = JSONDecoder()
         if !row.sessionIdsJSON.isEmpty,
-           let decoded = try? decoder.decode([String].self, from: row.sessionIdsJSON) {
+           let decoded = try? JSONDecoder().decode([String].self, from: row.sessionIdsJSON) {
             sessionIds = Set(decoded)
         }
-        if !row.modelTokensJSON.isEmpty,
-           let decoded = try? decoder.decode([String: Int64].self, from: row.modelTokensJSON) {
-            modelTokens = decoded
-        }
-        if !row.modelCostJSON.isEmpty,
-           let decoded = try? decoder.decode([String: Double].self, from: row.modelCostJSON) {
-            modelCost = decoded
-        }
+        guard let models = ProjectModelBreakdowns.decode(row.modelBreakdownJSON),
+              models.count == row.modelCount,
+              models.values.reduce(TokenBreakdown.zero, { $0 + $1.tokens }) == tokens
+        else { return nil }
+        modelBreakdowns = models
     }
 
     func write(to row: some ProjectRollupRow) {
@@ -213,8 +224,7 @@ public extension ProjectRollupValues {
         row.modelCount = modelCount
         row.lastActive = lastActive
         row.sessionIdsJSON = sessionIdsJSON
-        row.modelTokensJSON = modelTokensJSON
-        row.modelCostJSON = modelCostJSON
+        row.modelBreakdownJSON = modelBreakdownJSON
     }
 }
 
@@ -224,14 +234,9 @@ public extension ProjectRollupValues {
 /// Lets the Projects view and `CollectionUsageRollup` consume either table
 /// without knowing which, so the account scope is a change of source rather
 /// than a second copy of the view.
-public protocol ProjectDailyReadable {
+public protocol ProjectDailyReadable: RollupTokenColumns {
     var projectPath: String { get }
     var date: String { get }
-    var inputTokens: Int64 { get }
-    var outputTokens: Int64 { get }
-    var cacheReadTokens: Int64 { get }
-    var cacheCreation5mTokens: Int64 { get }
-    var cacheCreation1hTokens: Int64 { get }
     var totalCostUSD: Double { get }
     /// `totalCostUSD` split into its five priced parts (#296); both tables
     /// get it from `RollupCostColumns`.
@@ -239,11 +244,10 @@ public protocol ProjectDailyReadable {
     var sessionCount: Int { get }
     var modelCount: Int { get }
     var lastActive: Date { get }
-    /// The side-tables consumers break down by: per-model totals for the
-    /// project detail view, and the distinct session ids the CSV export
+    /// The side-tables consumers break down by: the row split by model (read
+    /// it as `modelBreakdowns`), and the distinct session ids the CSV export
     /// counts.
-    var modelTokensJSON: Data { get }
-    var modelCostJSON: Data { get }
+    var modelBreakdownJSON: Data? { get }
     var sessionIdsJSON: Data { get }
 }
 

@@ -337,9 +337,7 @@ struct MenuBarLabel: View {
     }
 
     private var todayTokens: Int64 {
-        todayAggregates.reduce(0) {
-            $0 + $1.inputTokens + $1.outputTokens
-        }
+        todayAggregates.reduce(0) { $0 + $1.tokens.all }
     }
 
     private var activeModel: String? {
@@ -824,9 +822,7 @@ struct MenuStatusContent: View {
     }
 
     private var todayTokens: Int64 {
-        todayAggregates.reduce(0) {
-            $0 + $1.inputTokens + $1.outputTokens
-        }
+        todayAggregates.reduce(0) { $0 + $1.tokens.all }
     }
 
     /// The popover's fixed width. Named because the screenshot harness used to

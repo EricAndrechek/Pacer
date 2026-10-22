@@ -83,8 +83,14 @@ public struct CostCalculator: Sendable {
     ) -> SampleCost {
         switch mode {
         case .display:
+            // Split like `.auto` does: in proportion to what the ledger says
+            // each part costs. Weighting by token counts (`like: .zero`) put
+            // ~98% of every bill on cache reads, the bulk of the tokens and
+            // the cheapest of them.
             guard let stored = storedCostUSD else { return .zero }
-            return SampleCost(components: .apportion(stored, like: .zero, tokens: breakdown))
+            let weights = ledger.cost(
+                model: model, at: sampledAt, speed: speed, geo: geo, breakdown: breakdown).components
+            return SampleCost(components: .apportion(stored, like: weights, tokens: breakdown))
         case .auto:
             if let stored = storedCostUSD {
                 let weights = ledger.cost(

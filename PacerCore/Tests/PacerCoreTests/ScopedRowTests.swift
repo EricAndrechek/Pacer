@@ -32,7 +32,7 @@ struct ScopedRowTests {
             cacheCreation5mTokens: 44, cacheCreation1hTokens: 55,
             totalCostUSD: 6.75)
         #expect(global.dailyRow == scoped.dailyRow)
-        #expect(global.dailyRow.totalTokens == 165)
+        #expect(global.dailyRow.tokens.all == 165)
     }
 
     @Test("an hourly row reads the same, except the count only one table stores")
@@ -73,7 +73,7 @@ struct ScopedRowTests {
             cumulativeCacheReadTokens: 3, cumulativeCacheCreation5mTokens: 4,
             cumulativeCacheCreation1hTokens: 5, topModel: "claude-opus-5")
         #expect(global.sessionRow == scoped.sessionRow)
-        #expect(global.sessionRow.totalTokens == 15)
+        #expect(global.sessionRow.tokens.all == 15)
     }
 
     /// Both project rollups satisfy the read protocol the Projects view and
@@ -87,15 +87,13 @@ struct ScopedRowTests {
             inputTokens: 1, outputTokens: 2, cacheReadTokens: 3,
             cacheCreation5mTokens: 4, cacheCreation1hTokens: 5,
             totalCostUSD: 9.5, sessionCount: 2, modelCount: 1,
-            lastActive: at, sessionIdsJSON: Data(), modelTokensJSON: Data(),
-            modelCostJSON: Data())
+            lastActive: at, sessionIdsJSON: Data(), modelBreakdownJSON: nil)
         let scoped: any ProjectDailyReadable = AccountProjectDailyAggregate(
             accountId: "org-a", projectPath: "/p", date: "2026-09-03",
             inputTokens: 1, outputTokens: 2, cacheReadTokens: 3,
             cacheCreation5mTokens: 4, cacheCreation1hTokens: 5,
             totalCostUSD: 9.5, sessionCount: 2, modelCount: 1,
-            lastActive: at, sessionIdsJSON: Data(), modelTokensJSON: Data(),
-            modelCostJSON: Data())
+            lastActive: at, sessionIdsJSON: Data(), modelBreakdownJSON: nil)
         #expect(global.projectPath == scoped.projectPath)
         #expect(global.totalCostUSD == scoped.totalCostUSD)
         #expect(global.sessionCount == scoped.sessionCount)
@@ -114,15 +112,15 @@ struct ScopedRowTests {
             projectPath: "/p", date: "d", inputTokens: 10, outputTokens: 20,
             cacheReadTokens: 30, cacheCreation5mTokens: 0, cacheCreation1hTokens: 0,
             totalCostUSD: 5, sessionCount: 1, modelCount: 1, lastActive: at,
-            sessionIdsJSON: Data(), modelTokensJSON: Data(), modelCostJSON: Data())])
+            sessionIdsJSON: Data(), modelBreakdownJSON: nil)])
         let s = totals([AccountProjectDailyAggregate(
             accountId: "org-a", projectPath: "/p", date: "d",
             inputTokens: 10, outputTokens: 20, cacheReadTokens: 30,
             cacheCreation5mTokens: 0, cacheCreation1hTokens: 0,
             totalCostUSD: 5, sessionCount: 1, modelCount: 1, lastActive: at,
-            sessionIdsJSON: Data(), modelTokensJSON: Data(), modelCostJSON: Data())])
+            sessionIdsJSON: Data(), modelBreakdownJSON: nil)])
         #expect(g?.cost == s?.cost)
-        #expect(g?.inputTokens == s?.inputTokens)
+        #expect(g?.tokens == s?.tokens)
         #expect(g?.sessionCount == s?.sessionCount)
     }
 

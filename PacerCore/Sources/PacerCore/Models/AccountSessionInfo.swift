@@ -74,11 +74,6 @@ public final class AccountSessionInfo {
         self.cumulativeCacheCreation1hTokens = cumulativeCacheCreation1hTokens
         self.topModel = topModel
     }
-
-    public var totalTokens: Int64 {
-        cumulativeInputTokens + cumulativeOutputTokens + cumulativeCacheReadTokens
-            + cumulativeCacheCreation5mTokens + cumulativeCacheCreation1hTokens
-    }
 }
 
 /// Everything a session bucket contains, computed once from its samples.
@@ -106,8 +101,13 @@ public struct SessionRollupValues: Sendable {
 
     public init() {}
 
-    /// The model with the most tokens, falling back to the first seen — the
-    /// row's `topModel`.
+    /// The model with the most tokens, all five parts counted
+    /// (`TokenBreakdown.all`, #215), falling back to the first seen — the
+    /// row's `topModel`. It ranked by input + output until cost recompute
+    /// "19", which re-picked it on every stored session: a session's top
+    /// model is the one that moved the most tokens, and in Claude Code ~98%
+    /// of them are cache reads and writes, which input + output never
+    /// counted. On a real store it re-picked 26 of 989 sessions.
     public var topModel: String {
         modelTokens.max { $0.value < $1.value }?.key ?? firstModel ?? ""
     }
@@ -129,8 +129,7 @@ public struct SessionRollupValues: Sendable {
         let priced = CostCalculator.sampleCost(sample, mode: mode, snapshot: snapshot)
         cost += priced.components
         pricedBy.add(priced.pricedBy)
-        modelTokens[sample.model, default: 0] +=
-            sample.breakdown.inputTokens + sample.breakdown.outputTokens
+        modelTokens[sample.model, default: 0] += sample.breakdown.all
         if firstModel == nil { firstModel = sample.model }
     }
 
@@ -151,7 +150,6 @@ public struct SessionRollupValues: Sendable {
         cacheCreation5mTokens -= sample.breakdown.cacheCreation5mTokens
         cacheCreation1hTokens -= sample.breakdown.cacheCreation1hTokens
         cost -= CostCalculator.sampleCost(sample, mode: mode, snapshot: snapshot).components
-        modelTokens[sample.model, default: 0] -=
-            sample.breakdown.inputTokens + sample.breakdown.outputTokens
+        modelTokens[sample.model, default: 0] -= sample.breakdown.all
     }
 }

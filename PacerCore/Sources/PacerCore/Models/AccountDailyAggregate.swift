@@ -57,9 +57,16 @@ public final class AccountDailyAggregate {
     )
 
     /// Stands in for `TokenSample.accountId == nil`. A sentinel rather than
-    /// an optional column so the unique key is always well-formed; the
-    /// U+0000 prefix cannot collide with a real org id.
-    public static let unattributedKey = "\u{0000}unattributed"
+    /// an optional column so the unique key is always well-formed. `~` cannot
+    /// appear in an org id (a UUID) or in `Account.defaultKey`.
+    ///
+    /// It was `"\u{0000}unattributed"`, and SQLite ends a string at U+0000:
+    /// the sentinel read back as `""`, and so did every unattributed row's
+    /// unique key, so the account rollups kept one unattributed row per
+    /// table and every `== unattributedKey` comparison missed. Cost recompute
+    /// 19 rebuilds those rows under this key; each bucket's rebuild deletes
+    /// the old `""` row as an orphan.
+    public static let unattributedKey = "~unattributed"
 
     public static func makeKey(accountId: String, date: String, model: String) -> String {
         "\(accountId)|\(date)|\(model)"
@@ -87,10 +94,5 @@ public final class AccountDailyAggregate {
         self.cacheCreation5mTokens = cacheCreation5mTokens
         self.cacheCreation1hTokens = cacheCreation1hTokens
         self.totalCostUSD = totalCostUSD
-    }
-
-    public var totalTokens: Int64 {
-        inputTokens + outputTokens + cacheReadTokens
-            + cacheCreation5mTokens + cacheCreation1hTokens
     }
 }

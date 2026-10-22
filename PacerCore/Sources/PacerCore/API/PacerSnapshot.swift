@@ -222,7 +222,9 @@ public struct PacerSnapshotPayload: Codable, Sendable {
         public let todayInput: Int
         public let todayOutput: Int
         public let todayCacheRead: Int
-        /// Input + output (cache excluded) — matches the menu bar's "today tokens".
+        /// Input + output (`TokenBreakdown.uncached`), cache excluded. Kept as it
+        /// was for API stability when the app's own "tokens" became all five parts
+        /// (#215); the menu bar's today tokens now count cache too.
         public let todayTotal: Int
 
         public init(todayInput: Int, todayOutput: Int, todayCacheRead: Int, todayTotal: Int) {
@@ -476,14 +478,12 @@ public enum PacerSnapshotBuilder {
             projectedMonthLowUSD: costSnapshot?.cost?.projectedMonthLoUSD,
             projectedMonthHighUSD: costSnapshot?.cost?.projectedMonthHiUSD)
 
-        let todayInput = todayRows.reduce(Int64(0)) { $0 + $1.inputTokens }
-        let todayOutput = todayRows.reduce(Int64(0)) { $0 + $1.outputTokens }
-        let todayCacheRead = todayRows.reduce(Int64(0)) { $0 + $1.cacheReadTokens }
+        let today = todayRows.reduce(TokenBreakdown.zero) { $0 + $1.tokens }
         let tokens = PacerSnapshotPayload.Tokens(
-            todayInput: Int(todayInput),
-            todayOutput: Int(todayOutput),
-            todayCacheRead: Int(todayCacheRead),
-            todayTotal: Int(todayInput + todayOutput))
+            todayInput: Int(today.inputTokens),
+            todayOutput: Int(today.outputTokens),
+            todayCacheRead: Int(today.cacheReadTokens),
+            todayTotal: Int(today.uncached))
 
         let pace = PacerSnapshotPayload.Pace(
             percentile: costSnapshot?.cost?.pacePercentile,
@@ -495,10 +495,10 @@ public enum PacerSnapshotBuilder {
                 project: URL(fileURLWithPath: $0.projectPath).lastPathComponent,
                 projectPath: $0.projectPath,
                 costUSD: $0.cumulativeCostUSD,
-                // Input + output, cache excluded — `SessionRow.totalTokens`
-                // counts cache too, and swapping to it here would quietly
-                // change a number that has always matched `tokens.todayTotal`.
-                tokens: Int($0.cumulativeInputTokens + $0.cumulativeOutputTokens),
+                // Uncached, like `tokens.todayTotal`: the app's "tokens" are
+                // all five parts (#215), but swapping that in here would
+                // quietly change a number API consumers already read.
+                tokens: Int($0.tokens.uncached),
                 lastActiveAt: $0.lastSeenAt)
         }
 

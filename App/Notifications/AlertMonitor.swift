@@ -248,7 +248,7 @@ final class AlertMonitor {
         struct Rule: Sendable {
             let id: String, name: String, metric: String, threshold: Double, accountId: String?
         }
-        struct Totals: Sendable { var todayCost = 0.0, weekCost = 0.0, todayTokens: Int64 = 0 }
+        struct Totals: Sendable { var todayCost = 0.0, weekCost = 0.0, todayUncachedTokens: Int64 = 0 }
         var today = ""
         var all = Totals()
         var topModel: String?
@@ -279,7 +279,8 @@ final class AlertMonitor {
             out.all.weekCost += row.totalCostUSD
             guard row.date == today else { continue }
             out.all.todayCost += row.totalCostUSD
-            out.all.todayTokens += row.inputTokens + row.outputTokens
+            // Uncached on purpose: see `AlertRuleMetric.todayTokens` (#215).
+            out.all.todayUncachedTokens += row.tokens.uncached
             todayByModel[row.model, default: 0] += row.totalCostUSD
         }
         out.topModel = todayByModel.max { $0.value < $1.value }?.key
@@ -309,7 +310,7 @@ final class AlertMonitor {
                 totals.weekCost += row.totalCostUSD
                 if row.date == today {
                     totals.todayCost += row.totalCostUSD
-                    totals.todayTokens += row.inputTokens + row.outputTokens
+                    totals.todayUncachedTokens += row.tokens.uncached
                 }
                 out.byAccount[row.accountId] = totals
             }
@@ -359,7 +360,7 @@ final class AlertMonitor {
             switch rule.metric {
             case AlertRuleMetric.todayCost:   value = totals.todayCost
             case AlertRuleMetric.weeklyCost:  value = totals.weekCost
-            case AlertRuleMetric.todayTokens: value = Double(totals.todayTokens)
+            case AlertRuleMetric.todayTokens: value = Double(totals.todayUncachedTokens)
             default: continue   // unknown metric: a newer build's, skip it
             }
             await coordinator.handleCustomRuleUpdate(

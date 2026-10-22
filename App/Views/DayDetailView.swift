@@ -1,13 +1,16 @@
 import SwiftUI
 import SwiftData
-import Charts
 import PacerCore
 import PacerUI
 
 /// Detail sheet for a single calendar day. Reachable from the History
-/// tab's heatmap (click a cell). Shows cost / tokens summary, the
-/// per-model donut breakdown for that day, and the projects active
-/// that day.
+/// tab's heatmap (click a cell) and every chart that plots days.
+///
+/// Laid out like Project detail (round 5), card for card: the first card
+/// (the shared `PacerSummaryCard`: what the day cost, its counts, its hours
+/// as a strip, and the breakdown), By model, Models, the day's Projects, then
+/// its Sessions. The shared cards are `DetailModalCards`; only the first
+/// card's counts and hours are the day's own.
 struct DayDetailView: View {
     let date: String  // YYYY-MM-DD
 
@@ -26,6 +29,11 @@ struct DayDetailView: View {
     private var projectAggregatesForDay: [any ProjectDailyReadable] {
         scope.isAll ? globalProjectsForDay : scopedProjectsForDay
     }
+    private var hourlyRows: [HourlyRow] {
+        scope.isAll
+            ? globalHourly.map(\.hourlyRow)
+            : scopedHourly.map(\.hourlyRow)
+    }
     private var sessionRows: [SessionRow] {
         scope.isAll
             ? globalSessionRows.map(\.sessionRow)
@@ -41,6 +49,11 @@ struct DayDetailView: View {
     /// numbers stay consistent with Projects / ProjectDetail.
     @Query private var globalProjectsForDay: [ProjectDailyAggregate]
     @Query private var scopedProjectsForDay: [AccountProjectDailyAggregate]
+    /// The day's hours, for the first card's strip of the day: which hours
+    /// had a turn and what each cost. At most 24 rows a model, by the indexed
+    /// date.
+    @Query private var globalHourly: [HourlyAggregate]
+    @Query private var scopedHourly: [AccountHourlyAggregate]
     @Query private var globalSessionRows: [SessionInfo]
     @Query private var scopedSessionRows: [AccountSessionInfo]
     @Query(DayDetailView.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
@@ -63,6 +76,14 @@ struct DayDetailView: View {
         )
         _scopedProjectsForDay = Query(
             filter: #Predicate<AccountProjectDailyAggregate> {
+                $0.date == date && $0.accountId == acct
+            }
+        )
+        _globalHourly = Query(
+            filter: #Predicate<HourlyAggregate> { $0.date == date }
+        )
+        _scopedHourly = Query(
+            filter: #Predicate<AccountHourlyAggregate> {
                 $0.date == date && $0.accountId == acct
             }
         )
@@ -92,11 +113,7 @@ struct DayDetailView: View {
     /// distantPast on parse failure so a malformed date key just
     /// surfaces an empty sessions list rather than crashing.
     private static func startOfDay(for ymd: String) -> Date {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.timeZone = .current
-        f.dateFormat = "yyyy-MM-dd"
-        return f.date(from: ymd) ?? .distantPast
+        prettyDateInputFmt.date(from: ymd) ?? .distantPast
     }
 
     private static let scanMetaProbe: FetchDescriptor<ClaudeCodeMeta> = {
@@ -106,184 +123,151 @@ struct DayDetailView: View {
         )
     }()
 
-    private struct Totals {
-        var cost: Double = 0
-        var input: Int64 = 0
-        var output: Int64 = 0
-        var cacheRead: Int64 = 0
-        var cacheCreation: Int64 = 0
-    }
-
-    private struct ProjectRow: Identifiable {
-        let path: String
-        let displayName: String
-        let cost: Double
-        let tokens: Int64
-        var id: String { path }
-    }
-
     private struct Cached {
-        var totals = Totals()
-        /// The whole day's cost by priced part (#225), and each model's,
-        /// largest model first.
+        /// The whole day's cost by priced part (#225): the first card's big
+        /// figure, its tokens, and its breakdown.
         var breakdown = CostBreakdown.zero
-        var modelBreakdowns: [ModelBreakdown] = []
-        var projectRows: [ProjectRow] = []
-        var sortedAggregates: [DailyRow] = []
-        var sortedProjectRows: [ProjectRow] = []
+        /// The day's 24 hours for the first card's strip: which had a turn,
+        /// each one's height its cost. With its span ("9 AM – 11 PM") and
+        /// each hour's tooltip, built here rather than in `body`.
+        var activity = PeriodActivity.hours(active: [])
+        var span: String?
+        var hourHelp: [String] = []
+        /// By model's and Models' rows, which sort themselves.
+        var modelRows: [DetailModalCards.ModelRow] = []
+        /// The Projects table's rows, from the same `ProjectUsageTotals`
+        /// fold the Projects list and Project detail use, so the three
+        /// agree (#215).
+        var projectRows: [PacerUsageRow<DetailPathExtra>] = []
     }
-
-    private struct ModelBreakdown: Identifiable {
-        let model: String
-        let breakdown: CostBreakdown
-        var id: String { model }
-    }
-
-    private var totals: Totals { cached.totals }
-    private var projectRows: [ProjectRow] { cached.projectRows }
-    private var sortedAggregates: [DailyRow] { cached.sortedAggregates }
-    private var sortedProjectRows: [ProjectRow] { cached.sortedProjectRows }
 
     @MainActor
     private func refreshCache() {
-        var t = Totals()
-        for r in aggregates {
-            t.cost += r.totalCostUSD
-            t.input += r.inputTokens
-            t.output += r.outputTokens
-            t.cacheRead += r.cacheReadTokens
-            t.cacheCreation += r.cacheCreation5mTokens + r.cacheCreation1hTokens
+        let rows = aggregates
+        // An hour counts when it had a turn: its samples, or its tokens for a
+        // row written before the per-account rollup kept a sample count.
+        var active: Set<Int> = []
+        var costByHour: [Int: Double] = [:]
+        for row in hourlyRows where row.sampleCount > 0 || row.tokens.all > 0 {
+            active.insert(row.hour)
+            costByHour[row.hour, default: 0] += row.totalCostUSD
         }
+        let activity = PeriodActivity.hours(active: active, cost: costByHour)
+        let year: Int = Calendar.current.component(.year, from: PacerClock.now)
 
         // Per-project rollup read straight from `ProjectDailyAggregate` —
         // one row per (projectPath, date), with totals already summed
         // and cost already applied at the user's current cost mode by
         // `ProjectAggregateRecomputer`. No per-sample iteration, no
         // pricing lookups on the body path.
-        let rows = projectAggregatesForDay.map { agg in
-            ProjectRow(
-                path: agg.projectPath,
-                displayName: pacerShortPath(agg.projectPath),
-                cost: agg.totalCostUSD,
-                tokens: agg.inputTokens + agg.outputTokens
-            )
-        }.sorted { lhs, rhs in
-            // Stable sort: by cost desc, with displayName as a
-            // deterministic tiebreaker so $0 rows don't shuffle on
-            // every scan tick.
-            if lhs.cost != rhs.cost { return lhs.cost > rhs.cost }
-            return lhs.displayName.localizedCaseInsensitiveCompare(rhs.displayName) == .orderedAscending
+        let projectRows = CollectionUsageRollup.perPathTotals(from: projectAggregatesForDay).map { path, totals in
+            PacerUsageRow(
+                id: path, label: pacerShortPath(path), subtitle: path,
+                tokens: totals.tokens, costParts: totals.costParts, cost: totals.cost,
+                extra: DetailPathExtra(sessions: totals.sessionCount))
         }
 
-        // Refresh the donut hover index. Pre-sorts by cost desc and
-        // builds the cumulative-angle table in one pass so hover
-        // ticks are O(rows) over an already-built array.
-        let sortedByCost = aggregates.sorted { $0.totalCostUSD > $1.totalCostUSD }
-        var running = 0.0
-        var built: [(agg: DailyRow, max: Double)] = []
-        built.reserveCapacity(sortedByCost.count)
-        for agg in sortedByCost {
-            running += agg.totalCostUSD
-            built.append((agg, running))
-        }
-        sortedAggsByCost = sortedByCost
-        aggCumulative = built
-        let breakdown = CostBreakdown.sum(aggregates, \.costBreakdown)
-        let modelBreakdowns = sortedByCost.map {
-            ModelBreakdown(model: $0.model, breakdown: $0.costBreakdown)
-        }
-
-        // Pre-sort the models + projects tables. Used to be computed
-        // properties (`sortedAggregates`, `sortedProjectRows`) read
-        // from `body` — re-sorted on every chart hover and every
-        // unrelated state change. Cached now and recomputed only
-        // when scan data or sort prefs change.
         cached = Cached(
-            totals: t,
-            breakdown: breakdown,
-            modelBreakdowns: modelBreakdowns,
-            projectRows: rows,
-            sortedAggregates: applyModelsSort(to: aggregates),
-            sortedProjectRows: applyProjectsSort(to: rows)
+            breakdown: CostBreakdown.sum(rows, \.costBreakdown),
+            activity: activity,
+            span: pacerActivitySpan(activity) { pacerHourLabel(Int($0) ?? 0) },
+            hourHelp: pacerActivityCellHelp(activity, currentYear: year),
+            modelRows: rows.map {
+                DetailModalCards.modelRow(model: $0.model, tokens: $0.tokens, costParts: $0.cost,
+                                          cost: $0.totalCostUSD)
+            },
+            projectRows: projectRows
         )
-    }
-
-    private func applyModelsSort(to source: [DailyRow]) -> [DailyRow] {
-        let primary: (DailyRow, DailyRow) -> Bool
-        switch modelsSort {
-        case .name:
-            primary = { $0.model < $1.model }
-        case .tokens:
-            let totalTokens: (DailyRow) -> Int64 = {
-                $0.inputTokens + $0.outputTokens
-            }
-            primary = { totalTokens($0) < totalTokens($1) }
-        case .cost:
-            primary = { $0.totalCostUSD < $1.totalCostUSD }
-        }
-        let sorted = source.sorted { lhs, rhs in
-            if primary(lhs, rhs) { return true }
-            if primary(rhs, lhs) { return false }
-            return lhs.model < rhs.model
-        }
-        return modelsSortDescending ? sorted.reversed() : sorted
-    }
-
-    private func applyProjectsSort(to source: [ProjectRow]) -> [ProjectRow] {
-        let primary: (ProjectRow, ProjectRow) -> Bool
-        switch projectsSort {
-        case .name:
-            primary = { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
-        case .tokens:
-            primary = { $0.tokens < $1.tokens }
-        case .cost:
-            primary = { $0.cost < $1.cost }
-        }
-        let sorted = source.sorted { lhs, rhs in
-            if primary(lhs, rhs) { return true }
-            if primary(rhs, lhs) { return false }
-            return lhs.path < rhs.path
-        }
-        return projectsSortDescending ? sorted.reversed() : sorted
     }
 
     var body: some View {
         // Read here as well as inside `PacerModalContent`'s stored closure,
         // so a refresh redraws this view (#140; AGENTS.md, "SwiftUI state and
-        // data flow"). The Sessions sort reaches its table only as bindings.
-        let _ = (cached, sortedAggsByCost, hoveredAggAngle)
-        let _ = (sessionsSortRaw, sessionsSortDescending)
+        // data flow").
+        let cached = self.cached
+        let sessions = sessionRows
+        // The cached rows, or on the first frame (before `.onChange` has run)
+        // the same rows built once here, so the card opens full.
+        let sessionTable = sessionTableRows.isEmpty && !sessions.isEmpty
+            ? PacerSessionsTable.rows(sessions) : sessionTableRows
+        // The sorts are read inside the cards, which run in that stored
+        // closure too; read here so a header click redraws at once.
+        let modelShareSort = DetailModalCards.sort(stored: modelShareSortRaw, descending: modelShareSortDescending)
+        let modelsSort = DetailModalCards.sort(stored: modelsSortRaw, descending: modelsSortDescending)
+        let projectsSort = DetailModalCards.sort(stored: projectsSortRaw, descending: projectsSortDescending,
+                                                 own: [DetailPathExtra.sessions])
+        let sessionsSort = PacerSessionsTable.sort(stored: sessionsSortRaw, descending: sessionsSortDescending)
+        let summary = summaryModel(cached, sessions: sessions.count)
+        let empty = aggregates.isEmpty
         PacerModalContent(
             title: prettyDate,
             subtitle: date,
             minWidth: 580, idealWidth: 660,
             minHeight: 480, idealHeight: 620
         ) {
-            summaryCard
-            if PacerCostBreakdownView.hasContent(cached.breakdown) { breakdownCard }
-            if !aggregates.isEmpty { modelsCard }
-            if !projectRows.isEmpty { projectsCard }
-            if !sessionRows.isEmpty { sessionsCard }
+            PacerSummaryCard(model: summary) {
+                if empty {
+                    Text("no data")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            if !cached.modelRows.isEmpty {
+                DetailModalCards.modelShareCard(
+                    rows: cached.modelRows, sort: modelShareSort, subject: prettyDate,
+                    onSort: { modelShareSortRaw = $0.column; modelShareSortDescending = $0.descending })
+                DetailModalCards.modelsTableCard(
+                    rows: cached.modelRows, tableId: "dayDetail.models", sort: modelsSort,
+                    onSort: { modelsSortRaw = $0.column; modelsSortDescending = $0.descending })
+            }
+            if !cached.projectRows.isEmpty { projectsCard(sort: projectsSort) }
+            if !sessions.isEmpty {
+                DetailModalCards.sessionsCard(
+                    rows: sessionTable, tableId: "dayDetail.sessions", showProject: true,
+                    sort: sessionsSort,
+                    onSort: { sessionsSortRaw = $0.column; sessionsSortDescending = $0.descending },
+                    onOpen: { row in
+                        push(.session(sessionId: row.id, projectDisplayName: row.extra.projectName))
+                    })
+            }
         }
         .onAppear { refreshCache() }
+        // The session rows are live `@Query` results (scans, a scope switch
+        // re-reading the other table); the table's rows follow them.
+        .onChange(of: sessions, initial: true) { _, new in
+            sessionTableRows = PacerSessionsTable.rows(new)
+        }
         .onChange(of: scanMeta.first?.value) { _, _ in refreshCache() }
         // The scope is an input to the cache: without this, switching scope
-        // with a day open left Summary, Models and Projects on the old
-        // account while the live Sessions list moved to the new one (#141).
+        // with a day open left the first card, Models and Projects on the
+        // old account while the live Sessions list moved to the new one
+        // (#141).
         .onChange(of: scope.accountId) { _, _ in refreshCache() }
-        // Sort-pref changes need a re-sort but not a re-fetch — the
-        // cache's `sortedAggregates`/`sortedProjectRows` are the only
-        // affected slices. Reusing `refreshCache()` is fine; it's
-        // bounded by the modal's small aggregate count.
-        .onChange(of: modelsSortRaw) { _, _ in refreshCache() }
-        .onChange(of: modelsSortDescending) { _, _ in refreshCache() }
-        .onChange(of: projectsSortRaw) { _, _ in refreshCache() }
-        .onChange(of: projectsSortDescending) { _, _ in refreshCache() }
     }
 
-    /// Static formatters used by `prettyDate`. The previous version
-    /// allocated both `DateFormatter` instances per call, and
-    /// `prettyDate` is read from `body` so every state change in the
+    /// The first card: the day's cost, three counts, and its hours as a
+    /// strip, each hour's height its cost, as History's and a project's
+    /// strips draw cost per day (the modal has no other picture of the day's
+    /// hours). Sessions come from the live session rows, the rest
+    /// from the cache. Each count is printed here only; the cards below carry
+    /// none in their headers.
+    private func summaryModel(_ cached: Cached, sessions: Int) -> PacerSummaryModel {
+        PacerSummaryModel(
+            breakdown: cached.breakdown,
+            stats: [
+                PacerSummaryFact("sessions", "\(sessions)"),
+                PacerSummaryFact("models", "\(cached.modelRows.count)"),
+                PacerSummaryFact("projects", "\(cached.projectRows.count)"),
+            ],
+            activity: cached.activity,
+            span: cached.span,
+            axis: pacerHourAxis(),
+            cellHelp: cached.hourHelp)
+    }
+
+    /// Static formatters used by `prettyDate` and `startOfDay`. The
+    /// previous version allocated both `DateFormatter` instances per call,
+    /// and `prettyDate` is read from `body` so every state change in the
     /// modal (chart hover, sort change) re-allocated them.
     private static let prettyDateInputFmt: DateFormatter = {
         let f = DateFormatter()
@@ -306,372 +290,72 @@ struct DayDetailView: View {
         return Self.prettyDateOutputFmt.string(from: d)
     }
 
-    private var summaryCard: some View {
-        let t = totals
-        return PacerCard("Summary", trailing: {
-            if aggregates.isEmpty {
-                Text("no data")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.tertiary)
-            }
-        }) {
-            VStack(alignment: .leading, spacing: 16) {
-                LazyVGrid(
-                    columns: Array(
-                        repeating: GridItem(.flexible(), spacing: 16, alignment: .topLeading),
-                        count: 5
-                    ),
-                    alignment: .leading,
-                    spacing: 12
-                ) {
-                    MetricTile(
-                        value: pacerCost(t.cost), label: "cost", size: .hero,
-                        tooltip: pacerCostExact(t.cost)
-                    )
-                    MetricTile(
-                        value: pacerTokens(t.input), label: "input",
-                        tooltip: pacerTokensExact(t.input)
-                    )
-                    MetricTile(
-                        value: pacerTokens(t.output), label: "output",
-                        tooltip: pacerTokensExact(t.output)
-                    )
-                    MetricTile(
-                        value: pacerTokens(t.cacheRead), label: "cache read",
-                        tooltip: pacerTokensExact(t.cacheRead)
-                    )
-                    MetricTile(
-                        value: pacerTokens(t.cacheCreation), label: "cache write",
-                        tooltip: pacerTokensExact(t.cacheCreation)
-                    )
-                }
-            }
-        }
-    }
-
-    /// Which of the five priced parts made up the day (#225), and the cache
-    /// hit rate the Summary used to carry. The shared `PacerCostBreakdownView`
-    /// draws it, so a day reads the same parts, colours and hit-rate
-    /// definition as a project or the Models tab. A day with more than one
-    /// model also gets one bar per model; their costs are in the Models card,
-    /// so here a model's line is its mix and its own hit rate.
-    private var breakdownCard: some View {
-        PacerCard("Cost breakdown") {
-            VStack(alignment: .leading, spacing: 14) {
-                PacerCostBreakdownView(cached.breakdown)
-                if cached.modelBreakdowns.count > 1 {
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack {
-                            Eyebrow(text: "By model", color: .secondary)
-                            Spacer()
-                            Eyebrow(text: "Cache hits", color: .secondary)
-                        }
-                        ForEach(cached.modelBreakdowns) { m in
-                            PacerCostBreakdownRow(
-                                label: pacerModelDisplayName(m.model),
-                                breakdown: m.breakdown
-                            ) {
-                                Text(m.breakdown.cacheHitRatio.map(pacerCacheHitText) ?? "–")
-                                    .font(.system(size: 11))
-                                    .foregroundStyle(.secondary)
-                                    .monospacedDigit()
-                                    .frame(width: 56, alignment: .trailing)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
+    /// By model's sort (which also turns its ring), and the Models and
+    /// Projects tables' sorts: a `UsageColumn` raw value (or the Projects
+    /// table's Sessions) and a direction. Models and Projects keep the keys
+    /// their cards always had; a stored sort on a column that has gone
+    /// (Models' old "share") falls back to cost (`DetailModalCards.sort`).
+    @AppStorage("pacer.dayDetail.modelShareSort", store: PacerSettings.store)
+    private var modelShareSortRaw: String = UsageColumn.cost.rawValue
+    @AppStorage("pacer.dayDetail.modelShareSortDescending", store: PacerSettings.store)
+    private var modelShareSortDescending: Bool = true
 
     @AppStorage("pacer.dayDetail.modelsSort", store: PacerSettings.store)
-    private var modelsSortRaw: String = DayModelsSort.cost.rawValue
+    private var modelsSortRaw: String = UsageColumn.cost.rawValue
     @AppStorage("pacer.dayDetail.modelsSortDescending", store: PacerSettings.store)
     private var modelsSortDescending: Bool = true
 
     @AppStorage("pacer.dayDetail.projectsSort", store: PacerSettings.store)
-    private var projectsSortRaw: String = DayProjectsSort.cost.rawValue
+    private var projectsSortRaw: String = UsageColumn.cost.rawValue
     @AppStorage("pacer.dayDetail.projectsSortDescending", store: PacerSettings.store)
     private var projectsSortDescending: Bool = true
-
-    private var modelsSort: DayModelsSort {
-        DayModelsSort(rawValue: modelsSortRaw) ?? .cost
-    }
-    private var projectsSort: DayProjectsSort {
-        DayProjectsSort(rawValue: projectsSortRaw) ?? .cost
-    }
-    private var modelsSortBinding: Binding<DayModelsSort> {
-        Binding(get: { modelsSort }, set: { modelsSortRaw = $0.rawValue })
-    }
-    private var projectsSortBinding: Binding<DayProjectsSort> {
-        Binding(get: { projectsSort }, set: { projectsSortRaw = $0.rawValue })
-    }
-
-    // `sortedAggregates` lives in `cached.sortedAggregates`; the
-    // build is in `applyModelsSort(to:)`.
 
     /// Tap handler on a day-detail project row: push the project's
     /// detail view onto the parent modal's NavigationStack so the
     /// native back button returns to this day modal. Skip the
     /// synthetic "(unknown)" path — there's no project to open.
-    private func openProject(_ row: ProjectRow) {
-        guard row.path != ProjectDailyAggregate.unknownProjectPath else { return }
+    private func openProject(path: String, displayName: String) {
+        guard path != ProjectDailyAggregate.unknownProjectPath else { return }
         // day detail has no time-range scope, so push with since: nil
         // → opens the project's all-time detail
-        push(.project(path: row.path, displayName: row.displayName, since: nil))
+        push(.project(path: path, displayName: displayName, since: nil))
     }
 
-    // `sortedProjectRows` lives in `cached.sortedProjectRows`; the
-    // build is in `applyProjectsSort(to:)`.
-
-    @State private var hoveredAggAngle: Double?
-
-    /// Pre-sorted aggregates + cumulative-angle table for the donut.
-    /// Recomputed in `refreshCache()`; hover lookups walk the table
-    /// without re-sorting. Without this every hover tick was an
-    /// N·log(N) sort + a fresh `cumulative += ...` loop.
-    @State private var sortedAggsByCost: [DailyRow] = []
-    @State private var aggCumulative: [(agg: DailyRow, max: Double)] = []
-
-    /// VoiceOver summary of the per-model donut for this day.
-    private var modelsAccessibilitySummary: String {
-        let total = aggregates.reduce(0) { $0 + $1.totalCostUSD }
-        guard total > 0 else { return "no data" }
-        return sortedAggsByCost.prefix(5).map { agg in
-            let pct = Int(agg.totalCostUSD / total * 100)
-            return "\(pacerModelDisplayName(agg.model)) \(pct) percent"
-        }.joined(separator: ", ")
-    }
-
-    private var hoveredAgg: DailyRow? {
-        guard let angle = hoveredAggAngle, !aggCumulative.isEmpty else { return nil }
-        for entry in aggCumulative where angle <= entry.max {
-            return entry.agg
-        }
-        return aggCumulative.last?.agg
-    }
-
-    private var modelsCard: some View {
-        PacerCard("Models", trailing: {
-            if let agg = hoveredAgg {
-                let total = aggregates.reduce(0) { $0 + $1.totalCostUSD }
-                let pct = total > 0 ? Int(agg.totalCostUSD / total * 100) : 0
-                HStack(spacing: 6) {
-                    Text(pacerModelDisplayName(agg.model))
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
-                    Text(pacerCost(agg.totalCostUSD)).help(pacerCostExact(agg.totalCostUSD))
-                        .font(.system(size: 12, weight: .semibold, design: .rounded))
-                        .monospacedDigit()
-                    Text("(\(pct)%)")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.tertiary)
-                }
-            }
-        }) {
-            HStack(alignment: .top, spacing: 24) {
-                // Use pre-sorted aggregates from the cache so we don't
-                // re-sort the array on every body render (which fired
-                // on every hover tick before).
-                PacerDonut(
-                    slices: sortedAggsByCost.map {
-                        PacerDonutSlice(id: pacerShortModel($0.model), value: $0.totalCostUSD,
-                                        color: pacerModelColor($0.model))
-                    },
-                    hoveredID: hoveredAgg.map { pacerShortModel($0.model) },
-                    hoveredAngle: $hoveredAggAngle,
-                    accessibilityLabel: "Models used on \(prettyDate)",
-                    accessibilityValue: modelsAccessibilitySummary
-                )
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack {
-                        SortableColumnHeader(
-                            "Model",
-                            field: DayModelsSort.name,
-                            alignment: .leading,
-                            active: modelsSortBinding,
-                            descending: $modelsSortDescending,
-                            defaultDescending: false
+    /// The projects active on this day: the shared paths table, a row
+    /// opening that project's detail.
+    private func projectsCard(sort: PacerUsageSort) -> some View {
+        DetailModalCards.pathsTableCard(
+            "Projects",
+            labelTitle: "Project",
+            rows: cached.projectRows,
+            tableId: "dayDetail.projects",
+            sort: sort,
+            onSort: { projectsSortRaw = $0.column; projectsSortDescending = $0.descending },
+            onOpen: { row in openProject(path: row.id, displayName: row.label) },
+            rowMenu: { row in
+                if row.id != ProjectDailyAggregate.unknownProjectPath {
+                    Button("Open project") { openProject(path: row.id, displayName: row.label) }
+                    Button("Reveal in Finder") {
+                        NSWorkspace.shared.activateFileViewerSelecting(
+                            [URL(fileURLWithPath: row.id)]
                         )
-                        Spacer()
-                        SortableColumnHeader(
-                            "Tokens",
-                            field: DayModelsSort.tokens,
-                            alignment: .trailing,
-                            active: modelsSortBinding,
-                            descending: $modelsSortDescending
-                        ).frame(width: 70)
-                        SortableColumnHeader(
-                            "Cost",
-                            field: DayModelsSort.cost,
-                            alignment: .trailing,
-                            active: modelsSortBinding,
-                            descending: $modelsSortDescending
-                        ).frame(width: 70)
                     }
-                    Divider().padding(.vertical, 2)
-                    let total = aggregates.reduce(0) { $0 + $1.totalCostUSD }
-                    ForEach(sortedAggregates) { agg in
-                        HStack(alignment: .firstTextBaseline) {
-                            Circle()
-                                .fill(pacerModelColor(agg.model))
-                                .frame(width: 8, height: 8)
-                            Text(pacerModelDisplayName(agg.model))
-                                .font(.system(size: 12, weight: .medium))
-                                .lineLimit(1)
-                            Spacer(minLength: 8)
-                            Text(pacerTokens(agg.inputTokens + agg.outputTokens)).help(pacerTokensExact(agg.inputTokens + agg.outputTokens))
-                                .font(.system(size: 11))
-                                .foregroundStyle(.secondary)
-                                .monospacedDigit()
-                                .frame(width: 70, alignment: .trailing)
-                            Text(pacerCost(agg.totalCostUSD)).help(pacerCostExact(agg.totalCostUSD))
-                                .font(.system(size: 12, weight: .semibold, design: .rounded))
-                                .monospacedDigit()
-                                .frame(width: 70, alignment: .trailing)
-                            if total > 0 {
-                                Text("\(Int(agg.totalCostUSD / total * 100))%")
-                                    .font(.system(size: 11))
-                                    .foregroundStyle(.tertiary)
-                                    .monospacedDigit()
-                                    .frame(width: 36, alignment: .trailing)
-                            }
-                        }
-                    }
+                    Divider()
                 }
-            }
-        }
-    }
-
-    private var projectsCard: some View {
-        PacerCard("Projects", trailing: {
-            Text("\(projectRows.count) project\(projectRows.count == 1 ? "" : "s")")
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-        }) {
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    SortableColumnHeader(
-                        "Project",
-                        field: DayProjectsSort.name,
-                        alignment: .leading,
-                        active: projectsSortBinding,
-                        descending: $projectsSortDescending,
-                        defaultDescending: false
-                    )
-                    Spacer()
-                    SortableColumnHeader(
-                        "Tokens",
-                        field: DayProjectsSort.tokens,
-                        alignment: .trailing,
-                        active: projectsSortBinding,
-                        descending: $projectsSortDescending
-                    ).frame(width: 90)
-                    SortableColumnHeader(
-                        "Cost",
-                        field: DayProjectsSort.cost,
-                        alignment: .trailing,
-                        active: projectsSortBinding,
-                        descending: $projectsSortDescending
-                    ).frame(width: 70)
-                }
-                Divider().padding(.vertical, 2)
-                ForEach(sortedProjectRows) { row in
-                    HoverRow(action: { openProject(row) }) {
-                        HStack(alignment: .firstTextBaseline) {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(row.displayName)
-                                    .font(.system(size: 13, weight: .medium))
-                                    .lineLimit(1)
-                                Text(row.path)
-                                    .font(.system(size: 10, design: .monospaced))
-                                    .foregroundStyle(.tertiary)
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
-                            }
-                            Spacer(minLength: 8)
-                            Text(pacerTokens(row.tokens)).help(pacerTokensExact(row.tokens))
-                                .font(.system(size: 11))
-                                .foregroundStyle(.secondary)
-                                .monospacedDigit()
-                                .frame(width: 90, alignment: .trailing)
-                            Text(pacerCost(row.cost)).help(pacerCostExact(row.cost))
-                                .font(.system(size: 12, weight: .semibold, design: .rounded))
-                                .monospacedDigit()
-                                .frame(width: 70, alignment: .trailing)
-                            Image(systemName: "chevron.right")
-                                .font(.system(size: 10, weight: .semibold))
-                                .foregroundStyle(.tertiary)
-                                .frame(width: 16, alignment: .trailing)
-                        }
-                    }
-                    .contextMenu {
-                        if row.path != ProjectDailyAggregate.unknownProjectPath {
-                            Button("Open project") { openProject(row) }
-                            Button("Reveal in Finder") {
-                                NSWorkspace.shared.activateFileViewerSelecting(
-                                    [URL(fileURLWithPath: row.path)]
-                                )
-                            }
-                            Divider()
-                        }
-                        Button("Copy path") { pacerCopyToPasteboard(row.path) }
-                        // Copy the exact dollars-and-cents; the visible
-                        // label is compact but the clipboard should be
-                        // precise so a paste into a spreadsheet works.
-                        Button("Copy cost") { pacerCopyToPasteboard(pacerCostExact(row.cost)) }
-                    }
-                }
-            }
-        }
+                Button("Copy path") { pacerCopyToPasteboard(row.id) }
+                // Copy the exact dollars-and-cents; the visible
+                // label is compact but the clipboard should be
+                // precise so a paste into a spreadsheet works.
+                Button("Copy cost") { pacerCopyToPasteboard(pacerCostExact(row.cost)) }
+            })
     }
 
     @AppStorage("pacer.dayDetail.sessionsSort", store: PacerSettings.store)
-    private var sessionsSortRaw: String = SessionsTableSort.cost.rawValue
+    private var sessionsSortRaw: String = UsageColumn.cost.rawValue
     @AppStorage("pacer.dayDetail.sessionsSortDescending", store: PacerSettings.store)
     private var sessionsSortDescending: Bool = true
 
-    private var sessionsSort: SessionsTableSort {
-        SessionsTableSort(rawValue: sessionsSortRaw) ?? .cost
-    }
-    private var sessionsSortBinding: Binding<SessionsTableSort> {
-        Binding(get: { sessionsSort }, set: { sessionsSortRaw = $0.rawValue })
-    }
-
-    /// Sessions active on this day — same shared SessionsTable that
-    /// the project modal uses, with the "Project" column enabled
-    /// because a day spans many projects. All rows reachable via the
-    /// table's inner scroll once the count exceeds the inline
-    /// threshold; no more "+N more" dead-end.
-    private var sessionsCard: some View {
-        PacerCard("Sessions", trailing: {
-            Text("\(sessionRows.count) on this day")
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-        }) {
-            SessionsTable(
-                rows: sessionRows,
-                showProjectColumn: true,
-                sort: sessionsSortBinding,
-                sortDescending: $sessionsSortDescending,
-                onSessionTap: { session in
-                    push(.session(
-                        sessionId: session.sessionId,
-                        projectDisplayName: pacerShortPath(session.projectPath)
-                    ))
-                }
-            )
-        }
-    }
-}
-
-/// Sort fields for the Day detail's Models / Projects mini-tables.
-enum DayModelsSort: String, CaseIterable, Identifiable {
-    case name, tokens, cost
-    var id: String { rawValue }
-}
-
-enum DayProjectsSort: String, CaseIterable, Identifiable {
-    case name, tokens, cost
-    var id: String { rawValue }
+    /// The Sessions table's rows, rebuilt when the day's sessions change
+    /// (a scan, a scope switch) rather than on every body pass.
+    @State private var sessionTableRows: [PacerSessionsTable.Row] = []
 }

@@ -209,9 +209,9 @@ struct PacerSnapshotAPITests {
         #expect(snap.limits.scoped.first?.usedPercent == 0)
     }
 
-    /// Session tokens exclude cache, matching `tokens.todayTotal` and the menu
-    /// bar. `SessionRow.totalTokens` counts cache too, and normalising the two
-    /// session tables through it would have changed a shipped number.
+    /// Session tokens exclude cache (`TokenBreakdown.uncached`), matching
+    /// `tokens.todayTotal`. The app's own "tokens" count all five parts
+    /// (#215); moving the API to that would change a shipped number.
     @MainActor
     @Test func sessionTokensExcludeCache() throws {
         let container = try Self.makeContainer()

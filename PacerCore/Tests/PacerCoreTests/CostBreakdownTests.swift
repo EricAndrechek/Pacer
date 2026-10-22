@@ -37,6 +37,18 @@ struct CostBreakdownTests {
         #expect(parts.first { $0.component == .cacheRead }?.usd == 649.96)
     }
 
+    @Test("the parts run in prompt order, then output")
+    func promptOrderThenOutput() {
+        // The cached prefix, what is being cached now (1h before 5m, as
+        // Anthropic orders breakpoints), the uncached tail, then the reply.
+        let order: [CostComponent] = CostComponent.allCases
+        #expect(order == [.cacheRead, .cacheWrite1h, .cacheWrite5m, .input, .output])
+        // Only the drawing order moved: the raw values are the stable names.
+        let raw: [String] = order.map(\.rawValue)
+        #expect(raw == ["cacheRead", "cacheWrite1h", "cacheWrite5m", "input", "output"])
+        #expect(CostComponent.input.label == "Uncached input")
+    }
+
     @Test("the order does not follow size")
     func orderIsFixed() {
         let outputHeavy = CostBreakdown(cost: CostComponents(input: 1, output: 90, cacheRead: 9))
@@ -48,11 +60,12 @@ struct CostBreakdownTests {
     func percentsSumTo100() {
         let parts = CostBreakdown(cost: realMix).parts
         #expect(parts.map(\.percent).reduce(0, +) == 100)
-        #expect(parts.map(\.percent) == [0, 7, 65, 15, 13])
+        // Reads, 1h writes, 5m writes, uncached input, output.
+        #expect(parts.map(\.percent) == [65, 13, 15, 0, 7])
         // Input is real money, just under a whole percent: it says so rather
         // than claiming 0%.
-        #expect(parts[0].percentLabel == "<1%")
-        #expect(parts[2].percentLabel == "65%")
+        #expect(parts[3].percentLabel == "<1%")
+        #expect(parts[0].percentLabel == "65%")
 
         // Three equal thirds would floor to 33 + 33 + 33 = 99; the leftover
         // point goes to one of them, not nowhere.
@@ -168,7 +181,7 @@ struct CostBreakdownTests {
                 cacheCreation5mTokens: 700, cacheCreation1hTokens: 300,
                 totalCostUSD: 0, sessionCount: 1, modelCount: 1,
                 lastActive: .distantPast, sessionIdsJSON: Data(),
-                modelTokensJSON: Data(), modelCostJSON: Data())
+                modelBreakdownJSON: nil)
             s.costComponents = c
             ctx.insert(g)
             ctx.insert(s)
@@ -203,15 +216,76 @@ struct CostBreakdownTests {
         }
     }
 
-    @Test("the two cache-write tiers are warm neighbours, apart from reads")
-    func writeTiersReadAsAPair() {
-        func gap(_ a: CostComponent, _ b: CostComponent) -> Double {
-            let d = abs(PacerCostPalette.hue(a) - PacerCostPalette.hue(b))
-            return min(d, 360 - d)
+    @Test("every pair of parts stays apart under red- and green-weak vision, light and dark",
+          arguments: [NSAppearance.Name.aqua, .darkAqua])
+    func partsSurviveColourBlindness(_ appearance: NSAppearance.Name) throws {
+        // The data-viz CVD check: Machado 2009 at severity 1.0, distance in
+        // OKLab ×100, target 8. Output at the ridge's purple measured 5.9
+        // against the blue reads under protanopia.
+        let protan: [[Double]] = [[0.152286, 1.052583, -0.204868],
+                                  [0.114503, 0.786281, 0.099216],
+                                  [-0.003882, -0.048116, 1.051998]]
+        let deutan: [[Double]] = [[0.367322, 0.860646, -0.227968],
+                                  [0.280085, 0.672501, 0.047413],
+                                  [-0.011820, 0.042940, 0.968881]]
+        // Every pair, not just neighbours: a legend puts any two side by side.
+        let parts: [CostComponent] = CostComponent.allCases
+        var hexes: [String?] = []
+        try #require(NSAppearance(named: appearance)).performAsCurrentDrawingAppearance {
+            hexes = parts.map { pacerHexString(from: $0.color) }
         }
-        #expect(gap(.cacheWrite5m, .cacheWrite1h) < 60)
-        #expect(gap(.cacheRead, .cacheWrite5m) > 90)
-        #expect(gap(.cacheRead, .cacheWrite1h) > 90)
+        let linear: [[Double]] = try hexes.map { try #require(Self.linearRGB($0)) }
+        for i in 0..<parts.count {
+            for j in (i + 1)..<parts.count {
+                for m in [protan, deutan] {
+                    let a: [Double] = Self.oklab(Self.apply(m, linear[i]))
+                    let b: [Double] = Self.oklab(Self.apply(m, linear[j]))
+                    let d: Double = Self.distance(a, b) * 100
+                    #expect(d >= 8, "\(appearance.rawValue) \(parts[i]) vs \(parts[j]): ΔE \(d)")
+                }
+            }
+        }
+    }
+
+    @Test("output is a deep violet on light backgrounds and a lavender on dark ones")
+    func outputPurpleFollowsTheAppearance() throws {
+        var light: String?, dark: String?
+        try #require(NSAppearance(named: .aqua)).performAsCurrentDrawingAppearance {
+            light = pacerHexString(from: CostComponent.output.color)
+        }
+        try #require(NSAppearance(named: .darkAqua)).performAsCurrentDrawingAppearance {
+            dark = pacerHexString(from: CostComponent.output.color)
+        }
+        #expect(light == "#6F3BB2")
+        #expect(dark == "#BC88F4")
+    }
+
+    private static func linearRGB(_ hex: String?) -> [Double]? {
+        guard let hex, hex.count >= 7, let v = UInt32(hex.dropFirst().prefix(6), radix: 16) else { return nil }
+        let channels: [Double] = [Double((v >> 16) & 0xff), Double((v >> 8) & 0xff), Double(v & 0xff)]
+        return channels.map { c in
+            let x: Double = c / 255
+            return x <= 0.04045 ? x / 12.92 : pow((x + 0.055) / 1.055, 2.4)
+        }
+    }
+
+    private static func apply(_ m: [[Double]], _ v: [Double]) -> [Double] {
+        m.map { row in min(max(row[0] * v[0] + row[1] * v[1] + row[2] * v[2], 0), 1) }
+    }
+
+    private static func oklab(_ rgb: [Double]) -> [Double] {
+        let l: Double = cbrt(0.4122214708 * rgb[0] + 0.5363325363 * rgb[1] + 0.0514459929 * rgb[2])
+        let m: Double = cbrt(0.2119034982 * rgb[0] + 0.6806995451 * rgb[1] + 0.1073969566 * rgb[2])
+        let s: Double = cbrt(0.0883024619 * rgb[0] + 0.2817188376 * rgb[1] + 0.6299787005 * rgb[2])
+        let lightness: Double = 0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s
+        let a: Double = 1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s
+        let b: Double = 0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s
+        return [lightness, a, b]
+    }
+
+    private static func distance(_ x: [Double], _ y: [Double]) -> Double {
+        let d0: Double = x[0] - y[0], d1: Double = x[1] - y[1], d2: Double = x[2] - y[2]
+        return (d0 * d0 + d1 * d1 + d2 * d2).squareRoot()
     }
 
     @Test("a cost bar's tooltip names all five parts, in order, with exact dollars")
@@ -222,6 +296,16 @@ struct CostBreakdownTests {
         for (line, part) in zip(lines, CostComponent.allCases) {
             #expect(line.hasPrefix(part.label + ": "))
         }
-        #expect(lines[2].hasSuffix("(65%)"))
+        #expect(lines[0].hasSuffix("(65%)"))
+    }
+
+    @Test("the hit rate never rounds up to a perfect 100%")
+    func cacheHitTextCapsShortOfEverything() {
+        #expect(pacerCacheHitText(0.981) == "98.1%")
+        // 99.96% would round to "100.0%", claiming the cache missed nothing.
+        #expect(pacerCacheHitText(0.9996) == "99.9%")
+        #expect(pacerCacheHitText(0.99949) == "99.9%")
+        #expect(pacerCacheHitText(1) == "100.0%")
+        #expect(pacerCacheHitText(0) == "0.0%")
     }
 }

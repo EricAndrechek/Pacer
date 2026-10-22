@@ -95,13 +95,7 @@ struct AdvisorBadges: View {
     }
 
     private static func toTotals(_ row: DailyRow) -> UsageHints.ModelTotals {
-        UsageHints.ModelTotals(
-            model: row.model,
-            costUSD: row.totalCostUSD,
-            inputTokens: row.inputTokens,
-            outputTokens: row.outputTokens,
-            cacheReadTokens: row.cacheReadTokens
-        )
+        UsageHints.ModelTotals(model: row.model, costUSD: row.totalCostUSD, tokens: row.tokens)
     }
 
     var body: some View {
@@ -214,7 +208,7 @@ struct AdvisorBadges: View {
         case .heavyPremiumShare(_, let cost):
             return "Sonnet 4.6 handles most coding tasks at a fraction of the per-token cost of Opus, Fable, or Mythos. Today's premium-model spend so far: \(pacerCost(cost))."
         case .lowCacheHitRate:
-            return "Long-running sessions reuse cached system prompts. Closing Claude Code and starting fresh forces a re-cache."
+            return "The cache expires after 5 idle minutes (an hour on the 1-hour tier), so long pauses between turns write the whole context again."
         }
     }
 }

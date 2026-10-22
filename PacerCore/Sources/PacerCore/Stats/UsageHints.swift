@@ -32,22 +32,15 @@ public enum UsageHints {
     public struct ModelTotals: Sendable {
         public let model: String
         public let costUSD: Double
-        public let inputTokens: Int64
-        public let outputTokens: Int64
-        public let cacheReadTokens: Int64
+        /// All five parts. The cache hint needs the writes: a hit rate
+        /// without them is reads ÷ (reads + input), which sits near 100%
+        /// for any Claude Code session and can never look low.
+        public let tokens: TokenBreakdown
 
-        public init(
-            model: String,
-            costUSD: Double,
-            inputTokens: Int64,
-            outputTokens: Int64,
-            cacheReadTokens: Int64
-        ) {
+        public init(model: String, costUSD: Double, tokens: TokenBreakdown) {
             self.model = model
             self.costUSD = costUSD
-            self.inputTokens = inputTokens
-            self.outputTokens = outputTokens
-            self.cacheReadTokens = cacheReadTokens
+            self.tokens = tokens
         }
     }
 
@@ -70,9 +63,13 @@ public enum UsageHints {
         let lower = model.lowercased()
         return premiumModelFragments.contains { lower.contains($0) }
     }
-    /// Cache-hit ratio below this is "low." 0.5 is generous (typical
-    /// Claude Code workloads run 80–95%).
-    public static let lowCacheHitThreshold: Double = 0.5
+    /// Cache-hit ratio (`TokenBreakdown.cacheHitRatio`, reads over every
+    /// prompt token) below this is "low". A Claude Code day runs about 97–99%:
+    /// each turn re-reads the conversation and writes only what is new. It
+    /// drops when the cache expires between turns (5 idle minutes, or an
+    /// hour on the 1-hour tier) and the whole context is written again.
+    /// 0.90 fired on 4 of the 67 five-hour blocks in the committed sample.
+    public static let lowCacheHitThreshold: Double = 0.90
     /// Token floor for the cache-hit hint — fewer than this and the
     /// ratio is too noisy to surface.
     public static let cacheTokensFloor: Int64 = 100_000
@@ -91,7 +88,7 @@ public enum UsageHints {
             .filter { isPremiumModel($0.model) }
             .reduce(0) { $0 + $1.costUSD }
         let usedSonnetThisWeek = thisWeekByModel.contains {
-            $0.model.lowercased().contains("sonnet") && ($0.inputTokens + $0.outputTokens) > 0
+            $0.model.lowercased().contains("sonnet") && $0.tokens.all > 0
         }
 
         if todayCost >= premiumMinTodayCost,
@@ -105,20 +102,11 @@ public enum UsageHints {
             )
         }
 
-        let todayInput = todayByModel.reduce(0) { $0 + $1.inputTokens }
-        let todayCacheRead = todayByModel.reduce(0) { $0 + $1.cacheReadTokens }
-        let totalTokensToday = todayByModel.reduce(0) {
-            $0 + $1.inputTokens + $1.outputTokens + $1.cacheReadTokens
-        }
-        let denom = Double(todayCacheRead + todayInput)
-        if denom > 0,
-           totalTokensToday >= cacheTokensFloor {
-            let ratio = Double(todayCacheRead) / denom
-            if ratio < lowCacheHitThreshold {
-                hints.append(
-                    .lowCacheHitRate(ratio: ratio, tokensToday: totalTokensToday)
-                )
-            }
+        let today = todayByModel.reduce(TokenBreakdown.zero) { $0 + $1.tokens }
+        if today.all >= cacheTokensFloor,
+           let ratio = today.cacheHitRatio,
+           ratio < lowCacheHitThreshold {
+            hints.append(.lowCacheHitRate(ratio: ratio, tokensToday: today.all))
         }
 
         return hints

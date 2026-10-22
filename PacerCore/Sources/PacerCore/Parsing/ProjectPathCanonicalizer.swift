@@ -62,6 +62,34 @@ public enum ProjectPathCanonicalizer {
         return resolveAlias(stripped, aliases: aliases)
     }
 
+    /// Where inside its project a raw cwd sits, with any worktree removed:
+    /// the Subprojects card's grouping key. A worktree is another checkout
+    /// of the same repo, so `<repo>/.claude/worktrees/<id>/packages/api` is
+    /// `packages/api`, the same subproject as `<repo>/packages/api`.
+    ///
+    /// - `subpath`: relative to the repo root; empty for the root itself.
+    /// - `worktree`: the worktree's directory name, nil for the main
+    ///   checkout. A path outside `canonical` (a renamed folder or a sibling
+    ///   checkout joined by an alias) counts as its root, from another
+    ///   checkout: its own subfolders were never aliased, so there is no
+    ///   finer place to put it.
+    public static func subproject(of original: String, in canonical: String)
+        -> (subpath: String, worktree: String?)
+    {
+        let root = canonical.hasSuffix("/") ? String(canonical.dropLast()) : canonical
+        for pattern in [#"/\.claude/worktrees/[^/]+"#, #"/\.worktrees/[^/]+"#] {
+            if let range = original.range(of: pattern, options: .regularExpression) {
+                let id = (String(original[range]) as NSString).lastPathComponent
+                var inner = String(original[range.upperBound...])
+                if inner.hasPrefix("/") { inner.removeFirst() }
+                return (inner, id)
+            }
+        }
+        if original == root { return ("", nil) }
+        if original.hasPrefix(root + "/") { return (String(original.dropFirst(root.count + 1)), nil) }
+        return ("", (original as NSString).lastPathComponent)
+    }
+
     private static func stripWorktreeSegment(_ path: String) -> String {
         // Patterns must match the worktree segment AND the agent dir
         // that follows it — otherwise we'd strip down to ".claude" or

@@ -373,12 +373,6 @@ public struct PriceLedger: Sendable {
                           pricedBy: tokens, flags: flags)
     }
 
-    /// The base-tier standard rates for `model` at `t`, for display math
-    /// (the cache-savings estimate) that needs a rate rather than a cost.
-    public func rates(for model: String, at t: Date) -> PriceRates? {
-        plan(for: model).timeline?.segment(at: t)?.standard.last?.record.rates
-    }
-
     /// Whether `model` has any price at all.
     public func isPriced(_ model: String) -> Bool {
         plan(for: model).timeline?.segments.isEmpty == false

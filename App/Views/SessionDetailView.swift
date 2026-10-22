@@ -149,8 +149,8 @@ struct SessionDetailView: View {
                     tooltip: pacerCostExact(session.cumulativeCostUSD)
                 )
                 MetricTile(
-                    value: pacerTokens(session.totalTokens), label: "tokens",
-                    tooltip: pacerTokensExact(session.totalTokens)
+                    value: pacerTokens(session.tokens.all), label: "tokens",
+                    tooltip: pacerTokensExact(session.tokens.all)
                 )
                 MetricTile(value: pacerModelDisplayName(session.topModel), label: "top model", size: .compact)
                 MetricTile(
@@ -161,20 +161,10 @@ struct SessionDetailView: View {
         }
     }
 
-    /// `firstSeen → lastSeen`. Compact ("3h 12m"); hour granularity for
-    /// long-running sessions, second granularity for sub-minute hits so
-    /// "0m" is never the answer.
+    /// `firstSeen → lastSeen`, the way the sessions table's Duration column
+    /// prints it (`pacerSessionDuration`).
     private static func durationLabel(for session: SessionRow) -> String {
-        let seconds = max(0, session.lastSeenAt.timeIntervalSince(session.firstSeenAt))
-        if seconds < 60 { return "\(Int(seconds))s" }
-        let minutes = Int(seconds / 60)
-        if minutes < 60 { return "\(minutes)m" }
-        let hours = minutes / 60
-        let remMin = minutes % 60
-        if hours < 24 { return remMin == 0 ? "\(hours)h" : "\(hours)h \(remMin)m" }
-        let days = hours / 24
-        let remHr = hours % 24
-        return remHr == 0 ? "\(days)d" : "\(days)d \(remHr)h"
+        pacerSessionDuration(session.lastSeenAt.timeIntervalSince(session.firstSeenAt))
     }
 
     // MARK: - Tokens

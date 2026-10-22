@@ -209,19 +209,39 @@ public struct TokenBreakdown: Sendable, Equatable, Hashable {
         self.cacheCreation1hTokens = cacheCreation1hTokens
     }
 
-    /// Input + output. Matches ccusage's "totalTokens" semantic (cache
-    /// reads/writes excluded) — useful for at-a-glance display where
-    /// caching makes the headline number jump.
-    public var billableInputOutput: Int64 {
+    public static let zero = TokenBreakdown()
+
+    /// Every token, all five categories. **This is what "tokens" means** on
+    /// every surface that shows, ranks or charts a token count (#215), and
+    /// what ccusage's `totalTokens` is.
+    ///
+    /// Three definitions used to coexist — input + output, input + output +
+    /// cache reads, and this one — so the same project read differently on
+    /// two screens, and Top Days ranked by input + output put months-old days
+    /// first while cache reads and writes, ~98% of a real store's tokens and
+    /// what drives cost, went uncounted.
+    public var all: Int64 {
+        inputTokens + outputTokens + cacheReadTokens + cacheWrite
+    }
+
+    /// Input + output: the tokens no cache served or stored. A surface that
+    /// shows this labels it "uncached tokens", never just "tokens".
+    public var uncached: Int64 {
         inputTokens + outputTokens
     }
 
-    /// Sum of all five categories. The number Anthropic actually ships
-    /// across the wire.
-    public var totalTokens: Int64 {
-        inputTokens + outputTokens + cacheReadTokens
-            + cacheCreation5mTokens + cacheCreation1hTokens
+    /// Both cache-write tiers.
+    public var cacheWrite: Int64 {
+        cacheCreation5mTokens + cacheCreation1hTokens
     }
+
+    public static func + (a: TokenBreakdown, b: TokenBreakdown) -> TokenBreakdown {
+        var sum = a
+        sum.add(b)
+        return sum
+    }
+
+    public static func += (a: inout TokenBreakdown, b: TokenBreakdown) { a.add(b) }
 
     public mutating func add(_ other: TokenBreakdown) {
         inputTokens += other.inputTokens

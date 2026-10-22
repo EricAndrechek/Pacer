@@ -216,9 +216,10 @@ public extension PacerAccountList.Row {
 /// from its own background queue.
 public enum PacerAccountsBuilder {
 
-    /// URL-safe stand-in for `AccountDailyAggregate.unattributedKey`, whose
-    /// U+0000 prefix exists to be un-typeable and therefore cannot be a query
-    /// parameter.
+    /// The API's stable name for the unattributed row, kept apart from
+    /// `AccountDailyAggregate.unattributedKey` so the store's internal key can
+    /// change (it did: from a U+0000 prefix SQLite truncated, to `~unattributed`)
+    /// without changing what a caller sends.
     public static let unattributedAlias = "unattributed"
 
     public enum ResolveError: Error, Sendable, Equatable {

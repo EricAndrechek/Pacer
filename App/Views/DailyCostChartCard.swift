@@ -1,27 +1,22 @@
 import SwiftUI
 import SwiftData
-import Charts
 import PacerCore
 import PacerUI
 
-/// 30-day rolling bar chart of daily cost in USD. Pulls
-/// `DailyAggregate` rows ordered descending by date, takes the last
-/// 30 days, sums per date (across models). Cost numbers are
-/// validated end-to-end against `bun x ccusage daily --json` —
-/// see `CCusageGroundTruthTests.dailyCostsMatchCapturedCcusageSnapshot`.
+/// The last 30 days as a chart. "This month" is its own card under it
+/// (`MonthOutlookCard`): the two were one card for a round, but they are
+/// different periods, and the owner chose two cards.
 ///
-/// Each bar is stacked by priced part (#225) — input, output, cache reads,
-/// 5m and 1h cache writes — coloured by part only, from `PacerCostPalette`.
-/// One encoding per chart: the split by model lives on the Models tab.
-///
-/// Click a bar to drill into the per-day modal (same view the
-/// History tab's heatmap opens). The hover callout in the trailing
-/// slot doubles as an affordance: when there's a selection, it shows
-/// the date + cost so the click target is clear.
+/// The chart is the shared `PacerStackedPartChart`: each bar stacked by
+/// priced part (#225), coloured by part only, with a hover card over the
+/// chart that gives the day's cost, tokens, breakdown and top models. One
+/// encoding per chart: the split by model lives on the Models tab. Click a
+/// bar to drill into the per-day modal (same view the History tab's heatmap
+/// opens).
 struct DailyCostChartCard: View {
     /// Optional callback fired when the user clicks a bar. Wiring is
-    /// at the parent (DashboardView / HistoryView), so each surface
-    /// can decide whether to open the day modal locally or stay quiet.
+    /// at the parent (DashboardView), so each surface can decide whether to
+    /// open the day modal locally or stay quiet.
     let onDayTap: ((String) -> Void)?
 
     init(scopeAccountId: String? = nil, onDayTap: ((String) -> Void)? = nil) {
@@ -64,85 +59,58 @@ struct DailyCostChartCard: View {
             : scopedAggregates.map(\.dailyRow)
     }
     /// Singleton-row probe — fires once per scan cycle. Drives the
-    /// `Derived` cache refresh so the Dictionary(grouping:) +
-    /// `.sorted()` + `.suffix(30)` pipeline runs at most once per
-    /// cycle instead of on every body render / hover event.
+    /// `Derived` cache refresh so the bucketing runs at most once per
+    /// cycle instead of on every body render.
     @Query(ScanMetaFetchDescriptor.scanCompletedProbe)
     private var scanMeta: [ClaudeCodeMeta]
 
-    /// Debounced selection that the chart RuleMark + trailing slot read.
-    /// Updated from `rawSelection` only once the pointer settles, so a
-    /// scroll that sweeps the cursor across the bars doesn't re-lay-out
-    /// the whole chart on every pointer event — the scroll-stutter cause.
-    /// See docs/perf-tuning.md.
-    @State private var selectedDate: String?
-    /// Raw `chartXSelection` binding — updates on every pointer move.
-    /// Nothing reads it for rendering; it feeds the debounce below and the
-    /// tap handler (which needs the immediate, un-debounced value).
-    @State private var rawSelection: String?
-    @State private var selectionDebounce: Task<Void, Never>?
-    @State private var cachedDerived = Derived(dailyTotals: [], annotateDates: [], totalCost: 0)
+    @State private var cachedDerived = Derived()
 
+    /// The bars and the header's total. Each bucket carries its breakdown
+    /// and top models, built here, so hovering a bar reads precomputed
+    /// numbers and never re-sums the rows.
     private struct Derived {
-        let dailyTotals: [DailyTotal]
-        let annotateDates: Set<String>
-        let totalCost: Double
+        var buckets: [PacerChartBucket] = []
+        var totalCost: Double = 0
     }
 
     private func refreshDerived() {
-        let grouped = Dictionary(grouping: aggregates, by: \.date)
-        let sortedDates = grouped.keys.sorted()
-        let lastN = sortedDates.suffix(30)
-        let totals = lastN.map { date -> DailyTotal in
-            let rows = grouped[date] ?? []
-            let parts = CostBreakdown.sum(rows, \.costBreakdown).parts
-            return DailyTotal(
-                date: date,
-                cost: rows.reduce(0) { $0 + $1.totalCostUSD },
-                tokens: rows.reduce(0) { $0 + $1.inputTokens + $1.outputTokens },
-                parts: parts,
-                topPart: parts.last { $0.usd > 0 }?.component
-            )
+        var builder = PacerChartBucketBuilder()
+        for row in aggregates {
+            builder.add(row.date, row.costBreakdown, model: row.model)
         }
-        let topThree = Set(totals.sorted { $0.cost > $1.cost }.prefix(3).map(\.date))
+        let buckets = builder.buckets(last: 30)
         cachedDerived = Derived(
-            dailyTotals: totals,
-            annotateDates: topThree,
-            totalCost: totals.reduce(0) { $0 + $1.cost }
+            buckets: buckets,
+            // The chart's days, not every row fetched: the header total is
+            // the last 30 bars' sum.
+            totalCost: buckets.reduce(0) { $0 + $1.total }
         )
     }
 
     var body: some View {
+        // Read here as well as inside `PacerCard`'s stored closures (#140).
         let d = cachedDerived
         PacerCard("Last 30 days", trailing: {
-            // Hover swaps "total $X.X" for the selected day's date + cost
-            // — surfacing the info up here means the chart's plot area
-            // never has to expand to fit a callout, so the chart stops
-            // jumping in height when the user moves the pointer over
-            // bars. Same trick is applied in MonthlyChartCard.
-            if let selectedDate, let row = d.dailyTotals.first(where: { $0.date == selectedDate }) {
-                HStack(spacing: 8) {
-                    Text(row.date)
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                    Text(pacerCost(row.cost)).help(pacerCostExact(row.cost))
-                        .font(.system(size: 12, weight: .semibold, design: .rounded))
-                        .monospacedDigit()
-                }
-            } else if d.totalCost > 0 {
+            // The hovered day's numbers are in the card floating over the
+            // chart, so this slot no longer swaps on hover and the header
+            // never moves.
+            if d.totalCost > 0 {
                 Text("total \(pacerCost(d.totalCost))")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
                     .help(pacerCostExact(d.totalCost))
             }
         }) {
-            if d.dailyTotals.isEmpty {
-                Text("No daily aggregates yet.")
+            if d.buckets.isEmpty {
+                Text("No usage in the last 30 days.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .frame(height: 220)
             } else {
-                chart(annotateDates: d.annotateDates, totals: d.dailyTotals)
+                PacerStackedPartChart(d.buckets, kind: .day, onTap: onDayTap)
+                    .accessibilityLabel("Daily cost by part over the last 30 days")
+                    .accessibilityHint(onDayTap != nil ? "Click a bar to drill into that day" : "")
             }
         }
         .onAppear { refreshDerived() }
@@ -153,123 +121,4 @@ struct DailyCostChartCard: View {
         // and looks exactly like a very slow render rather than a stale one.
         .onChange(of: scope.accountId) { _, _ in refreshDerived() }
     }
-
-    /// See `PacerSparseBars`: a cap only while the series is short enough that
-    /// capping is the smaller number.
-    static func barWidth(count: Int) -> MarkDimension { PacerSparseBars.width(count: count) }
-
-    private func chart(annotateDates: Set<String>, totals: [DailyTotal]) -> some View {
-        let dateAxis = pacerDateAxis(totals.map(\.date))
-        let barWidth = Self.barWidth(count: totals.count)
-        return Chart {
-            ForEach(totals) { d in
-                // One segment per priced part, stacked in `CostComponent`
-                // order (the order of the style scale's domain below), so a
-                // part sits at the same height band on every day.
-                ForEach(d.parts) { part in
-                    // The width cap keeps a sparse series from rendering as
-                    // one slab filling the card: a two-day account's "last 30
-                    // days" drew a single bar the width of the chart, which
-                    // reads as a rendering fault rather than as "you have two
-                    // days".
-                    BarMark(
-                        x: .value("Date", d.date),
-                        y: .value("Cost", part.usd),
-                        width: barWidth
-                    )
-                    .foregroundStyle(by: .value("Part", part.component.label))
-                    // The day's total goes on its topmost non-empty segment,
-                    // which is the top of the stack.
-                    .annotation(position: .top, alignment: .center, spacing: 2) {
-                        if part.component == d.topPart, annotateDates.contains(d.date) {
-                            Text(pacerCost(d.cost)).help(pacerCostExact(d.cost))
-                                .font(.system(size: 9, weight: .medium))
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
-            }
-            if let selectedDate, totals.contains(where: { $0.date == selectedDate }) {
-                RuleMark(x: .value("Selected", selectedDate))
-                    .foregroundStyle(.secondary.opacity(0.5))
-                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 2]))
-            }
-        }
-        // 20pt over the old 200 for the legend, so the plot keeps its height.
-        .frame(height: 220)
-        .chartForegroundStyleScale(
-            domain: PacerCostPalette.chartDomain,
-            range: PacerCostPalette.chartRange
-        )
-        .chartLegend(position: .bottom, alignment: .leading, spacing: 8)
-        .chartYAxis {
-            AxisMarks(position: .leading) { value in
-                AxisGridLine().foregroundStyle(.secondary.opacity(0.18))
-                AxisValueLabel {
-                    if let dollars = value.as(Double.self) {
-                        Text(pacerCost(dollars)).help(pacerCostExact(dollars))
-                            .font(.system(size: 9))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-        }
-        .chartXAxis {
-            AxisMarks(values: dateAxis.values) { value in
-                AxisValueLabel {
-                    // See `PacerDateAxis.labelIfMarked` — the `values:` above
-                    // is not honoured on a band axis from macOS 26 on.
-                    if let date = value.as(String.self),
-                       let text = dateAxis.labelIfMarked(date) {
-                        Text(text)
-                            .font(.system(size: 9))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-        }
-        .chartXSelection(value: $rawSelection)
-        // Coalesce the rapid hover stream a scroll produces into a single
-        // commit once the pointer settles, so the chart's marks re-lay-out
-        // at most once per hover instead of once per pointer event. 40ms is
-        // imperceptible on a deliberate hover but collapses a fast
-        // scroll-sweep across the bars to zero chart re-layouts.
-        .onChange(of: rawSelection) { _, newValue in
-            selectionDebounce?.cancel()
-            selectionDebounce = Task { @MainActor in
-                try? await Task.sleep(for: .milliseconds(40))
-                guard !Task.isCancelled else { return }
-                selectedDate = newValue
-            }
-        }
-        // Tap-to-drill pattern: chartXSelection already tracks the
-        // hovered/clicked bar via the binding, so on tap we just
-        // open that day. The whole chart surface becomes the hit
-        // target; no chartOverlay needed (an explicit overlay on top
-        // would block hover events from reaching chartXSelection).
-        // Arrow cursor (default) — clickable charts don't warrant the
-        // link cursor per macOS HIG.
-        .contentShape(Rectangle())
-        .onTapGesture {
-            // Use the immediate selection, not the debounced one — on tap
-            // the 40ms debounce may not have committed `selectedDate` yet.
-            if let date = rawSelection, let onDayTap {
-                onDayTap(date)
-            }
-        }
-        .accessibilityLabel("Daily cost by part over the last 30 days")
-        .accessibilityHint(onDayTap != nil ? "Click a bar to drill into that day" : "")
-    }
-}
-
-private struct DailyTotal: Identifiable {
-    var id: String { date }
-    let date: String
-    let cost: Double
-    let tokens: Int64
-    /// The day's five priced parts, in stacking order.
-    let parts: [CostBreakdown.Part]
-    /// The last part with any cost — the top of the stack, where the
-    /// day's total is annotated. `nil` on a $0 day.
-    let topPart: CostComponent?
 }

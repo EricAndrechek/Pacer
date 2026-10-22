@@ -221,6 +221,9 @@ public final class SamplePersister {
     /// long historical scans.
     private var pendingInsertCount: Int
     private let saveBatchSize: Int
+    /// Rows per page in every walk of the sample table. Tests shrink it so a
+    /// small store crosses page boundaries.
+    var walkPageSize = ModelWalk.pageSize
     /// Where the on-disk dedup index lives, or nil to disable it (tests and
     /// in-memory stores, which have no container to write into).
     private let indexURL: URL?
@@ -358,6 +361,9 @@ public final class SamplePersister {
         tail.propertiesToFetch = [\.dedupKey, \.outputTokens]
         var newest = index.watermark
         var tailCount = 0
+        // `enumerate` is fine here, unlike the whole-table walks (#337, #338):
+        // an index valid against the exact keyed row count leaves only the
+        // rows written since it was saved, two slim columns, read-only.
         try context.enumerate(tail, batchSize: 5_000) { sample in
             tailCount += 1
             if sample.sampledAt > newest { newest = sample.sampledAt }
@@ -611,22 +617,41 @@ public final class SamplePersister {
                 }
             }
         } else {
-            // The scan, in batches (#327). One `fetch` of the whole table held
-            // every TokenSample at once, in the scan context — the one that
-            // lives as long as the app — to rewrite a fraction of them; on a
-            // real-store upgrade the footprint rose ~3 GB during that pass and
-            // stayed. Rows inserted this pass aren't on disk yet, so they come
-            // from the context first, and `applied` keeps the walk from
-            // rewriting any row twice.
+            // The scan. One `fetch` of the whole table held every TokenSample
+            // at once, in the scan context — the one that lives as long as the
+            // app — to rewrite a fraction of them; on a real-store upgrade the
+            // footprint rose ~3 GB during that pass and stayed (#327). Batching
+            // it with `enumerate` still peaked at 3.6 GB (#338). Rows
+            // inserted this pass aren't on disk yet, so they come from the
+            // context first, and `applied` keeps the walk from rewriting any
+            // row twice.
             for case let sample as TokenSample in context.insertedModelsArray {
                 guard let key = sample.dedupKey, let entry = wanted[key],
                       applied.insert(key).inserted else { continue }
                 apply(entry, to: sample)
             }
-            try context.enumerate(FetchDescriptor<TokenSample>(), batchSize: 5_000,
-                                  allowEscapingMutations: true) { sample in
-                guard let key = sample.dedupKey, let entry = wanted[key],
-                      applied.insert(key).inserted else { return }
+            // Found with a slim read-only walk, then written through this
+            // context, not `ModelWalk.update`: the rollups read an upgraded
+            // row back through the instances this context holds — the pending
+            // lists, `SessionUpgrade.new`, the `===` test in `apply` — so the
+            // write has to land on those, and stay pending until the cycle's
+            // save like the rest of it. `model(for:)` returns the instance this
+            // context holds where there is one (as `enumerate` here did) and a
+            // fault otherwise, so only the rows actually upgraded are ever
+            // materialized here: 18,945 upgrades on a 757,909-row copy peaked
+            // at 285 MB. Walk order is `enumerate`'s, so the first stored row
+            // under a key is still the one upgraded.
+            var keyOnly = FetchDescriptor<TokenSample>()
+            keyOnly.propertiesToFetch = [\.dedupKey]
+            var found: [(key: String, id: PersistentIdentifier)] = []
+            try ModelWalk.forEach(keyOnly, in: context.container, pageSize: walkPageSize) { sample in
+                guard let key = sample.dedupKey, wanted[key] != nil else { return }
+                found.append((key, sample.persistentModelID))
+            }
+            for (key, id) in found where !applied.contains(key) {
+                guard let entry = wanted[key],
+                      let sample = context.model(for: id) as? TokenSample else { continue }
+                applied.insert(key)
                 apply(entry, to: sample)
             }
         }
@@ -930,15 +955,29 @@ public final class SamplePersister {
             guard let key = sample.dedupKey, !key.isEmpty else { return }
             if !seen.insert(key).inserted { duplicated.insert(key) }
         }
-        try ModelWalk.forEach(keyOnly, in: context.container, note)
+        try ModelWalk.forEach(keyOnly, in: context.container, pageSize: walkPageSize, note)
         for case let sample as TokenSample in context.insertedModelsArray { note(sample) }
         guard !duplicated.isEmpty else { return 0 }
 
         // Pass 2: gather only the offending rows, keep the best of each.
-        var groups: [String: [TokenSample]] = [:]
-        try context.enumerate(FetchDescriptor<TokenSample>(), batchSize: 5_000) { sample in
+        //
+        // Found by the same kind of read-only walk (#338) and resolved here,
+        // so the deletes stay pending in this context with the rest of the
+        // cycle — committed by its save, together with the repair's version
+        // mark — and nothing is deleted while a walk is still paging. With
+        // `enumerate` this pass peaked at 3.7 GB on a 773k-row copy holding
+        // 15k duplicates; found this way, 292 MB. Each
+        // key's rows keep `enumerate`'s order, which breaks the keeper's ties.
+        // Like `enumerate`, this sees saved rows only: an unsaved copy is not
+        // gathered, though pass 1 counts it.
+        var ids: [String: [PersistentIdentifier]] = [:]
+        try ModelWalk.forEach(keyOnly, in: context.container, pageSize: walkPageSize) { sample in
             guard let key = sample.dedupKey, duplicated.contains(key) else { return }
-            groups[key, default: []].append(sample)
+            ids[key, default: []].append(sample.persistentModelID)
+        }
+        var groups: [String: [TokenSample]] = [:]
+        for (key, rows) in ids {
+            groups[key] = rows.compactMap { context.model(for: $0) as? TokenSample }
         }
 
         var removed = 0
@@ -1068,16 +1107,26 @@ public final class SamplePersister {
         // Paged through throwaway contexts, for the same reason the preload
         // is (#337): marking only reads. The turns this cycle hasn't saved
         // yet aren't in the store, so they are marked from the context.
-        try ModelWalk.forEach(descriptor, in: context.container) { markForRebuild($0) }
+        try ModelWalk.forEach(descriptor, in: context.container, pageSize: walkPageSize) { markForRebuild($0) }
         for case let sample as TokenSample in context.insertedModelsArray { markForRebuild(sample) }
 
         // Backfill the stored hour on rows written before the field existed:
         // they carry -1 and would keep deriving — and drifting — otherwise.
-        // A write, so through the persister's own context; on a store that
-        // has been through this once there is nothing left to match.
+        // On a store that has been through this once there is nothing left
+        // to match, and the COUNT says so without saving anything.
         var unstamped = FetchDescriptor<TokenSample>(predicate: #Predicate { $0.localHour < 0 })
+        guard try context.fetchCount(unstamped) > 0 else { return }
         unstamped.propertiesToFetch = [\.sampledAt, \.localHour]
-        try context.enumerate(unstamped, batchSize: 5_000) { sample in
+        // Paged and saved a page at a time (#338): on a store older than the
+        // field that is every row, and `enumerate` here kept every one of
+        // them pending in this context until the cycle's save (7.3 GB on a
+        // 757,909-row copy; 239 MB paged). Draining, because stamping takes a
+        // row out of the predicate. Saved first, as `update` requires. The
+        // stamp is the value `localHour(of:)` already derives for a -1 row,
+        // so committing it ahead of the rebuild changes no bucket.
+        if context.hasChanges { try context.save() }
+        try ModelWalk.update(unstamped, in: context.container, owner: context, paging: .drain,
+                             pageSize: walkPageSize) { sample in
             sample.localHour = Self.localHour(of: sample.sampledAt)
         }
     }
@@ -1125,10 +1174,21 @@ public final class SamplePersister {
     /// recomputer.
     @discardableResult
     public func canonicalizeProjectPaths(aliases: [String: String] = [:]) throws -> Int {
-        // Batched — same whole-table shape as the preload.
+        // Paged and saved a page at a time (#338): the first run backfills
+        // `originalProjectPath` on every row, and `enumerate` here kept every
+        // changed row pending in this context until the cycle's save — the
+        // whole table, 7.6 GB on a 757,909-row copy. Offset paging is safe: no
+        // predicate, no sort, and an update doesn't move a row in row-id order.
+        //
+        // Saved first, as `update` requires: a page sees only saved rows, and
+        // a row this context held pending would be written under it. The
+        // coordinator saves straight after this migration anyway, so no commit
+        // moves past anything but the walk itself.
+        if context.hasChanges { try context.save() }
         var changedCount = 0
         // `continue` becomes `return` — the body is a per-row closure now.
-        try context.enumerate(FetchDescriptor<TokenSample>(), batchSize: 5_000) { sample in
+        try ModelWalk.update(FetchDescriptor<TokenSample>(), in: context.container,
+                             owner: context, paging: .offset, pageSize: walkPageSize) { sample in
             guard let pre = sample.projectPath else { return }
             // Backfill `originalProjectPath` whenever it's nil. The
             // pre-migration `projectPath` is the best historical
@@ -1306,7 +1366,7 @@ public final class SamplePersister {
         // materialization; the loop below is only 853 ms of it and the
         // aggregate-gap queries 128 ms. Each page is released before the next
         // is pulled, so the whole table never exists as objects at once.
-        try ModelWalk.forEach(sampleDescriptor, in: context.container) { sample in
+        try ModelWalk.forEach(sampleDescriptor, in: context.container, pageSize: walkPageSize) { sample in
             rowCount += 1
             if sample.sampledAt > maxSampledAt { maxSampledAt = sample.sampledAt }
             if let key = sample.dedupKey {

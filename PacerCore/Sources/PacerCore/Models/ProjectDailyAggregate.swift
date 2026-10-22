@@ -61,13 +61,16 @@ public final class ProjectDailyAggregate {
     /// only by ProjectDetailView (small per-row cost; rows for one
     /// project ≤ ~90).
     public var sessionIdsJSON: Data
-    /// JSON `[String: Int64]` mapping model name → total tokens
-    /// (input + output + cacheRead) for this bucket. Used by
-    /// ProjectDetailView's per-model donut so we don't have to fetch
-    /// raw samples on drill-in.
-    public var modelTokensJSON: Data
-    /// JSON `[String: Double]` mapping model name → totalCostUSD.
-    public var modelCostJSON: Data
+    /// The bucket split by model: every model's five token parts and the
+    /// cost of each, encoded by `ProjectModelBreakdowns` and read back
+    /// through `ProjectDailyReadable.modelBreakdowns`. Per model, the parts
+    /// sum to this row's own columns, so a project's By model card and its
+    /// header cannot disagree, and drilling in needs no raw samples.
+    ///
+    /// Replaced `modelTokensJSON` (input + output only) and `modelCostJSON`
+    /// (a total only) under cost recompute "19". Optional so SwiftData's
+    /// lightweight migration adds the column; nil reads as no models.
+    public var modelBreakdownJSON: Data?
 
     public init(
         projectPath: String,
@@ -82,8 +85,7 @@ public final class ProjectDailyAggregate {
         modelCount: Int = 0,
         lastActive: Date = .distantPast,
         sessionIdsJSON: Data = Data(),
-        modelTokensJSON: Data = Data(),
-        modelCostJSON: Data = Data()
+        modelBreakdownJSON: Data? = nil
     ) {
         self.projectDateKey = Self.makeKey(projectPath: projectPath, date: date)
         self.projectPath = projectPath
@@ -98,8 +100,7 @@ public final class ProjectDailyAggregate {
         self.modelCount = modelCount
         self.lastActive = lastActive
         self.sessionIdsJSON = sessionIdsJSON
-        self.modelTokensJSON = modelTokensJSON
-        self.modelCostJSON = modelCostJSON
+        self.modelBreakdownJSON = modelBreakdownJSON
     }
 
     public static func makeKey(projectPath: String, date: String) -> String {

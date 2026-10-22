@@ -205,6 +205,10 @@ public actor OAuthPoller: TokenPoolTesting {
         public let misclassifiedLaneCount: Int
         /// Lanes the scheduler will poll ahead of its cadence gate (#214).
         public let probeFirstLaneCount: Int
+        /// Whether this launch has read a token from Claude Code's keychain
+        /// item, which is when the `[OAuthPoller] ok keychain` line is written
+        /// (#325).
+        public let keychainTokenRead: Bool
     }
 
     public typealias RandomSource = @Sendable () -> Double
@@ -287,6 +291,9 @@ public actor OAuthPoller: TokenPoolTesting {
     /// Which lane the last logged poll used, so a change of token is worth a
     /// line even when the outcome category has not moved.
     private var lastPolledLaneId: String?
+    /// Set by the first discovery this launch that reads a token from Claude
+    /// Code's keychain item, which also writes the `ok keychain` line (#325).
+    private var keychainTokenRead = false
     private var lastPollAt: Date?
     private var nextPollAt: Date?
 
@@ -432,7 +439,8 @@ public actor OAuthPoller: TokenPoolTesting {
                 let belongs = (lane.resolvedOrg == nil) || (Account.key(forOrg: lane.resolvedOrg) == active)
                 return belongs != (lane.state.account == .primary)
             }.count,
-            probeFirstLaneCount: lanes.filter { $0.state.probeFirst }.count
+            probeFirstLaneCount: lanes.filter { $0.state.probeFirst }.count,
+            keychainTokenRead: keychainTokenRead
         )
     }
 
@@ -1371,6 +1379,19 @@ public actor OAuthPoller: TokenPoolTesting {
         // did not).
         liveKeychainToken = candidates.first { $0.source == .keychain }?.credential.accessToken
         liveKeychainReadAt = liveKeychainToken == nil ? nil : now
+        // One line per launch saying the keychain read works (#325): the
+        // post-install check in AGENTS.md greps for it. It is written here,
+        // where launch's first discovery reads the item, rather than when the
+        // token is next polled. On a machine where an account switcher fetches
+        // the signed-in account's usage, Pacer can go well past fifteen
+        // minutes without polling that token, and the per-poll `ok 5h=` lines
+        // only appear for the active account on a change of outcome.
+        if !keychainTokenRead, let live = liveKeychainToken {
+            keychainTokenRead = true
+            Log.write("OAuthPoller", "ok keychain: read Claude Code's token; " + Self.laneLabel(
+                laneCount: lanes.count, lane: lanes.first { $0.credential.accessToken == live },
+                liveKeychainToken: live))
+        }
         // The token Claude Code is billing now, never polled: let the
         // scheduler poll it ahead of the endpoint-cadence gate (#214).
         if let live = liveKeychainToken,
@@ -1656,10 +1677,7 @@ public actor OAuthPoller: TokenPoolTesting {
         }
     }
 
-    private static func summarize(
-        outcome: PollOutcome, laneCount: Int, lane: Lane? = nil,
-        liveKeychainToken: String? = nil
-    ) -> String {
+    private static func laneLabel(laneCount: Int, lane: Lane?, liveKeychainToken: String?) -> String {
         // Which credential, and whose. Enough to tell a Desktop token from the
         // Claude Code one an account switcher is also holding, without ever
         // putting the token itself in a log file.
@@ -1673,7 +1691,14 @@ public actor OAuthPoller: TokenPoolTesting {
             let former = l.source == .keychain && l.credential.accessToken != liveKeychainToken
             return "\(former ? "keychain(old)" : l.source.rawValue)/\(org) "
         } ?? ""
-        let lanes = "\(which)lanes=\(laneCount)"
+        return "\(which)lanes=\(laneCount)"
+    }
+
+    private static func summarize(
+        outcome: PollOutcome, laneCount: Int, lane: Lane? = nil,
+        liveKeychainToken: String? = nil
+    ) -> String {
+        let lanes = laneLabel(laneCount: laneCount, lane: lane, liveKeychainToken: liveKeychainToken)
         switch outcome {
         case .success(let fh, let sd):
             let f = fh.map { String(format: "%.1f%%", $0) } ?? "nil"

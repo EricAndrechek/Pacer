@@ -42,9 +42,10 @@ public final class SessionInfo {
     public var cumulativeCacheReadTokens: Int64
     public var cumulativeCacheCreation5mTokens: Int64
     public var cumulativeCacheCreation1hTokens: Int64
-    /// Model that contributed the most tokens in this session — driver
-    /// for the "model" column in the sessions list. Ties broken
-    /// arbitrarily; ties at zero stay as the first-seen model.
+    /// Model that contributed the most tokens in this session, all five
+    /// parts counted (`TokenBreakdown.all`, #215) — driver for the "model"
+    /// column in the sessions list. Ties broken arbitrarily; ties at zero
+    /// stay as the first-seen model.
     public var topModel: String
 
     public init(
@@ -73,11 +74,5 @@ public final class SessionInfo {
         self.cumulativeCacheCreation5mTokens = cumulativeCacheCreation5mTokens
         self.cumulativeCacheCreation1hTokens = cumulativeCacheCreation1hTokens
         self.topModel = topModel
-    }
-}
-
-extension SessionInfo {
-    public var totalTokens: Int64 {
-        cumulativeInputTokens + cumulativeOutputTokens
     }
 }

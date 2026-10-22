@@ -7,22 +7,67 @@ import Foundation
 /// place on every row and every day: a bar sorted by share would move cache
 /// reads from one end to the other as a day's mix shifted, and two bars side
 /// by side could not be compared.
+///
+/// It is the order a request's prompt is laid out in, then its reply: the
+/// cached prefix the request read back (cache reads), what it is caching now
+/// (1h writes before 5m ones, which is the order Anthropic requires their
+/// breakpoints in), the uncached tail after the last breakpoint (uncached
+/// input), and then the reply (output).
+///
+/// The case order is only a drawing order. Nothing persists a part by its
+/// position, and the raw values are the stable names.
 public enum CostComponent: String, CaseIterable, Sendable, Identifiable {
+    case cacheRead
+    case cacheWrite1h
+    case cacheWrite5m
     case input
     case output
-    case cacheRead
-    case cacheWrite5m
-    case cacheWrite1h
 
     public var id: String { rawValue }
 
+    /// "Uncached input" rather than "Input": all four prompt parts are
+    /// input, and this one is the part that missed the cache.
     public var label: String {
         switch self {
-        case .input:        return "Input"
+        case .input:        return "Uncached input"
         case .output:       return "Output"
         case .cacheRead:    return "Cache reads"
         case .cacheWrite5m: return "5m cache writes"
         case .cacheWrite1h: return "1h cache writes"
+        }
+    }
+
+    /// What a token of this part is billed at, as a multiple of the model's
+    /// uncached input price. Anthropic's list ratios, the same for every
+    /// current Claude model: every prompt token is exactly one of the four
+    /// input parts, billed 0.1× if read from the cache, 1.25× or 2× if
+    /// written to it (5-minute / 1-hour), 1× if neither; output is 5×.
+    /// Fast mode and data residency scale all five together, so the ratios
+    /// hold there too.
+    public var listPriceMultiple: Double {
+        switch self {
+        case .cacheRead:    return 0.1
+        case .cacheWrite1h: return 2
+        case .cacheWrite5m: return 1.25
+        case .input:        return 1
+        case .output:       return 5
+        }
+    }
+
+    /// "0.1×", "1.25×" — the multiple as a legend tag.
+    public var listPriceMultipleLabel: String {
+        let m = listPriceMultiple
+        return (m == m.rounded() ? String(Int(m)) : String(m)) + "×"
+    }
+
+    /// Why this part costs what it does, for its legend tooltip.
+    public var billingNote: String {
+        switch self {
+        case .cacheRead:    return "Prompt tokens read from the cache: 0.1× the input price"
+        case .cacheWrite1h: return "Prompt tokens written to the 1-hour cache: 2× the input price"
+        case .cacheWrite5m: return "Prompt tokens written to the 5-minute cache: 1.25× the input price"
+        case .input:        return "Prompt tokens neither read from nor written to the cache: 1× the input price"
+        case .output:       return "The response, including thinking: 5× the input price"
         }
     }
 }
@@ -41,6 +86,20 @@ public extension CostComponents {
 }
 
 public extension TokenBreakdown {
+    /// The tokens behind one priced part — the one place a `CostComponent`
+    /// maps to its token column, as `CostComponents[_:]` is for its dollars.
+    /// Every legend that prints a part's tokens reads them through this, so
+    /// "cache reads" cannot show the 5m-write count on one screen.
+    subscript(_ part: CostComponent) -> Int64 {
+        switch part {
+        case .input:        return inputTokens
+        case .output:       return outputTokens
+        case .cacheRead:    return cacheReadTokens
+        case .cacheWrite5m: return cacheCreation5mTokens
+        case .cacheWrite1h: return cacheCreation1hTokens
+        }
+    }
+
     /// Every token of the prompt side: fresh input, cache reads and both
     /// cache-write tiers. Output is the response, not the prompt.
     var promptTokens: Int64 {
@@ -98,6 +157,10 @@ public struct CostBreakdown: Sendable, Equatable {
         /// Whole-number percent, rounded so the five add up to 100
         /// (largest remainder). 0 for every part when the total is 0.
         public let percent: Int
+        /// The tokens this part priced (`TokenBreakdown[_:]`). Shown beside
+        /// the dollars because the two tell different stories: cache reads
+        /// are ~98% of the tokens and well under that share of the cost.
+        public let tokens: Int64
         public var id: CostComponent { component }
 
         /// "66%", "<1%" for a part too small to round to 1 but not
@@ -121,7 +184,8 @@ public struct CostBreakdown: Sendable, Equatable {
         return CostComponent.allCases.enumerated().map { i, c in
             Part(component: c, usd: values[i],
                  share: sum > 0 ? values[i] / sum : 0,
-                 percent: percents[i])
+                 percent: percents[i],
+                 tokens: tokens[c])
         }
     }
 
@@ -162,14 +226,10 @@ public extension DailyRow {
     var costBreakdown: CostBreakdown { CostBreakdown(cost: cost, tokens: tokens) }
 }
 
+public extension HourlyRow {
+    var costBreakdown: CostBreakdown { CostBreakdown(cost: cost, tokens: tokens) }
+}
+
 public extension ProjectDailyReadable {
-    var costBreakdown: CostBreakdown {
-        CostBreakdown(
-            cost: costComponents,
-            tokens: TokenBreakdown(
-                inputTokens: inputTokens, outputTokens: outputTokens,
-                cacheReadTokens: cacheReadTokens,
-                cacheCreation5mTokens: cacheCreation5mTokens,
-                cacheCreation1hTokens: cacheCreation1hTokens))
-    }
+    var costBreakdown: CostBreakdown { CostBreakdown(cost: costComponents, tokens: tokens) }
 }

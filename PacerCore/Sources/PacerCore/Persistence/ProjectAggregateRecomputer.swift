@@ -98,6 +98,12 @@ public final class ProjectAggregateRecomputer {
     /// re-encode. Even with the round-trip, the savings vs fetching
     /// every TokenSample for the pair (~100ms on a populated bucket)
     /// are large — single-ms typical case once decoded.
+    ///
+    /// Declines (returns false, so the bucket is rebuilt from its samples)
+    /// when the global row or any of the touched account rows cannot be
+    /// hydrated exactly — see `ProjectRollupValues.init?(hydrating:)`.
+    /// Everything is read and checked before anything is written, so a
+    /// decline leaves the rows as they were.
     private func fastPathApply(
         pair: ProjectDatePair,
         pending: [TokenSample],
@@ -118,9 +124,8 @@ public final class ProjectAggregateRecomputer {
         // decode-merge-encode so the global and per-account rollups share it
         // rather than keeping two copies that can disagree about, say, how a
         // corrupt JSON blob is treated.
-        var values = ProjectRollupValues(hydrating: existing)
+        guard var values = ProjectRollupValues(hydrating: existing) else { return false }
         for sample in pending { values.add(sample, mode: mode, snapshot: snapshot) }
-        values.write(to: existing)
 
         // The same increment, per account. Rows are keyed by account so a
         // bucket's accounts are maintained independently.
@@ -129,6 +134,8 @@ public final class ProjectAggregateRecomputer {
             perAccount[sample.accountId ?? AccountDailyAggregate.unattributedKey,
                        default: []].append(sample)
         }
+        var accountWrites: [(row: AccountProjectDailyAggregate?, accountId: String,
+                             values: ProjectRollupValues)] = []
         for (accountId, samples) in perAccount {
             let accountKey = AccountProjectDailyAggregate.makeKey(
                 accountId: accountId, projectPath: pair.projectPath, date: pair.date)
@@ -139,22 +146,30 @@ public final class ProjectAggregateRecomputer {
                     }
                 )
             ).first
-            var accountValues = row.map { ProjectRollupValues(hydrating: $0) }
-                ?? ProjectRollupValues()
+            var accountValues = ProjectRollupValues()
+            if let row {
+                guard let hydrated = ProjectRollupValues(hydrating: row) else { return false }
+                accountValues = hydrated
+            }
             for sample in samples {
                 accountValues.add(sample, mode: mode, snapshot: snapshot)
             }
-            if let row {
-                accountValues.write(to: row)
+            accountWrites.append((row, accountId, accountValues))
+        }
+
+        values.write(to: existing)
+        for write in accountWrites {
+            if let row = write.row {
+                write.values.write(to: row)
             } else {
                 let fresh = AccountProjectDailyAggregate(
-                    accountId: accountId, projectPath: pair.projectPath, date: pair.date,
+                    accountId: write.accountId, projectPath: pair.projectPath, date: pair.date,
                     inputTokens: 0, outputTokens: 0, cacheReadTokens: 0,
                     cacheCreation5mTokens: 0, cacheCreation1hTokens: 0,
                     totalCostUSD: 0, sessionCount: 0, modelCount: 0,
                     lastActive: .distantPast, sessionIdsJSON: Data(),
-                    modelTokensJSON: Data(), modelCostJSON: Data())
-                accountValues.write(to: fresh)
+                    modelBreakdownJSON: nil)
+                write.values.write(to: fresh)
                 context.insert(fresh)
             }
         }
@@ -245,7 +260,7 @@ public final class ProjectAggregateRecomputer {
                 cacheCreation5mTokens: 0, cacheCreation1hTokens: 0,
                 totalCostUSD: 0, sessionCount: 0, modelCount: 0,
                 lastActive: .distantPast, sessionIdsJSON: Data(),
-                modelTokensJSON: Data(), modelCostJSON: Data())
+                modelBreakdownJSON: nil)
             values.write(to: row)
             insert(row)
         }
@@ -298,7 +313,7 @@ func syncAccountProjectRows<S: AggregatableSample>(
                 cacheCreation5mTokens: 0, cacheCreation1hTokens: 0,
                 totalCostUSD: 0, sessionCount: 0, modelCount: 0,
                 lastActive: .distantPast, sessionIdsJSON: Data(),
-                modelTokensJSON: Data(), modelCostJSON: Data())
+                modelBreakdownJSON: nil)
             values.write(to: row)
             context.insert(row)
         }
