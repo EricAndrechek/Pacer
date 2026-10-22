@@ -10,15 +10,13 @@ struct UsageHintsTests {
         cost: Double = 0,
         input: Int64 = 0,
         output: Int64 = 0,
-        cacheRead: Int64 = 0
+        cacheRead: Int64 = 0,
+        write5m: Int64 = 0
     ) -> UsageHints.ModelTotals {
-        UsageHints.ModelTotals(
-            model: model,
-            costUSD: cost,
-            inputTokens: input,
-            outputTokens: output,
-            cacheReadTokens: cacheRead
-        )
+        let tokens = TokenBreakdown(
+            inputTokens: input, outputTokens: output,
+            cacheReadTokens: cacheRead, cacheCreation5mTokens: write5m)
+        return UsageHints.ModelTotals(model: model, costUSD: cost, tokens: tokens)
     }
 
     @Test func noHintsForEmptyData() {
@@ -103,6 +101,29 @@ struct UsageHintsTests {
         if case .lowCacheHitRate(let ratio, let tokens) = hints.first {
             #expect(abs(ratio - 0.4) < 1e-9)
             #expect(tokens == 140_000)
+        } else {
+            Issue.record("expected lowCacheHitRate; got \(hints)")
+        }
+    }
+
+    @Test("a healthy Claude Code day (reads dwarf everything) raises no cache hint")
+    func typicalDayDoesNotFire() {
+        // 98% hits: the conversation re-read every turn, only new content written.
+        let today = [t("claude-opus-4-7", input: 1_000, output: 300_000,
+                       cacheRead: 98_000_000, write5m: 1_999_000)]
+        let hints = UsageHints.compute(todayByModel: today, thisWeekByModel: today)
+        #expect(hints.isEmpty)
+    }
+
+    @Test("a cache rewritten every few turns fires, though reads ÷ (reads + input) is ~100%")
+    func heavyRewritesFire() {
+        // The old ratio, 7M ÷ (7M + 1K), is 99.99% and never fired. Counting the
+        // 3M written makes it 70%.
+        let today = [t("claude-opus-4-7", input: 1_000, output: 200_000,
+                       cacheRead: 7_000_000, write5m: 3_000_000)]
+        let hints = UsageHints.compute(todayByModel: today, thisWeekByModel: today)
+        if case .lowCacheHitRate(let ratio, _) = hints.first {
+            #expect(abs(ratio - 7_000_000.0 / 10_001_000.0) < 1e-9)
         } else {
             Issue.record("expected lowCacheHitRate; got \(hints)")
         }
