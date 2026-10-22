@@ -17,9 +17,9 @@ public struct PacerDonutSlice: Identifiable {
     }
 }
 
-/// The shared identity donut behind every "share" ring: Models' Token share,
-/// Project detail's models, and, through ``PacerShareDonut``, Today by model
-/// and the Projects list. The `SectorMark` ring, color pinning,
+/// The shared identity donut behind every "share" ring, drawn through
+/// ``PacerShareDonut`` in every donut card (`PacerDonutListCard`): Today by
+/// model, Top projects, the Models tab's Share and Project detail's By model. The `SectorMark` ring, color pinning,
 /// hover-highlight opacity, and accessibility used to be copy-pasted five
 /// times (and drifted); they live here now.
 ///
@@ -120,13 +120,13 @@ public struct PacerDonutLegendRow<Trailing: View>: View {
     }
 }
 
-// MARK: - A share donut beside its table
+// MARK: - A share donut beside its list
 
 /// What a share donut measures: one column whose values add up to a whole
 /// (a cost, a token count, a count of sessions).
 public struct PacerShareMetric: Equatable, Sendable {
-    /// The table column it follows: a `UsageColumn` raw value or a screen's
-    /// own column id.
+    /// The column it follows: a `UsageColumn` raw value or a screen's own
+    /// column id.
     public let column: String
     /// What the donut's centre names it: "Cost", "Tokens", "Sessions".
     public let title: String
@@ -140,14 +140,14 @@ public struct PacerShareMetric: Equatable, Sendable {
 }
 
 public extension UsageColumn {
-    /// The metric a donut beside the table measures while it is sorted by
-    /// this column, or nil for a column whose values do not add up to a
-    /// whole: the label, the two ratios, the Mix bar.
+    /// The metric a share donut measures while its list is sorted by this
+    /// column, or nil for a column whose values do not add up to a whole:
+    /// the label, the two ratios, the Mix bar.
     var shareMetric: PacerShareMetric? {
         switch self {
         case .cost:
             return .cost
-        case .name, .outputShare, .cacheWriteShare, .mix:
+        case .name, .cacheHitRate, .outputShare, .mix:
             return nil
         case .tokens:
             // "Total" is the column's title; on its own in the donut it
@@ -159,14 +159,14 @@ public extension UsageColumn {
     }
 }
 
-/// The wedges of a share donut, built from the rows of the table beside it.
+/// The wedges of a share donut, built from the rows of the list beside it.
 ///
-/// The donut measures whatever the table is sorted by, when that adds up
+/// The donut measures whatever the list is sorted by, when that adds up
 /// (cost, a token column, a screen's count), and cost otherwise (the label,
-/// a ratio, a date): the table's header is the donut's metric picker, so
-/// there is one control rather than two that can disagree. The wedges run
+/// a ratio, a date): the list's column titles are the donut's metric picker,
+/// so there is one control rather than two that can disagree. The wedges run
 /// largest first whatever the sort's direction: flipping it reorders the
-/// table, not the ring.
+/// list, not the ring.
 ///
 /// Plain and `Equatable`, built where the screen caches its rows: a hover
 /// changes only the donut's own state, never this.
@@ -273,13 +273,13 @@ public struct PacerShareDonutData: Equatable {
 
 /// A share donut with its own hover: the ring in the rows' colours, and in
 /// its centre the metric it measures, or, under the pointer, that wedge's
-/// share and name. The numbers themselves are in the table beside it.
+/// share and name. The numbers themselves are in the list beside it.
 public struct PacerShareDonut: View {
     let data: PacerShareDonutData
     let size: CGFloat
     let accessibilityLabel: String
     /// The hover lives here, so moving the pointer over the ring redraws the
-    /// ring and its centre, not the card or the table beside it.
+    /// ring and its centre, not the card or the list beside it.
     @State private var hoveredAngle: Double?
 
     static let innerRatio: Double = 0.62
@@ -330,7 +330,7 @@ public struct PacerShareDonut: View {
                     .lineLimit(1)
                     .truncationMode(.tail)
             } else {
-                // Which column the ring measures: it follows the table's sort.
+                // Which column the ring measures: it follows the list's sort.
                 Text(data.metric.title)
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
@@ -338,50 +338,5 @@ public struct PacerShareDonut: View {
             }
         }
         .frame(width: inner)
-    }
-}
-
-/// A share donut beside the table it summarises: Today by model and the
-/// Projects list. The donut measures what the table is sorted by
-/// (`PacerShareDonutData`), the rows' colour dots are its legend, and the
-/// table carries every number, so none is printed twice.
-public struct PacerDonutBesideTable<Table: View>: View {
-    let data: PacerShareDonutData
-    let donutSize: CGFloat
-    let accessibilityLabel: String
-    let hoveredAngle: Double?
-    let table: Table
-
-    public init(
-        _ data: PacerShareDonutData,
-        donutSize: CGFloat = 140,
-        accessibilityLabel: String,
-        @ViewBuilder table: () -> Table
-    ) {
-        self.init(data, donutSize: donutSize, accessibilityLabel: accessibilityLabel,
-                  hoveredAngle: nil, table: table)
-    }
-
-    /// With a hover already in place, for the render tests.
-    init(
-        _ data: PacerShareDonutData,
-        donutSize: CGFloat = 140,
-        accessibilityLabel: String,
-        hoveredAngle: Double?,
-        @ViewBuilder table: () -> Table
-    ) {
-        self.data = data
-        self.donutSize = donutSize
-        self.accessibilityLabel = accessibilityLabel
-        self.hoveredAngle = hoveredAngle
-        self.table = table()
-    }
-
-    public var body: some View {
-        HStack(alignment: .top, spacing: 24) {
-            PacerShareDonut(data, size: donutSize, accessibilityLabel: accessibilityLabel,
-                            hoveredAngle: hoveredAngle)
-            table
-        }
     }
 }

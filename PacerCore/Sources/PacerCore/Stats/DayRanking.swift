@@ -8,8 +8,15 @@ import Foundation
 public enum TopDaysSort: String, CaseIterable, Identifiable, Sendable {
     case date, tokens, cost
     case input, output, cacheRead, cacheWrite, cacheWrite5m, cacheWrite1h
-    case outShare, writeShare, mix
+    case hitRate, outShare, mix
     public var id: String { rawValue }
+
+    /// A stored sort, retired column ids included: "writeShare" (Write %)
+    /// ranks by Hit %, the column that replaced it. Anything unknown ranks
+    /// by cost.
+    public init(stored raw: String) {
+        self = TopDaysSort(rawValue: UsageColumn.migratedId(raw)) ?? .cost
+    }
 
     /// The table column this sort is. `date` is the label column.
     public var column: UsageColumn {

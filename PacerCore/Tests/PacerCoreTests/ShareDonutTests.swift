@@ -78,7 +78,7 @@ struct ShareDonutTests {
     }
 
     @Test("a column that does not add up leaves the donut on cost",
-          arguments: ["name", "outShare", "writeShare", "mix", "lastActive", "retired"])
+          arguments: ["name", "outShare", "hitRate", "writeShare", "mix", "lastActive", "retired"])
     func fallsBackToCost(column: String) {
         let data = PacerShareDonutData(rows: Self.rows(), sort: PacerUsageSort(column: column, descending: true))
         #expect(data.metric == .cost)

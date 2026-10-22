@@ -32,16 +32,21 @@ struct ModelsView: View {
         Binding(get: { range }, set: { rangeRaw = $0.rawValue })
     }
 
+    /// The Share card's sort: what its list ranks by and its ring measures.
+    /// The key is the old metric picker's, whose values ("tokens", "cost")
+    /// are the column ids the list sorts by, so the metric a user picked is
+    /// the column the card opens sorted by.
     @AppStorage("pacer.models.metric", store: PacerSettings.store)
-    private var metricRaw: String = ModelMetric.tokens.rawValue
+    private var shareSortRaw: String = UsageColumn.tokens.rawValue
+    @AppStorage("pacer.models.shareSortDescending", store: PacerSettings.store)
+    private var shareSortDescending: Bool = true
     @AppStorage("pacer.models.grouping", store: PacerSettings.store)
     private var groupingRaw: String = ModelGrouping.none.rawValue
 
-    private var metric: ModelMetric { ModelMetric(rawValue: metricRaw) ?? .tokens }
-    private var grouping: ModelGrouping { ModelGrouping(rawValue: groupingRaw) ?? .none }
-    private var metricBinding: Binding<ModelMetric> {
-        Binding(get: { metric }, set: { metricRaw = $0.rawValue })
+    private var shareSort: PacerUsageSort {
+        PacerUsageSort(column: shareSortRaw, descending: shareSortDescending)
     }
+    private var grouping: ModelGrouping { ModelGrouping(rawValue: groupingRaw) ?? .none }
     private var groupingBinding: Binding<ModelGrouping> {
         Binding(get: { grouping }, set: { groupingRaw = $0.rawValue })
     }
@@ -51,15 +56,15 @@ struct ModelsView: View {
         // `PageScaffold`'s stored closures. See `ProjectsView.body` (#140).
         let range = self.range, scopeAccountId = scope.accountId
         let sort = PacerUsageSort(column: sortRaw, descending: sortDescending)
-        let metric = self.metric, grouping = self.grouping
+        let shareSort = self.shareSort, grouping = self.grouping
         PageScaffold(
             "Models",
             subtitle: "How traffic splits across Claude models.",
             trailing: {
-                // Page-header controls scope every card on the tab (Token
-                // share, Trend, the list): group-by folds versions together,
-                // the range picker windows the data. The donut's metric
-                // (tokens/cost) lives on its own card header, like Projects.
+                // Page-header controls scope every card on the tab (Share,
+                // Trend, the list): group-by folds versions together, the
+                // range picker windows the data. What the donut measures is
+                // its list's sort, like Top projects.
                 HStack(spacing: 10) {
                     Picker("Group by", selection: groupingBinding) {
                         ForEach(ModelGrouping.allCases) { Text($0.label).tag($0) }
@@ -83,10 +88,10 @@ struct ModelsView: View {
                 scopeAccountId: scopeAccountId,
                 sort: sort,
                 onSort: { sortRaw = $0.column; sortDescending = $0.descending },
-                metric: metric,
+                shareSort: shareSort,
+                onShareSort: { shareSortRaw = $0.column; shareSortDescending = $0.descending },
                 grouping: grouping,
                 rangeBinding: rangeBinding,
-                metricBinding: metricBinding,
                 onSelectDay: { date in
                     modalRoot = .day(date: date)
                 }
@@ -118,18 +123,6 @@ struct ModelTableExtra: PacerUsageExtra {
         default:            return nil
         }
     }
-}
-
-/// Which metric sizes the share donut (mirrors ProjectsView's overview
-/// metric). Sessions-per-model isn't offered: unlike projects, our per-model
-/// rollup carries no session count, and the only proxy (a session's single
-/// dominant model) would misattribute mixed-model sessions.
-enum ModelMetric: String, CaseIterable, Identifiable {
-    case tokens
-    case cost
-
-    var id: String { rawValue }
-    var label: String { self == .cost ? "Cost" : "Tokens" }
 }
 
 /// How the Models tab buckets rows. `.none` is one row per model, colored by
@@ -187,10 +180,14 @@ private struct ModelsContent: View {
     /// not an input to the cache.
     let sort: PacerUsageSort
     let onSort: (PacerUsageSort) -> Void
-    let metric: ModelMetric
+    /// The Share card's sort. Sessions are not one of its columns: unlike
+    /// projects, the per-model rollup carries no session count, and the only
+    /// proxy (a session's single dominant model) would misattribute
+    /// mixed-model sessions.
+    let shareSort: PacerUsageSort
+    let onShareSort: (PacerUsageSort) -> Void
     let grouping: ModelGrouping
     let rangeBinding: Binding<TimeRange>
-    let metricBinding: Binding<ModelMetric>
     /// Callback to the page-level modal navigator when a chart bar
     /// is tapped — opens that day's day-detail modal.
     let onSelectDay: (String) -> Void
@@ -209,18 +206,18 @@ private struct ModelsContent: View {
         scopeAccountId: String? = nil,
         sort: PacerUsageSort,
         onSort: @escaping (PacerUsageSort) -> Void,
-        metric: ModelMetric,
+        shareSort: PacerUsageSort,
+        onShareSort: @escaping (PacerUsageSort) -> Void,
         grouping: ModelGrouping,
         rangeBinding: Binding<TimeRange>,
-        metricBinding: Binding<ModelMetric>,
         onSelectDay: @escaping (String) -> Void
     ) {
         self.sort = sort
         self.onSort = onSort
-        self.metric = metric
+        self.shareSort = shareSort
+        self.onShareSort = onShareSort
         self.grouping = grouping
         self.rangeBinding = rangeBinding
-        self.metricBinding = metricBinding
         self.onSelectDay = onSelectDay
         let acct = scopeAccountId ?? UsageScope.noAccountSentinel
         if let days = range.days {
@@ -284,11 +281,9 @@ private struct ModelsContent: View {
         /// avoid paying on every hover.
         var trendDayCount: Int = 0
         var trendBuckets: [String: [(model: String, tokens: Int64)]] = [:]
-        /// `rows` re-sorted by the metric the donut is *showing*, largest
-        /// first. The donut, its legend and its hover table all read this one
-        /// array — see `shareCumulative` for what happens when they don't.
-        var shareRows: [ModelRow] = []
-        var shareCumulative: [(row: ModelRow, max: Double)] = []
+        /// The Share card: its ring and list, ranked by `shareSort`. Rebuilt
+        /// with the rows, and on its own when the sort changes.
+        var share: PacerShareListData<ModelTableExtra>?
     }
 
     /// What body reads. Resolves to the cached snapshot when populated,
@@ -335,7 +330,7 @@ private struct ModelsContent: View {
         }
     }
 
-    /// Pure computation over `aggregates`, `grouping` and `metric`. The
+    /// Pure computation over `aggregates`, `grouping` and `shareSort`. The
     /// table's sort is not an input: the table sorts these rows itself.
     /// Called both from `refreshDerived` (writes to `@State`) and from
     /// the `derived` fallback when the cache hasn't landed yet. Body
@@ -404,24 +399,6 @@ private struct ModelsContent: View {
                                        lastSeen: r.lastSeen))
         }
 
-        // The donut is drawn largest-wedge-first, which is not the table's
-        // sort — the table can be ordered by name, or by days, or ascending.
-        // Both the wedges and the cumulative-angle table below must walk the
-        // SAME array: when they disagreed, hovering a wedge named whichever
-        // model happened to sort first in the table.
-        let shareRows = Self.foldedShareRows(
-            rows.sorted { metricValue($0) > metricValue($1) })
-
-        // Share-donut cumulative-angle table, sized by the chosen metric so a
-        // per-hover `body` doesn't have to walk it.
-        var running = 0.0
-        var cumulative: [(row: ModelRow, max: Double)] = []
-        cumulative.reserveCapacity(shareRows.count)
-        for r in shareRows {
-            running += metricValue(r)
-            cumulative.append((r, running))
-        }
-
         // Daily token mix, folded by the grouping so each (day, group) is one
         // stacked segment rather than one-per-model.
         struct DayKey: Hashable { let date: String; let key: String }
@@ -461,54 +438,26 @@ private struct ModelsContent: View {
             dailyMix: dailyMix,
             trendDayCount: Set(dailyMix.map(\.date)).count,
             trendBuckets: buckets,
-            shareRows: shareRows,
-            shareCumulative: cumulative
+            share: Self.share(tableRows, sort: shareSort)
         )
     }
 
-    /// How many models the share legend names before it starts folding.
-    private static let shareLegendCap = 8
+    /// The Share card's columns: each model's share of the cost and of the
+    /// tokens. Shares, not amounts: the All models table prints every
+    /// model's amounts, and the page prints a number once.
+    private static let shareColumns: [PacerShareListColumn] = [
+        .share(of: UsageColumn.cost.rawValue, title: "Cost", format: .cost, help: "Share of the cost"),
+        .share(of: UsageColumn.tokens.rawValue, title: "Tokens", format: .tokens, help: "Share of every token"),
+    ]
 
-    /// The legend used to stop at `shareLegendCap` while the donut kept
-    /// drawing every row, so with nine models the ninth was an unlabelled
-    /// sliver and the legend's percentages summed to less than 100. The tail
-    /// is now one real wedge, so the two always agree.
-    ///
-    /// Folding a *single* row into "Other" would be worse than showing it, so
-    /// the fold only starts once at least two rows would be hidden.
-    /// Both metrics are summed, so the folded row is correct whichever one
-    /// the picker is showing.
-    private static func foldedShareRows(_ ordered: [ModelRow]) -> [ModelRow] {
-        guard ordered.count > shareLegendCap + 1 else { return ordered }
-        let head = Array(ordered.prefix(shareLegendCap))
-        let tail = ordered.dropFirst(shareLegendCap)
-        let other = ModelRow(
-            key: "__other__",
-            model: "",
-            displayName: "Other",
-            subtitle: "\(tail.count) models",
-            color: .secondary,
-            cost: tail.reduce(0) { $0 + $1.cost },
-            tokens: tail.reduce(TokenBreakdown.zero) { $0 + $1.tokens },
-            activeDays: 0,
-            firstSeen: tail.map(\.firstSeen).min() ?? "",
-            lastSeen: tail.map(\.lastSeen).max() ?? "",
-            breakdown: CostBreakdown.sum(tail, \.breakdown)
-        )
-        return head + [other]
+    /// Eight models with a wedge and a line of their own, and the rest as
+    /// one: the legend used to stop at eight while the donut drew every row,
+    /// so a ninth was an unlabelled sliver.
+    private static func share(_ rows: [PacerUsageRow<ModelTableExtra>],
+                              sort: PacerUsageSort) -> PacerShareListData<ModelTableExtra> {
+        PacerShareListData(rows: rows, sort: sort, columns: shareColumns, maxSlices: 8)
     }
 
-    /// The metric that sizes the donut for a row.
-    private func metricValue(_ row: ModelRow) -> Double {
-        metric == .cost ? row.cost : Double(row.totalTokens)
-    }
-    /// Compact metric label / exact tooltip for legends + hover readouts.
-    private func metricLabel(_ row: ModelRow) -> String {
-        metric == .cost ? pacerCost(row.cost) : pacerTokens(row.totalTokens)
-    }
-    private func metricHelp(_ row: ModelRow) -> String {
-        metric == .cost ? pacerCostExact(row.cost) : pacerTokensExact(row.totalTokens)
-    }
     /// Color for a slice/label. Ungrouped uses the curated blend palette; a
     /// class-grouped view uses each family's class-center color, so a class
     /// reads the same color it does in the per-model view (and stays on the
@@ -547,7 +496,10 @@ private struct ModelsContent: View {
         // happens to fire — which on an idle machine is seven to ten seconds,
         // and looks exactly like a very slow render rather than a stale one.
         .onChange(of: scope.accountId) { _, _ in refreshDerived() }
-        .onChange(of: metric) { _, _ in refreshDerived() }
+        // The card's sort re-ranks its list and ring without a rows refresh.
+        .onChange(of: shareSort) { _, sort in
+            cachedDerived?.share = Self.share(derived.tableRows, sort: sort)
+        }
         .onChange(of: grouping) { _, _ in refreshDerived() }
     }
 
@@ -559,109 +511,19 @@ private struct ModelsContent: View {
         }
     }
 
-    @State private var hoveredShareAngle: Double?
-
-    /// Sorted-by-cumulative-angle table for the share donut. Built
-    /// once in `computeDerived` alongside the per-model rollup.
-    private var shareCumulative: [(row: ModelRow, max: Double)] {
-        derived.shareCumulative
-    }
-
-    private var shareTotal: Double {
-        rows.reduce(0) { $0 + metricValue($1) }
-    }
-
-    /// VoiceOver summary read in place of the donut. Lists the top 5
-    /// rows with their share percentage so screen-reader users get the
-    /// same info sighted users get from wedges + legend.
-    private var shareSummary: String {
-        let total = shareTotal
-        guard total > 0 else { return "no data yet" }
-        return derived.shareRows.prefix(5).map { r in
-            let pct = Int(metricValue(r) / total * 100)
-            return "\(r.displayName) \(pct) percent"
-        }.joined(separator: ", ")
-    }
-
-    private var hoveredShareRow: ModelRow? {
-        let cumulative = shareCumulative
-        guard let angle = hoveredShareAngle, !cumulative.isEmpty else { return nil }
-        // Linear scan over a precomputed table; cheap because N is
-        // small (handful of models). Could binary-search but the
-        // wins don't show up at this size.
-        for entry in cumulative where angle <= entry.max {
-            return entry.row
-        }
-        return cumulative.last?.row
-    }
-
+    /// How the models divide the cost and the tokens: the shared donut card.
+    /// Clicking Cost or Tokens ranks the list by it and turns the ring to it,
+    /// where a picker in the header used to.
     private var shareCard: some View {
-        let total = shareTotal
-        let title = metric == .cost ? "Cost share" : "Token share"
-        return PacerCard(title, trailing: {
-            HStack(spacing: 10) {
-                if let r = hoveredShareRow {
-                    let pct = total > 0 ? Int(metricValue(r) / total * 100) : 0
-                    HStack(spacing: 6) {
-                        Text(r.displayName)
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(.secondary)
-                        Text(metricLabel(r)).help(metricHelp(r))
-                            .font(.system(size: 12, weight: .semibold, design: .rounded))
-                            .monospacedDigit()
-                        Text("(\(pct)%)")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.tertiary)
-                    }
-                }
-                Picker("Metric", selection: metricBinding) {
-                    ForEach(ModelMetric.allCases) { Text($0.label).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                .pacerDenseControl()
-                .labelsHidden()
-            }
-        }) {
-            HStack(alignment: .top, spacing: 24) {
-                // Ordered by the metric the donut is *showing*, not by the
-                // table's sort. They are different controls: the table was
-                // sorted by cost while this showed tokens, so the legend read
-                // 5.6B, 661M, 795M — a list of token counts in cost order,
-                // which just looks broken.
-                let shareRows = derived.shareRows
-                PacerDonut(
-                    slices: shareRows.map {
-                        PacerDonutSlice(id: $0.key, value: metricValue($0), color: $0.color)
-                    },
-                    size: 180,
-                    hoveredID: hoveredShareRow?.key,
-                    hoveredAngle: $hoveredShareAngle,
-                    accessibilityLabel: "\(title) across models",
-                    accessibilityValue: shareSummary
-                )
-                VStack(alignment: .leading, spacing: 6) {
-                    ForEach(shareRows) { row in
-                        PacerDonutLegendRow(
-                            color: row.color,
-                            label: row.displayName
-                        ) {
-                            Text(metricLabel(row)).help(metricHelp(row))
-                                .font(.system(size: 11))
-                                .foregroundStyle(.secondary)
-                                .monospacedDigit()
-                                .frame(width: 90, alignment: .trailing)
-                            if total > 0 {
-                                Text("\(Int(metricValue(row) / total * 100))%")
-                                    .font(.system(size: 11))
-                                    .foregroundStyle(.tertiary)
-                                    .monospacedDigit()
-                                    .frame(width: 40, alignment: .trailing)
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        let derived = self.derived
+        let share = derived.share.flatMap { $0.sort == shareSort ? $0 : nil }
+            ?? Self.share(derived.tableRows, sort: shareSort)
+        return PacerDonutListCard(
+            "Share",
+            data: share,
+            labelTitle: grouping.label,
+            accessibilityLabel: "\(share.donut.metric.title) across models",
+            onSort: onShareSort)
     }
 
     /// Debounced hover (chart RuleMark + per-day breakdown reads). Updated
@@ -814,55 +676,53 @@ private struct ModelsContent: View {
         // Range picker moved to the page header (it scopes the whole tab,
         // not just this list) — see `ModelsView.body`.
         let tableRows = derived.tableRows
-        return PacerCard("All models") {
-            VStack(alignment: .leading, spacing: 0) {
-                PacerUsageTable(
-                    rows: tableRows,
-                    tableId: "models",
-                    labelTitle: grouping.label,
-                    sort: sort,
-                    onSort: onSort,
-                    // The full token columns, and the Mix bar this table
-                    // has always had.
-                    defaultColumns: UsageColumn.wideDefaults.union([.mix]),
-                    extraColumns: {
-                        PacerUsageColumns.extra(ModelTableExtra.days, title: "Days",
-                                                of: ModelTableExtra.self,
-                                                minWidth: 34, idealWidth: 34) { row in
-                            Text("\(row.extra.activeDays)")
-                                .font(.system(size: 12))
-                                .foregroundStyle(.secondary)
-                                .monospacedDigit()
-                        }
-                        PacerUsageColumns.extra(ModelTableExtra.lastSeen, title: "Last seen",
-                                                of: ModelTableExtra.self,
-                                                minWidth: 70, idealWidth: 70) { row in
-                            Text(row.extra.lastSeen)
-                                .font(.system(size: 11, design: .monospaced))
-                                .foregroundStyle(.secondary)
-                        }
-                    },
-                    rowMenu: { row in
-                        if !row.extra.model.isEmpty {
-                            Button("Copy model name") { pacerCopyToPasteboard(row.extra.model) }
-                        }
-                        Button("Copy display name") { pacerCopyToPasteboard(row.label) }
-                        Divider()
-                        // Copy precise dollars so a paste into a
-                        // spreadsheet keeps full cents.
-                        Button("Copy cost") { pacerCopyToPasteboard(pacerCostExact(row.cost)) }
-                        Button("Copy token total") {
-                            pacerCopyToPasteboard(pacerTokensExact(row.tokens.all))
-                        }
-                    })
-                HStack {
-                    Text("\(tableRows.count) \(grouping == .none ? "model" : "group")\(tableRows.count == 1 ? "" : "s")")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.tertiary)
-                    Spacer()
-                }
-                .padding(.top, 8)
-            }
+        let count = "\(tableRows.count) \(grouping == .none ? "model" : "group")\(tableRows.count == 1 ? "" : "s")"
+        return PacerTableCard("All models", trailing: {
+            Text(count)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+        }) {
+            PacerUsageTable(
+                rows: tableRows,
+                tableId: "models",
+                labelTitle: grouping.label,
+                sort: sort,
+                onSort: onSort,
+                // The full token columns, and the Mix bar this table
+                // has always had.
+                defaultColumns: UsageColumn.wideDefaults.union([.mix]),
+                extraColumns: {
+                    PacerUsageColumns.extra(ModelTableExtra.days, title: "Days",
+                                            of: ModelTableExtra.self,
+                                            minWidth: 28, idealWidth: 36) { row in
+                        Text("\(row.extra.activeDays)")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                            .lineLimit(1)
+                    }
+                    PacerUsageColumns.extra(ModelTableExtra.lastSeen, title: "Last seen",
+                                            of: ModelTableExtra.self,
+                                            minWidth: 36, idealWidth: 72) { row in
+                        Text(row.extra.lastSeen)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                },
+                rowMenu: { row in
+                    if !row.extra.model.isEmpty {
+                        Button("Copy model name") { pacerCopyToPasteboard(row.extra.model) }
+                    }
+                    Button("Copy display name") { pacerCopyToPasteboard(row.label) }
+                    Divider()
+                    // Copy precise dollars so a paste into a
+                    // spreadsheet keeps full cents.
+                    Button("Copy cost") { pacerCopyToPasteboard(pacerCostExact(row.cost)) }
+                    Button("Copy token total") {
+                        pacerCopyToPasteboard(pacerTokensExact(row.tokens.all))
+                    }
+                })
         }
     }
 }

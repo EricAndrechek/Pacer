@@ -2,9 +2,10 @@ import AppKit
 import SwiftUI
 import PacerCore
 
-// One sortable, customizable table for every "by model / by project / by day /
-// by session" usage list (#215 follow-up): Models, Today by model, Projects,
-// Top days, Day detail's models and projects, and the sessions lists.
+// One sortable, customizable table for every full "by model / by project / by
+// day / by session" usage list (#215 follow-up): Models, Projects, Top days,
+// Day detail's models and projects, and the sessions lists. A donut card's
+// short list beside its ring is not one of these (`PacerDonutListCard`).
 //
 // It is SwiftUI's own `Table`, not a hand-rolled grid, because what the owner
 // asked for is exactly what `TableColumnCustomization` gives a native table:
@@ -14,22 +15,22 @@ import PacerCore
 // counted three token parts, another two, and none could show the parts.
 //
 // It is styled only through SwiftUI's own API: the inset style with no
-// alternating rows, the card showing through, and a rounded hairline around
-// the table so it reads as one contained element, like the cards it sits in.
-// The header is the system's, dividers included: they are how a Mac table
-// says its columns resize. Round 2 drew its own (a custom header cell, an
-// override of a private AppKit method, and a view that found the
-// `NSTableView` by matching frames), which read worse for the missing
-// dividers and leaned on things no SDK promises. The right-click column
-// menu, reordering, resizing and the saved layout are all SwiftUI's.
+// alternating rows and the card showing through. The table is its own card
+// (`PacerTableCard`): its surface is the card's, with the title above the
+// header, rather than a bordered table nested in another card's padding,
+// which read as a card in a card. The header is the system's, dividers
+// included: they are how a Mac table says its columns resize. The right-click
+// column menu, reordering, resizing and the saved layout are all SwiftUI's.
 //
-// Columns start at widths their content needs (`UsageColumn.idealWidth`) and
-// AppKit's uniform autoresizing spreads the rest of the card between them, so
-// a default layout fills the card without cutting anything off. One thing
-// only `NSTableView` could fix, and the table no longer reaches it: SwiftUI
-// restores saved widths as they were, so a layout saved in a wider card
-// starts too wide in a narrower one and scrolls sideways until the window
-// widens. "Reset columns" in the table's context menu refits it.
+// It never scrolls sideways. Columns start at widths their content needs
+// (`UsageColumn.idealWidth`), and each screen's defaults fit its card at the
+// window's default size (`UsageTableLayoutTests` measures that). AppKit's
+// uniform autoresizing spreads spare width between the columns and takes it
+// back as the window narrows, down to minimums small enough that a cell
+// truncates ("88.…") before the table would overflow. What autoresizing does
+// not cover is a saved layout: SwiftUI restores saved widths as they were,
+// so a layout saved in a wider window started too wide in a narrower one.
+// `PacerTableFit` refits those to the width the table has (below).
 //
 // What a native `Table` costs inside a scrolling page is its height. It is an
 // `NSScrollView` and reports no content height of its own (an off-screen host
@@ -45,58 +46,55 @@ public extension UsageColumn {
     /// "Project", "Date").
     func title(label: String) -> String {
         switch self {
-        case .name:            return label
-        case .input:           return "Input"
-        case .output:          return "Output"
-        case .cacheRead:       return "Cache read"
-        case .cacheWrite:      return "Cache write"
-        case .cacheWrite5m:    return "5m write"
-        case .cacheWrite1h:    return "1h write"
-        case .tokens:          return "Total"
-        case .outputShare:     return "Out %"
-        case .cacheWriteShare: return "Write %"
-        case .cost:            return "Cost"
-        case .mix:             return "Mix"
+        case .name:         return label
+        // Input that missed the cache: "Input" alone read as every prompt
+        // token, of which this is a sliver.
+        case .input:        return "Uncached"
+        case .output:       return "Output"
+        case .cacheRead:    return "Cache read"
+        case .cacheWrite:   return "Cache write"
+        case .cacheWrite5m: return "5m write"
+        case .cacheWrite1h: return "1h write"
+        case .tokens:       return "Total"
+        case .cacheHitRate: return "Hit %"
+        case .outputShare:  return "Out %"
+        case .cost:         return "Cost"
+        case .mix:          return "Mix"
         }
     }
 
     /// The width a column starts at: what its values need (a compact count
     /// is at most five characters, "86.0M"; a cost six, "$12.3k" in
-    /// semibold), and what its title needs where that is more. AppKit's
-    /// uniform autoresizing then gives every column the same share of the
-    /// card's spare width, so these are deliberately the least each column
-    /// can live with: the sum is what decides whether a table fits its card
-    /// or scrolls sideways.
-    ///
-    /// The two cache titles are the exception. Fitting them would make the
-    /// Models table (ten columns) wider than its card at the window's default
-    /// size, so at that size they shorten ("Cache re…"), as a Finder column
-    /// title does, and come back whole in a wider window. A number never
-    /// shortens: the minimum keeps every number whole, and a window narrowed
-    /// past it scrolls instead. `UsageTableLayoutTests` measures the titles
-    /// and the fit against the real header on whichever OS runs it.
+    /// semibold; a hit rate "96.8%") and what its title needs where that is
+    /// more. AppKit's uniform autoresizing then gives every column the same
+    /// share of the card's spare width, so these are the least each column
+    /// starts at: their sum is what decides whether a screen's defaults fit
+    /// its card. `UsageTableLayoutTests` measures the titles and the fit
+    /// against the real header on whichever OS runs it.
     var idealWidth: CGFloat {
         switch self {
-        case .name:            return 110
-        case .input:           return 46
-        case .output:          return 46
-        case .cacheRead:       return 58
-        case .cacheWrite:      return 62
-        case .cacheWrite5m:    return 52
-        case .cacheWrite1h:    return 50
-        case .tokens:          return 46
-        case .outputShare:     return 42
-        case .cacheWriteShare: return 50
-        case .cost:            return 50
-        case .mix:             return 40
+        case .name:         return 110
+        case .input:        return 60
+        case .output:       return 50
+        case .cacheRead:    return 68
+        case .cacheWrite:   return 70
+        case .cacheWrite5m: return 56
+        case .cacheWrite1h: return 54
+        case .tokens:       return 46
+        case .cacheHitRate: return 46
+        case .outputShare:  return 44
+        case .cost:         return 52
+        case .mix:          return 40
         }
     }
 
+    /// How narrow autoresizing (or the user) may take a column: small, so a
+    /// window narrowed past a screen's defaults truncates its cells rather
+    /// than scrolling the table sideways.
     var minWidth: CGFloat {
         switch self {
-        case .name: return 96
-        case .cost: return 46
-        default:    return 40
+        case .name: return 64
+        default:    return 28
         }
     }
 
@@ -122,11 +120,15 @@ public extension UsageColumn {
         case .outputShare:
             let help = "Output \(pacerCostExact(max(0, costParts.output))) of \(pacerCostExact(costParts.total))"
             return PacerUsageCellText(share: costParts.outputShare, help: help, none: "No cost")
-        case .cacheWriteShare:
-            let writes = max(0, costParts.cacheWrite5m) + max(0, costParts.cacheWrite1h)
-            let cache = writes + max(0, costParts.cacheRead)
-            let help = "Cache writes \(pacerCostExact(writes)) of \(pacerCostExact(cache)) cache cost"
-            return PacerUsageCellText(share: costParts.cacheWriteShare, help: help, none: "No cache cost")
+        case .cacheHitRate:
+            // At the precision every other surface prints a hit rate
+            // (`pacerCacheHitText`): it sits near 98% on most rows, and a
+            // whole percent would print the same number on all of them.
+            guard let ratio = tokens.cacheHitRatio else {
+                return PacerUsageCellText(text: "–", help: "No prompt tokens")
+            }
+            let help = "Cache reads \(pacerTokensExact(tokens.cacheReadTokens)) of \(pacerTokensExact(tokens.promptTokens)) prompt tokens"
+            return PacerUsageCellText(text: pacerCacheHitText(ratio), help: help)
         default:
             let count = tokenCount(of: tokens) ?? 0
             return PacerUsageCellText(text: pacerTokens(count), help: pacerTokensExact(count))
@@ -296,8 +298,11 @@ public struct PacerUsageSort: Hashable, Sendable, Codable {
     public var column: String
     public var descending: Bool
 
+    /// - Parameter column: as stored. A retired column id is read as its
+    ///   successor's ("writeShare" sorts by Hit %), so a sort saved before a
+    ///   column was replaced still names a column on screen.
     public init(column: String, descending: Bool) {
-        self.column = column
+        self.column = UsageColumn.migratedId(column)
         self.descending = descending
     }
 
@@ -387,9 +392,6 @@ public enum PacerUsageTableMetrics {
     static let verticalInsets: CGFloat = 15
     /// What a row adds around its cell content.
     static let rowPadding: CGFloat = 8
-    /// The rounded hairline the table sits in: smaller than the card's 14,
-    /// so the two corners read as nested rather than competing.
-    static let cornerRadius: CGFloat = 8
     /// A little over, never under: a table one point short scrolls and
     /// clips its last row, one a few points tall just has a margin.
     static let slack: CGFloat = 3
@@ -415,6 +417,35 @@ public enum PacerUsageTableMetrics {
     /// Where a table's column layout (visibility, order, widths) is kept.
     public static func columnsKey(tableId: String) -> String {
         "pacer.table.\(tableId).columns"
+    }
+
+    /// A saved layout with every retired column id renamed to its successor
+    /// (`UsageColumn.legacyIds`), or nil when it names none. "writeShare"
+    /// becomes "hitRate", so the place, width and visibility a user gave
+    /// Write % carry over to Hit %, the column that replaced it.
+    ///
+    /// The ids are JSON strings in `TableColumnCustomization`'s encoding, so
+    /// this renames the quoted id and leaves the rest of the encoding alone.
+    /// A layout that already names the successor is left as it is: two
+    /// entries for one id would not decode.
+    static func migratedLayout(_ data: Data) -> Data? {
+        guard var json = String(data: data, encoding: .utf8) else { return nil }
+        var changed = false
+        for (old, new) in UsageColumn.legacyIds {
+            let quotedOld = "\"\(old)\"", quotedNew = "\"\(new.rawValue)\""
+            guard json.contains(quotedOld), !json.contains(quotedNew) else { continue }
+            json = json.replacingOccurrences(of: quotedOld, with: quotedNew)
+            changed = true
+        }
+        return changed ? Data(json.utf8) : nil
+    }
+
+    /// Renames retired ids in the layout stored for `tableId`, before the
+    /// table reads it.
+    static func migrateLayout(tableId: String, store: UserDefaults) {
+        let key = columnsKey(tableId: tableId)
+        guard let data = store.data(forKey: key), let migrated = migratedLayout(data) else { return }
+        store.set(migrated, forKey: key)
     }
 
     /// Puts the table `tableId` back to its defaults: its default columns,
@@ -447,7 +478,8 @@ extension Notification.Name {
 ///   selection instead.
 /// - `defaultColumns`: the standard columns shown until the user changes
 ///   them — `UsageColumn.wideDefaults` or `.narrowDefaults`, plus whatever a
-///   screen adds. The rest are one right-click away.
+///   screen adds. The rest are one right-click away. A screen's defaults fit
+///   its card at the window's default size, with its own columns.
 /// - `leadingColumns`: screen columns that belong beside the label (a
 ///   sessions list's Project), built with `PacerUsageColumns.extra`.
 /// - `extraColumns`: the screen's own columns, built with
@@ -513,6 +545,7 @@ where Leading.TableRowValue == PacerUsageRow<Extra>,
         self.extraColumns = extraColumns
         self.labelAccessory = labelAccessory
         self.rowMenu = rowMenu
+        PacerUsageTableMetrics.migrateLayout(tableId: tableId, store: store)
         _columns = AppStorage(
             wrappedValue: TableColumnCustomization<Row>(),
             PacerUsageTableMetrics.columnsKey(tableId: tableId),
@@ -522,6 +555,7 @@ where Leading.TableRowValue == PacerUsageRow<Extra>,
     public var body: some View {
         let sorted: [Row] = rows.sortedForUsageTable(sort)
         let twoLine = rows.contains { $0.subtitle != nil }
+        let parts: [UsageColumn] = UsageColumn.partColumns
         let current = sort
         let onSort = self.onSort
         let sortOrder = Binding<[Comparator]>(
@@ -533,18 +567,22 @@ where Leading.TableRowValue == PacerUsageRow<Extra>,
         Table(sorted, selection: $selection, sortOrder: sortOrder, columnCustomization: $columns) {
             labelColumn(twoLine: twoLine)
             leadingColumns()
+            // The token parts in the parts' own order (`partColumns`, read
+            // from `CostComponent`), so the columns follow the order every
+            // bar and breakdown draws the parts in. Six slots: five parts and
+            // Cache write, both tiers together (`UsageTableTests` checks).
             Group {
-                numberColumn(.input)
-                numberColumn(.output)
-                numberColumn(.cacheRead)
-                numberColumn(.cacheWrite)
-                numberColumn(.cacheWrite5m)
-                numberColumn(.cacheWrite1h)
+                numberColumn(parts[0])
+                numberColumn(parts[1])
+                numberColumn(parts[2])
+                numberColumn(parts[3])
+                numberColumn(parts[4])
+                numberColumn(parts[5])
             }
             Group {
                 numberColumn(.tokens)
+                numberColumn(.cacheHitRate)
                 numberColumn(.outputShare)
-                numberColumn(.cacheWriteShare)
                 numberColumn(.cost)
             }
             extraColumns()
@@ -562,14 +600,6 @@ where Leading.TableRowValue == PacerUsageRow<Extra>,
         .scrollBounceBehavior(.basedOnSize, axes: [.horizontal, .vertical])
         .frame(height: PacerUsageTableMetrics.height(
             rowCount: sorted.count, twoLine: twoLine, maxVisibleRows: maxVisibleRows))
-        // One contained element, rounded like the card around it, in the
-        // colour the table draws its own separators in.
-        .clipShape(RoundedRectangle(cornerRadius: PacerUsageTableMetrics.cornerRadius, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: PacerUsageTableMetrics.cornerRadius, style: .continuous)
-                .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 1)
-                .allowsHitTesting(false)
-        }
         .contextMenu(forSelectionType: Row.ID.self) { ids in
             if RowMenu.self != EmptyView.self,
                let id = ids.first, let row = sorted.first(where: { $0.id == id }) {
@@ -629,6 +659,9 @@ where Leading.TableRowValue == PacerUsageRow<Extra>,
             }
             .frame(height: PacerUsageTableMetrics.labelHeight(twoLine: twoLine), alignment: .leading)
             .help(row.subtitle ?? row.label)
+            // Inside a cell, so it can find the table it is in by walking up
+            // (`PacerTableFitter`), and keep it fitted to its width.
+            .background(PacerTableFitter())
         }
         .width(min: UsageColumn.name.minWidth, ideal: UsageColumn.name.idealWidth)
         .customizationID(UsageColumn.name.rawValue)
@@ -651,6 +684,10 @@ where Leading.TableRowValue == PacerUsageRow<Extra>,
                       : .system(size: 12))
                 .foregroundStyle(isCost ? .primary : .secondary)
                 .monospacedDigit()
+                // A column narrowed past its number cuts the number short
+                // ("88.…") rather than overflowing into its neighbour.
+                .lineLimit(1)
+                .truncationMode(.tail)
                 .help(cell?.help ?? "")
         }
         .width(min: column.minWidth, ideal: column.idealWidth)
@@ -837,7 +874,7 @@ public enum PacerUsageColumns {
         title: String,
         of extra: Extra.Type,
         numeric: Bool = true,
-        minWidth: CGFloat = 40,
+        minWidth: CGFloat = 28,
         idealWidth: CGFloat = 64,
         descendingFirst: Bool = true,
         visibleByDefault: Bool = true,

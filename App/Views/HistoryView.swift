@@ -451,7 +451,9 @@ private struct TopDaysCard: View {
     @AppStorage("pacer.history.topDaysSortDescending", store: PacerSettings.store)
     private var descending: Bool = true
 
-    private var sort: TopDaysSort { TopDaysSort(rawValue: sortRaw) ?? .cost }
+    /// A sort stored under a retired column id ("writeShare") ranks by its
+    /// successor.
+    private var sort: TopDaysSort { TopDaysSort(stored: sortRaw) }
 
     var body: some View {
         // The `.id()` value is prefixed per-card so it can't collide
@@ -559,8 +561,8 @@ private struct TopDaysContent: View {
         case .cacheWrite:   return "Heaviest cache-write days"
         case .cacheWrite5m: return "Heaviest 5m-write days"
         case .cacheWrite1h: return "Heaviest 1h-write days"
+        case .hitRate:      return descending ? "Best-cached days" : "Least-cached days"
         case .outShare:     return descending ? "Most output-heavy days" : "Least output-heavy days"
-        case .writeShare:   return descending ? "Most cache-rebuilding days" : "Least cache-rebuilding days"
         case .mix:          return descending ? "Most uncached days" : "Most cached days"
         }
     }
@@ -578,22 +580,22 @@ private struct TopDaysContent: View {
                           tokens: day.tokens, costParts: day.costParts, cost: day.cost)
         }
         let tableSort = PacerUsageSort(sort.column, descending: descending)
-        return PacerCard(title, trailing: {
-            if !all.isEmpty {
-                Text("showing \(visible.count) of \(all.count)")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-            }
-        }) {
+        let trailing = Text(all.isEmpty ? "" : "showing \(visible.count) of \(all.count)")
+            .font(.system(size: 11))
+            .foregroundStyle(.secondary)
+        return Group {
             if all.isEmpty {
-                Text("No data yet.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+                PacerCard(title, trailing: { trailing }) {
+                    Text("No data yet.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
             } else {
-                VStack(alignment: .leading, spacing: 4) {
-                    // The rank number and the bar that used to lead each row
-                    // are gone: the table's order is the rank, and the bar
-                    // drew the number printed beside it a second time.
+                // The table is the card: its title over the native header.
+                // The rank number and the bar that used to lead each row
+                // are gone: the table's order is the rank, and the bar drew
+                // the number printed beside it a second time.
+                PacerTableCard(title, trailing: { trailing }) {
                     PacerUsageTable(
                         rows: tableRows,
                         tableId: "topDays",
@@ -609,6 +611,7 @@ private struct TopDaysContent: View {
                             // "$10.8k" but a copy-to-paste should be the precise value.
                             Button("Copy cost") { pacerCopyToPasteboard(pacerCostExact(row.cost)) }
                         })
+                } footer: {
                     if all.count > 10 {
                         HStack {
                             Spacer()
@@ -628,7 +631,7 @@ private struct TopDaysContent: View {
                             .buttonStyle(.plain)
                             Spacer()
                         }
-                        .padding(.top, 8)
+                        .padding(.top, 4)
                     }
                 }
             }

@@ -51,6 +51,14 @@ struct ProjectsView: View {
     @AppStorage("pacer.projects.sortDescending", store: PacerSettings.store)
     private var sortDescending: Bool = true
 
+    /// The Top projects card's sort, its own: the card ranks the five
+    /// largest by it and its ring measures it, while the table below keeps
+    /// whatever order its user chose. "cost", "tokens" or "sessions".
+    @AppStorage("pacer.projects.topSort", store: PacerSettings.store)
+    private var topSortRaw: String = UsageColumn.cost.rawValue
+    @AppStorage("pacer.projects.topSortDescending", store: PacerSettings.store)
+    private var topSortDescending: Bool = true
+
     /// Search text and collection filter. See `ProjectsPageState`.
     @State private var page = ProjectsPageState.shared
 
@@ -91,6 +99,9 @@ struct ProjectsView: View {
     private var sort: PacerUsageSort {
         PacerUsageSort(column: sortRaw, descending: sortDescending)
     }
+    private var topSort: PacerUsageSort {
+        PacerUsageSort(column: topSortRaw, descending: topSortDescending)
+    }
 
     var body: some View {
         // Presentation state, read here so setting it redraws this view and
@@ -104,7 +115,7 @@ struct ProjectsView: View {
         // on the value rather than this page. That is the shape of the modal
         // bug #150 fixed, where a click only showed after something unrelated
         // redrew the page (#140; AGENTS.md, "SwiftUI state and data flow").
-        let range = self.range, sort = self.sort
+        let range = self.range, sort = self.sort, topSort = self.topSort
         let scopeAccountId = scope.accountId
         let searchText = page.searchText, collectionFilter = page.collectionFilter
         PageScaffold(
@@ -117,6 +128,8 @@ struct ProjectsView: View {
                 scopeAccountId: scopeAccountId,
                 sort: sort,
                 onSort: { sortRaw = $0.column; sortDescending = $0.descending },
+                topSort: topSort,
+                onTopSort: { topSortRaw = $0.column; topSortDescending = $0.descending },
                 searchText: searchText,
                 collectionFilter: collectionFilter,
                 rangeBinding: rangeBinding,
@@ -192,8 +205,8 @@ struct ProjectsView: View {
     }
 }
 
-/// The metric the heatmap colours its days by. (The Projects list's donut
-/// follows the table's sort instead: `PacerShareDonutData`.)
+/// The metric the heatmap colours its days by. (The Top projects donut
+/// follows its list's sort instead: `PacerShareDonutData`.)
 enum ProjectMetric: String, CaseIterable, Identifiable {
     case cost
     case tokens
@@ -266,14 +279,15 @@ private struct ProjectsContent: View {
     /// `cachedFilteredRows` as the shared table's rows, built with it so a
     /// body pass does not rebuild them or their colours.
     @State private var cachedTableRows: [PacerUsageRow<ProjectRow>]?
-    /// The donut beside the table: its wedges follow the table's rows and
-    /// its sort, so both refresh it (`refreshFilteredRows`, and the sort's
-    /// own trigger). Hundreds of projects are too many to rank per body pass.
-    @State private var cachedDonut: PacerShareDonutData?
-    /// The sort the donut was last built for, kept as state so a refresh
+    /// The Top projects card: its ring and list follow the table's rows (the
+    /// search and the collection) and the card's own sort, so both refresh it
+    /// (`refreshFilteredRows`, and the sort's own trigger). Hundreds of
+    /// projects are too many to rank per body pass.
+    @State private var cachedTop: PacerShareListData<ProjectRow>?
+    /// The sort the card was last built for, kept as state so a refresh
     /// from the search debounce, whose closure holds an older copy of this
     /// view, still ranks by the sort on screen.
-    @State private var donutSort: PacerUsageSort
+    @State private var builtTopSort: PacerUsageSort
     @State private var debouncedSearch: String = ""
     @State private var searchDebounceTask: Task<Void, Never>?
     /// Candidate canonical paths for the "Merge into…" submenu. Used
@@ -291,10 +305,12 @@ private struct ProjectsContent: View {
 
     let rangeSince: Date?
     let searchText: String
-    /// The table's sort. The table sorts the cached rows itself; the donut
-    /// measures the sorted column, so it is an input to `cachedDonut`.
+    /// The table's sort. The table sorts the cached rows itself.
     let sort: PacerUsageSort
     let onSort: (PacerUsageSort) -> Void
+    /// The Top projects card's sort: an input to `cachedTop`.
+    let topSort: PacerUsageSort
+    let onTopSort: (PacerUsageSort) -> Void
     /// Active collection scope — `""` = All projects.
     let collectionFilter: String
 
@@ -313,6 +329,8 @@ private struct ProjectsContent: View {
         scopeAccountId: String? = nil,
         sort: PacerUsageSort,
         onSort: @escaping (PacerUsageSort) -> Void,
+        topSort: PacerUsageSort,
+        onTopSort: @escaping (PacerUsageSort) -> Void,
         searchText: String,
         collectionFilter: String,
         rangeBinding: Binding<TimeRange>,
@@ -340,8 +358,10 @@ private struct ProjectsContent: View {
         // field showing "pacer" over an unfiltered list.
         _debouncedSearch = State(initialValue: searchText)
         self.sort = sort
-        _donutSort = State(initialValue: sort)
         self.onSort = onSort
+        self.topSort = topSort
+        _builtTopSort = State(initialValue: topSort)
+        self.onTopSort = onTopSort
         self.collectionFilter = collectionFilter
         self.rangeBinding = rangeBinding
         self.collectionFilterBinding = collectionFilterBinding
@@ -403,8 +423,8 @@ private struct ProjectsContent: View {
             }
         }
 
-        /// Sessions add up across projects, so sorting by them turns the
-        /// donut to sessions. Last active is a date and does not.
+        /// Sessions add up across projects, so sorting Top projects by them
+        /// turns its ring to sessions. Last active is a date and does not.
         static func shareMetric(forColumn id: String) -> PacerShareMetric? {
             id == sessionsColumn ? PacerShareMetric(column: id, title: "Sessions") : nil
         }
@@ -584,13 +604,23 @@ private struct ProjectsContent: View {
         cachedFilteredRows = filtered
         let tableRows = Self.tableRows(filtered)
         cachedTableRows = tableRows
-        cachedDonut = Self.donut(tableRows, sort: donutSort)
+        cachedTop = Self.top(tableRows, sort: builtTopSort)
     }
 
-    /// The five largest projects by the sorted column, and the rest as one
-    /// Other wedge: the share is of everything the table lists.
-    private static func donut(_ rows: [PacerUsageRow<ProjectRow>], sort: PacerUsageSort) -> PacerShareDonutData {
-        PacerShareDonutData(rows: rows, sort: sort, maxSlices: 5)
+    /// Top projects' columns: each project's share of the cost, the tokens
+    /// and the sessions. Shares, not amounts: the table below prints every
+    /// project's amounts, and the page prints a number once.
+    private static let topColumns: [PacerShareListColumn] = [
+        .share(of: UsageColumn.cost.rawValue, title: "Cost", format: .cost, help: "Share of the cost"),
+        .share(of: UsageColumn.tokens.rawValue, title: "Tokens", format: .tokens, help: "Share of every token"),
+        .share(of: ProjectRow.sessionsColumn, title: "Sessions", format: .count, help: "Share of the sessions",
+               width: 66),
+    ]
+
+    /// The five largest projects by the card's sort, and the rest as one
+    /// Other line and wedge: the share is of everything the table lists.
+    private static func top(_ rows: [PacerUsageRow<ProjectRow>], sort: PacerUsageSort) -> PacerShareListData<ProjectRow> {
+        PacerShareListData(rows: rows, sort: sort, columns: topColumns, maxSlices: 5)
     }
 
     /// The table's plain-value rows: the project's name over its path, in
@@ -647,6 +677,7 @@ private struct ProjectsContent: View {
             } else if rows.isEmpty {
                 emptyState
             } else {
+                topProjectsCard
                 projectListCard
             }
         }
@@ -745,11 +776,11 @@ private struct ProjectsContent: View {
             // every init, so as a trigger it re-ran the whole refresh on any
             // redraw of the page — each search keystroke, each project click.
             .onChange(of: collectionFilter) { _, _ in refreshFilteredRows() }
-            // The donut measures the sorted column: a header click re-ranks
-            // the wedges without a rows refresh.
-            .onChange(of: sort) { _, sort in
-                donutSort = sort
-                cachedDonut = Self.donut(cachedTableRows ?? Self.tableRows(rows), sort: sort)
+            // Top projects ranks by its own sort: a title click re-ranks the
+            // list and the ring without a rows refresh.
+            .onChange(of: topSort) { _, sort in
+                builtTopSort = sort
+                cachedTop = Self.top(cachedTableRows ?? Self.tableRows(rows), sort: sort)
             }
             // Every field the rollups read, not the count: editing a
             // collection renames, recolours and re-members it in place.
@@ -866,82 +897,87 @@ private struct ProjectsContent: View {
         }
     }
 
-    /// The project list: the shared donut beside the shared usage table.
+    /// The five projects with the largest share of the card's sort (cost by
+    /// default), and the rest as one line: the shared donut card. Its
+    /// columns are shares, so none of the table's amounts is printed twice;
+    /// clicking one ranks the list by it and turns the ring to it. A line
+    /// opens its project, as the table's rows do.
+    private var topProjectsCard: some View {
+        let tableRows = cachedTableRows ?? Self.tableRows(rows)
+        let top = cachedTop ?? Self.top(tableRows, sort: topSort)
+        return PacerDonutListCard(
+            "Top projects",
+            data: top,
+            labelTitle: "Project",
+            accessibilityLabel: "Projects by \(top.donut.metric.title.lowercased())",
+            onSort: onTopSort,
+            onOpen: { row in onSelectProject(row.extra.path, row.extra.displayName, rangeSince) })
+    }
+
+    /// Every project, in the shared usage table as its own card: the token
+    /// parts, the total and the cost, plus Sessions and Last active. Click a
+    /// row for Project detail; right-click for collections, merges and
+    /// copying. The range picker and the alias manager live in the page
+    /// header, and the search field in the window toolbar (`.searchable` on
+    /// the parent view).
     ///
-    /// This was two cards, a Top projects donut with its own Cost / Tokens /
-    /// Sessions picker and a legend, and the full list under it, so the top
-    /// five's numbers were printed twice and the picker and the table's sort
-    /// could disagree. Now the donut measures what the table is sorted by
-    /// (the five largest and an Other wedge), the rows' colour dots are its
-    /// legend, and the table carries the numbers.
-    ///
-    /// Beside the donut the table starts narrow (Total, Out %, Write %, Cost,
-    /// Sessions, Last active), so it fits the card at the window's default
-    /// size; the token parts are a right-click away. Click a row for Project
-    /// detail; right-click for collections, merges and copying. The range
-    /// picker and the alias manager live in the page header, and the search
-    /// field in the window toolbar (`.searchable` on the parent view).
+    /// Round 3 put this table beside the Top projects donut in one card, and
+    /// the owner found it very hard to read; the donut is its own card above
+    /// again, and the table has the page's width.
     private var projectListCard: some View {
         let tableRows = cachedTableRows ?? Self.tableRows(rows)
-        let donut = cachedDonut ?? Self.donut(tableRows, sort: sort)
-        return PacerCard("All projects") {
-            VStack(alignment: .leading, spacing: 0) {
-                PacerDonutBesideTable(donut, accessibilityLabel: "Projects by \(donut.metric.title.lowercased())") {
-                    // A native table only realizes the rows in view, which is
-                    // what the `LazyVStack` here used to buy: a long project
-                    // list does not build every row's context menu up front.
-                    PacerUsageTable(
-                        rows: tableRows,
-                        // Not "projects": that layout was saved for the
-                        // full-width card, and SwiftUI would restore its
-                        // widths here, too wide beside the donut.
-                        tableId: "projects.list",
-                        labelTitle: "Project",
-                        sort: sort,
-                        onSort: onSort,
-                        onOpen: { row in
-                            onSelectProject(row.extra.path, row.extra.displayName, rangeSince)
-                        },
-                        defaultColumns: UsageColumn.narrowDefaults,
-                        extraColumns: {
-                            PacerUsageColumns.extra(ProjectRow.sessionsColumn, title: "Sessions",
-                                                    of: ProjectRow.self,
-                                                    minWidth: 44, idealWidth: 62) { row in
-                                Text("\(row.extra.sessionCount)")
-                                    .font(.system(size: 12))
-                                    .foregroundStyle(.secondary)
-                                    .monospacedDigit()
-                            }
-                            PacerUsageColumns.extra(ProjectRow.lastActiveColumn, title: "Last active",
-                                                    of: ProjectRow.self,
-                                                    minWidth: 60, idealWidth: 64) { row in
-                                // Judged against the clock, so it needs one: on an
-                                // idle machine nothing else redraws the list, and
-                                // "2 min ago" stayed put.
-                                TimelineView(.everyMinute) { _ in
-                                    Text(pacerRelative(row.extra.lastActive))
-                                        .help(pacerRelativeExact(row.extra.lastActive))
-                                        .font(.system(size: 11))
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
-                        },
-                        labelAccessory: { row in
-                            ProjectStatusBadge(state: row.extra.status)
-                            membershipDots(for: row.extra.path)
-                        },
-                        rowMenu: { row in
-                            projectMenu(for: row.extra)
-                        })
-                }
-                HStack {
-                    Text("\(tableRows.count) project\(tableRows.count == 1 ? "" : "s")")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.tertiary)
-                    Spacer()
-                }
-                .padding(.top, 8)
-            }
+        return PacerTableCard("All projects", trailing: {
+            Text("\(tableRows.count) project\(tableRows.count == 1 ? "" : "s")")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+        }) {
+            // A native table only realizes the rows in view, which is
+            // what the `LazyVStack` here used to buy: a long project
+            // list does not build every row's context menu up front.
+            PacerUsageTable(
+                rows: tableRows,
+                // The full-width list's own layout, as it was before round 3
+                // put it beside the donut (under "projects.list"). A width
+                // saved in another window size is refitted to this one.
+                tableId: "projects",
+                labelTitle: "Project",
+                sort: sort,
+                onSort: onSort,
+                onOpen: { row in
+                    onSelectProject(row.extra.path, row.extra.displayName, rangeSince)
+                },
+                extraColumns: {
+                    PacerUsageColumns.extra(ProjectRow.sessionsColumn, title: "Sessions",
+                                            of: ProjectRow.self,
+                                            minWidth: 28, idealWidth: 58) { row in
+                        Text("\(row.extra.sessionCount)")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                            .lineLimit(1)
+                    }
+                    PacerUsageColumns.extra(ProjectRow.lastActiveColumn, title: "Last active",
+                                            of: ProjectRow.self,
+                                            minWidth: 36, idealWidth: 70) { row in
+                        // Judged against the clock, so it needs one: on an
+                        // idle machine nothing else redraws the list, and
+                        // "2 min ago" stayed put.
+                        TimelineView(.everyMinute) { _ in
+                            Text(pacerRelative(row.extra.lastActive))
+                                .help(pacerRelativeExact(row.extra.lastActive))
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                    }
+                },
+                labelAccessory: { row in
+                    ProjectStatusBadge(state: row.extra.status)
+                    membershipDots(for: row.extra.path)
+                },
+                rowMenu: { row in
+                    projectMenu(for: row.extra)
+                })
         }
     }
 

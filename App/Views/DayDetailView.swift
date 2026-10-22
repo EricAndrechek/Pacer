@@ -365,12 +365,12 @@ struct DayDetailView: View {
     }
 
     /// Every model the day used, in the shared usage table's narrow form
-    /// (Total, Out %, Write %, Cost; the token parts are in the header's
-    /// menu), with each model's share of the day's cost. The Cost breakdown
-    /// card above draws each model's mix.
+    /// (Total, Hit %, Out %, Cost; the token parts are in the header's menu)
+    /// as its own card, with each model's share of the day's cost. The Cost
+    /// breakdown card above draws each model's mix.
     private var modelsCard: some View {
         let sort = PacerUsageSort(column: modelsSortRaw, descending: modelsSortDescending)
-        return PacerCard("Models") {
+        return PacerTableCard("Models") {
             PacerUsageTable(
                 rows: cached.modelTableRows,
                 tableId: "dayDetail.models",
@@ -381,11 +381,12 @@ struct DayDetailView: View {
             ) {
                 PacerUsageColumns.extra(DayModelShare.column, title: "Share",
                                         of: DayModelShare.self,
-                                        minWidth: 40, idealWidth: 44) { row in
+                                        minWidth: 28, idealWidth: 44) { row in
                     Text("\(Int((row.extra.share * 100).rounded()))%")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                         .monospacedDigit()
+                        .lineLimit(1)
                         .help("Share of the day's cost")
                 }
             }
@@ -394,7 +395,7 @@ struct DayDetailView: View {
 
     private var projectsCard: some View {
         let sort = PacerUsageSort(column: projectsSortRaw, descending: projectsSortDescending)
-        return PacerCard("Projects", trailing: {
+        return PacerTableCard("Projects", trailing: {
             Text("\(projectRows.count) project\(projectRows.count == 1 ? "" : "s")")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
@@ -439,7 +440,7 @@ struct DayDetailView: View {
     /// reachable through the table's own scroll.
     private func sessionsCard(_ rows: [PacerSessionsTable.Row]) -> some View {
         let sort = PacerSessionsTable.sort(stored: sessionsSortRaw, descending: sessionsSortDescending)
-        return PacerCard("Sessions", trailing: {
+        return PacerTableCard("Sessions", trailing: {
             Text("\(rows.count) on this day")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)

@@ -7,8 +7,9 @@ import PacerCore
 // They were the last hand-rolled table: a header row of `SortableColumnHeader`s
 // over `HoverRow`s, with its own sort, its own fonts and only two of the
 // numbers. Now a session is a row like a model or a project: the same header,
-// sort, column menu and saved layout, and every token part, the two ratios
-// and the Mix bar one right-click away.
+// sort, column menu and saved layout, and every token part, Hit %, Out % and
+// the Mix bar one right-click away. A screen shows it as its own card
+// (`PacerTableCard`).
 
 /// What a sessions table shows beyond the standard columns: the session's
 /// project, how long it ran, and when it was last seen.
@@ -46,8 +47,8 @@ public struct PacerSessionExtra: PacerUsageExtra, Sendable, Equatable {
 
 /// A sessions table: the session's top model over its short id, the Project
 /// column when the list spans projects, Total, Cost and a Last seen that
-/// keeps ticking. Duration, every token part, Out %, Write % and Mix are in
-/// the header's menu.
+/// keeps ticking. Duration, every token part, Hit %, Out % and Mix are in the
+/// header's menu.
 public struct PacerSessionsTable: View {
     public typealias Row = PacerUsageRow<PacerSessionExtra>
 
@@ -107,7 +108,7 @@ public struct PacerSessionsTable: View {
             if showProject {
                 PacerUsageColumns.extra(PacerSessionExtra.project, title: "Project",
                                         of: PacerSessionExtra.self, numeric: false,
-                                        minWidth: 70, idealWidth: 100, descendingFirst: false) { row in
+                                        minWidth: 40, idealWidth: 100, descendingFirst: false) { row in
                     Text(row.extra.projectName)
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
@@ -119,16 +120,17 @@ public struct PacerSessionsTable: View {
         } extraColumns: {
             PacerUsageColumns.extra(PacerSessionExtra.duration, title: "Duration",
                                     of: PacerSessionExtra.self,
-                                    minWidth: 48, idealWidth: 56, visibleByDefault: false) { row in
+                                    minWidth: 28, idealWidth: 56, visibleByDefault: false) { row in
                 Text(pacerSessionDuration(row.extra.duration))
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
+                    .lineLimit(1)
                     .help("\(pacerRelativeExact(row.extra.firstSeenAt)) → \(pacerRelativeExact(row.extra.lastSeenAt))")
             }
             PacerUsageColumns.extra(PacerSessionExtra.lastSeen, title: "Last seen",
                                     of: PacerSessionExtra.self,
-                                    minWidth: 60, idealWidth: 64) { row in
+                                    minWidth: 36, idealWidth: 64) { row in
                 // Judged against the clock, so it needs one: nothing else
                 // redraws an open detail on an idle machine, and "2 min ago"
                 // stayed "2 min ago".
@@ -137,6 +139,7 @@ public struct PacerSessionsTable: View {
                         .help(pacerRelativeExact(row.extra.lastSeenAt))
                         .font(.system(size: 11))
                         .foregroundStyle(.tertiary)
+                        .lineLimit(1)
                 }
             }
         }

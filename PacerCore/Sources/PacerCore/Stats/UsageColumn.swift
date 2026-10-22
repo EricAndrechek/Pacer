@@ -14,7 +14,11 @@ import Foundation
 /// saved column layout. `name`, `tokens` and `cost` are what the per-screen
 /// sort enums stored before the shared table, and `mix` is the id the Models
 /// table's own Mix column had, so a sort or a layout the user picked then
-/// carries over.
+/// carries over. A retired id maps to its successor (`legacyIds`).
+///
+/// The declaration order is not the order a table shows the columns in: that
+/// is `displayOrder`, which takes the token parts' order from
+/// `CostComponent`.
 public enum UsageColumn: String, CaseIterable, Sendable {
     /// The row's label: a model, a project, a date, a session.
     case name
@@ -29,15 +33,19 @@ public enum UsageColumn: String, CaseIterable, Sendable {
     /// Every token, all five parts (`TokenBreakdown.all`), titled "Total".
     /// The raw value stays "tokens": it is what every older sort stored.
     case tokens
+    /// "Hit %": the share of the row's prompt tokens served from the cache,
+    /// `TokenBreakdown.cacheHitRatio` (reads ÷ (reads + writes + uncached
+    /// input)), the one definition every surface prints.
+    ///
+    /// It replaced "Write %" (raw value "writeShare"), cache writes' share of
+    /// the cache *cost*. That one turned out to be the reuse figure bent by
+    /// each model's read price: the same caching read differently on Opus
+    /// and on Haiku. A token ratio means the same thing on every model.
+    /// "writeShare" still decodes, as this column (`init(storedId:)`).
+    case cacheHitRate = "hitRate"
     /// "Out %": output's share of the row's cost. For a table too narrow for
     /// the token columns: how much of the money went on the response.
     case outputShare = "outShare"
-    /// "Write %": cache writes' share of the row's cache cost (reads plus
-    /// writes). It moves when caches are rebuilt — a new session, an idle
-    /// gap that lets the 5-minute cache expire, a compaction — which is the
-    /// cache signal worth a column. The hit rate is ~98% everywhere and says
-    /// nothing row to row.
-    case cacheWriteShare = "writeShare"
     case cost
     /// "Mix": the five cost parts as one 100% bar. Declared after a
     /// screen's own columns, where the Models table had its Mix.
@@ -47,7 +55,7 @@ public enum UsageColumn: String, CaseIterable, Sendable {
     /// count (the label, the ratios, the bar, the cost).
     public func tokenCount(of tokens: TokenBreakdown) -> Int64? {
         switch self {
-        case .name, .cost, .outputShare, .cacheWriteShare, .mix: return nil
+        case .name, .cost, .cacheHitRate, .outputShare, .mix: return nil
         case .input:        return tokens.inputTokens
         case .output:       return tokens.outputTokens
         case .cacheRead:    return tokens.cacheReadTokens
@@ -59,14 +67,23 @@ public enum UsageColumn: String, CaseIterable, Sendable {
     }
 
     /// The share a ratio column prints, in 0...1, or nil when the row has
-    /// nothing to divide (no cost, no cache cost) or the column is not a
-    /// ratio.
-    public func share(of cost: CostComponents) -> Double? {
+    /// nothing to divide (no cost, no prompt) or the column is not a ratio.
+    /// Hit % divides tokens; Out % and the Mix bar divide the cost.
+    public func ratio(of row: some UsageColumnValues) -> Double? {
         switch self {
-        case .outputShare:     return cost.outputShare
-        case .cacheWriteShare: return cost.cacheWriteShare
-        case .mix:             return cost.uncachedShare
-        default:               return nil
+        case .cacheHitRate: return row.tokens.cacheHitRatio
+        case .outputShare:  return row.costParts.outputShare
+        case .mix:          return row.costParts.uncachedShare
+        default:            return nil
+        }
+    }
+
+    /// Whether this column prints a ratio rather than an amount: its values
+    /// do not add up across rows.
+    public var isRatio: Bool {
+        switch self {
+        case .cacheHitRate, .outputShare, .mix: return true
+        default:                                return false
         }
     }
 
@@ -81,8 +98,8 @@ public enum UsageColumn: String, CaseIterable, Sendable {
             return .orderedSame
         case .cost:
             return Self.order(a.cost, b.cost)
-        case .outputShare, .cacheWriteShare, .mix:
-            switch (share(of: a.costParts), share(of: b.costParts)) {
+        case .cacheHitRate, .outputShare, .mix:
+            switch (ratio(of: a), ratio(of: b)) {
             case let (x?, y?): return Self.order(x, y)
             case (nil, nil):   return .orderedSame
             case (nil, _):     return .orderedAscending
@@ -111,12 +128,66 @@ public enum UsageColumn: String, CaseIterable, Sendable {
         .name, .input, .output, .cacheRead, .cacheWrite, .tokens, .cost,
     ]
 
-    /// What a table too narrow for the token columns shows: the total, the
-    /// two ratios and the cost. The token columns stay one right-click away.
-    /// Today by model beside its donut, Day detail's models.
+    /// What a table in a tight space shows: Total · Hit % · Out % · Cost.
+    /// The token parts stay one right-click away. Day detail's models, and
+    /// anywhere else a table has little room.
     public static let narrowDefaults: Set<UsageColumn> = [
-        .name, .tokens, .outputShare, .cacheWriteShare, .cost,
+        .name, .tokens, .cacheHitRate, .outputShare, .cost,
     ]
+
+    /// The column showing one priced part's tokens. The two write tiers
+    /// have their own columns; Cache write is both of them together.
+    public init(part: CostComponent) {
+        switch part {
+        case .input:        self = .input
+        case .output:       self = .output
+        case .cacheRead:    self = .cacheRead
+        case .cacheWrite5m: self = .cacheWrite5m
+        case .cacheWrite1h: self = .cacheWrite1h
+        }
+    }
+
+    /// The token-part columns in the order every table shows them: the
+    /// parts' own order (`CostComponent.allCases`, the order every bar and
+    /// breakdown draws them in), with Cache write, both tiers together, just
+    /// before the first tier. Read from the parts rather than written out, so
+    /// a change to the parts' order moves the columns with it.
+    public static var partColumns: [UsageColumn] {
+        var columns: [UsageColumn] = []
+        for part in CostComponent.allCases {
+            let column = UsageColumn(part: part)
+            if column == .cacheWrite5m || column == .cacheWrite1h, !columns.contains(.cacheWrite) {
+                columns.append(.cacheWrite)
+            }
+            columns.append(column)
+        }
+        return columns
+    }
+
+    /// Every column in the order a table lays them out: the label, the token
+    /// parts, the total, the ratios (Hit % with the cache parts before Out %
+    /// with output, as the parts run), the cost and the Mix bar. A screen's
+    /// own columns go between Cost and Mix.
+    public static var displayOrder: [UsageColumn] {
+        [.name] + partColumns + [.tokens, .cacheHitRate, .outputShare, .cost, .mix]
+    }
+
+    /// Ids this enum stored before, and the column each one is now. A sort or
+    /// a saved table layout naming one carries over to its successor.
+    public static let legacyIds: [String: UsageColumn] = [
+        // Write % (cache writes' share of the cache cost) became Hit %.
+        "writeShare": .cacheHitRate,
+    ]
+
+    /// `id` as it is stored now: a retired id becomes its successor's.
+    public static func migratedId(_ id: String) -> String {
+        legacyIds[id]?.rawValue ?? id
+    }
+
+    /// The column a stored id names, retired ids included.
+    public init?(storedId id: String) {
+        self.init(rawValue: Self.migratedId(id))
+    }
 }
 
 /// What a usage column reads from a row: a table row, a Top days total.
@@ -135,14 +206,6 @@ public extension CostComponents {
     /// there is float residue from apportioning a stored cost.
     var outputShare: Double? {
         Self.share(output, of: Self.clamped(input, output, cacheRead, cacheWrite5m, cacheWrite1h))
-    }
-
-    /// Cache writes' share of what the cache cost: (5m + 1h writes) ÷
-    /// (reads + 5m + 1h writes). The "Write %" column; nil when the row
-    /// spent nothing on the cache.
-    var cacheWriteShare: Double? {
-        Self.share(max(0, cacheWrite5m) + max(0, cacheWrite1h),
-                   of: Self.clamped(cacheRead, cacheWrite5m, cacheWrite1h))
     }
 
     /// Input and output's share of the cost: where a Mix bar's cache part

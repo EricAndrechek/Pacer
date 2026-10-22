@@ -63,13 +63,13 @@ struct ProjectDetailView: View {
     /// expensive computed properties below still pays off on chart
     /// hover, range filter, and other in-modal re-renders.
 
-    /// Cached output of the per-row `JSONDecoder` walk that builds
-    /// `modelSlices`. The previous computed-property version decoded
+    /// Cached output of the per-row `JSONDecoder` walk that builds the By
+    /// model card's rows. The previous computed-property version decoded
     /// two JSON blobs per `ProjectDailyAggregate` row (one for tokens,
     /// one for costs) on every body render — and any chart hover or
     /// state change re-evaluates the body. With ~90 rows per project
     /// that's 180 decoder allocations per hover tick.
-    @State private var cachedModelSlices: [ModelSlice] = []
+    @State private var cachedModelRows: [PacerUsageRow<ProjectModelExtra>] = []
     /// The daily chart's bars, each with its breakdown and top models (by
     /// cost, from `modelCostJSON`) precomputed for the hover card, so a
     /// hover reads them rather than decoding anything.
@@ -193,14 +193,6 @@ struct ProjectDetailView: View {
 
     private var dailySeries: [PacerChartBucket] { cachedDailySeries }
 
-    private struct ModelSlice: Identifiable {
-        let model: String
-        let tokens: Int64
-        let cost: Double
-        var id: String { model }
-    }
-
-    private var modelSlices: [ModelSlice] { cachedModelSlices }
 
     /// One bucket of the Subprojects card. Built by walking
     /// `samples` once and grouping on `originalProjectPath` — what
@@ -256,9 +248,19 @@ struct ProjectDetailView: View {
         // `@Query(sort:)` staying put — the band-date chart that plots this
         // needs a chronological x-domain (same invariant as the Models trend).
         cachedDailySeries = days.buckets()
-        cachedModelSlices = byModel.map { (model, v) in
-            ModelSlice(model: model, tokens: v.tokens, cost: v.cost)
-        }.sorted { $0.tokens > $1.tokens }
+        // What the side-tables hold per model is its cost and its uncached
+        // (input + output) tokens, so that is all a row carries: no token
+        // parts, no ratios, rather than numbers made up from the project's.
+        cachedModelRows = byModel.map { (model, v) in
+            PacerUsageRow(
+                id: model,
+                label: pacerModelDisplayName(model),
+                color: pacerModelColor(model),
+                tokens: .zero,
+                costParts: .zero,
+                cost: v.cost,
+                extra: ProjectModelExtra(uncached: v.tokens))
+        }
     }
 
     /// Changes whenever a row `refreshDerived` reads changes: a new day
@@ -447,15 +449,15 @@ struct ProjectDetailView: View {
         // which is the shape of the modal bug #150 fixed. Subprojects most of
         // all: it fills in asynchronously, after the modal is on screen, and
         // the other three now change while it's open (#145). (#140)
-        let _ = (cachedTotals, cachedBreakdown, cachedDailySeries, cachedModelSlices, cachedSubprojects)
+        let _ = (cachedTotals, cachedBreakdown, cachedDailySeries, cachedModelRows, cachedSubprojects)
         // Presentation state, read here so setting it redraws this view and
         // what it presents opens at once. Passed only as a binding, nothing
         // read it: the collections sheet opened only after an unrelated
         // redraw, seconds later (#140; AGENTS.md, "SwiftUI state and data flow").
         let _ = (bulkMergeDraft?.id, mergeError)
-        // The Sessions sort is read inside the card, in that stored closure;
-        // read here so clicking a header re-sorts at once.
-        let _ = (sessionsSortRaw, sessionsSortDescending)
+        // The Sessions and By model sorts are read inside the cards, in that
+        // stored closure; read here so clicking a header re-sorts at once.
+        let _ = (sessionsSortRaw, sessionsSortDescending, modelsSortRaw, modelsSortDescending)
         let sessions = sessionRows
         // The cached rows, or on the first frame (before `.onChange` has run)
         // the same rows built once here, so the card opens full.
@@ -504,7 +506,7 @@ struct ProjectDetailView: View {
             // model." Hidden when there's only one bucket (no
             // drill-down value).
             if subprojects.count > 1 { subprojectsCard }
-            if !modelSlices.isEmpty { modelsCard }
+            if !cachedModelRows.isEmpty { modelsCard }
             if !sessions.isEmpty { sessionsCard(sessionTable) }
         }
         .onAppear {
@@ -851,79 +853,33 @@ struct ProjectDetailView: View {
         }
     }
 
-    @State private var hoveredModelAngle: Double?
+    @AppStorage("pacer.projectDetail.modelsSort", store: PacerSettings.store)
+    private var modelsSortRaw: String = UsageColumn.cost.rawValue
+    @AppStorage("pacer.projectDetail.modelsSortDescending", store: PacerSettings.store)
+    private var modelsSortDescending: Bool = true
 
-    /// VoiceOver alternative to the model donut — per-model token share
-    /// read as a comma list.
-    private func modelSlicesSummary(total: Int64) -> String {
-        guard total > 0 else { return "no data" }
-        return modelSlices.prefix(5).map { m in
-            let pct = Int(Double(m.tokens) / Double(total) * 100)
-            return "\(pacerModelDisplayName(m.model)) \(pct) percent"
-        }.joined(separator: ", ")
-    }
+    /// By model's columns: what the project's side-tables hold per model.
+    /// "In + out" rather than "Uncached": the tables' Uncached is input
+    /// alone, and this is input and output together.
+    private static let modelColumns: [PacerShareListColumn] = [
+        .usage(.cost),
+        .count(ProjectModelExtra.inOut, title: "In + out", format: .tokens,
+               help: "Uncached input and output tokens"),
+        .ringShare,
+    ]
 
-    private var hoveredModelSlice: ModelSlice? {
-        guard let angle = hoveredModelAngle, !modelSlices.isEmpty else { return nil }
-        var cumulative = 0.0
-        for slice in modelSlices {
-            cumulative += Double(slice.tokens)
-            if angle <= cumulative { return slice }
-        }
-        return modelSlices.last
-    }
-
+    /// The project's models in the shared donut card: the ring measures
+    /// cost unless the list is sorted by In + out, and Share follows it.
     private var modelsCard: some View {
-        let total = modelSlices.reduce(Int64(0)) { $0 + $1.tokens }
-        return PacerCard("Uncached tokens by model", trailing: {
-            if let m = hoveredModelSlice {
-                let pct = total > 0 ? Int(Double(m.tokens) / Double(total) * 100) : 0
-                HStack(spacing: 6) {
-                    Text(pacerModelDisplayName(m.model))
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
-                    Text(pacerTokens(m.tokens)).help("\(pacerTokensExact(m.tokens)) uncached tokens")
-                        .font(.system(size: 12, weight: .semibold, design: .rounded))
-                        .monospacedDigit()
-                    Text("(\(pct)%)")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.tertiary)
-                }
-            }
-        }) {
-            HStack(alignment: .top, spacing: 24) {
-                PacerDonut(
-                    slices: modelSlices.map {
-                        PacerDonutSlice(id: pacerShortModel($0.model), value: Double($0.tokens),
-                                        color: pacerModelColor($0.model))
-                    },
-                    hoveredID: hoveredModelSlice.map { pacerShortModel($0.model) },
-                    hoveredAngle: $hoveredModelAngle,
-                    accessibilityLabel: "Uncached token share by model for \(displayName)",
-                    accessibilityValue: modelSlicesSummary(total: total)
-                )
-                VStack(alignment: .leading, spacing: 6) {
-                    ForEach(modelSlices) { m in
-                        PacerDonutLegendRow(
-                            color: pacerModelColor(m.model),
-                            label: pacerModelDisplayName(m.model)
-                        ) {
-                            Text(pacerTokens(m.tokens)).help("\(pacerTokensExact(m.tokens)) uncached tokens")
-                                .font(.system(size: 11))
-                                .foregroundStyle(.secondary)
-                                .monospacedDigit()
-                            if total > 0 {
-                                Text("\(Int(Double(m.tokens) / Double(total) * 100))%")
-                                    .font(.system(size: 11))
-                                    .foregroundStyle(.tertiary)
-                                    .monospacedDigit()
-                                    .frame(width: 36, alignment: .trailing)
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        let sort = PacerUsageSort(column: modelsSortRaw, descending: modelsSortDescending)
+        let data = PacerShareListData(rows: cachedModelRows, sort: sort, columns: Self.modelColumns,
+                                      maxSlices: 8)
+        return PacerDonutListCard(
+            "By model",
+            data: data,
+            labelTitle: "Model",
+            accessibilityLabel: "\(data.donut.metric.title) by model for \(displayName)",
+            onSort: { modelsSortRaw = $0.column; modelsSortDescending = $0.descending })
     }
 
     @AppStorage("pacer.projectDetail.sessionsSortField", store: PacerSettings.store)
@@ -937,13 +893,13 @@ struct ProjectDetailView: View {
 
     private func sessionsCard(_ rows: [PacerSessionsTable.Row]) -> some View {
         let sort = PacerSessionsTable.sort(stored: sessionsSortRaw, descending: sessionsSortDescending)
-        return PacerCard("Sessions", trailing: {
+        return PacerTableCard("Sessions", trailing: {
             Text("\(rows.count) total")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
         }) {
-            // The shared sessions table, without the Project column: the
-            // modal is one project.
+            // The shared sessions table as the card itself, without the
+            // Project column: the modal is one project.
             PacerSessionsTable(
                 rows: rows,
                 tableId: "projectDetail.sessions",
@@ -1125,5 +1081,26 @@ private struct BudgetEditor: View {
             ))
         }
         try? context.save()
+    }
+}
+
+/// What Project detail's By model card knows of a model beyond its cost: its
+/// uncached tokens, input and output together, which is what
+/// `modelTokensJSON` stores per model.
+struct ProjectModelExtra: PacerUsageExtra, Sendable {
+    static let inOut = "inOut"
+    let uncached: Int64
+
+    func sortKey(forColumn id: String) -> PacerUsageSortKey? {
+        id == Self.inOut ? .number(Double(uncached)) : nil
+    }
+
+    /// They add up across models, so sorting by them turns the ring to them.
+    static func shareMetric(forColumn id: String) -> PacerShareMetric? {
+        id == inOut ? PacerShareMetric(column: id, title: "In + out") : nil
+    }
+
+    func shareValue(forColumn id: String) -> Double? {
+        id == Self.inOut ? Double(uncached) : nil
     }
 }

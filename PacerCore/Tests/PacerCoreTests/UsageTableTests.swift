@@ -39,59 +39,81 @@ struct UsageColumnTests {
         #expect(UsageColumn.name.tokenCount(of: t) == nil)
         #expect(UsageColumn.cost.tokenCount(of: t) == nil)
         #expect(UsageColumn.outputShare.tokenCount(of: t) == nil)
-        #expect(UsageColumn.cacheWriteShare.tokenCount(of: t) == nil)
+        #expect(UsageColumn.cacheHitRate.tokenCount(of: t) == nil)
         #expect(UsageColumn.mix.tokenCount(of: t) == nil)
     }
 
     /// A different value in every cost part, chosen so reading any wrong
-    /// part (or only one write tier, or reads for writes) gives a different
-    /// percent.
+    /// part gives a different percent.
     static let parts = CostComponents(
         input: 7, output: 23, cacheRead: 41, cacheWrite5m: 18, cacheWrite1h: 11)
 
-    @Test("Out % is output's share of the cost; Write % is writes' share of the cache cost")
+    struct Values: UsageColumnValues {
+        var tokens: TokenBreakdown
+        var cost: Double
+        var costParts: CostComponents
+    }
+
+    @Test("Hit % is cache reads over every prompt token: reads, both write tiers and uncached input")
+    func hitRate() throws {
+        // 300 read of 1 + 300 + 4,000 + 50,000 prompt tokens; output (20)
+        // is the response, not the prompt, and is not counted.
+        let row = Values(tokens: Self.distinct, cost: 100, costParts: Self.parts)
+        let ratio: Double = try #require(UsageColumn.cacheHitRate.ratio(of: row))
+        let expected: Double = 300.0 / 54_301.0
+        #expect(abs(ratio - expected) < 1e-12)
+        // The one definition (`TokenBreakdown.cacheHitRatio`), not a second.
+        #expect(ratio == Self.distinct.cacheHitRatio)
+        // A token ratio: the cost parts do not move it.
+        let repriced = Values(tokens: Self.distinct, cost: 1, costParts: CostComponents(cacheRead: 1))
+        #expect(UsageColumn.cacheHitRate.ratio(of: repriced) == ratio)
+        // No prompt, no answer: output alone has nothing to divide.
+        let outputOnly = Values(tokens: TokenBreakdown(outputTokens: 9), cost: 1, costParts: .zero)
+        #expect(UsageColumn.cacheHitRate.ratio(of: outputOnly) == nil)
+    }
+
+    @Test("Out % is output's share of the cost; Mix sorts by the uncached share")
     func shares() throws {
         let p = Self.parts
         let out: Double = try #require(p.outputShare)
-        let write: Double = try #require(p.cacheWriteShare)
         let uncached: Double = try #require(p.uncachedShare)
         #expect(abs(out - 0.23) < 1e-12)
-        // (18 + 11) / (41 + 18 + 11)
-        let expectedWrite: Double = 29.0 / 70.0
-        #expect(abs(write - expectedWrite) < 1e-12)
         #expect(abs(uncached - 0.30) < 1e-12)
-        let outColumn: Double? = UsageColumn.outputShare.share(of: p)
-        let writeColumn: Double? = UsageColumn.cacheWriteShare.share(of: p)
-        #expect(outColumn == p.outputShare)
-        #expect(writeColumn == p.cacheWriteShare)
-        #expect(UsageColumn.cost.share(of: p) == nil)
+        let row = Values(tokens: Self.distinct, cost: 100, costParts: p)
+        #expect(UsageColumn.outputShare.ratio(of: row) == p.outputShare)
+        #expect(UsageColumn.mix.ratio(of: row) == p.uncachedShare)
+        #expect(UsageColumn.cost.ratio(of: row) == nil)
+        #expect(UsageColumn.tokens.ratio(of: row) == nil)
+        let ratios: [UsageColumn] = UsageColumn.allCases.filter(\.isRatio)
+        #expect(ratios == [.cacheHitRate, .outputShare, .mix])
     }
 
     @Test("a row with nothing to divide has no share, and residue below zero counts as zero")
     func sharesWithNothingToDivide() {
         #expect(CostComponents.zero.outputShare == nil)
-        #expect(CostComponents.zero.cacheWriteShare == nil)
         let uncachedOnly = CostComponents(input: 2, output: 3)
-        #expect(uncachedOnly.cacheWriteShare == nil)
         #expect(uncachedOnly.outputShare == 0.6)
         // `apportion` can leave -1e-17 on the 1h tier.
-        let residue = CostComponents(cacheRead: 3, cacheWrite5m: 1, cacheWrite1h: -1e-17)
-        #expect(residue.cacheWriteShare == 0.25)
+        let residue = CostComponents(output: 1, cacheRead: 3, cacheWrite1h: -1e-17)
+        #expect(residue.outputShare == 0.25)
     }
 
-    @Test("ratio cells print a whole percent, <1% for a sliver and a dash for no answer")
+    @Test("Hit % prints a tenth of a percent, as every hit rate does; Out % a whole one")
     func shareCells() {
         let t = Self.distinct
         let out: PacerUsageCellText? = UsageColumn.outputShare.cellText(tokens: t, cost: 100, costParts: Self.parts)
-        let write: PacerUsageCellText? = UsageColumn.cacheWriteShare.cellText(tokens: t, cost: 100, costParts: Self.parts)
+        let hit: PacerUsageCellText? = UsageColumn.cacheHitRate.cellText(tokens: t, cost: 100, costParts: Self.parts)
         #expect(out?.text == "23%")
-        #expect(write?.text == "41%")
         #expect(out?.help == "Output \(pacerCostExact(23)) of \(pacerCostExact(100))")
-        #expect(write?.help == "Cache writes \(pacerCostExact(29)) of \(pacerCostExact(70)) cache cost")
+        // 300 / 54,301 = 0.55%.
+        #expect(hit?.text == pacerCacheHitText(300.0 / 54_301.0))
+        #expect(hit?.text == "0.6%")
+        #expect(hit?.help == "Cache reads \(pacerTokensExact(300)) of \(pacerTokensExact(54_301)) prompt tokens")
         let sliver = CostComponents(output: 0.001, cacheRead: 10)
         let small: PacerUsageCellText? = UsageColumn.outputShare.cellText(tokens: t, cost: 10, costParts: sliver)
         #expect(small?.text == "<1%")
-        let none: PacerUsageCellText? = UsageColumn.cacheWriteShare.cellText(tokens: t, cost: 0, costParts: .zero)
+        let none: PacerUsageCellText? = UsageColumn.cacheHitRate.cellText(
+            tokens: TokenBreakdown(outputTokens: 4), cost: 0, costParts: .zero)
         #expect(none?.text == "–")
         #expect(UsageColumn.mix.cellText(tokens: t, cost: 1, costParts: Self.parts) == nil)
     }
@@ -127,27 +149,65 @@ struct UsageColumnTests {
         #expect(UsageColumn.name.cellText(tokens: big, cost: 1, costParts: .zero) == nil)
     }
 
-    @Test("titles are short and Total keeps the persisted raw value \"tokens\"")
+    @Test("titles are short; input is Uncached; Total keeps the persisted raw value \"tokens\"")
     func titles() {
         let titles: [String] = UsageColumn.allCases.map { $0.title(label: "Model") }
-        #expect(titles == ["Model", "Input", "Output", "Cache read", "Cache write",
-                           "5m write", "1h write", "Total", "Out %", "Write %", "Cost", "Mix"])
+        #expect(titles == ["Model", "Uncached", "Output", "Cache read", "Cache write",
+                           "5m write", "1h write", "Total", "Hit %", "Out %", "Cost", "Mix"])
         #expect(UsageColumn.tokens.rawValue == "tokens")
         // Persisted as sort columns and layout ids. "mix" is the id the
         // Models table's own Mix column had, so its saved layout carries over.
         #expect(UsageColumn.outputShare.rawValue == "outShare")
-        #expect(UsageColumn.cacheWriteShare.rawValue == "writeShare")
+        #expect(UsageColumn.cacheHitRate.rawValue == "hitRate")
         #expect(UsageColumn.mix.rawValue == "mix")
         #expect(UsageColumn(rawValue: "cost") == .cost)
         #expect(UsageColumn(rawValue: "name") == .name)
     }
 
-    @Test("wide tables show the token parts; narrow ones the total, the ratios and the cost")
+    @Test("Write %'s stored id reads as Hit %, the column that replaced it")
+    func writeShareMigrates() {
+        #expect(UsageColumn(rawValue: "writeShare") == nil)
+        #expect(UsageColumn(storedId: "writeShare") == .cacheHitRate)
+        #expect(UsageColumn(storedId: "cost") == .cost)
+        #expect(UsageColumn(storedId: "gone") == nil)
+        #expect(UsageColumn.migratedId("writeShare") == "hitRate")
+        #expect(UsageColumn.migratedId("sessions") == "sessions")
+        // A sort a screen stored under it sorts by Hit %.
+        let stored = PacerUsageSort(column: "writeShare", descending: false)
+        #expect(stored == PacerUsageSort(.cacheHitRate, descending: false))
+        #expect(TopDaysSort(stored: "writeShare") == .hitRate)
+        #expect(TopDaysSort(stored: "nonsense") == .cost)
+        #expect(TopDaysSort(stored: "date") == .date)
+    }
+
+    @Test("the token parts run in the parts' own order, Cache write before its two tiers")
+    func partOrder() {
+        let parts: [UsageColumn] = UsageColumn.partColumns
+        // Six slots: one per part, and Cache write. `PacerUsageTable` lays
+        // out exactly six.
+        #expect(parts.count == 6)
+        #expect(Set(parts) == [.input, .output, .cacheRead, .cacheWrite, .cacheWrite5m, .cacheWrite1h])
+        // Read from `CostComponent`, not written out: every part in its order.
+        let fromParts: [UsageColumn] = CostComponent.allCases.map(UsageColumn.init(part:))
+        #expect(parts.filter { $0 != .cacheWrite } == fromParts)
+        let write: Int = parts.firstIndex(of: .cacheWrite) ?? -1
+        let firstTier: Int = parts.firstIndex { $0 == .cacheWrite5m || $0 == .cacheWrite1h } ?? -1
+        #expect(write == firstTier - 1)
+        #expect(UsageColumn.displayOrder.first == .name)
+        #expect(Array(UsageColumn.displayOrder.suffix(5)) == [.tokens, .cacheHitRate, .outputShare, .cost, .mix])
+        #expect(Set(UsageColumn.displayOrder) == Set(UsageColumn.allCases))
+        #expect(UsageColumn.displayOrder.count == UsageColumn.allCases.count)
+    }
+
+    @Test("wide tables show the token parts; narrow ones Total, Hit %, Out % and Cost")
     func defaults() {
-        let wide: [UsageColumn] = UsageColumn.allCases.filter { UsageColumn.wideDefaults.contains($0) }
-        let narrow: [UsageColumn] = UsageColumn.allCases.filter { UsageColumn.narrowDefaults.contains($0) }
-        #expect(wide == [.name, .input, .output, .cacheRead, .cacheWrite, .tokens, .cost])
-        #expect(narrow == [.name, .tokens, .outputShare, .cacheWriteShare, .cost])
+        let wide: [UsageColumn] = UsageColumn.displayOrder.filter { UsageColumn.wideDefaults.contains($0) }
+        let narrow: [UsageColumn] = UsageColumn.displayOrder.filter { UsageColumn.narrowDefaults.contains($0) }
+        let parts: [UsageColumn] = UsageColumn.partColumns.filter {
+            [.input, .output, .cacheRead, .cacheWrite].contains($0)
+        }
+        #expect(wide == [.name] + parts + [.tokens, .cost])
+        #expect(narrow == [.name, .tokens, .cacheHitRate, .outputShare, .cost])
         let ascendingFirst: [UsageColumn] = UsageColumn.allCases.filter { !$0.sortsDescendingFirst }
         #expect(ascendingFirst == [.name])
         #expect(PacerUsageSort.costDescending == PacerUsageSort(column: "cost", descending: true))
@@ -214,8 +274,8 @@ struct UsageTableSortTests {
             ("cost", ["b", "c", "a"]),
             // Out %: a 10%, c 20%, b 50%.
             ("outShare", ["a", "c", "b"]),
-            // Write %: b 8/40, a 30/60, c 60/75.
-            ("writeShare", ["b", "a", "c"]),
+            // Hit %, reads over prompt tokens: c 1/8, a 2/7, b 3/9.
+            ("hitRate", ["c", "a", "b"]),
             // Mix, by the uncached share: c 25%, a 40%, b 60%.
             ("mix", ["c", "a", "b"]),
             ("sessions", ["c", "a", "b"]),
@@ -231,7 +291,7 @@ struct UsageTableSortTests {
     func coverage() {
         let tested: Set<String> = ["name", "input", "output", "cacheRead", "cacheWrite",
                                    "cacheWrite5m", "cacheWrite1h", "tokens", "outShare",
-                                   "writeShare", "cost", "mix"]
+                                   "hitRate", "cost", "mix"]
         let all: Set<String> = Set(UsageColumn.allCases.map(\.rawValue))
         #expect(all == tested)
     }
@@ -248,12 +308,13 @@ struct UsageTableSortTests {
         #expect(c != flipped)
     }
 
-    @Test("a row with no cost sorts below every share, both ways round")
-    func noAnswerSortsFirst() {
+    @Test("a row with nothing to divide sorts below every share, both ways round",
+          arguments: [UsageColumn.outputShare, .cacheHitRate])
+    func noAnswerSortsFirst(column: UsageColumn) {
         let free = Self.row("z", label: "Zulu", sessions: 0, cost: 0, TokenBreakdown(), .zero)
         let all: [Row] = Self.rows + [free]
-        let up: [Row] = all.sortedForUsageTable(PacerUsageSort(.outputShare, descending: false))
-        let down: [Row] = all.sortedForUsageTable(PacerUsageSort(.outputShare, descending: true))
+        let up: [Row] = all.sortedForUsageTable(PacerUsageSort(column, descending: false))
+        let down: [Row] = all.sortedForUsageTable(PacerUsageSort(column, descending: true))
         #expect(up.first?.id == "z")
         #expect(down.last?.id == "z")
     }
