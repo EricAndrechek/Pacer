@@ -36,6 +36,40 @@ public enum CostComponent: String, CaseIterable, Sendable, Identifiable {
         case .cacheWrite1h: return "1h cache writes"
         }
     }
+
+    /// What a token of this part is billed at, as a multiple of the model's
+    /// uncached input price. Anthropic's list ratios, the same for every
+    /// current Claude model: every prompt token is exactly one of the four
+    /// input parts, billed 0.1× if read from the cache, 1.25× or 2× if
+    /// written to it (5-minute / 1-hour), 1× if neither; output is 5×.
+    /// Fast mode and data residency scale all five together, so the ratios
+    /// hold there too.
+    public var listPriceMultiple: Double {
+        switch self {
+        case .cacheRead:    return 0.1
+        case .cacheWrite1h: return 2
+        case .cacheWrite5m: return 1.25
+        case .input:        return 1
+        case .output:       return 5
+        }
+    }
+
+    /// "0.1×", "1.25×" — the multiple as a legend tag.
+    public var listPriceMultipleLabel: String {
+        let m = listPriceMultiple
+        return (m == m.rounded() ? String(Int(m)) : String(m)) + "×"
+    }
+
+    /// Why this part costs what it does, for its legend tooltip.
+    public var billingNote: String {
+        switch self {
+        case .cacheRead:    return "Prompt tokens read from the cache: 0.1× the input price"
+        case .cacheWrite1h: return "Prompt tokens written to the 1-hour cache: 2× the input price"
+        case .cacheWrite5m: return "Prompt tokens written to the 5-minute cache: 1.25× the input price"
+        case .input:        return "Prompt tokens neither read from nor written to the cache: 1× the input price"
+        case .output:       return "The response, including thinking: 5× the input price"
+        }
+    }
 }
 
 public extension CostComponents {

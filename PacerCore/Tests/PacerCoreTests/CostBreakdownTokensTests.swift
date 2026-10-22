@@ -74,8 +74,11 @@ struct CostBreakdownTokensTests {
         let read: CostBreakdown.Part = try #require(parts.first { $0.component == .cacheRead })
         #expect(pacerPartTokens(read.tokens) == "21.5B tokens")
         let help: String = pacerPartHelp(read)
+        let lines: [String] = help.split(separator: "\n").map(String.init)
+        #expect(lines.count == 2)
         #expect(help.hasPrefix("Cache reads: "))
-        #expect(help.hasSuffix(" · \(pacerTokensExact(21_512_345_678)) tokens"))
+        #expect(lines.first?.hasSuffix(" · \(pacerTokensExact(21_512_345_678)) tokens") == true)
+        #expect(lines.last == CostComponent.cacheRead.billingNote)
     }
 
     @Test("the breakdown and the hit line take no trailing slot")
@@ -88,5 +91,16 @@ struct CostBreakdownTokensTests {
         #expect(!PacerCostBreakdownView.hasContent(.zero))
         let line: PacerCacheHitLine = PacerCacheHitLine(ratio: 0.5)
         _ = line
+    }
+}
+
+@Suite("Part price multiples")
+struct PartPriceMultipleTests {
+    @Test("each part's list-price multiple of the uncached input price")
+    func multiplesAndLabels() {
+        let labels: [String] = CostComponent.allCases.map(\.listPriceMultipleLabel)
+        // Prompt order: reads, 1h writes, 5m writes, uncached input; then output.
+        #expect(labels == ["0.1×", "2×", "1.25×", "1×", "5×"])
+        #expect(CostComponent.input.listPriceMultiple == 1)
     }
 }

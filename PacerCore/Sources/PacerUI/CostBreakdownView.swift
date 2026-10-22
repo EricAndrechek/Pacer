@@ -265,11 +265,14 @@ public struct PacerCostBreakdownView: View {
                     }
                     .lineLimit(1)
                     .minimumScaleFactor(0.85)
-                    Text(pacerPartTokens(part.tokens))
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
-                        .lineLimit(1)
+                    HStack(alignment: .firstTextBaseline, spacing: 4) {
+                        Text(pacerPartTokens(part.tokens))
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                        PriceMultipleTag(part: part.component)
+                    }
+                    .lineLimit(1)
                         .minimumScaleFactor(0.85)
                 }
                 .padding(.leading, 13)
@@ -425,7 +428,25 @@ func pacerPartTokens(_ tokens: Int64) -> String {
 /// "Cache reads: $12,603.12 · 21,512,345,678 tokens" — a legend entry's
 /// tooltip, exact where the entry is compact.
 func pacerPartHelp(_ part: CostBreakdown.Part) -> String {
-    "\(part.component.label): \(pacerCostExact(part.usd)) · \(pacerTokensExact(part.tokens)) tokens"
+    "\(part.component.label): \(pacerCostExact(part.usd)) · \(pacerTokensExact(part.tokens)) tokens\n"
+        + part.component.billingNote
+}
+
+/// "0.1×" after a part's tokens: what each is billed at against the
+/// uncached input price, so the four ways a prompt token can be billed read
+/// as one scale. The compact rows (hover card) leave it to the tooltip:
+/// at ~300pt the tag would cost the part names their last words.
+struct PriceMultipleTag: View {
+    let part: CostComponent
+
+    var body: some View {
+        Text(part.listPriceMultipleLabel)
+            .font(.system(size: 10, weight: .medium).monospacedDigit())
+            .foregroundStyle(.tertiary)
+            .lineLimit(1)
+            .fixedSize()
+            .help(part.billingNote)
+    }
 }
 
 /// One labelled stacked bar — a model's or a project's parts — with a
@@ -526,7 +547,7 @@ public struct PacerCacheHitLine: View {
 }
 
 /// The hit rate's tooltip: what it measures, and what a low one means.
-let pacerCacheHitHelp = "Share of prompt tokens read from cache · low when the cache expired between turns"
+let pacerCacheHitHelp = "Cache reads ÷ every prompt token (reads + cache writes + uncached input) · low when the cache expired between turns"
 
 /// The compact breakdown's number columns, shared with the hover card's
 /// top-models rows (`PacerCostHoverCard`) so the two grids' dollars, shares

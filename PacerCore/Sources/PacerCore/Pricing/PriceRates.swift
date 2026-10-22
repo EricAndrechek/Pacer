@@ -141,10 +141,11 @@ public struct CostComponents: Sendable, Hashable, Codable {
         var basis = weights
         if basis.total <= 0 {
             basis = CostComponents(
-                input: Double(b.inputTokens), output: Double(b.outputTokens) * 5,
-                cacheRead: Double(b.cacheReadTokens) * 0.1,
-                cacheWrite5m: Double(b.cacheCreation5mTokens) * 1.25,
-                cacheWrite1h: Double(b.cacheCreation1hTokens) * 2)
+                input: Double(b.inputTokens) * CostComponent.input.listPriceMultiple,
+                output: Double(b.outputTokens) * CostComponent.output.listPriceMultiple,
+                cacheRead: Double(b.cacheReadTokens) * CostComponent.cacheRead.listPriceMultiple,
+                cacheWrite5m: Double(b.cacheCreation5mTokens) * CostComponent.cacheWrite5m.listPriceMultiple,
+                cacheWrite1h: Double(b.cacheCreation1hTokens) * CostComponent.cacheWrite1h.listPriceMultiple)
         }
         let sum = basis.total
         guard sum > 0 else { return CostComponents(output: total) }
