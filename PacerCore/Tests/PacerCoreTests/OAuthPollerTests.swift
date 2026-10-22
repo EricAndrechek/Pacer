@@ -125,6 +125,47 @@ import Testing
         #expect(rows.allSatisfy { $0.source == "oauth" })
     }
 
+    // MARK: - The post-install `ok keychain` line (#325)
+
+    @Test("the keychain token answering marks the launch's ok-keychain line")
+    func keychainTokenAnsweringIsRecorded() async throws {
+        let container = try Self.makeContainer()
+        let client = Self.sequencedClient([.success(jsonBody: #"{"five_hour":{"utilization":3}}"#)])
+        let poller = OAuthPoller(client: client, container: container,
+                                 configuration: .init(), clock: TestClock())
+        #expect(await poller.snapshot().keychainTokenPolled == false)
+
+        _ = await poller.runOnce()
+
+        #expect(await poller.snapshot().keychainTokenPolled)
+    }
+
+    @Test("a refused keychain token never claims the keychain read works")
+    func refusedKeychainTokenIsNotRecorded() async throws {
+        let container = try Self.makeContainer()
+        let client = Self.sequencedClient([.status(401)])
+        let poller = OAuthPoller(client: client, container: container,
+                                 configuration: .init(), clock: TestClock())
+
+        #expect(await poller.runOnce() == .unauthorized)
+
+        #expect(await poller.snapshot().keychainTokenPolled == false)
+    }
+
+    @Test("a failure after the keychain token answered leaves the line written")
+    func laterFailureKeepsTheRecord() async throws {
+        let container = try Self.makeContainer()
+        let ok = HTTPOutcome.success(jsonBody: #"{"five_hour":{"utilization":3}}"#)
+        let client = Self.sequencedClient([ok, .status(503)])
+        let poller = OAuthPoller(client: client, container: container,
+                                 configuration: .init(), clock: TestClock())
+
+        _ = await poller.runOnce()
+        _ = await poller.runOnce()
+
+        #expect(await poller.snapshot().keychainTokenPolled)
+    }
+
     @Test func successPersistsSingleWindow() async throws {
         let container = try Self.makeContainer()
         let client = Self.sequencedClient([.success(jsonBody: """

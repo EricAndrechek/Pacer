@@ -205,6 +205,9 @@ public actor OAuthPoller: TokenPoolTesting {
         public let misclassifiedLaneCount: Int
         /// Lanes the scheduler will poll ahead of its cadence gate (#214).
         public let probeFirstLaneCount: Int
+        /// Whether this launch has polled the token the Claude Code keychain
+        /// holds and had it answer — the `[OAuthPoller] ok keychain` line (#325).
+        public let keychainTokenPolled: Bool
     }
 
     public typealias RandomSource = @Sendable () -> Double
@@ -287,6 +290,10 @@ public actor OAuthPoller: TokenPoolTesting {
     /// Which lane the last logged poll used, so a change of token is worth a
     /// line even when the outcome category has not moved.
     private var lastPolledLaneId: String?
+    /// Set by the first poll this launch of the token the Claude Code keychain
+    /// holds that the server answered, which is also when the `ok keychain`
+    /// line is written (#325).
+    private var keychainTokenPolled = false
     private var lastPollAt: Date?
     private var nextPollAt: Date?
 
@@ -432,7 +439,8 @@ public actor OAuthPoller: TokenPoolTesting {
                 let belongs = (lane.resolvedOrg == nil) || (Account.key(forOrg: lane.resolvedOrg) == active)
                 return belongs != (lane.state.account == .primary)
             }.count,
-            probeFirstLaneCount: lanes.filter { $0.state.probeFirst }.count
+            probeFirstLaneCount: lanes.filter { $0.state.probeFirst }.count,
+            keychainTokenPolled: keychainTokenPolled
         )
     }
 
@@ -1507,6 +1515,20 @@ public actor OAuthPoller: TokenPoolTesting {
                 lane: idx < lanes.count ? lanes[idx] : nil,
                 liveKeychainToken: liveKeychainToken))
         }
+        // One line per launch that says the keychain read works end to end:
+        // Claude Code's item was read and its token answered (#325). That is
+        // what the post-install check in AGENTS.md looks for, and the lines
+        // above cannot carry it. They say `ok` only for the active account and
+        // only when the outcome changes, and with Desktop and parked tokens in
+        // the pool a healthy launch could spend its first hour logging nothing
+        // but `token is another account`.
+        if !keychainTokenPolled, credential.accessToken == liveKeychainToken,
+           let account = Self.answeredAccount(outcome) {
+            keychainTokenPolled = true
+            Log.write("OAuthPoller", "ok keychain: the signed-in token answered (\(account)); "
+                + Self.laneLabel(laneCount: lanes.count, lane: idx < lanes.count ? lanes[idx] : nil,
+                                 liveKeychainToken: liveKeychainToken))
+        }
         // Persist the lane's freshly-learned state (account/org/last-poll/
         // cooldown) so it survives a restart.
         await saveAllLaneMeta()
@@ -1656,10 +1678,18 @@ public actor OAuthPoller: TokenPoolTesting {
         }
     }
 
-    private static func summarize(
-        outcome: PollOutcome, laneCount: Int, lane: Lane? = nil,
-        liveKeychainToken: String? = nil
-    ) -> String {
+    /// Whose account a poll the server answered belongs to, or nil when it
+    /// failed. Both are a working token: `.secondaryAccount` is a successful
+    /// read of a token signed into some other account.
+    private static func answeredAccount(_ outcome: PollOutcome) -> String? {
+        switch outcome {
+        case .success: return "active account"
+        case .secondaryAccount: return "another account"
+        default: return nil
+        }
+    }
+
+    private static func laneLabel(laneCount: Int, lane: Lane?, liveKeychainToken: String?) -> String {
         // Which credential, and whose. Enough to tell a Desktop token from the
         // Claude Code one an account switcher is also holding, without ever
         // putting the token itself in a log file.
@@ -1673,7 +1703,14 @@ public actor OAuthPoller: TokenPoolTesting {
             let former = l.source == .keychain && l.credential.accessToken != liveKeychainToken
             return "\(former ? "keychain(old)" : l.source.rawValue)/\(org) "
         } ?? ""
-        let lanes = "\(which)lanes=\(laneCount)"
+        return "\(which)lanes=\(laneCount)"
+    }
+
+    private static func summarize(
+        outcome: PollOutcome, laneCount: Int, lane: Lane? = nil,
+        liveKeychainToken: String? = nil
+    ) -> String {
+        let lanes = laneLabel(laneCount: laneCount, lane: lane, liveKeychainToken: liveKeychainToken)
         switch outcome {
         case .success(let fh, let sd):
             let f = fh.map { String(format: "%.1f%%", $0) } ?? "nil"

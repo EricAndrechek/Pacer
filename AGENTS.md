@@ -368,10 +368,16 @@ Rules that follow from it:
     `*/Products/Debug/Pacer.app` suffix, never a hardcoded nesting — a
     path that works on the contributor's toolchain can break on yours.
   - **Keychain v1/v2 compat.** Confirm the OAuth poller logs
-    `[OAuthPoller] ok …` after install — that proves the live keychain
-    read still works. The reader tries `-a NSUserName()` (Claude Code
-    2.x per-user item) first and falls back to no-acct only on
-    `errSecItemNotFound`, so v1 (`acct=""`) installs keep working.
+    `[OAuthPoller] ok keychain: …` after install (`grep 'ok keychain'
+    ~/Library/Logs/Pacer/Pacer.err.log`). It is written once per launch,
+    the first time the token read from Claude Code's keychain item gets an
+    answer from the server, so it proves the live keychain read still
+    works. The per-poll
+    `[OAuthPoller] ok 5h=…` lines are no substitute: they appear only for
+    the active account and only when the outcome changes. The reader tries
+    `-a NSUserName()` (Claude Code 2.x per-user item) first and falls back
+    to no-acct only on `errSecItemNotFound`, so v1 (`acct=""`) installs
+    keep working.
 
 ## App target — what's where
 
