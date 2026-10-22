@@ -991,8 +991,11 @@ walk's memory until it ends: on a 746k-row `TokenSample` table it held about
 3.3 GB, and the freed heap stayed dirty afterwards (#337). Pacer then paged
 itself out under system memory pressure and stalled its main thread for
 minutes. Walk a whole table with `ModelWalk.forEach`: fresh-context pages of
-25,000 rows, about 45 MB. Writing walks need the same treatment (#338). A new
-large transient allocation also needs a `MemoryHygiene.relieve` afterwards.
+25,000 rows, about 45 MB. A walk that writes most of the table uses
+`ModelWalk.update` (each page saved in its own context; save the owning context
+first). One that writes a handful of rows the cycle reads back through its own
+instances finds them with `forEach` and writes them through that context (#338).
+A new large transient allocation also needs a `MemoryHygiene.relieve` afterwards.
 The hourly `[Memory]` log line is how a regression shows up.
 
 ### Default to scoped fetches; nothing should fetch then filter
