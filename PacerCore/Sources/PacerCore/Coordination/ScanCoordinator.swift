@@ -49,7 +49,33 @@ public final class ScanCoordinator {
     ///         Rows whose transcripts Claude Code has since rotated
     ///         away keep their old values — we never delete a sample we
     ///         can no longer re-derive.
-    public static let currentScanVersion = "3"
+    /// - "4" — `usage.speed`, `usage.inference_geo` and `usage.iterations[]`
+    ///         are parsed (#218). The re-read gives stored fast-mode and
+    ///         US-residency turns their marker, so the v17 cost rebuild can
+    ///         price them at their premium, and splits multi-call responses
+    ///         into one row per call (`SamplePersister.backfillsPricingDetail`).
+    /// - "5" — the bulk importer recorded each file's cursor *after* reading
+    ///         it, at the file's size then, so lines a live session appended
+    ///         during the import were skipped for good. The fix takes the
+    ///         cursor first, at the last whole line. Re-reading every
+    ///         transcript recovers the turns an earlier import skipped (the
+    ///         persister's dedup makes the rest no-ops). A store coming from
+    ///         "3" re-reads once either way; this only adds a pass for stores
+    ///         already at "4".
+    public static let currentScanVersion = "5"
+
+    /// The priority the app runs the scan loop at (`AppBackgroundService`),
+    /// and everything it hangs off the loop's results.
+    ///
+    /// Utility, not the user-initiated priority a bare `Task {}` started from
+    /// the main thread inherits. An incremental cycle is tens of milliseconds
+    /// and doesn't notice. The first cycle after a `currentScanVersion` or
+    /// `costRecomputeVersion` bump re-reads every transcript and rebuilds
+    /// every rollup — minutes of CPU — and at user-initiated it competed on
+    /// equal terms with whatever the user was doing (#326). Utility is the
+    /// class for long-running work the user isn't waiting on; the engine
+    /// refit and the history prune already run there.
+    public nonisolated static let loopPriority: TaskPriority = .utility
 
     /// Bumped when a code change requires recomputing the cost columns
     /// on existing aggregates.
@@ -141,7 +167,21 @@ public final class ScanCoordinator {
     ///          aborted on an unrelated assertion, so the rebuild produced
     ///          1,936 account rows with real tokens and a zero count. The
     ///          check in `make verify-data` is what caught it, one bump late.
-    public static let currentCostRecomputeVersion = "16"
+    /// - "17" — pricing epic, part 1 (#279). Every bucket is re-priced at the
+    ///          rate in effect when each request was made (the dated
+    ///          `PriceRecord` ledger, #296) instead of at the one current rate
+    ///          per model, and gains its cost split into five component
+    ///          columns (`costInput` … `costCacheWrite1h`), which sum to its
+    ///          total. Exact price matching (#216) changes which price a
+    ///          model gets where the old substring search guessed a sibling:
+    ///          on a real store, Sonnet 5.5's first week priced at Sonnet 5's
+    ///          cache-read rate. Tiers are priced per request on the whole
+    ///          prompt (#297): Haiku 5.5 over 100k, and the old Sonnet 4/4.5
+    ///          200k tier, which used to split each category at 200k. The
+    ///          rebuild also fills the global rollups' `pricedByRecordIds`
+    ///          (#217), from which later price changes rebuild only what they
+    ///          touch. One bump for all of it, so the store is rebuilt once.
+    public static let currentCostRecomputeVersion = "17"
 
     /// Generation of the duplicate-turn repair.
     ///
@@ -419,6 +459,15 @@ public final class ScanCoordinator {
     private var loginPassKeychainMoved = false
     private var loginPassSeenAt: Date?
     private var scanInFlight = false
+    /// Set for the startup cycle, which must walk every file — it is what
+    /// catches up on whatever changed while Pacer wasn't running — even
+    /// though the watcher is already running and may have heard a write.
+    private var walkEveryFileNextCycle = false
+    /// Increments on every `HistoryRebuildStatus` publish, so the main actor
+    /// applies them in order.
+    private var rebuildStatusGeneration: UInt64 = 0
+    /// This coordinator's key in `HistoryRebuildStatus`.
+    nonisolated let rebuildStatusSource = UUID()
     /// Long-lived persister so its in-memory dedup Set is built once.
     /// Lazily constructed on the first scan cycle so tests that never
     /// scan don't pay the preload cost.
@@ -716,8 +765,10 @@ public final class ScanCoordinator {
     /// breaking the scan.
     private func resolveAllRoots() throws -> [ClaudePathResolver.ResolvedRoot] {
         let primary = try resolver.resolve()
+        // This coordinator's home, not the process's: a test or probe that
+        // gives it a home of its own must not scan the machine's profiles.
         let discovered = resolver.resolveAdditional(
-            ExternalAccountDirectory.discoverProfileRoots()
+            ExternalAccountDirectory.discoverProfileRoots(homeDirectory: homeDirectory)
         )
         sessionProfileRoots = discovered.filter { !primary.contains($0) }
         if !sessionProfileRoots.isEmpty {
@@ -800,9 +851,22 @@ public final class ScanCoordinator {
 
     /// Runs the initial scan, then blocks watching for change events.
     /// Returns when the watcher stream ends (typically on `stop()`).
+    ///
+    /// A `stop()` that lands during startup is honoured: each step below
+    /// checks for it (`abandonIfStopped`) once its `await` returns. Since #328
+    /// the poller, the watcher and a main-actor hop all come before the first
+    /// cycle, and a `stop()` running in any of those gaps used to be undone by
+    /// the steps after it — the poller or watcher started after it was
+    /// stopped and ran on; and a `stop()` before `triggers()` left the loop
+    /// waiting on a stream nothing would end, so `runForever` never returned.
+    /// The app's quit can come that early, and `stop()` arrives at a higher
+    /// priority than the loop's `loopPriority`, so its actor hops can
+    /// overtake a startup step still queued behind them.
     public func runForever() async throws {
+        guard !stopRequested else { return }
         resolvedRoots = try resolveAllRoots()
         let stream = await watcher.triggers()
+        if await abandonIfStopped() { return }
         // One-shot stale-cursor prune: walk the JSONLFileCursor table
         // and drop rows whose paths no longer exist on disk. On the
         // live machine the table had drifted to 1072 cursors vs ~900
@@ -821,25 +885,14 @@ public final class ScanCoordinator {
         } catch {
             log("startup: stale-cursor prune failed: \(error)")
         }
-        // Initial scan first, BEFORE we install the watcher. That way
-        // the first FSEvent doesn't race the historical scan and we
-        // can't double-process the same files.
-        do {
-            let report = try await runScanCycle()
-            log("startup: \(formatReport(report))")
-        } catch {
-            log("startup scan failed: \(error)")
-            sessionRollupCache.forgetAll()
-        }
-        await watcher.start(roots: resolvedRoots, extraPaths: extraWatchPaths)
-        // Apply whatever visibility state we already have at startup —
-        // a login-at-launch invocation has no window, so this widens
-        // the watcher's FSEvent latency immediately and saves wakeups
-        // until the user actually opens the dashboard.
-        let initialVisible = await MainActor.run { PacerWindowVisibility.shared.isMainWindowVisible }
-        applyVisibilityCadence(visible: initialVisible)
-        installVisibilityObserver()
-
+        // The poller and the watcher start BEFORE the first cycle (#328).
+        // Neither needs it: the poller owns its own context and cadence, and
+        // the watcher only records which transcripts changed. Started after
+        // it, an upgrade's minutes-long first cycle stopped rate-limit
+        // sampling for its whole length — a gap in every pace chart, and no
+        // alert could fire. The poller goes first of all, ahead of the main
+        // thread hop below, which waits on a busy main thread at launch.
+        //
         // OAuth poller runs independently from the JSONL watcher loop.
         // Each subsystem owns its own cadence; if the network is down
         // the JSONL pipeline keeps working, and if the user has no
@@ -847,8 +900,25 @@ public final class ScanCoordinator {
         // disturbing scans. Both shut down via `stop()`.
         if let oauthPoller {
             await oauthPoller.start()
+            if await abandonIfStopped() { return }
             log("oauth poller started")
         }
+        // What the watcher hears during the first cycle can't double-count:
+        // that cycle walks every file whatever was heard
+        // (`walkEveryFileNextCycle`), its trigger waits in the one-deep
+        // buffer, and the cycle after resumes from the cursors this one
+        // saved — the persister rejects anything read twice by its key.
+        walkEveryFileNextCycle = true
+        await watcher.start(roots: resolvedRoots, extraPaths: extraWatchPaths)
+        if await abandonIfStopped() { return }
+        // Apply whatever visibility state we already have at startup —
+        // a login-at-launch invocation has no window, so this widens
+        // the watcher's FSEvent latency immediately and saves wakeups
+        // until the user actually opens the dashboard.
+        let initialVisible = await MainActor.run { PacerWindowVisibility.shared.isMainWindowVisible }
+        if await abandonIfStopped() { return }
+        applyVisibilityCadence(visible: initialVisible)
+        installVisibilityObserver()
         // A login switch is accepted by the next cycle, and the next cycle
         // waited for a transcript to change: ~40 s on a busy machine when it
         // was measured, up to the 5-minute backstop on a quiet one (#184).
@@ -856,10 +926,22 @@ public final class ScanCoordinator {
         signedInCredential.setOnAccountChange {
             Task { await watcher.requestScan() }
         }
-        // And the login itself, pushed rather than found (#192).
+        // And the login itself, pushed rather than found (#192). A change
+        // seen during the first cycle queues behind it (`followLoginChange`).
         startLoginWatcher()
 
+        do {
+            let report = try await runScanCycle()
+            log("startup: \(formatReport(report))")
+        } catch {
+            log("startup scan failed: \(error)")
+            sessionRollupCache.forgetAll()
+        }
+
         for await _ in stream {
+            // A finished stream still hands over the trigger it buffered
+            // before `stop()`; that is not a cycle to run.
+            if stopRequested { break }
             // Skip if a scan is already underway. The watcher fires
             // both on FSEvents (debounced 500ms) and the 60s backstop
             // — they CAN overlap during a long scan. Skipping is
@@ -881,6 +963,9 @@ public final class ScanCoordinator {
     }
 
     public func stop() async {
+        // First, before anything suspends: `runForever` reads it after each
+        // startup step, so whatever this call can't reach yet is not started.
+        stopRequested = true
         signedInCredential.setOnAccountChange(nil)
         loginWatcher?.stop()
         loginWatcher = nil
@@ -890,12 +975,33 @@ public final class ScanCoordinator {
         // throttled during normal operation, so without this a clean quit
         // could still leave several minutes of rows to re-walk next launch.
         persister?.writeDedupIndexIfNeeded(force: true)
+        await stopRunningParts()
+    }
+
+    /// Set by `stop()`, and never cleared: a stopped coordinator stays
+    /// stopped, and `runForever` on one returns at once.
+    private var stopRequested = false
+
+    /// What `stop()` shuts down that `runForever` starts. Idempotent, so
+    /// `stop()` and a startup that finds it was stopped can both run it.
+    private func stopRunningParts() async {
         await watcher.stop()
         if let oauthPoller {
             await oauthPoller.stop()
         }
         visibilityObservationTask?.cancel()
         visibilityObservationTask = nil
+    }
+
+    /// `runForever`'s check after each startup step. When `stop()` has run,
+    /// stop again whatever this startup has begun since — `stop()` may have
+    /// reached the watcher or the poller before the step that starts it did
+    /// — and tell the caller to return.
+    private func abandonIfStopped() async -> Bool {
+        guard stopRequested else { return false }
+        await stopRunningParts()
+        log("startup: stopped before the first cycle")
+        return true
     }
 
     // MARK: - Following the login
@@ -905,6 +1011,8 @@ public final class ScanCoordinator {
     /// resolver says names the default login (`loginConfigRoot`).
     /// Test seam: the poller this coordinator owns.
     var oauthPollerForTesting: OAuthPoller? { oauthPoller }
+    /// Test seam: the watcher this coordinator owns.
+    var watcherForTesting: JSONLWatcher { watcher }
 
     private func trailRecorder() -> AccountTrailRecorder {
         if let accountTrailRecorder { return accountTrailRecorder }
@@ -1268,15 +1376,23 @@ public final class ScanCoordinator {
 
     /// Bridges the `Observation` API's one-shot `onChange` into an
     /// awaitable. Returns when the next mutation to
-    /// `isMainWindowVisible` lands.
+    /// `isMainWindowVisible` lands, or when the task is cancelled — without
+    /// that, `stop()` cancelled the observer and it stayed parked here until
+    /// the window next opened or closed, one per coordinator ever run.
     @MainActor
     private static func nextVisibilityChange() async {
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            withObservationTracking {
-                _ = PacerWindowVisibility.shared.isMainWindowVisible
-            } onChange: {
-                continuation.resume()
+        let wake = OneShotWake()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                wake.arm(continuation)
+                withObservationTracking {
+                    _ = PacerWindowVisibility.shared.isMainWindowVisible
+                } onChange: {
+                    wake.fire()
+                }
             }
+        } onCancel: {
+            wake.fire()
         }
     }
 
@@ -1295,8 +1411,19 @@ public final class ScanCoordinator {
     // MARK: - Internal
 
     private func runScanCycle() async throws -> ScanReport {
-        try await withMarksToItself { try await runScanCycleUnserialized() }
+        let report = try await withMarksToItself { try await runScanCycleUnserialized() }
+        // After the cycle's locals are gone, so what is reported is what the
+        // rebuild left behind: the floor the app then sits on for hours (#337).
+        if lastCycleRebuilt {
+            lastCycleRebuilt = false
+            MemoryHygiene.relieve()
+            MemoryHygiene.report("after history rebuild")
+        }
+        return report
     }
+
+    /// Set by a cycle that re-read history or rebuilt rollups wholesale.
+    private var lastCycleRebuilt = false
 
     /// A pass that finds marks nobody committed means one died before its
     /// save. Worth a line: it's otherwise invisible, and it's the only sign
@@ -1429,6 +1556,21 @@ public final class ScanCoordinator {
 
         let lastVersion = try fetchMeta(ClaudeCodeMetaKey.scanVersion)
         let isFullScan = (lastVersion != Self.currentScanVersion)
+        // A full re-read or a full rollup rebuild is minutes on a large
+        // history; say so while it runs (#328). Cleared however the cycle
+        // ends, so a failed one doesn't leave the pill saying it forever.
+        var rebuilding = false
+        func rebuildStep(_ step: HistoryRebuildStatus.Step?) {
+            guard rebuilding else { return }
+            rebuildStatusGeneration &+= 1
+            HistoryRebuildStatus.publish(step, source: rebuildStatusSource,
+                                         generation: rebuildStatusGeneration)
+        }
+        defer { rebuildStep(nil) }
+        if isFullScan {
+            rebuilding = true
+            rebuildStep(.preparing)
+        }
 
         // On a full re-scan we wipe all cursors so every JSONL is
         // read from offset 0. The hoisted persister still rejects
@@ -1444,6 +1586,7 @@ public final class ScanCoordinator {
 
         let activePersister = try persister ?? makePersister()
         if persister == nil { persister = activePersister }
+        activePersister.backfillsPricingDetail = isFullScan
         // Taken before anything this cycle can pollute a session: re-stamps,
         // carried-over marks and recovery all run before `beforeStats` below.
         let pollutionBefore = activePersister.stats.sessionPollution
@@ -1610,6 +1753,10 @@ public final class ScanCoordinator {
             != Self.currentCostRecomputeVersion
         )
         if needsCostRebuild {
+            if !rebuilding {
+                rebuilding = true
+                rebuildStep(.preparing)
+            }
             try activePersister.markEverySampleDirty()
             log("integrity: cost recompute version bumped to \(Self.currentCostRecomputeVersion) — rebuilding every aggregate")
         }
@@ -1727,9 +1874,10 @@ public final class ScanCoordinator {
         // recent write would otherwise leave the other 700+ files
         // unscanned until their next individual FSEvent.
         var hintedPaths: Set<String>?
-        if isFullScan {
+        if isFullScan || walkEveryFileNextCycle {
             _ = watcher.consumeChangedPaths()  // drain anyway
             hintedPaths = nil
+            walkEveryFileNextCycle = false
         } else {
             let paths = watcher.consumeChangedPaths()
             hintedPaths = paths.isEmpty ? nil : paths
@@ -1749,6 +1897,7 @@ public final class ScanCoordinator {
         //
         // Incremental cycles never come here: they resume from byte offsets
         // and touch only what changed, which no bulk reader can match.
+        if isFullScan { rebuildStep(.readingTranscripts) }
         var bulkResult: JSONLScanner.ScanResult?
         if isFullScan, let importer = configuration.bulkImporter {
             do {
@@ -1777,6 +1926,9 @@ public final class ScanCoordinator {
         // Bulk-insert everything the scanner collected. One MainActor
         // pass over the entries; see `InsertSink` doc for the rationale.
         try sink.flush()
+        // The import's DuckDB working set and every parsed turn are freed by
+        // now: the largest transient allocation Pacer makes (#337).
+        if bulkResult != nil { MemoryHygiene.relieve() }
         // scanMs is the inner work (scanner actor + file I/O + emit
         // hops). consumeMs is the watcher-actor hop to drain hinted
         // paths. The two are reported separately in PhaseTimings but
@@ -1797,7 +1949,8 @@ public final class ScanCoordinator {
             await SampleCostCache.reload()
         }
         if configuration.costMode != .display {
-            try reconcileUnpricedModels(persister: activePersister)
+            rebuildStep(.updatingPrices)
+            try await reconcilePriceLedger(persister: activePersister)
         }
         try saveCursors(result.updatedCursors)
         // After the cycle's rows are in, so the index never claims coverage
@@ -1885,6 +2038,7 @@ public final class ScanCoordinator {
         // rows the previous worker had just read. Built lazily, so a normal
         // incremental cycle — every worker on its fast path — never touches it.
         let sampleSnapshots = SampleSnapshotCache(container: container)
+        rebuildStep(.rebuildingDaily)
         let recomputeStats = try await recomputer.recompute(
             pairs: activePersister.dirtyPairs,
             pending: activePersister.pendingPairSamples,
@@ -1892,6 +2046,7 @@ public final class ScanCoordinator {
             snapshots: sampleSnapshots
         )
         phase.dailyRecomputeMs = tickMs()
+        logRepriceOutcome()
 
         // Hourly rollup feeds TodayTimelineCard (24-bar hour-of-day
         // chart) and NowStrip (last-hour burn rate). Order
@@ -1904,6 +2059,7 @@ public final class ScanCoordinator {
             context: context,
             mode: configuration.costMode
         )
+        rebuildStep(.rebuildingHourly)
         let hourlyRecomputeStats = try await hourlyRecomputer.recompute(
             buckets: activePersister.dirtyHourBuckets,
             pending: activePersister.pendingHourSamples,
@@ -1930,6 +2086,7 @@ public final class ScanCoordinator {
             context: context,
             mode: configuration.costMode
         )
+        rebuildStep(.rebuildingProjects)
         let projectRecomputeStats = try await projectRecomputer.recompute(
             pairs: activePersister.dirtyProjectDates,
             pending: activePersister.pendingProjectSamples,
@@ -1973,6 +2130,7 @@ public final class ScanCoordinator {
             mode: configuration.costMode,
             cache: sessionRollupCache
         )
+        rebuildStep(.rebuildingSessions)
         let sessionRecomputeStats = try await sessionRecomputer.recompute(
             sessionIds: activePersister.dirtySessionIds,
             snapshots: sampleSnapshots,
@@ -1981,6 +2139,8 @@ public final class ScanCoordinator {
             upgrades: activePersister.pendingSessionUpgrades
         )
         phase.sessionRecomputeMs = tickMs()
+        // The last reader. On a rebuild it holds every sample (#337).
+        sampleSnapshots.release()
 
         var probeResult: StatsCacheProbe.ProbeResult?
         let probeNow = Date()
@@ -2102,6 +2262,7 @@ public final class ScanCoordinator {
             }
         }
         phase.notifMs = tickMs()
+        lastCycleRebuilt = rebuilding
 
         return ScanReport(
             wasFullScan: isFullScan,
@@ -2268,41 +2429,69 @@ public final class ScanCoordinator {
     /// nothing while a walk per launch costs 9-16 s every time.
     private static let integrityWalkInterval: TimeInterval = 24 * 60 * 60
 
-    /// Rebuild history when a model that had no price gains one.
+    /// The `SampleCostCache.catalogGeneration` the ledger was last synced
+    /// from, in this process. nil until the first sync, which therefore runs
+    /// on the first cycle after launch.
+    private var ledgerSyncedAtCatalogGeneration: UInt64?
+    /// Price changes whose buckets this cycle is rebuilding, logged with
+    /// their new cost once the daily rollup has been recomputed.
+    private var pendingReprice: [RepriceScope.Line] = []
+
+    /// Keep the dated price ledger (`PriceRecord`) in step with the catalogs
+    /// and the curated file, and install it for pricing (#296).
+    ///
+    /// Runs before anything is recomputed, every cycle, but only does work
+    /// when its inputs moved: on the first cycle after launch, and after a
+    /// catalog refresh or a curated-file refresh. A sync that finds nothing
+    /// new writes nothing.
     ///
     /// A model Pacer sees before any pricing source lists it aggregates at
-    /// $0 — `CostCalculator` has nothing to multiply by, and $0 is a legal
-    /// total, so the rollup never revisits it. This has happened at every
-    /// model launch: `costRecomputeVersion` "3" was Fable 5 and Mythos 5,
-    /// "4" was Mythos Preview. Each needed a human to notice and ship a
-    /// version bump, and until then those users' costs read low.
-    ///
-    /// Pricing already self-heals (LiteLLM plus a models.dev gap-fill). The
-    /// rollups didn't. Now the set of models with usage but no price is
-    /// carried across cycles, and anything that leaves that set takes its
-    /// history with it — no bump, no release.
-    ///
-    /// Deliberately not scoped to the model's own buckets: the project and
-    /// session rollups aren't model-keyed, so a mixed bucket has to be
-    /// rebuilt whole anyway. This fires only when a price appears, which is
-    /// a handful of times a year.
-    private func reconcileUnpricedModels(persister: SamplePersister) throws {
-        let snapshot = SampleCostCache.current()
+    /// $0 — there is nothing to multiply by, and $0 is a legal total, so the
+    /// rollup never revisits it. That happened at every model launch
+    /// (`costRecomputeVersion` "3" was Fable 5 and Mythos 5, "4" was Mythos
+    /// Preview). So the set of models with usage but no price is carried
+    /// across cycles, and a model that leaves it takes its history with it.
+    private func reconcilePriceLedger(persister: SamplePersister) async throws {
         var models = FetchDescriptor<DailyAggregate>()
         models.propertiesToFetch = [\.model]
         let used = Set(try context.fetch(models).map(\.model))
-        guard !used.isEmpty else { return }
 
-        let unpriced = used.filter { snapshot.pricing(for: $0) == nil }
+        let generation = SampleCostCache.catalogGeneration
+        if ledgerSyncedAtCatalogGeneration != generation || !SampleCostCache.hasLedgerFromStore {
+            do {
+                let result = try PriceLedgerStore.sync(
+                    context: context,
+                    catalog: SampleCostCache.current().pricingByModel,
+                    curated: SampleCostCache.curated(),
+                    usedModels: used)
+                await SampleCostCache.installLedger(result.ledger)
+                ledgerSyncedAtCatalogGeneration = generation
+                if result.changed {
+                    log("pricing: ledger \(result.ledger.records.count) record(s) — "
+                        + "\(result.opened.count) opened, \(result.closed.count) closed, "
+                        + "\(result.curatedChanged) curated change(s)")
+                    try rebuildRepricedBuckets(
+                        result.ledger.changes(since: result.previous), persister: persister)
+                }
+            } catch {
+                // Keep pricing with what is installed; the next cycle retries.
+                log("pricing: ledger sync failed (\(error)) — keeping the current ledger")
+            }
+        }
+
+        guard !used.isEmpty else { return }
+        let ledger = SampleCostCache.current().ledger
+        let unpriced = used.filter { !ledger.isPriced($0) }
         let previously: Set<String> = (try fetchMeta(ClaudeCodeMetaKey.unpricedModels))
             .flatMap { Data($0.utf8) }
             .flatMap { try? JSONDecoder().decode(Set<String>.self, from: $0) } ?? []
 
-        // Left the unpriced set => gained a price => its history is stale.
+        // Left the unpriced set => gained a price. Its buckets carry a
+        // `none|…` token, so the ledger change above already queued exactly
+        // those for a rebuild.
         let nowPriced = previously.subtracting(unpriced)
         if !nowPriced.isEmpty {
-            try persister.markEverySampleDirty()
-            log("pricing: \(nowPriced.sorted().joined(separator: ", ")) gained pricing — rebuilding cost history")
+            log("pricing: \(nowPriced.sorted().joined(separator: ", ")) gained pricing")
         }
         if unpriced != previously,
            let encoded = try? JSONEncoder().encode(unpriced),
@@ -2311,6 +2500,53 @@ public final class ScanCoordinator {
             if !unpriced.subtracting(previously).isEmpty {
                 log("pricing: no price yet for \(unpriced.sorted().joined(separator: ", ")) — cost reads low until there is")
             }
+        }
+    }
+
+    /// Queue for a from-scratch rebuild every bucket a price change reaches
+    /// (#217), and log each change as `model, window, old → new`.
+    ///
+    /// This is what fixes old data: a corrected curated record, a catalog
+    /// price change, or a model gaining its first price rebuilds exactly the
+    /// buckets that were priced by that model over the affected window —
+    /// and nothing else. Past usage is re-priced at the rate in effect when
+    /// it was made, never at today's.
+    private func rebuildRepricedBuckets(_ changes: [PriceChange], persister: SamplePersister) throws {
+        guard !changes.isEmpty else { return }
+        let scope = try PriceLedgerStore.affectedBuckets(context: context, changes: changes)
+        // One line per change that reaches a bucket. A first sync "changes"
+        // every key from unpriced to priced and reaches none of them, so
+        // those collapse into one count.
+        let reaching = scope.lines.filter {
+            !$0.daily.isEmpty || $0.hourly > 0 || $0.project > 0 || $0.sessions > 0
+        }
+        for line in reaching {
+            log("pricing: \(line.change) — rebuilding \(line.daily.count) daily, \(line.hourly) hourly, "
+                + "\(line.project) project, \(line.sessions) session bucket(s)")
+        }
+        if reaching.count < changes.count {
+            log("pricing: \(changes.count - reaching.count) price change(s) reach no stored bucket")
+        }
+        guard !scope.isEmpty else { return }
+        persister.addDirtyPairs(scope.daily)
+        persister.addDirtyHourBuckets(scope.hourly)
+        persister.addDirtyProjectDates(scope.project)
+        persister.addDirtySessionIds(scope.sessions, reason: .reprice)
+        pendingReprice = scope.lines.filter { !$0.daily.isEmpty }
+    }
+
+    /// The second half of the reprice log: each change's daily cost, before
+    /// and after its rebuild. Reads this cycle's uncommitted rollup rows.
+    private func logRepriceOutcome() {
+        guard !pendingReprice.isEmpty else { return }
+        defer { pendingReprice = [] }
+        guard let rows = try? context.fetch(FetchDescriptor<DailyAggregate>()) else { return }
+        var cost: [DateModelPair: Double] = [:]
+        for r in rows { cost[DateModelPair(date: r.date, model: r.model)] = r.totalCostUSD }
+        for line in pendingReprice {
+            let after = line.daily.reduce(0) { $0 + (cost[$1] ?? 0) }
+            log(String(format: "pricing: rebuilt %@: daily cost $%.2f → $%.2f",
+                       line.change.key.description, line.costBefore, after))
         }
     }
 
@@ -2351,6 +2587,9 @@ public final class ScanCoordinator {
     /// Called right before each session recompute, so the recompute's own
     /// `SampleCostCache.current()` read is as close to it as it can be.
     private func forgetSessionRollupsIfPricingChanged() {
+        // Display mode never prices anything, so a price change can't make a
+        // cached session total stale.
+        guard configuration.costMode != .display else { return }
         if sessionRollupCache.forgetAllIfPricingChanged(generation: SampleCostCache.generation) {
             log("pricing: prices changed — session rollups take the full path on next touch")
         }
@@ -2514,16 +2753,19 @@ public final class ScanCoordinator {
         aliases: [String: String],
         sink: InsertSink
     ) throws -> JSONLScanner.ScanResult {
-        let imported = try importer.importAll(roots: roots, aliases: aliases)
-        for entry in imported.entries { sink.consume(entry) }
+        var imported = try importer.importAll(roots: roots, aliases: aliases)
+        let entryCount = imported.entries.count
+        // Handed over whole: copied entry by entry, the sink held a second
+        // array of every turn in history next to the importer's (#337).
+        sink.adopt(&imported.entries)
         log(String(format: "bulk import: %d entries from %d files in %.1fs",
-                   imported.entries.count, imported.fileMarks.count, imported.seconds))
+                   entryCount, imported.fileMarks.count, imported.seconds))
         return JSONLScanner.ScanResult(
             progress: JSONLScanner.ScanProgress(
                 filesScanned: imported.fileMarks.count,
                 filesSkipped: 0,
-                entriesParsed: imported.entries.count,
-                entriesAccepted: imported.entries.count,
+                entriesParsed: entryCount,
+                entriesAccepted: entryCount,
                 // The importer deduplicates in SQL, so whatever it dropped is
                 // already gone before we see it — reporting a number here
                 // would be inventing one.
@@ -2941,17 +3183,36 @@ private final class InsertSink: @unchecked Sendable {
         lock.unlock()
     }
 
+    /// Take a whole batch — the bulk importer's, every turn in history —
+    /// without copying it; `entries` is left empty.
+    func adopt(_ entries: inout [ParsedUsageEntry]) {
+        lock.lock()
+        if collected.isEmpty {
+            swap(&collected, &entries)
+        } else {
+            collected.append(contentsOf: entries)
+            entries = []
+        }
+        lock.unlock()
+    }
+
     /// MainActor pass that inserts every collected entry into the
     /// persister and surfaces the first error. Called by ScanCoordinator
     /// once after `scanner.scan` returns. One MainActor pass instead of
     /// one-hop-per-entry is the entire point of this design.
+    ///
+    /// Each entry is released once it is in (#337): after a bulk import that
+    /// is hundreds of MB of parsed turns, and holding them all to the end
+    /// kept them resident while the inserts allocated alongside them.
+    /// Reversed first so `popLast` still inserts in arrival order.
     @ScanActor
     func flush() throws {
         lock.lock()
-        let toInsert = collected
-        collected.removeAll(keepingCapacity: true)
+        var toInsert: [ParsedUsageEntry] = []
+        swap(&toInsert, &collected)
         lock.unlock()
-        for entry in toInsert {
+        toInsert.reverse()
+        while let entry = toInsert.popLast() {
             do {
                 _ = try persister.insert(entry)
             } catch {
@@ -2972,4 +3233,37 @@ extension ISO8601DateFormatter {
         f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return f
     }()
+}
+
+/// Resumes one continuation once, on whichever comes first: the event it
+/// waits for, or a cancellation — which can arrive before the continuation
+/// is even armed, and then resumes it as soon as it is.
+private final class OneShotWake: @unchecked Sendable {
+    private let lock = NSLock()
+    private var fired = false
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func arm(_ continuation: CheckedContinuation<Void, Never>) {
+        lock.lock()
+        if fired {
+            lock.unlock()
+            continuation.resume()
+            return
+        }
+        self.continuation = continuation
+        lock.unlock()
+    }
+
+    func fire() {
+        lock.lock()
+        if fired {
+            lock.unlock()
+            return
+        }
+        fired = true
+        let pending = continuation
+        continuation = nil
+        lock.unlock()
+        pending?.resume()
+    }
 }

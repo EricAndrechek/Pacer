@@ -14,8 +14,8 @@ import Foundation
 ///   before the first successful refresh, if the embedded snapshot
 ///   predates the model.
 ///
-/// Consulted ONLY after every fetched-table lookup path (literal,
-/// provider prefix, bidirectional substring) has missed, so the
+/// Consulted ONLY after the fetched-table lookup (exact canonical id, then
+/// version-complete prefix) has missed, so the
 /// dynamic sources win the moment they ship a real entry. Zero-priced
 /// placeholder rows are dropped at decode (see
 /// `LiteLLMModelPricing.hasUsablePricing`), so they can't shadow a
@@ -74,19 +74,17 @@ enum AnthropicFallbackPricing {
         "claude-mythos-preview": mythosPreviewTier,
     ]
 
-    /// Exact match first, then "model contains key" — which covers the
-    /// variants Claude Code and cloud providers emit: the 1M-context
-    /// beta suffix (`claude-fable-5[1m]`), provider prefixes
-    /// (`anthropic.claude-fable-5`), and any future date-pinned form
-    /// (`claude-fable-5-20260609`). Keys are mutually exclusive
-    /// substrings, so dictionary iteration order can't change the
-    /// result.
+    /// Exact on the canonical id, which already absorbs the variants Claude
+    /// Code and cloud providers emit — the 1M-context suffix
+    /// (`claude-fable-5[1m]`), provider prefixes (`anthropic.claude-fable-5`)
+    /// and date pins (`claude-fable-5-20260609`) — then the longest
+    /// version-complete prefix. This used to be "model contains key", which
+    /// happened to be safe only because no key here was a prefix of another
+    /// model's id; `claude-fable-5` is one of `claude-fable-5-1`, so it no
+    /// longer would be.
     static func pricing(for model: String) -> LiteLLMModelPricing? {
-        if let direct = table[model] { return direct }
-        let lower = model.lowercased()
-        for (key, value) in table where lower.contains(key) {
-            return value
-        }
-        return nil
+        index.matchKey(model).flatMap { table[$0] }
     }
+
+    private static let index = PricingCatalogIndex(table)
 }

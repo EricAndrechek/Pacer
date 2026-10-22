@@ -106,12 +106,18 @@ final class PaceStubServer {
     private let task: Process
     let base: String
 
-    enum StartFailure: Error { case neverListened }
+    enum StartFailure: Error { case neverListened(afterSeconds: Int) }
 
     init(status: Int, body: String, file: URL? = nil) throws {
         let payload = file.map { "open(\"\($0.path)\", \"rb\").read()" }
             ?? "b\"\"\"\(body)\"\"\""
+        // `HTTPServer.server_bind` names the server with `socket.getfqdn`, a
+        // reverse DNS lookup of 127.0.0.1. On CI runners it takes tens of
+        // seconds, and each server's test held a cooperative thread for all
+        // of it. On a 3-core runner that saturated the pool for minutes (#328's
+        // CI hang). `S` binds the same socket without the lookup.
         let script = """
+        import socketserver
         from http.server import BaseHTTPRequestHandler, HTTPServer
         class H(BaseHTTPRequestHandler):
             def do_GET(self):
@@ -120,7 +126,11 @@ final class PaceStubServer {
                 self.end_headers()
                 self.wfile.write(\(payload))
             def log_message(self, *a): pass
-        server = HTTPServer(("127.0.0.1", 0), H)
+        class S(HTTPServer):
+            def server_bind(self):
+                socketserver.TCPServer.server_bind(self)
+                self.server_name, self.server_port = "127.0.0.1", self.server_address[1]
+        server = S(("127.0.0.1", 0), H)
         print(server.server_port, flush=True)
         server.serve_forever()
         """
@@ -131,9 +141,18 @@ final class PaceStubServer {
         process.standardOutput = out
         process.standardError = FileHandle.nullDevice
         try process.run()
+        // Waits for the port with a deadline. `availableData` alone blocks a
+        // cooperative thread until Python prints or exits, so a server that
+        // did neither would hang the run instead of failing the test.
         var line = Data()
+        let reader = out.fileHandleForReading
+        let started = Date()
+        let deadline = started.addingTimeInterval(60)
         while !line.contains(UInt8(ascii: "\n")) {
-            let chunk = out.fileHandleForReading.availableData
+            var ready = pollfd(fd: reader.fileDescriptor, events: Int16(POLLIN), revents: 0)
+            let remaining = Int32(deadline.timeIntervalSinceNow * 1000)
+            guard remaining > 0, poll(&ready, 1, remaining) > 0 else { break }
+            let chunk = reader.availableData
             if chunk.isEmpty { break }
             line.append(chunk)
         }
@@ -141,7 +160,7 @@ final class PaceStubServer {
             .flatMap({ Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) })
         else {
             process.terminate()
-            throw StartFailure.neverListened
+            throw StartFailure.neverListened(afterSeconds: Int(Date().timeIntervalSince(started)))
         }
         task = process
         base = "http://127.0.0.1:\(port)"

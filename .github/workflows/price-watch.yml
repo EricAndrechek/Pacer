@@ -1,0 +1,56 @@
+name: Price watch
+
+# Daily diff of the catalogs' first-party Anthropic rows (LiteLLM, models.dev)
+# and Anthropic's pricing page against the curated price history (#330). A
+# rate that differs from the record open today, or a model with no curated
+# row, opens an issue — or comments on the open one with the same key — so a
+# maintainer can pin the change's exact date before installs date it by
+# whenever each one first noticed. See
+# research/price-history/watch_catalog_prices.py.
+
+on:
+  schedule:
+    - cron: "23 7 * * *"   # daily, 07:23 UTC
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Report findings in the run summary without opening or commenting on issues
+        type: boolean
+        default: false
+
+# The default token, issues only. No `contents` either: the two files the job
+# needs are public, and are fetched at this exact commit below.
+permissions:
+  issues: write
+
+concurrency:
+  group: price-watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # No checkout (it would need `contents: read`) and no setup action or
+      # cache: the watcher is stdlib-only Python, and the runner's python3
+      # runs it. Locally it is a `uv run` script.
+      - name: Fetch the watcher and the curated history at this commit
+        run: |
+          base="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}"
+          mkdir -p research/price-history PacerCore/Sources/PacerCore/Resources
+          curl -fsSL --retry 3 -o research/price-history/watch_catalog_prices.py \
+            "$base/research/price-history/watch_catalog_prices.py"
+          curl -fsSL --retry 3 -o PacerCore/Sources/PacerCore/Resources/price-history.json \
+            "$base/PacerCore/Sources/PacerCore/Resources/price-history.json"
+
+      - name: Diff the catalogs against the curated price history
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
+        run: |
+          if [ -n "$DRY_RUN" ]; then
+            python3 research/price-history/watch_catalog_prices.py --dry-run
+          else
+            python3 research/price-history/watch_catalog_prices.py
+          fi

@@ -553,6 +553,8 @@ struct ToolbarFreshness: View {
     @State private var lastScanAt: String?
     @State private var scanReadInFlight = false
     @State private var scope = UsageScope.shared
+    /// The one-time history rebuild a new build's first launch runs (#328).
+    @State private var rebuild = HistoryRebuildStatus.shared
     @Environment(\.modelContext) private var modelContext
 
     /// Re-read the four probes and recompute the pill's value.
@@ -589,6 +591,11 @@ struct ToolbarFreshness: View {
     /// nothing has used it since its last reading (#198); the reason is the
     /// tooltip.
     private var currentDisplay: Display {
+        // Ahead of everything else: while history is being rebuilt the other
+        // readings are mid-change, and this is the one thing worth saying.
+        if let step = rebuild.step {
+            return Display(state: .recent, label: "Updating history…", tooltip: step.detail)
+        }
         let lastUse = [tokens.first?.sampledAt, sessionRows.first?.lastSeenAt].compactMap { $0 }.max()
         if sessionActivity != .active,
            TokenPoolStatus.shared.isAuthPaused(
@@ -773,6 +780,9 @@ struct ToolbarFreshness: View {
             // the next scan cycle happens to fire.
             .onChange(of: scope.limitAccountId) { _, _ in refreshScopedProbes() }
             .onChange(of: scope.accountId) { _, _ in refreshScopedProbes() }
+            // Read here so the pill depends on it: shown the moment a rebuild
+            // starts and gone the moment it ends, not on the next 1 s tick.
+            .onChange(of: rebuild.step) { _, _ in display = currentDisplay }
             .task {
                 refreshScopedProbes()
                 await refresh()

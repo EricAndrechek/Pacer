@@ -260,6 +260,8 @@ private struct ModelsContent: View {
         let activeDays: Int
         let firstSeen: String
         let lastSeen: String
+        /// The row's cost by priced part (#225); drawn as its Mix bar.
+        let breakdown: CostBreakdown
         var id: String { key }
     }
 
@@ -345,6 +347,7 @@ private struct ModelsContent: View {
             var input: Int64 = 0
             var output: Int64 = 0
             var cacheRead: Int64 = 0
+            var breakdown: CostBreakdown = .zero
             var dates: Set<String> = []
             var firstSeen: String = "9999-99-99"
             var lastSeen: String = "0000-00-00"
@@ -361,6 +364,7 @@ private struct ModelsContent: View {
             a.input += r.inputTokens
             a.output += r.outputTokens
             a.cacheRead += r.cacheReadTokens
+            a.breakdown += r.costBreakdown
             a.dates.insert(r.date)
             if r.date < a.firstSeen { a.firstSeen = r.date }
             if r.date > a.lastSeen { a.lastSeen = r.date }
@@ -383,7 +387,8 @@ private struct ModelsContent: View {
                 totalTokens: a.input + a.output + a.cacheRead,
                 activeDays: a.dates.count,
                 firstSeen: a.firstSeen,
-                lastSeen: a.lastSeen
+                lastSeen: a.lastSeen,
+                breakdown: a.breakdown
             )
         }
         let primary: (ModelRow, ModelRow) -> Bool
@@ -498,7 +503,8 @@ private struct ModelsContent: View {
             totalTokens: tail.reduce(0) { $0 + $1.totalTokens },
             activeDays: 0,
             firstSeen: tail.map(\.firstSeen).min() ?? "",
-            lastSeen: tail.map(\.lastSeen).max() ?? ""
+            lastSeen: tail.map(\.lastSeen).max() ?? "",
+            breakdown: CostBreakdown.sum(tail, \.breakdown)
         )
         return head + [other]
     }
@@ -886,6 +892,9 @@ private struct ModelsContent: View {
                 active: sortFieldBinding,
                 descending: sortDescendingBinding
             ).frame(width: 100)
+            Eyebrow(text: "Mix")
+                .frame(width: 110, alignment: .leading)
+                .padding(.leading, 12)
             SortableColumnHeader(
                 "Cost",
                 field: ModelsSort.cost,
@@ -926,6 +935,9 @@ private struct ModelsContent: View {
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundStyle(.secondary)
                 .frame(width: 100, alignment: .trailing)
+            PacerCostBar(row.breakdown)
+                .frame(width: 110)
+                .padding(.leading, 12)
             Text(pacerCost(row.cost)).help(pacerCostExact(row.cost))
                 .font(.system(size: 13, weight: .semibold, design: .rounded))
                 .monospacedDigit()

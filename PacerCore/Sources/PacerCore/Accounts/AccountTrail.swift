@@ -14,7 +14,7 @@ import Foundation
 /// rendering as `$0` — a number nothing ever revisits because nothing looks
 /// wrong. Unattributed is visibly incomplete; misattributed is invisibly
 /// false.
-public struct AccountTrail: Sendable {
+public struct AccountTrail: Sendable, Equatable {
     /// One activation, flattened to a value type so the trail can cross
     /// actor boundaries without dragging a `ModelContext` along.
     public struct Span: Sendable, Equatable {

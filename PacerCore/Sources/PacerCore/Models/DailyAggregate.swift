@@ -33,6 +33,18 @@ public final class DailyAggregate {
     /// pricing row at recompute time. Stored so the read path doesn't
     /// have to re-apply pricing for every chart redraw.
     public var totalCostUSD: Double
+    /// The price-ledger tokens that priced this bucket, newline-separated
+    /// and sorted (#217): when one of their keys changes price over this
+    /// bucket's time, the bucket is rebuilt. See `PricedBy`.
+    public var pricedByRecordIds: String = ""
+    /// `totalCostUSD` split by category (#296). The total is always written
+    /// as the sum of these five, so they agree by construction; see
+    /// `RollupCostColumns`.
+    public var costInput: Double = 0
+    public var costOutput: Double = 0
+    public var costCacheRead: Double = 0
+    public var costCacheWrite5m: Double = 0
+    public var costCacheWrite1h: Double = 0
 
     public init(
         date: String,

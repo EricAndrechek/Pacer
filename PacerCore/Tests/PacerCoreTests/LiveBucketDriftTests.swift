@@ -182,25 +182,42 @@ import Testing
             try context.fetch(FetchDescriptor<DailyAggregate>()).first).model
 
         // Rewrite history as it would look had this model been unpriced when
-        // its samples were first aggregated: $0 cost, and recorded as
-        // unpriced so the next cycle can see it has since gained a price.
-        for row in try context.fetch(FetchDescriptor<DailyAggregate>()) { row.totalCostUSD = 0 }
-        for row in try context.fetch(FetchDescriptor<HourlyAggregate>()) { row.totalCostUSD = 0 }
-        let key = ClaudeCodeMetaKey.unpricedModels
-        let json = String(data: try JSONEncoder().encode(Set([model])), encoding: .utf8)!
-        let existing = try context.fetch(FetchDescriptor<ClaudeCodeMeta>(
-            predicate: #Predicate<ClaudeCodeMeta> { $0.key == key }))
-        if let row = existing.first { row.value = json }
-        else { context.insert(ClaudeCodeMeta(key: key, value: json)) }
+        // its samples were first aggregated: $0 cost, priced by nothing (the
+        // `none|…` token every unpriced sample carries), and no price record
+        // for it in the ledger yet.
+        let id = CanonicalModelID.parse(model)
+        for row in try context.fetch(FetchDescriptor<DailyAggregate>()) {
+            row.costComponents = .zero
+            row.pricedByRecordIds = PriceLedger.noneToken(id)
+        }
+        for row in try context.fetch(FetchDescriptor<HourlyAggregate>()) {
+            row.costComponents = .zero
+            row.pricedByRecordIds = PriceLedger.noneToken(id)
+        }
+        let canonical = id.model
+        for row in try context.fetch(FetchDescriptor<PriceRecord>(
+            predicate: #Predicate<PriceRecord> { $0.model == canonical })) {
+            context.delete(row)
+        }
         try context.save()
 
-        _ = try await coordinator.runOnce()
+        // The next launch syncs the ledger, which now prices the model.
+        let relaunched = ScanCoordinator(
+            container: container,
+            configuration: .init(costMode: .calculate, watcherMode: .manual,
+                                 probeStatsCache: false),
+            resolver: ClaudePathResolver(environment: ["CLAUDE_CONFIG_DIR": root.path])
+        )
+        _ = try await relaunched.runOnce()
 
-        // The model is priced now, so it left the unpriced set, so its
-        // history was rebuilt — no version bump, no release.
+        // The model gained a price, the ledger change names its key, and
+        // exactly its buckets were rebuilt — no version bump, no release.
         let daily = try context.fetch(FetchDescriptor<DailyAggregate>())
             .reduce(0) { $0 + $1.totalCostUSD }
         #expect(daily > 0, "history stayed at $0 after the model gained a price")
+        let hourly = try context.fetch(FetchDescriptor<HourlyAggregate>())
+            .reduce(0) { $0 + $1.totalCostUSD }
+        #expect(abs(hourly - daily) < 1e-9)
     }
 
     /// The same billable turn stored twice gets collapsed to one.

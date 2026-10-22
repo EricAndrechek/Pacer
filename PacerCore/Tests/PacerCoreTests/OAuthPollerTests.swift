@@ -616,6 +616,44 @@ import Testing
         await poller.stop()   // double-stop is no-op
     }
 
+    /// A `stop()` landing while the loop is between naps — here, in the
+    /// activity probe — found no sleeper to cancel, and the loop then began a
+    /// fresh idle nap, an unstructured task that didn't inherit the loop's
+    /// cancellation. `stop()` waited out all ten minutes of it: it held up the
+    /// app's quit, and hung CI.
+    @Test func aStopBetweenNapsDoesNotWaitOutTheNext() async throws {
+        let container = try Self.makeContainer()
+        // No credential anywhere, so the pass ends in the idle nap.
+        let client = OAuthClient(
+            keychain: KeychainOAuth(rawReader: { .failure(.notFound) }),
+            transport: { _ in (Data(), HTTPURLResponse()) },
+            tokenOverride: { nil }, desktopEnabled: { false })
+        let (probed, probing) = AsyncStream.makeStream(of: Void.self)
+        let poller = OAuthPoller(
+            client: client, container: container, configuration: .init(),
+            // The real clock, so that nap is the real ten minutes.
+            clock: SystemPollerClock(),
+            // Holds the pass here until `stop()` cancels the loop, so the
+            // stop lands between naps.
+            activityProbe: {
+                probing.yield()
+                try? await Task.sleep(for: .seconds(3_600))
+                return nil
+            })
+        await poller.start()
+        for await _ in probed { break }
+
+        let stopped = StopFlag()
+        let stopping = Task {
+            await poller.stop()
+            await stopped.set()
+        }
+        let returned = await eventually(timeout: .seconds(120)) { await stopped.isSet }
+        #expect(returned, "stop() is waiting out the idle nap the loop began after it")
+        // Left behind on a failure, so the test fails rather than hangs.
+        if returned { await stopping.value }
+    }
+
     @Test func loopExitsCleanlyOnStop() async throws {
         let container = try Self.makeContainer()
         let client = Self.sequencedClient([.success(jsonBody: #"{"five_hour":{"utilization":1,"resets_at":""}}"#)])
@@ -877,6 +915,11 @@ final class TestClock: PollerClock, @unchecked Sendable {
         let discoveries = (keychain.reads - before) / perDiscovery
         #expect(discoveries == 3, "got \(discoveries) discoveries over 150 s")
     }
+}
+
+private actor StopFlag {
+    private(set) var isSet = false
+    func set() { isSet = true }
 }
 
 private final class LockedBox: @unchecked Sendable {

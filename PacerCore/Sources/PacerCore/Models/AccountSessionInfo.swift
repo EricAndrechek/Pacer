@@ -21,6 +21,14 @@ public final class AccountSessionInfo {
     public var projectPath: String
     public var ccVersion: String?
     public var cumulativeCostUSD: Double
+    /// `cumulativeCostUSD` split by category (#296). The total is always written
+    /// as the sum of these five, so they agree by construction; see
+    /// `RollupCostColumns`.
+    public var costInput: Double = 0
+    public var costOutput: Double = 0
+    public var costCacheRead: Double = 0
+    public var costCacheWrite5m: Double = 0
+    public var costCacheWrite1h: Double = 0
     public var cumulativeInputTokens: Int64
     public var cumulativeOutputTokens: Int64
     public var cumulativeCacheReadTokens: Int64
@@ -86,7 +94,11 @@ public struct SessionRollupValues: Sendable {
     public var cacheReadTokens: Int64 = 0
     public var cacheCreation5mTokens: Int64 = 0
     public var cacheCreation1hTokens: Int64 = 0
-    public var totalCostUSD: Double = 0
+    /// Cost by category; `totalCostUSD` is its sum.
+    public var cost = CostComponents.zero
+    public var totalCostUSD: Double { cost.total }
+    /// The ledger tokens behind `cost`, written to the global `SessionInfo`.
+    public var pricedBy = PricedBy()
     public var modelTokens: [String: Int64] = [:]
     public var projectPath: String?
     public var ccVersion: String?
@@ -114,13 +126,9 @@ public struct SessionRollupValues: Sendable {
         cacheReadTokens += sample.breakdown.cacheReadTokens
         cacheCreation5mTokens += sample.breakdown.cacheCreation5mTokens
         cacheCreation1hTokens += sample.breakdown.cacheCreation1hTokens
-        totalCostUSD += CostCalculator.cost(
-            storedCostUSD: sample.sourceCostUSD,
-            model: sample.model,
-            breakdown: sample.breakdown,
-            mode: mode,
-            snapshot: snapshot
-        )
+        let priced = CostCalculator.sampleCost(sample, mode: mode, snapshot: snapshot)
+        cost += priced.components
+        pricedBy.add(priced.pricedBy)
         modelTokens[sample.model, default: 0] +=
             sample.breakdown.inputTokens + sample.breakdown.outputTokens
         if firstModel == nil { firstModel = sample.model }
@@ -142,13 +150,7 @@ public struct SessionRollupValues: Sendable {
         cacheReadTokens -= sample.breakdown.cacheReadTokens
         cacheCreation5mTokens -= sample.breakdown.cacheCreation5mTokens
         cacheCreation1hTokens -= sample.breakdown.cacheCreation1hTokens
-        totalCostUSD -= CostCalculator.cost(
-            storedCostUSD: sample.sourceCostUSD,
-            model: sample.model,
-            breakdown: sample.breakdown,
-            mode: mode,
-            snapshot: snapshot
-        )
+        cost -= CostCalculator.sampleCost(sample, mode: mode, snapshot: snapshot).components
         modelTokens[sample.model, default: 0] -=
             sample.breakdown.inputTokens + sample.breakdown.outputTokens
     }

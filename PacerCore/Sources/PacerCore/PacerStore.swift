@@ -127,10 +127,16 @@ public enum PacerStore {
         AccountHourlyAggregate.self,
         AccountProjectDailyAggregate.self,
         AccountSessionInfo.self,
+        PriceRecord.self,
     ]
 
     public static func makeModelContainer() throws -> ModelContainer {
-        let url = try storeURL()
+        try makeModelContainer(at: try storeURL())
+    }
+
+    /// The on-disk container at an explicit path — for tools that verify a
+    /// frozen *copy* of a real store and must never open the live one.
+    public static func makeModelContainer(at url: URL) throws -> ModelContainer {
         let configuration = ModelConfiguration(url: url)
         // **Schema evolution:** Pacer relies on SwiftData's implicit
         // lightweight migration — safe for added optional fields and

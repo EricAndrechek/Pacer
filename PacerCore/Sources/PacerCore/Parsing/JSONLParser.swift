@@ -43,7 +43,25 @@ public enum JSONLLineParser {
     /// path.
     private static let decoder = JSONDecoder()
 
-    /// Parse one JSONL line into an entry or nil. Pure function — no IO.
+    /// Parse one JSONL line into the billable entries it holds — one per
+    /// model call (`usage.iterations`, #218), usually exactly one. Pure, no IO.
+    public static func parseAll(
+        line: Data,
+        aliases: [String: String] = [:],
+        rootPath: String? = nil,
+        fixedProjectPath: String? = nil
+    ) -> [ParsedUsageEntry] {
+        guard !line.isEmpty,
+              let raw = try? decoder.decode(RawJSONLine.self, from: line),
+              let entry = entry(from: raw, aliases: aliases, rootPath: rootPath,
+                                fixedProjectPath: fixedProjectPath)
+        else { return [] }
+        return expand(entry, iterations: raw.message?.usage?.iterations)
+    }
+
+    /// Parse one JSONL line into its final entry, or nil. Pure function — no
+    /// IO. For a multi-iteration response that is the last model call; the
+    /// scanner uses `parseAll` and records every one.
     ///
     /// `aliases` is the user-defined project-path remap consulted by
     /// `ProjectPathCanonicalizer.canonicalize(_:aliases:)` after the
@@ -58,13 +76,8 @@ public enum JSONLLineParser {
         rootPath: String? = nil,
         fixedProjectPath: String? = nil
     ) -> ParsedUsageEntry? {
-        guard !line.isEmpty,
-              let raw = try? decoder.decode(RawJSONLine.self, from: line)
-        else {
-            return nil
-        }
-        return entry(from: raw, aliases: aliases, rootPath: rootPath,
-                     fixedProjectPath: fixedProjectPath)
+        parseAll(line: line, aliases: aliases, rootPath: rootPath,
+                 fixedProjectPath: fixedProjectPath).last
     }
 
     public static func parse(
@@ -126,21 +139,95 @@ public enum JSONLLineParser {
             isApiErrorMessage: raw.isApiErrorMessage ?? false,
             // A finished message carries a stop_reason; a mid-stream
             // snapshot of it doesn't. See `ParsedUsageEntry.isComplete`.
-            isComplete: raw.message?.stop_reason != nil
+            isComplete: raw.message?.stop_reason != nil,
+            speed: usage?.speed,
+            inferenceGeo: usage?.inference_geo
         )
+    }
+
+    /// One entry per iteration of a multi-iteration response (#218).
+    ///
+    /// A response can be more than one model call: a `message` attempt on
+    /// one model that falls back to a `fallback_message` on another, say. The
+    /// top-level usage describes only the final call — and on a real corpus
+    /// mixed its fields, taking `cache_creation`'s split from the first call
+    /// and `cache_creation_input_tokens` from the second — so the first
+    /// call's tokens silently vanished, on the more expensive model. Each
+    /// iteration becomes its own entry, priced on its own model with its own
+    /// counts and its own cache-write split.
+    ///
+    /// The final iteration keeps the line's dedup key; earlier ones get
+    /// `<key>#<index>`, so every iteration is unique and every streamed copy
+    /// of the same response maps its iterations onto the same keys —
+    /// `supersedes` (correctness rule 7) then works per iteration, unchanged.
+    /// A single-iteration (or iteration-less) line is returned as is.
+    static func expand(
+        _ base: ParsedUsageEntry, iterations: [RawJSONLine.RawIteration]?
+    ) -> [ParsedUsageEntry] {
+        guard let iterations, iterations.count > 1 else { return [base] }
+        var out: [ParsedUsageEntry] = []
+        for (index, it) in iterations.enumerated() {
+            let model = it.model.flatMap { $0.isEmpty ? nil : $0 } ?? base.model
+            if model == syntheticModelSentinel { continue }
+            let isLast = index == iterations.count - 1
+            out.append(ParsedUsageEntry(
+                timestamp: base.timestamp,
+                model: model,
+                breakdown: breakdown(
+                    input: it.input_tokens, output: it.output_tokens,
+                    cacheRead: it.cache_read_input_tokens,
+                    summedCacheCreation: it.cache_creation_input_tokens,
+                    split: it.cache_creation),
+                // Claude Code's stored cost covers the response as a whole;
+                // it stays with the final call rather than being counted twice.
+                storedCostUSD: isLast ? base.storedCostUSD : nil,
+                dedupKey: base.dedupKey.map { isLast ? $0 : "\($0)#\(index)" },
+                sessionId: base.sessionId,
+                projectPath: base.projectPath,
+                originalProjectPath: base.originalProjectPath,
+                claudeCodeVersion: base.claudeCodeVersion,
+                rootPath: base.rootPath,
+                entrypoint: base.entrypoint,
+                isApiErrorMessage: base.isApiErrorMessage,
+                isComplete: base.isComplete,
+                speed: base.speed,
+                inferenceGeo: base.inferenceGeo,
+                isIterationPart: true))
+        }
+        return out.isEmpty ? [base] : out
+    }
+
+    /// `expand` for an importer holding the iterations as raw JSON (the
+    /// DuckDB bulk path), so both ingest paths split responses identically.
+    public static func expand(_ base: ParsedUsageEntry, iterationsJSON: String?) -> [ParsedUsageEntry] {
+        guard let iterationsJSON, let data = iterationsJSON.data(using: .utf8),
+              let list = try? decoder.decode(RawJSONLine.LenientList<RawJSONLine.RawIteration>.self,
+                                             from: data)
+        else { return [base] }
+        return expand(base, iterations: list.items)
     }
 
     private static func breakdown(from usage: RawJSONLine.RawUsage?) -> TokenBreakdown {
         guard let usage else { return TokenBreakdown() }
+        return breakdown(
+            input: usage.input_tokens, output: usage.output_tokens,
+            cacheRead: usage.cache_read_input_tokens,
+            summedCacheCreation: usage.cache_creation_input_tokens,
+            split: usage.cache_creation)
+    }
 
+    private static func breakdown(
+        input: Int64?, output: Int64?, cacheRead: Int64?,
+        summedCacheCreation summed: Int64?, split: RawJSONLine.RawCacheCreation?
+    ) -> TokenBreakdown {
         // Cache-creation sub-breakdown: prefer the explicit 5m/1h fields
         // when present (Claude Code began emitting them in 2.1.x). Older
         // lines only have the summed `cache_creation_input_tokens` —
         // we treat that as the 5m (cheaper) tier so we never
         // over-estimate cost on legacy data.
-        let explicit5m = usage.cache_creation?.ephemeral_5m_input_tokens ?? 0
-        let explicit1h = usage.cache_creation?.ephemeral_1h_input_tokens ?? 0
-        let summedCacheCreation = usage.cache_creation_input_tokens ?? 0
+        let explicit5m = split?.ephemeral_5m_input_tokens ?? 0
+        let explicit1h = split?.ephemeral_1h_input_tokens ?? 0
+        let summedCacheCreation = summed ?? 0
 
         let cc5m: Int64
         let cc1h: Int64
@@ -153,9 +240,9 @@ public enum JSONLLineParser {
         }
 
         return TokenBreakdown(
-            inputTokens: usage.input_tokens ?? 0,
-            outputTokens: usage.output_tokens ?? 0,
-            cacheReadTokens: usage.cache_read_input_tokens ?? 0,
+            inputTokens: input ?? 0,
+            outputTokens: output ?? 0,
+            cacheReadTokens: cacheRead ?? 0,
             cacheCreation5mTokens: cc5m,
             cacheCreation1hTokens: cc1h
         )

@@ -16,18 +16,21 @@ public final class HourlyAggregateRecomputer {
     private let container: ModelContainer
     private let context: ModelContext
     private let mode: CostMode
-    private let pricingTable: PricingTable
+    /// Prices to recompute with; nil = the process-wide `SampleCostCache`.
+    /// Tests pin one so a parallel suite installing another ledger can't
+    /// change what they compute.
+    private let pricing: PricingTable.Snapshot?
 
     public init(
         container: ModelContainer,
         context: ModelContext,
         mode: CostMode = .auto,
-        pricingTable: PricingTable = .shared
+        pricing: PricingTable.Snapshot? = nil
     ) {
         self.container = container
         self.context = context
         self.mode = mode
-        self.pricingTable = pricingTable
+        self.pricing = pricing
     }
 
     public struct Stats: Sendable {
@@ -65,14 +68,11 @@ public final class HourlyAggregateRecomputer {
             // worker's separate context reads — same coordination
             // dance as the other recomputers.
             try context.save()
-            if mode == .calculate {
-                try? await pricingTable.ensureLoaded()
-            }
             let worker = HourlyAggregateBulkWorker(modelContainer: container)
             return try await worker.bulkRecompute(
                 buckets: buckets,
                 mode: mode,
-                pricingTable: pricingTable,
+                pricing: pricing ?? SampleCostCache.current(),
                 snapshots: snapshots ?? SampleSnapshotCache(container: container)
             )
         }
@@ -82,9 +82,7 @@ public final class HourlyAggregateRecomputer {
         // nonisolated) — see the same comment in
         // `AggregateRecomputer.recompute` for why we don't `await`
         // `PricingTable.shared` here.
-        let pricingSnapshot: PricingTable.Snapshot = (mode == .display)
-            ? PricingTable.Snapshot(pricingByModel: [:])
-            : SampleCostCache.current()
+        let pricingSnapshot = pricing ?? SampleCostCache.current()
         for bucket in buckets {
             stats.bucketsRecomputed += 1
             let pendingForBucket = pending[bucket] ?? []
@@ -94,7 +92,7 @@ public final class HourlyAggregateRecomputer {
                                  snapshot: pricingSnapshot, stats: &stats) {
                 continue
             }
-            try await recomputeOne(bucket: bucket, stats: &stats)
+            try recomputeOne(bucket: bucket, snapshot: pricingSnapshot, stats: &stats)
         }
         // No save here — `ScanCoordinator.runScanCycle` does one
         // terminal save per cycle that commits this recomputer's
@@ -124,28 +122,19 @@ public final class HourlyAggregateRecomputer {
         ).first
         guard let existing else { return false }
 
-        var perAccount: [String: (sum: TokenBreakdown, cost: Double, count: Int)] = [:]
+        var perAccount: [String: AccountHourBucket] = [:]
+        var components = existing.costComponents
+        var pricedBy = PricedBy(stored: existing.pricedByRecordIds)
         for sample in pending {
             existing.inputTokens += sample.inputTokens
             existing.outputTokens += sample.outputTokens
             existing.cacheReadTokens += sample.cacheReadTokens
             existing.cacheCreation5mTokens += sample.cacheCreation5mTokens
             existing.cacheCreation1hTokens += sample.cacheCreation1hTokens
-            let breakdown = TokenBreakdown(
-                inputTokens: sample.inputTokens,
-                outputTokens: sample.outputTokens,
-                cacheReadTokens: sample.cacheReadTokens,
-                cacheCreation5mTokens: sample.cacheCreation5mTokens,
-                cacheCreation1hTokens: sample.cacheCreation1hTokens
-            )
-            let sampleCost = CostCalculator.cost(
-                storedCostUSD: sample.sourceCostUSD,
-                model: sample.model,
-                breakdown: breakdown,
-                mode: mode,
-                snapshot: snapshot
-            )
-            existing.totalCostUSD += sampleCost
+            let breakdown = sample.breakdown
+            let sampleCost = CostCalculator.sampleCost(sample, mode: mode, snapshot: snapshot)
+            components += sampleCost.components
+            pricedBy.add(sampleCost.pricedBy)
 
             // Accumulated and written once per account below. The daily
             // rollup learned this the expensive way: writing per sample cost
@@ -153,12 +142,15 @@ public final class HourlyAggregateRecomputer {
             // uncommitted inserts has to merge them — a cost charged to
             // whoever fetches next, not to the code that caused it.
             let accountKey = sample.accountId ?? AccountDailyAggregate.unattributedKey
-            var acc = perAccount[accountKey] ?? (TokenBreakdown(), 0, 0)
+            var acc = perAccount[accountKey] ?? AccountHourBucket()
             acc.sum.add(breakdown)
-            acc.cost += sampleCost
+            acc.cost += sampleCost.components
             acc.count += 1
             perAccount[accountKey] = acc
         }
+        existing.costComponents = components
+        let stored = pricedBy.stored
+        if stored != existing.pricedByRecordIds { existing.pricedByRecordIds = stored }
         for (accountId, acc) in perAccount {
             try addToAccountHourlyRow(
                 context: context, accountId: accountId, date: bucket.date,
@@ -171,7 +163,9 @@ public final class HourlyAggregateRecomputer {
         return true
     }
 
-    private func recomputeOne(bucket: DateHourModelTriple, stats: inout Stats) async throws {
+    private func recomputeOne(
+        bucket: DateHourModelTriple, snapshot: PricingTable.Snapshot, stats: inout Stats
+    ) throws {
         let dateString = bucket.date
         let modelString = bucket.model
         // Predicating on `sampledAt` would force a range scan; instead
@@ -229,85 +223,64 @@ public final class HourlyAggregateRecomputer {
             return
         }
 
-        var sum = TokenBreakdown()
-        var totalCost: Double = 0
-        var pricing: LiteLLMModelPricing?
-        var pricingLoaded = false
-        var perAccount: [String: (sum: TokenBreakdown, cost: Double, count: Int)] = [:]
-
-        for sample in samples {
-            let breakdown = TokenBreakdown(
-                inputTokens: sample.inputTokens,
-                outputTokens: sample.outputTokens,
-                cacheReadTokens: sample.cacheReadTokens,
-                cacheCreation5mTokens: sample.cacheCreation5mTokens,
-                cacheCreation1hTokens: sample.cacheCreation1hTokens
-            )
-            sum.add(breakdown)
-
-            let sampleCost: Double
-            switch mode {
-            case .display:
-                sampleCost = sample.sourceCostUSD ?? 0
-            case .auto:
-                if let stored = sample.sourceCostUSD {
-                    sampleCost = stored
-                } else {
-                    if !pricingLoaded {
-                        try? await pricingTable.ensureLoaded()
-                        pricing = await pricingTable.pricing(for: modelString)
-                        pricingLoaded = true
-                    }
-                    sampleCost = pricing.map {
-                        CostCalculator.cost(breakdown: breakdown, pricing: $0)
-                    } ?? 0
-                }
-            case .calculate:
-                if !pricingLoaded {
-                    pricing = await pricingTable.pricing(for: modelString)
-                    pricingLoaded = true
-                }
-                sampleCost = pricing.map {
-                    CostCalculator.cost(breakdown: breakdown, pricing: $0)
-                } ?? 0
-            }
-            totalCost += sampleCost
-
-            let accountKey = sample.accountId ?? AccountDailyAggregate.unattributedKey
-            var acc = perAccount[accountKey] ?? (TokenBreakdown(), 0, 0)
-            acc.sum.add(breakdown)
-            acc.cost += sampleCost
-            acc.count += 1
-            perAccount[accountKey] = acc
-        }
-
+        let values = HourBucketValues(samples: samples, mode: mode, snapshot: snapshot)
         try syncAccountHourlyRows(
             context: context, date: dateString, hour: targetHour,
-            model: modelString, perAccount: perAccount)
-
+            model: modelString, perAccount: values.perAccount)
         if let existing {
-            existing.inputTokens = sum.inputTokens
-            existing.outputTokens = sum.outputTokens
-            existing.cacheReadTokens = sum.cacheReadTokens
-            existing.cacheCreation5mTokens = sum.cacheCreation5mTokens
-            existing.cacheCreation1hTokens = sum.cacheCreation1hTokens
-            existing.totalCostUSD = totalCost
-            existing.sampleCount = samples.count
+            values.write(to: existing)
         } else {
-            context.insert(HourlyAggregate(
-                date: dateString,
-                hour: targetHour,
-                model: modelString,
-                inputTokens: sum.inputTokens,
-                outputTokens: sum.outputTokens,
-                cacheReadTokens: sum.cacheReadTokens,
-                cacheCreation5mTokens: sum.cacheCreation5mTokens,
-                cacheCreation1hTokens: sum.cacheCreation1hTokens,
-                totalCostUSD: totalCost,
-                sampleCount: samples.count
-            ))
+            let row = HourlyAggregate(date: dateString, hour: targetHour, model: modelString)
+            values.write(to: row)
+            context.insert(row)
         }
         stats.aggregatesUpserted += 1
+    }
+}
+
+/// One account's share of an hour bucket.
+struct AccountHourBucket {
+    var sum = TokenBreakdown()
+    var cost = CostComponents.zero
+    var count = 0
+}
+
+/// A (date, hour, model) bucket's totals, computed once — the hourly
+/// counterpart of `DailyBucketValues`, shared by the per-bucket path and the
+/// bulk worker for the same reason.
+struct HourBucketValues {
+    var sum = TokenBreakdown()
+    var cost = CostComponents.zero
+    var count = 0
+    var pricedBy = PricedBy()
+    var perAccount: [String: AccountHourBucket] = [:]
+
+    init<S: AggregatableSample>(samples: [S], mode: CostMode, snapshot: PricingTable.Snapshot) {
+        for sample in samples {
+            let breakdown = sample.breakdown
+            sum.add(breakdown)
+            let c = CostCalculator.sampleCost(sample, mode: mode, snapshot: snapshot)
+            cost += c.components
+            pricedBy.add(c.pricedBy)
+            count += 1
+            let key = sample.accountId ?? AccountDailyAggregate.unattributedKey
+            var acc = perAccount[key] ?? AccountHourBucket()
+            acc.sum.add(breakdown)
+            acc.cost += c.components
+            acc.count += 1
+            perAccount[key] = acc
+        }
+    }
+
+    func write(to row: HourlyAggregate) {
+        row.inputTokens = sum.inputTokens
+        row.outputTokens = sum.outputTokens
+        row.cacheReadTokens = sum.cacheReadTokens
+        row.cacheCreation5mTokens = sum.cacheCreation5mTokens
+        row.cacheCreation1hTokens = sum.cacheCreation1hTokens
+        row.costComponents = cost
+        row.sampleCount = count
+        row.pricedByRecordIds = pricedBy.stored
     }
 }
 
@@ -323,7 +296,7 @@ actor HourlyAggregateBulkWorker {
     func bulkRecompute(
         buckets: Set<DateHourModelTriple>,
         mode: CostMode,
-        pricingTable: PricingTable,
+        pricing: PricingTable.Snapshot,
         snapshots: SampleSnapshotCache
     ) async throws -> HourlyAggregateRecomputer.Stats {
         var stats = HourlyAggregateRecomputer.Stats(
@@ -334,26 +307,33 @@ actor HourlyAggregateBulkWorker {
         // semantics the per-pair path and `SamplePersister.localHour`
         // use everywhere else.
         // Shared with the daily and project workers — see SampleSnapshot.
-        var grouped: [DateHourModelTriple: [SampleSnapshot.Row]] = [:]
-        for s in try snapshots.snapshot().rows {
-            // The STORED hour, not a fresh derivation — re-deriving is what
-            // let historical buckets drift across a DST/timezone change.
-            let h = s.localHour
-            grouped[DateHourModelTriple(date: s.date, hour: h, model: s.model),
-                    default: []].append(s)
+        let table = try snapshots.snapshot()
+        // The STORED hour, not a fresh derivation — re-deriving is what let
+        // historical buckets drift across a DST/timezone change.
+        let grouped = table.positions(of: buckets) {
+            DateHourModelTriple(date: $0.date, hour: $0.localHour, model: $0.model)
         }
         let existingAll = try modelContext.fetch(FetchDescriptor<HourlyAggregate>())
         var existingByKey: [String: HourlyAggregate] = [:]
         for agg in existingAll { existingByKey[agg.dateHourModelKey] = agg }
+        // The per-account rows too, once, rather than a fetch per bucket: a
+        // full rebuild has thousands of hour buckets, and that fetch each was
+        // most of this phase on a real store (AGENTS.md, "a per-item fetch is
+        // a bulk-path bug"). Each bucket is visited once, so nothing inserted
+        // below can belong to a bucket still to come.
+        var accountRows: [DateHourModelTriple: [AccountHourlyAggregate]] = [:]
+        for row in try modelContext.fetch(FetchDescriptor<AccountHourlyAggregate>()) {
+            accountRows[DateHourModelTriple(date: row.date, hour: row.hour, model: row.model),
+                        default: []].append(row)
+        }
 
-        var pricingCache: [String: LiteLLMModelPricing?] = [:]
         var processed = 0
         for bucket in buckets {
             stats.bucketsRecomputed += 1
             let key = HourlyAggregate.makeKey(
                 date: bucket.date, hour: bucket.hour, model: bucket.model)
             let existing = existingByKey[key]
-            let samples = grouped[bucket] ?? []
+            let samples = table.rows(at: grouped[bucket])
 
             if samples.isEmpty {
                 if let existing {
@@ -362,73 +342,21 @@ actor HourlyAggregateBulkWorker {
                 }
                 try syncAccountHourlyRows(
                     context: modelContext, date: bucket.date, hour: bucket.hour,
-                    model: bucket.model, perAccount: [:])
+                    model: bucket.model, perAccount: [:], existing: accountRows[bucket] ?? [])
                 continue
             }
 
-            var sum = TokenBreakdown()
-            var totalCost: Double = 0
-            var perAccount: [String: (sum: TokenBreakdown, cost: Double, count: Int)] = [:]
-            for sample in samples {
-                let breakdown = sample.breakdown
-                sum.add(breakdown)
-
-                let sampleCost: Double
-                switch mode {
-                case .display:
-                    sampleCost = sample.sourceCostUSD ?? 0
-                case .auto:
-                    if let stored = sample.sourceCostUSD {
-                        sampleCost = stored
-                    } else {
-                        let pricing = try await pricing(
-                            for: bucket.model, cache: &pricingCache, pricingTable: pricingTable)
-                        sampleCost = pricing.map {
-                            CostCalculator.cost(breakdown: breakdown, pricing: $0)
-                        } ?? 0
-                    }
-                case .calculate:
-                    let pricing = try await pricing(
-                        for: bucket.model, cache: &pricingCache, pricingTable: pricingTable)
-                    sampleCost = pricing.map {
-                        CostCalculator.cost(breakdown: breakdown, pricing: $0)
-                    } ?? 0
-                }
-                totalCost += sampleCost
-
-                let accountKey = sample.accountId ?? AccountDailyAggregate.unattributedKey
-                var acc = perAccount[accountKey] ?? (TokenBreakdown(), 0, 0)
-                acc.sum.add(breakdown)
-                acc.cost += sampleCost
-                acc.count += 1
-            perAccount[accountKey] = acc
-            }
-
+            let values = HourBucketValues(samples: samples, mode: mode, snapshot: pricing)
             try syncAccountHourlyRows(
                 context: modelContext, date: bucket.date, hour: bucket.hour,
-                model: bucket.model, perAccount: perAccount)
-
+                model: bucket.model, perAccount: values.perAccount,
+                existing: accountRows[bucket] ?? [])
             if let existing {
-                existing.inputTokens = sum.inputTokens
-                existing.outputTokens = sum.outputTokens
-                existing.cacheReadTokens = sum.cacheReadTokens
-                existing.cacheCreation5mTokens = sum.cacheCreation5mTokens
-                existing.cacheCreation1hTokens = sum.cacheCreation1hTokens
-                existing.totalCostUSD = totalCost
-                existing.sampleCount = samples.count
+                values.write(to: existing)
             } else {
-                modelContext.insert(HourlyAggregate(
-                    date: bucket.date,
-                    hour: bucket.hour,
-                    model: bucket.model,
-                    inputTokens: sum.inputTokens,
-                    outputTokens: sum.outputTokens,
-                    cacheReadTokens: sum.cacheReadTokens,
-                    cacheCreation5mTokens: sum.cacheCreation5mTokens,
-                    cacheCreation1hTokens: sum.cacheCreation1hTokens,
-                    totalCostUSD: totalCost,
-                    sampleCount: samples.count
-                ))
+                let row = HourlyAggregate(date: bucket.date, hour: bucket.hour, model: bucket.model)
+                values.write(to: row)
+                modelContext.insert(row)
             }
             stats.aggregatesUpserted += 1
             processed += 1
@@ -440,17 +368,6 @@ actor HourlyAggregateBulkWorker {
         try modelContext.save()
         return stats
     }
-
-    private func pricing(
-        for model: String,
-        cache: inout [String: LiteLLMModelPricing?],
-        pricingTable: PricingTable
-    ) async throws -> LiteLLMModelPricing? {
-        if let cached = cache[model] { return cached }
-        let resolved = await pricingTable.pricing(for: model)
-        cache[model] = resolved
-        return resolved
-    }
 }
 
 /// Bring `AccountHourlyAggregate` for one (date, hour, model) bucket in line
@@ -460,14 +377,18 @@ actor HourlyAggregateBulkWorker {
 /// path and the bulk worker live on different actors with different contexts,
 /// and a rollup written by two copies of the same logic drifts depending on
 /// which one last touched a bucket.
+///
+/// `existing` is the bucket's current rows when the caller already has them
+/// (the bulk path reads them all at once); nil fetches them.
 func syncAccountHourlyRows(
     context: ModelContext,
     date: String,
     hour: Int,
     model: String,
-    perAccount: [String: (sum: TokenBreakdown, cost: Double, count: Int)]
+    perAccount: [String: AccountHourBucket],
+    existing prefetched: [AccountHourlyAggregate]? = nil
 ) throws {
-    let existing = try context.fetch(
+    let existing = try prefetched ?? context.fetch(
         FetchDescriptor<AccountHourlyAggregate>(
             predicate: #Predicate<AccountHourlyAggregate> {
                 $0.date == date && $0.hour == hour && $0.model == model
@@ -484,19 +405,21 @@ func syncAccountHourlyRows(
             row.cacheReadTokens = bucket.sum.cacheReadTokens
             row.cacheCreation5mTokens = bucket.sum.cacheCreation5mTokens
             row.cacheCreation1hTokens = bucket.sum.cacheCreation1hTokens
-            row.totalCostUSD = bucket.cost
+            row.costComponents = bucket.cost
             row.sampleCount = bucket.count
         } else {
-            context.insert(AccountHourlyAggregate(
+            let row = AccountHourlyAggregate(
                 accountId: accountId, date: date, hour: hour, model: model,
                 inputTokens: bucket.sum.inputTokens,
                 outputTokens: bucket.sum.outputTokens,
                 cacheReadTokens: bucket.sum.cacheReadTokens,
                 cacheCreation5mTokens: bucket.sum.cacheCreation5mTokens,
                 cacheCreation1hTokens: bucket.sum.cacheCreation1hTokens,
-                totalCostUSD: bucket.cost,
+                totalCostUSD: 0,
                 sampleCount: bucket.count
-            ))
+            )
+            row.costComponents = bucket.cost
+            context.insert(row)
         }
     }
     // Whatever is left had no samples this time round. Re-attributing history
@@ -515,7 +438,7 @@ func addToAccountHourlyRow(
     hour: Int,
     model: String,
     breakdown: TokenBreakdown,
-    cost: Double,
+    cost: CostComponents,
     count: Int
 ) throws {
     let key = AccountHourlyAggregate.makeKey(
@@ -533,18 +456,20 @@ func addToAccountHourlyRow(
         existing.cacheReadTokens += breakdown.cacheReadTokens
         existing.cacheCreation5mTokens += breakdown.cacheCreation5mTokens
         existing.cacheCreation1hTokens += breakdown.cacheCreation1hTokens
-        existing.totalCostUSD += cost
+        existing.costComponents = existing.costComponents + cost
         existing.sampleCount += count
     } else {
-        context.insert(AccountHourlyAggregate(
+        let row = AccountHourlyAggregate(
             accountId: accountId, date: date, hour: hour, model: model,
             inputTokens: breakdown.inputTokens,
             outputTokens: breakdown.outputTokens,
             cacheReadTokens: breakdown.cacheReadTokens,
             cacheCreation5mTokens: breakdown.cacheCreation5mTokens,
             cacheCreation1hTokens: breakdown.cacheCreation1hTokens,
-            totalCostUSD: cost,
+            totalCostUSD: 0,
             sampleCount: count
-        ))
+        )
+        row.costComponents = cost
+        context.insert(row)
     }
 }

@@ -153,8 +153,9 @@ These are subtle, easy to miss, and break user-visible numbers:
 
 1. **Cross-file dedup on `${messageId}:${requestId}`.** Resumed sessions
    spawn new JSONL files that replay prior turns. Without dedup, costs
-   inflate 2–3× for active users. Sort files by earliest timestamp first
-   so dedup is deterministic.
+   inflate 2–3× for active users. Which copy is kept must not depend on
+   the order files are read in: it is decided by `ParsedUsageEntry.isKept`
+   (rule 7, then earliest, then file path), the same in both ingest paths.
 2. **Skip `model == "<synthetic>"`** in every aggregation path.
 3. **Stream JSONL line-by-line.** Sessions can be 10MB+; never load whole
    files into memory.
@@ -173,7 +174,11 @@ These are subtle, easy to miss, and break user-visible numbers:
    for *replayed* duplicates) kept the mid-stream snapshot and discarded
    29.5M output tokens — 63% of the output recorded. Precedence lives in
    `ParsedUsageEntry.supersedes`: finished message first, else larger
-   output. Do not "simplify" it back to skip-on-seen. See
+   output. Do not "simplify" it back to skip-on-seen. Both ingest paths
+   reduce a scan's copies to one per key (`CopySelection`) before the
+   persister sees them, and `ArchiveImporter`'s ORDER BY is the same rule
+   in SQL; `IngestParityTests` (`make test-ingest-parity`) fails if the line
+   parser and the bulk importer leave any row differently (#334). See
    `docs/duckdb-archive.md`.
 8. **Verify ingest changes against a REAL store, not a synthetic one.**
    Both performance bugs and the dedup bug above were invisible on a
@@ -958,6 +963,17 @@ view, widget, query, and rollup should follow them. Re-litigating any of
 these wastes effort and risks regressing user-visible cost — search the
 git log for "Views/Widgets: scope @Query" or "HourlyAggregate" or
 "PacerStore + widgets" for the commits that established them.
+
+### Never walk a whole table with `enumerate`; page it with `ModelWalk`
+
+`ModelContext.enumerate(_:batchSize:)` looks like streaming but keeps the
+walk's memory until it ends: on a 746k-row `TokenSample` table it held about
+3.3 GB, and the freed heap stayed dirty afterwards (#337). Pacer then paged
+itself out under system memory pressure and stalled its main thread for
+minutes. Walk a whole table with `ModelWalk.forEach`: fresh-context pages of
+25,000 rows, about 45 MB. Writing walks need the same treatment (#338). A new
+large transient allocation also needs a `MemoryHygiene.relieve` afterwards.
+The hourly `[Memory]` log line is how a regression shows up.
 
 ### Default to scoped fetches; nothing should fetch then filter
 

@@ -35,12 +35,18 @@ public struct SampleSnapshot: Sendable {
         /// `TokenSample.accountId`. nil for turns recorded before the
         /// activation trail existed — see `AccountActivation`.
         public let accountId: String?
+        /// `TokenSample.speed` / `.inferenceGeo` — what selects a premium price.
+        public let speed: String?
+        public let inferenceGeo: String?
 
         public init(
             date: String, model: String, projectPath: String?, sessionId: String?,
             sampledAt: Date, localHour: Int, ccVersion: String?, breakdown: TokenBreakdown,
-            sourceCostUSD: Double?, accountId: String? = nil
+            sourceCostUSD: Double?, accountId: String? = nil,
+            speed: String? = nil, inferenceGeo: String? = nil
         ) {
+            self.speed = speed
+            self.inferenceGeo = inferenceGeo
             self.date = date
             self.model = model
             self.projectPath = projectPath
@@ -60,18 +66,41 @@ public struct SampleSnapshot: Sendable {
 
     /// Project every stored sample. The caller decides *when* — see
     /// `SampleSnapshotCache`, which makes sure that's at most once a cycle.
-    public static func fetch(from context: ModelContext) throws -> SampleSnapshot {
-        let samples = try context.fetch(FetchDescriptor<TokenSample>())
-        return SampleSnapshot(rows: samples.map { sample in
-            Row(date: sample.date,
-                model: sample.model,
-                projectPath: sample.projectPath,
-                sessionId: sample.sessionId,
+    ///
+    /// Paged (#337), not `enumerate`d: the "floor any full walk reaches" that
+    /// #327 measured at ~1.6 GB was `enumerate` itself, which peaked at 3.3 GB
+    /// on a 746k-row store; a whole rebuild through `ModelWalk` peaked at
+    /// 317 MB.
+    public static func fetch(from container: ModelContainer) throws -> SampleSnapshot {
+        var rows: [Row] = []
+        // A SQL COUNT, and it saves ~20 regrowth copies of a 750k-row array.
+        rows.reserveCapacity(try ModelContext(container).fetchCount(FetchDescriptor<TokenSample>()))
+        var descriptor = FetchDescriptor<TokenSample>()
+        // Every column `Row` reads, and nothing else — `dedupKey` and
+        // `originalProjectPath` are the widest strings on the row and no
+        // rollup reads them. SwiftData may ignore this (AGENTS.md); it can't
+        // hurt, because nothing below touches a column left out.
+        descriptor.propertiesToFetch = [
+            \.date, \.model, \.projectPath, \.sessionId, \.sampledAt, \.localHour, \.ccVersion,
+            \.inputTokens, \.outputTokens, \.cacheReadTokens, \.cacheCreation5mTokens,
+            \.cacheCreation1hTokens, \.sourceCostUSD, \.accountId, \.speed, \.inferenceGeo,
+        ]
+        // A few hundred distinct models, projects, accounts and sessions
+        // repeat across the whole table, and each row read back carried its
+        // own copy of every one: ~3M small heap strings for 746k rows,
+        // scattered through the heap and freed together at the end (#337).
+        var strings = StringInterner()
+        try ModelWalk.forEach(descriptor, in: container) { sample in
+            rows.append(Row(
+                date: strings(sample.date),
+                model: strings(sample.model),
+                projectPath: strings(sample.projectPath),
+                sessionId: strings(sample.sessionId),
                 sampledAt: sample.sampledAt,
                 localHour: sample.localHour >= 0
                     ? sample.localHour
                     : Calendar.current.component(.hour, from: sample.sampledAt),
-                ccVersion: sample.ccVersion,
+                ccVersion: strings(sample.ccVersion),
                 breakdown: TokenBreakdown(
                     inputTokens: sample.inputTokens,
                     outputTokens: sample.outputTokens,
@@ -79,8 +108,51 @@ public struct SampleSnapshot: Sendable {
                     cacheCreation5mTokens: sample.cacheCreation5mTokens,
                     cacheCreation1hTokens: sample.cacheCreation1hTokens),
                 sourceCostUSD: sample.sourceCostUSD,
-                accountId: sample.accountId)
-        })
+                accountId: strings(sample.accountId),
+                speed: strings(sample.speed),
+                inferenceGeo: strings(sample.inferenceGeo)))
+        }
+        return SampleSnapshot(rows: rows)
+    }
+
+    /// Where the rows of each key in `wanted` are, in table order.
+    ///
+    /// Positions, not rows (#337). Each bulk worker used to group the whole
+    /// table into per-bucket `[Row]`s — a second copy of every sample, ~200
+    /// bytes apiece, held to the end of its pass, and built for every bucket
+    /// when it rebuilds only the dirty ones. A position is four bytes, and
+    /// only the wanted buckets get any. Table order is what the rollups sum
+    /// costs in, so a bucket's total is unchanged to the bit.
+    func positions<Key: Hashable>(of wanted: Set<Key>, by key: (Row) -> Key?) -> [Key: [Int32]] {
+        var out: [Key: [Int32]] = [:]
+        out.reserveCapacity(wanted.count)
+        for (index, row) in rows.enumerated() {
+            guard let k = key(row), wanted.contains(k) else { continue }
+            out[k, default: []].append(Int32(index))
+        }
+        return out
+    }
+
+    /// One bucket's rows, from `positions(of:by:)`, in table order.
+    func rows(at positions: [Int32]?) -> [Row] {
+        guard let positions else { return [] }
+        return positions.map { rows[Int($0)] }
+    }
+}
+
+/// One shared copy of each distinct string, for a table that repeats a few
+/// hundred values across hundreds of thousands of rows.
+struct StringInterner {
+    private var known: Set<String> = []
+
+    mutating func callAsFunction(_ s: String) -> String {
+        // Up to 15 UTF-8 bytes a String stores inline: nothing to share.
+        guard s.utf8.count > 15 else { return s }
+        return known.insert(s).memberAfterInsert
+    }
+
+    mutating func callAsFunction(_ s: String?) -> String? {
+        s.map { self($0) }
     }
 }
 
@@ -104,15 +176,25 @@ public final class SampleSnapshotCache: @unchecked Sendable {
         self.container = container
     }
 
-    /// The cycle's snapshot, fetched on first call. Uses its own context: the
-    /// callers are separate actors, and a `ModelContext` is not `Sendable`.
+    /// The cycle's snapshot, fetched on first call. Through contexts of its
+    /// own: the callers are separate actors, and a `ModelContext` is not
+    /// `Sendable`.
     public func snapshot() throws -> SampleSnapshot {
         lock.lock()
         defer { lock.unlock() }
         if let cached { return cached }
-        let fresh = try SampleSnapshot.fetch(from: ModelContext(container))
+        let fresh = try SampleSnapshot.fetch(from: container)
         cached = fresh
         return fresh
+    }
+
+    /// Drop the snapshot once the last rollup has read it, rather than when
+    /// the cycle's locals go: on a full rebuild it is every sample, and
+    /// nothing after the session rollup reads it (#337).
+    public func release() {
+        lock.lock()
+        cached = nil
+        lock.unlock()
     }
 }
 
@@ -141,6 +223,9 @@ public protocol AggregatableSample {
     /// per-bucket and bulk paths must split by account identically or the
     /// two rollups disagree depending on which path last touched a bucket.
     var accountId: String? { get }
+    /// What picks a premium price variant: fast mode, US residency (#218).
+    var speed: String? { get }
+    var inferenceGeo: String? { get }
 }
 
 extension SampleSnapshot.Row: AggregatableSample {}

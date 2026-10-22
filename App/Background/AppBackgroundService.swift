@@ -127,6 +127,10 @@ final class AppBackgroundService {
 
         let costMode = PacerPreferences.costMode()
         Log.write("AppBackground", "starting; cost mode: \(costMode)")
+        // An hourly `[Memory]` line (#337): the 1.3 GB footprint that
+        // stalled the main thread under pressure left no trace in this log.
+        MemoryHygiene.report("launch · allocator \(MemoryHygiene.allocatorMode)")
+        MemoryHygiene.startHourlyReports()
 
         // No Keychain prompt on first poll: `KeychainOAuth` shells to
         // `/usr/bin/security` (an Apple-signed binary already trusted
@@ -159,8 +163,9 @@ final class AppBackgroundService {
         // ScanCoordinator.runForever blocks; run it in a child task
         // so the AppKit run loop stays responsive. Errors are logged
         // and the coordinator is cleared so a future start() can
-        // retry.
-        coordinatorTask = Task { [weak self] in
+        // retry. At `loopPriority`, not the main thread's inherited one:
+        // an upgrade's first cycle is minutes of CPU (#326).
+        coordinatorTask = Task(priority: ScanCoordinator.loopPriority) { [weak self] in
             do {
                 try await scanCoordinator.runForever()
                 Log.write("AppBackground", "scan loop exited")
@@ -333,6 +338,9 @@ final class AppBackgroundService {
                 if stale {
                     let count = await PricingTable.shared.modelCount()
                     refreshed = await PricingTable.shared.refresh()
+                    // The curated price history rides the same cadence; it
+                    // is best-effort and never blocks the catalog refresh.
+                    await CuratedPriceHistory.refresh()
                     if refreshed {
                         await SampleCostCache.reload()
                         let after = await PricingTable.shared.modelCount()
@@ -498,7 +506,10 @@ final class AppBackgroundService {
         ) { [weak self] note in
             let samplesChanged = (note.object as? ScanCycleSummary)?.samplesChanged ?? false
             guard samplesChanged else { return }
-            Task { @ScanActor [weak self] in
+            // At the scan loop's priority, not the main queue's: it runs on
+            // the scan actor, and after an upgrade its reconcile is seconds of
+            // work that a higher priority would also lend the actor.
+            Task(priority: ScanCoordinator.loopPriority) { @ScanActor [weak self] in
                 guard let self else { return }
                 self.syncArchive(archiveURL: archiveURL)
             }

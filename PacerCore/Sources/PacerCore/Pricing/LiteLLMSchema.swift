@@ -33,6 +33,24 @@ public struct LiteLLMModelPricing: Decodable, Sendable, Equatable {
     public let maxInputTokens: Int?
     public let maxOutputTokens: Int?
 
+    /// Haiku 5.5's tier: a request whose prompt is over 100k tokens pays
+    /// these for the whole request (#297).
+    public var inputCostPerTokenAbove100kTokens: Double? = nil
+    public var outputCostPerTokenAbove100kTokens: Double? = nil
+    public var cacheCreationInputTokenCostAbove100kTokens: Double? = nil
+    public var cacheReadInputTokenCostAbove100kTokens: Double? = nil
+
+    /// LiteLLM's per-model premiums: `{"fast": 2.0, "us": 1.1}` — fast mode
+    /// and US data residency (#297). Decoded leniently: a value that isn't a
+    /// number is dropped rather than failing the whole entry.
+    public var providerSpecificEntry: NumberMap? = nil
+
+    /// Which catalog supplied this entry, when it wasn't LiteLLM. Written by
+    /// `PricingTable.reconcile` into the cached merged file (LiteLLM itself
+    /// never carries it), so the price ledger can record a model's source.
+    public var pacerSourceName: String? = nil
+    public var pacerSource: PriceSource? { pacerSourceName.flatMap(PriceSource.init(rawValue:)) }
+
     enum CodingKeys: String, CodingKey {
         case inputCostPerToken = "input_cost_per_token"
         case outputCostPerToken = "output_cost_per_token"
@@ -49,6 +67,12 @@ public struct LiteLLMModelPricing: Decodable, Sendable, Equatable {
 
         case maxInputTokens = "max_input_tokens"
         case maxOutputTokens = "max_output_tokens"
+        case pacerSourceName = "pacer_source"
+        case inputCostPerTokenAbove100kTokens = "input_cost_per_token_above_100k_tokens"
+        case outputCostPerTokenAbove100kTokens = "output_cost_per_token_above_100k_tokens"
+        case cacheCreationInputTokenCostAbove100kTokens = "cache_creation_input_token_cost_above_100k_tokens"
+        case cacheReadInputTokenCostAbove100kTokens = "cache_read_input_token_cost_above_100k_tokens"
+        case providerSpecificEntry = "provider_specific_entry"
     }
 
     /// True when this row has any pricing data we can use. LiteLLM
@@ -66,5 +90,33 @@ public struct LiteLLMModelPricing: Decodable, Sendable, Equatable {
             cacheCreationInputTokenCost, cacheReadInputTokenCost,
         ]
         return costs.contains { ($0 ?? 0) > 0 }
+    }
+}
+
+/// A JSON object reduced to its numeric values. Never fails to decode: a
+/// non-object, or a non-numeric value, simply contributes nothing — so one
+/// odd field can't drop a model's whole pricing entry.
+public struct NumberMap: Decodable, Sendable, Equatable {
+    public let values: [String: Double]
+
+    public init(_ values: [String: Double]) { self.values = values }
+
+    public subscript(key: String) -> Double? { values[key] }
+
+    struct AnyKey: CodingKey {
+        var stringValue: String
+        var intValue: Int? { nil }
+        init(stringValue: String) { self.stringValue = stringValue }
+        init?(intValue: Int) { nil }
+    }
+
+    public init(from decoder: Decoder) throws {
+        var out: [String: Double] = [:]
+        if let c = try? decoder.container(keyedBy: AnyKey.self) {
+            for key in c.allKeys {
+                if let v = try? c.decode(Double.self, forKey: key) { out[key.stringValue] = v }
+            }
+        }
+        values = out
     }
 }

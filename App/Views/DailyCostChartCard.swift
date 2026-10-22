@@ -10,6 +10,10 @@ import PacerUI
 /// validated end-to-end against `bun x ccusage daily --json` —
 /// see `CCusageGroundTruthTests.dailyCostsMatchCapturedCcusageSnapshot`.
 ///
+/// Each bar is stacked by priced part (#225) — input, output, cache reads,
+/// 5m and 1h cache writes — coloured by part only, from `PacerCostPalette`.
+/// One encoding per chart: the split by model lives on the Models tab.
+///
 /// Click a bar to drill into the per-day modal (same view the
 /// History tab's heatmap opens). The hover callout in the trailing
 /// slot doubles as an affordance: when there's a selection, it shows
@@ -91,10 +95,13 @@ struct DailyCostChartCard: View {
         let lastN = sortedDates.suffix(30)
         let totals = lastN.map { date -> DailyTotal in
             let rows = grouped[date] ?? []
+            let parts = CostBreakdown.sum(rows, \.costBreakdown).parts
             return DailyTotal(
                 date: date,
                 cost: rows.reduce(0) { $0 + $1.totalCostUSD },
-                tokens: rows.reduce(0) { $0 + $1.inputTokens + $1.outputTokens }
+                tokens: rows.reduce(0) { $0 + $1.inputTokens + $1.outputTokens },
+                parts: parts,
+                topPart: parts.last { $0.usd > 0 }?.component
             )
         }
         let topThree = Set(totals.sorted { $0.cost > $1.cost }.prefix(3).map(\.date))
@@ -133,7 +140,7 @@ struct DailyCostChartCard: View {
                 Text("No daily aggregates yet.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
-                    .frame(height: 200)
+                    .frame(height: 220)
             } else {
                 chart(annotateDates: d.annotateDates, totals: d.dailyTotals)
             }
@@ -153,25 +160,32 @@ struct DailyCostChartCard: View {
 
     private func chart(annotateDates: Set<String>, totals: [DailyTotal]) -> some View {
         let dateAxis = pacerDateAxis(totals.map(\.date))
+        let barWidth = Self.barWidth(count: totals.count)
         return Chart {
             ForEach(totals) { d in
-                // The width cap keeps a sparse series from rendering as one
-                // slab filling the card: a two-day account's "last 30 days"
-                // drew a single bar the width of the chart, which reads as a
-                // rendering fault rather than as "you have two days".
-                BarMark(
-                    x: .value("Date", d.date),
-                    y: .value("Cost", d.cost),
-                    width: Self.barWidth(count: totals.count)
-                )
-                .foregroundStyle(barColor(for: d.cost))
-                .cornerRadius(2)
-
-                .annotation(position: .top, alignment: .center, spacing: 2) {
-                    if annotateDates.contains(d.date) {
-                        Text(pacerCost(d.cost)).help(pacerCostExact(d.cost))
-                            .font(.system(size: 9, weight: .medium))
-                            .foregroundStyle(.secondary)
+                // One segment per priced part, stacked in `CostComponent`
+                // order (the order of the style scale's domain below), so a
+                // part sits at the same height band on every day.
+                ForEach(d.parts) { part in
+                    // The width cap keeps a sparse series from rendering as
+                    // one slab filling the card: a two-day account's "last 30
+                    // days" drew a single bar the width of the chart, which
+                    // reads as a rendering fault rather than as "you have two
+                    // days".
+                    BarMark(
+                        x: .value("Date", d.date),
+                        y: .value("Cost", part.usd),
+                        width: barWidth
+                    )
+                    .foregroundStyle(by: .value("Part", part.component.label))
+                    // The day's total goes on its topmost non-empty segment,
+                    // which is the top of the stack.
+                    .annotation(position: .top, alignment: .center, spacing: 2) {
+                        if part.component == d.topPart, annotateDates.contains(d.date) {
+                            Text(pacerCost(d.cost)).help(pacerCostExact(d.cost))
+                                .font(.system(size: 9, weight: .medium))
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
             }
@@ -181,7 +195,13 @@ struct DailyCostChartCard: View {
                     .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 2]))
             }
         }
-        .frame(height: 200)
+        // 20pt over the old 200 for the legend, so the plot keeps its height.
+        .frame(height: 220)
+        .chartForegroundStyleScale(
+            domain: PacerCostPalette.chartDomain,
+            range: PacerCostPalette.chartRange
+        )
+        .chartLegend(position: .bottom, alignment: .leading, spacing: 8)
         .chartYAxis {
             AxisMarks(position: .leading) { value in
                 AxisGridLine().foregroundStyle(.secondary.opacity(0.18))
@@ -237,12 +257,8 @@ struct DailyCostChartCard: View {
                 onDayTap(date)
             }
         }
-        .accessibilityLabel("Daily cost over the last 30 days")
+        .accessibilityLabel("Daily cost by part over the last 30 days")
         .accessibilityHint(onDayTap != nil ? "Click a bar to drill into that day" : "")
-    }
-
-    private func barColor(for cost: Double) -> Color {
-        cost > 0 ? .accentColor : .accentColor.opacity(0.3)
     }
 }
 
@@ -251,4 +267,9 @@ private struct DailyTotal: Identifiable {
     let date: String
     let cost: Double
     let tokens: Int64
+    /// The day's five priced parts, in stacking order.
+    let parts: [CostBreakdown.Part]
+    /// The last part with any cost — the top of the stack, where the
+    /// day's total is annotated. `nil` on a $0 day.
+    let topPart: CostComponent?
 }

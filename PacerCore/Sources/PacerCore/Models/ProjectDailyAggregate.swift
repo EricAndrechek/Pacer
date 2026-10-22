@@ -35,6 +35,18 @@ public final class ProjectDailyAggregate {
     public var cacheCreation5mTokens: Int64
     public var cacheCreation1hTokens: Int64
     public var totalCostUSD: Double
+    /// The price-ledger tokens that priced this bucket, newline-separated
+    /// and sorted (#217): when one of their keys changes price over this
+    /// bucket's time, the bucket is rebuilt. See `PricedBy`.
+    public var pricedByRecordIds: String = ""
+    /// `totalCostUSD` split by category (#296). The total is always written
+    /// as the sum of these five, so they agree by construction; see
+    /// `RollupCostColumns`.
+    public var costInput: Double = 0
+    public var costOutput: Double = 0
+    public var costCacheRead: Double = 0
+    public var costCacheWrite5m: Double = 0
+    public var costCacheWrite1h: Double = 0
     /// Distinct sessions that wrote into this bucket. Sessions are
     /// per-day-keyed here, so summing across days slightly overcounts a
     /// session that crossed midnight — accepted for the Projects-list

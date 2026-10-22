@@ -298,19 +298,20 @@ private func makeAssistantLine(
     )
 
     let runTask = Task { try await coordinator.runForever() }
-    // Yield enough times for the poller's first cycle to complete.
-    // The cycle is fully synchronous in test mode (stubbed transport,
-    // immediate persistence hop) so a few yields suffice.
-    for _ in 0..<10 { await Task.yield() }
-    // Give the main-actor persist hop a moment to flush.
-    try await Task.sleep(nanoseconds: 50_000_000)
+    // Wait for the poller's first cycle to land, with a deadline, rather than
+    // for a fixed 10 yields + 50 ms: under a loaded full-suite run the
+    // main-actor persist hop sometimes hadn't flushed by then, and the test
+    // failed with no bug.
+    func rows() -> Int {
+        (try? ModelContext(container).fetchCount(FetchDescriptor<RateLimitSample>())) ?? 0
+    }
+    let landed = await eventually { rows() >= 2 }
 
-    await coordinator.stop()
-    try await runTask.value
-
-    let context = ModelContext(container)
-    let count = try context.fetchCount(FetchDescriptor<RateLimitSample>())
-    #expect(count >= 2, "expected the poller to insert at least one snapshot's worth of rows")
+    // Reached whether or not the rows came: a stop that waited out the
+    // poller's next nap used to hang here for its full ten minutes.
+    let stopped = try await stopAndAwait(coordinator, running: runTask)
+    #expect(stopped, "stop() or runForever didn't return")
+    #expect(landed, "expected the poller to insert at least one snapshot's worth of rows, got \(rows())")
 }
 
 @ScanActor

@@ -138,3 +138,11 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             build \
             | (xcbeautify --renderer github-actions || cat)
+
+      # The line parser and the DuckDB bulk importer must leave the same rows
+      # from the same transcripts (#334). PacerCore's own job can't run the
+      # comparison — PacerCore doesn't link DuckDB — so it runs here, where
+      # prepare-build has already restored the framework. A throwaway package,
+      # no cache and no artifacts of its own.
+      - name: Ingest parity (line parser vs bulk importer)
+        run: bin/dev-ingest-parity.sh --fixtures

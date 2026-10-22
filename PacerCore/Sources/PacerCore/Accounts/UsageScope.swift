@@ -16,18 +16,28 @@ public struct DailyRow: Sendable, Equatable, Identifiable {
     public let cacheCreation5mTokens: Int64
     public let cacheCreation1hTokens: Int64
     public let totalCostUSD: Double
+    /// `totalCostUSD` split into its five priced parts (#296), carried so a
+    /// breakdown (#225) reads the same row the total came from.
+    public let cost: CostComponents
 
     public var id: String { "\(date)|\(model)" }
     public var totalTokens: Int64 {
         inputTokens + outputTokens + cacheReadTokens
             + cacheCreation5mTokens + cacheCreation1hTokens
     }
+    public var tokens: TokenBreakdown {
+        TokenBreakdown(
+            inputTokens: inputTokens, outputTokens: outputTokens,
+            cacheReadTokens: cacheReadTokens,
+            cacheCreation5mTokens: cacheCreation5mTokens,
+            cacheCreation1hTokens: cacheCreation1hTokens)
+    }
 
     public init(
         date: String, model: String,
         inputTokens: Int64, outputTokens: Int64, cacheReadTokens: Int64,
         cacheCreation5mTokens: Int64, cacheCreation1hTokens: Int64,
-        totalCostUSD: Double
+        totalCostUSD: Double, cost: CostComponents = .zero
     ) {
         self.date = date
         self.model = model
@@ -37,6 +47,7 @@ public struct DailyRow: Sendable, Equatable, Identifiable {
         self.cacheCreation5mTokens = cacheCreation5mTokens
         self.cacheCreation1hTokens = cacheCreation1hTokens
         self.totalCostUSD = totalCostUSD
+        self.cost = cost
     }
 }
 
@@ -47,7 +58,7 @@ public extension DailyAggregate {
                  cacheReadTokens: cacheReadTokens,
                  cacheCreation5mTokens: cacheCreation5mTokens,
                  cacheCreation1hTokens: cacheCreation1hTokens,
-                 totalCostUSD: totalCostUSD)
+                 totalCostUSD: totalCostUSD, cost: costComponents)
     }
 }
 
@@ -58,7 +69,7 @@ public extension AccountDailyAggregate {
                  cacheReadTokens: cacheReadTokens,
                  cacheCreation5mTokens: cacheCreation5mTokens,
                  cacheCreation1hTokens: cacheCreation1hTokens,
-                 totalCostUSD: totalCostUSD)
+                 totalCostUSD: totalCostUSD, cost: costComponents)
     }
 }
 

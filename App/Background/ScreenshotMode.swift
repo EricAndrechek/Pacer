@@ -1924,7 +1924,7 @@ extension ScreenshotMode {
                 let cost = base * (0.45 + 1.1 * noise(d &* 7 &+ li))
                 let input = Int64(cost * 9_000)
                 let output = Int64(cost * 2_400)
-                ctx.insert(ProjectDailyAggregate(
+                let row = ProjectDailyAggregate(
                     projectPath: path,
                     date: ds,
                     inputTokens: input,
@@ -1934,7 +1934,10 @@ extension ScreenshotMode {
                     sessionCount: 1 + Int(noise(d &+ li) * 3),
                     modelCount: 2,
                     lastActive: day
-                ))
+                )
+                seedParts(row, tokens: TokenBreakdown(inputTokens: input, outputTokens: output,
+                                                      cacheReadTokens: input * 6))
+                ctx.insert(row)
             }
         }
 
@@ -2370,7 +2373,7 @@ extension ScreenshotMode {
             let last = now.addingTimeInterval(-s.ageSeconds)
             let first = last.addingTimeInterval(-s.hours * 3_600)
             let t = tokens(forCost: s.cost)
-            ctx.insert(SessionInfo(
+            let row = SessionInfo(
                 sessionId: "screenshot-session-\(idx)",
                 firstSeenAt: first,
                 lastSeenAt: last,
@@ -2383,7 +2386,10 @@ extension ScreenshotMode {
                 cumulativeCacheCreation5mTokens: t.cache5m,
                 cumulativeCacheCreation1hTokens: 0,
                 topModel: s.model
-            ))
+            )
+            seedParts(row, tokens: TokenBreakdown(inputTokens: t.input, outputTokens: t.output,
+                                                  cacheReadTokens: t.cacheRead, cacheCreation5mTokens: t.cache5m))
+            ctx.insert(row)
         }
     }
 
@@ -2412,6 +2418,20 @@ extension ScreenshotMode {
 
     // MARK: helpers
 
+    /// Split a seeded row's total across the five priced parts (#225), the
+    /// way the rebuild splits a stored cost: weighted by a standard rate card
+    /// (input 1×, output 5×, cache read 0.1×, 5m write 1.25×, 1h write 2×) over
+    /// the row's tokens. Without it every part is zero, and the cost-breakdown
+    /// card and the Models tab's Mix bars render empty in the README shots.
+    private static func seedParts<R: RollupCostColumns>(_ row: R, tokens b: TokenBreakdown) {
+        let weights = CostComponents(
+            input: Double(b.inputTokens), output: Double(b.outputTokens) * 5,
+            cacheRead: Double(b.cacheReadTokens) * 0.1,
+            cacheWrite5m: Double(b.cacheCreation5mTokens) * 1.25,
+            cacheWrite1h: Double(b.cacheCreation1hTokens) * 2)
+        row.costComponents = CostComponents.apportion(row.rollupTotalCostUSD, like: weights, tokens: b)
+    }
+
     /// Token breakdown for a given dollar cost, shaped from real usage:
     /// prompt caching dominates (cache reads ≈ 280× input+output), and
     /// the *non-cached* input is tiny next to the generated output
@@ -2426,25 +2446,31 @@ extension ScreenshotMode {
         _ ctx: ModelContext, date: String, model: String, cost: Double
     ) {
         let t = tokens(forCost: cost)
-        ctx.insert(DailyAggregate(
+        let row = DailyAggregate(
             date: date, model: model,
             inputTokens: t.input, outputTokens: t.output,
             cacheReadTokens: t.cacheRead, cacheCreation5mTokens: t.cache5m,
             cacheCreation1hTokens: 0, totalCostUSD: cost
-        ))
+        )
+        seedParts(row, tokens: TokenBreakdown(inputTokens: t.input, outputTokens: t.output,
+                                              cacheReadTokens: t.cacheRead, cacheCreation5mTokens: t.cache5m))
+        ctx.insert(row)
     }
 
     private static func insertHourly(
         _ ctx: ModelContext, date: String, hour: Int, model: String, cost: Double
     ) {
         let t = tokens(forCost: cost)
-        ctx.insert(HourlyAggregate(
+        let row = HourlyAggregate(
             date: date, hour: hour, model: model,
             inputTokens: t.input, outputTokens: t.output,
             cacheReadTokens: t.cacheRead, cacheCreation5mTokens: t.cache5m,
             cacheCreation1hTokens: 0, totalCostUSD: cost,
             sampleCount: 4 + Int(cost / 2)
-        ))
+        )
+        seedParts(row, tokens: TokenBreakdown(inputTokens: t.input, outputTokens: t.output,
+                                              cacheReadTokens: t.cacheRead, cacheCreation5mTokens: t.cache5m))
+        ctx.insert(row)
     }
 
     /// Deterministic [0,1) pseudo-noise — no `Math.random`, so a re-run

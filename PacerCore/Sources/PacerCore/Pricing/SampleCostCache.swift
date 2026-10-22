@@ -30,15 +30,30 @@ import Foundation
 /// which stopped being true when they started reading it and cost a day's
 /// project costs their `claude-fable-5` share before `make verify-data`
 /// caught it.
+///
+/// **Two layers since #296.** The catalog (`PricingTable`'s current rates) is
+/// loaded here, but samples are priced by the *ledger* — dated records, read
+/// from the store by `ScanCoordinator` and installed with `installLedger`.
+/// Until that has happened, the snapshot carries a provisional ledger built
+/// from the catalog and the bundled curated history; `ScanCoordinator`
+/// installs the real one before it recomputes anything, so only views can
+/// briefly see the stand-in.
 @MainActor
 public enum SampleCostCache {
     nonisolated(unsafe) private static var snapshotStorage: PricingTable.Snapshot =
-        PricingTable.Snapshot(pricingByModel: [:])
+        PricingTable.Snapshot(pricingByModel: [:], ledger: .empty)
+    nonisolated(unsafe) private static var curatedStorage: CuratedPriceHistory = .empty
+    nonisolated(unsafe) private static var hasStoreLedger = false
 
     /// Latest pricing snapshot. Sync. Empty until `reload()` has been
     /// awaited at least once. Safe to call from any thread.
     public static nonisolated func current() -> PricingTable.Snapshot {
         snapshotStorage
+    }
+
+    /// The curated price history last loaded by `reload()`.
+    public static nonisolated func curated() -> CuratedPriceHistory {
+        curatedStorage
     }
 
     /// Whether `reload()` has produced anything. False means every
@@ -47,33 +62,67 @@ public enum SampleCostCache {
         !snapshotStorage.pricingByModel.isEmpty
     }
 
-    nonisolated(unsafe) private static var generationStorage: UInt64 = 0
+    /// Whether the ledger in use came from the store rather than being the
+    /// provisional stand-in.
+    public static nonisolated var hasLedgerFromStore: Bool { hasStoreLedger }
 
-    /// Bumped every time the snapshot's prices actually change — not on
-    /// every `reload()`, which runs on each cost-mode flip and pricing
-    /// refresh and usually installs identical prices. Anything that caches
-    /// a cost computed from `current()` compares this to know its cached
-    /// cost is stale: `ScanCoordinator` forgets `SessionRollupCache` on a
-    /// change, since those cached values bake the old prices into
+    nonisolated(unsafe) private static var generationStorage: UInt64 = 0
+    nonisolated(unsafe) private static var catalogGenerationStorage: UInt64 = 0
+
+    /// Bumped every time the prices samples are priced with actually change
+    /// — the ledger, not every `reload()`, which runs on each cost-mode flip
+    /// and pricing refresh and usually installs identical prices. Anything
+    /// that caches a cost computed from `current()` compares this to know its
+    /// cached cost is stale: `ScanCoordinator` forgets `SessionRollupCache` on
+    /// a change, since those cached values bake the old prices into
     /// `totalCostUSD` and the fast path would keep adding to them.
     public static nonisolated var generation: UInt64 { generationStorage }
 
+    /// Bumped when the catalog or the curated file changes — the inputs the
+    /// ledger is synced from. `ScanCoordinator` re-syncs the ledger when it
+    /// moves.
+    public static nonisolated var catalogGeneration: UInt64 { catalogGenerationStorage }
+
     /// Load (if needed) and atomically refresh the snapshot. Call
     /// from `applicationDidFinishLaunching` and on cost-mode change.
-    public static func reload(_ table: PricingTable = .shared) async {
+    public static func reload(_ table: PricingTable = .shared, curatedCacheURL: URL? = nil) async {
         try? await table.ensureLoaded()
-        install(await table.snapshot())
+        let catalog = await table.snapshot()
+        install(catalog: catalog, curated: CuratedPriceHistory.load(cacheURL: curatedCacheURL))
     }
 
-    /// Replace the snapshot, bumping `generation` only if prices changed.
-    /// Comparing ~2,700 entries is cheap next to how rarely this runs.
-    static func install(_ snap: PricingTable.Snapshot) {
+    /// Replace the catalog, keeping the store's ledger once there is one.
+    static func install(catalog snap: PricingTable.Snapshot, curated: CuratedPriceHistory = .empty) {
         // `nonisolated(unsafe)` storage above lets readers from any
         // actor get the value sync; the write is single-threaded
         // because this is @MainActor-isolated.
-        guard snap.pricingByModel != snapshotStorage.pricingByModel else { return }
+        let catalogChanged = snap.pricingByModel != snapshotStorage.pricingByModel
+        let curatedChanged = curated != curatedStorage
+        guard catalogChanged || curatedChanged else { return }
+        curatedStorage = curated
+        catalogGenerationStorage &+= 1
+        let ledger = hasStoreLedger
+            ? snapshotStorage.ledger
+            : PriceLedger.provisional(catalog: snap.pricingByModel, curated: curated.records)
+        let previous = snapshotStorage.ledger
+        snapshotStorage = snap.with(ledger: ledger)
+        if !ledger.samePrices(as: previous) { generationStorage &+= 1 }
+    }
+
+    /// Kept for callers that install a ready snapshot (tests).
+    static func install(_ snap: PricingTable.Snapshot) {
+        let previous = snapshotStorage.ledger
         snapshotStorage = snap
-        generationStorage &+= 1
+        if !snap.ledger.samePrices(as: previous) { generationStorage &+= 1 }
+    }
+
+    /// Install the ledger read from the store. From here on, `reload()`
+    /// updates the catalog but keeps this ledger until the next install.
+    public static func installLedger(_ ledger: PriceLedger) {
+        hasStoreLedger = true
+        let previous = snapshotStorage.ledger
+        snapshotStorage = snapshotStorage.with(ledger: ledger)
+        if !ledger.samePrices(as: previous) { generationStorage &+= 1 }
     }
 }
 
@@ -84,26 +133,11 @@ public extension TokenSample {
     /// scattered `sourceCostUSD ?? 0` blocks that silently dropped
     /// the calculate-mode fallback.
     ///
-    /// Recomputer code paths (AggregateRecomputer, etc.) keep their
-    /// own pricing-table loading because they run during scan cycles
-    /// and need to survive process restarts where the cache hasn't
-    /// warmed yet. Views always run after launch, so the cache is
-    /// always populated.
+    /// The recomputers price through the same cache (and the same
+    /// `CostCalculator.sampleCost`), so a view and a rollup cannot disagree
+    /// about a sample's cost.
     @MainActor
     func effectiveCostUSD(mode: CostMode) -> Double {
-        let breakdown = TokenBreakdown(
-            inputTokens: inputTokens,
-            outputTokens: outputTokens,
-            cacheReadTokens: cacheReadTokens,
-            cacheCreation5mTokens: cacheCreation5mTokens,
-            cacheCreation1hTokens: cacheCreation1hTokens
-        )
-        return CostCalculator.cost(
-            storedCostUSD: sourceCostUSD,
-            model: model,
-            breakdown: breakdown,
-            mode: mode,
-            snapshot: SampleCostCache.current()
-        )
+        CostCalculator.cost(self, mode: mode, snapshot: SampleCostCache.current())
     }
 }

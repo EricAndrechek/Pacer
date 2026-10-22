@@ -190,6 +190,9 @@ final class PacerAPISnapshotRefresher: @unchecked Sendable {
         }
         for observer in oldObservers { NotificationCenter.default.removeObserver(observer) }
         oldTimer?.cancel()
+        // A build already running finishes against it and leaves answers
+        // behind; the next start's first build simply reads afresh.
+        PacerAPISnapshot.releaseKeptState()
         // The watch is parked on an observation that only resumes on the next
         // change; it exits then, without triggering, because it was cancelled.
         oldWatch?.cancel()
@@ -278,6 +281,10 @@ final class PacerAPISnapshotRefresher: @unchecked Sendable {
         let startedAt = Date()
         let result = Result { try PacerAPISnapshot.build(now: startedAt) }
         let elapsed = Date().timeIntervalSince(startedAt)
+        // Every build reads the window's turns and every account's rollups
+        // into a throwaway context; rate-limited, so a quiet machine isn't
+        // walking its heap every 15 s (#337).
+        MemoryHygiene.relieve(minimumInterval: MemoryHygiene.recurringReliefInterval)
 
         typealias Outcome = (wanted: Bool, first: Bool,
                              broadcast: PacerAPISnapshot?,

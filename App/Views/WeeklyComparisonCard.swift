@@ -72,15 +72,16 @@ struct WeeklyComparisonCard: View {
 
         var totalTokens: Int64 { inputTokens + outputTokens }
         var activeDays: Int { distinctDates.filter { _ in true }.count }
-        /// Standard cache hit rate: reads / (reads + writes). Matches
-        /// the formula used in TodayDetailsCard. Cache writes (5m + 1h
-        /// creation) cost 1.25–2× input; reads cost ~10% — so the
-        /// hit-rate framing is the right efficiency lens.
+        /// The shared cache hit rate (`TokenBreakdown.cacheHitRatio`,
+        /// #225): reads over every prompt token. The same number Today,
+        /// Day detail and the cost breakdowns show.
         var cacheHitRatio: Double {
-            let written = cacheCreation5mTokens + cacheCreation1hTokens
-            let denom = Double(cacheReadTokens + written)
-            guard denom > 0 else { return 0 }
-            return Double(cacheReadTokens) / denom
+            TokenBreakdown(
+                inputTokens: inputTokens, outputTokens: outputTokens,
+                cacheReadTokens: cacheReadTokens,
+                cacheCreation5mTokens: cacheCreation5mTokens,
+                cacheCreation1hTokens: cacheCreation1hTokens
+            ).cacheHitRatio ?? 0
         }
         /// Cost per million tokens — orientation-invariant productivity
         /// metric. Numbers in the $1–$15 range are typical for Claude

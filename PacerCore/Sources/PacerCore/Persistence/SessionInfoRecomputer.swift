@@ -17,7 +17,10 @@ public final class SessionInfoRecomputer {
     private let container: ModelContainer
     private let context: ModelContext
     private let mode: CostMode
-    private let pricingTable: PricingTable
+    /// Prices to recompute with; nil = the process-wide `SampleCostCache`.
+    /// Tests pin one so a parallel suite installing another ledger can't
+    /// change what they compute.
+    private let pricing: PricingTable.Snapshot?
     private let cache: SessionRollupCache
 
     /// `cache` should outlive the recomputer — `ScanCoordinator` holds one for
@@ -27,13 +30,13 @@ public final class SessionInfoRecomputer {
         container: ModelContainer,
         context: ModelContext,
         mode: CostMode = .auto,
-        pricingTable: PricingTable = .shared,
-        cache: SessionRollupCache = SessionRollupCache()
+        cache: SessionRollupCache = SessionRollupCache(),
+        pricing: PricingTable.Snapshot? = nil
     ) {
         self.container = container
         self.context = context
         self.mode = mode
-        self.pricingTable = pricingTable
+        self.pricing = pricing
         self.cache = cache
     }
 
@@ -74,13 +77,9 @@ public final class SessionInfoRecomputer {
     ) async throws -> Stats {
         var stats = Stats(sessionsRecomputed: 0, sessionsUpserted: 0, sessionsDeleted: 0)
         if sessionIds.isEmpty { return stats }
-        // Sync pricing snapshot via `SampleCostCache.current()` for the
-        // per-session path — matches the same change in
-        // `AggregateRecomputer.recompute`. The bulk path below still
-        // awaits because it runs off-MainActor (no contention).
-        let snapshot: PricingTable.Snapshot = (mode == .display)
-            ? PricingTable.Snapshot(pricingByModel: [:])
-            : SampleCostCache.current()
+        // One pricing snapshot for every path, per-session and bulk — see
+        // the same comment in `AggregateRecomputer.recompute`.
+        let snapshot = pricing ?? SampleCostCache.current()
         if sessionIds.count >= Self.bulkRecomputeThreshold {
             // The bulk worker writes these rows from another context and
             // does not seed the cache, so what the cache holds for them is
@@ -405,7 +404,9 @@ extension SessionRollupValues {
         row.lastSeenAt = lastSeenAt
         row.projectPath = projectPath ?? ""
         row.ccVersion = ccVersion
-        row.cumulativeCostUSD = totalCostUSD
+        row.costComponents = cost
+        let stored = pricedBy.stored
+        if stored != row.pricedByRecordIds { row.pricedByRecordIds = stored }
         row.cumulativeInputTokens = inputTokens
         row.cumulativeOutputTokens = outputTokens
         row.cumulativeCacheReadTokens = cacheReadTokens
@@ -419,7 +420,7 @@ extension SessionRollupValues {
         row.lastSeenAt = lastSeenAt
         row.projectPath = projectPath ?? ""
         row.ccVersion = ccVersion
-        row.cumulativeCostUSD = totalCostUSD
+        row.costComponents = cost
         row.cumulativeInputTokens = inputTokens
         row.cumulativeOutputTokens = outputTokens
         row.cumulativeCacheReadTokens = cacheReadTokens
@@ -429,7 +430,7 @@ extension SessionRollupValues {
     }
 
     func makeSessionRow(sessionId: String) -> SessionInfo {
-        SessionInfo(
+        let row = SessionInfo(
             sessionId: sessionId,
             firstSeenAt: firstSeenAt,
             lastSeenAt: lastSeenAt,
@@ -442,10 +443,13 @@ extension SessionRollupValues {
             cumulativeCacheCreation5mTokens: cacheCreation5mTokens,
             cumulativeCacheCreation1hTokens: cacheCreation1hTokens,
             topModel: topModel)
+        row.costComponents = cost
+        row.pricedByRecordIds = pricedBy.stored
+        return row
     }
 
     func makeAccountRow(accountId: String, sessionId: String) -> AccountSessionInfo {
-        AccountSessionInfo(
+        let row = AccountSessionInfo(
             accountId: accountId, sessionId: sessionId,
             firstSeenAt: firstSeenAt, lastSeenAt: lastSeenAt,
             projectPath: projectPath ?? "", ccVersion: ccVersion,
@@ -456,6 +460,8 @@ extension SessionRollupValues {
             cumulativeCacheCreation5mTokens: cacheCreation5mTokens,
             cumulativeCacheCreation1hTokens: cacheCreation1hTokens,
             topModel: topModel)
+        row.costComponents = cost
+        return row
     }
 }
 
@@ -477,10 +483,10 @@ actor SessionInfoBulkWorker {
             sessionsRecomputed: 0, sessionsUpserted: 0, sessionsDeleted: 0)
 
         // Shared with the daily/hourly/project workers — see SampleSnapshot.
-        var grouped: [String: [SampleSnapshot.Row]] = [:]
-        for s in try snapshots.snapshot().rows {
-            guard let sid = s.sessionId, !sid.isEmpty else { continue }
-            grouped[sid, default: []].append(s)
+        let table = try snapshots.snapshot()
+        let grouped = table.positions(of: sessionIds) { row -> String? in
+            guard let sid = row.sessionId, !sid.isEmpty else { return nil }
+            return sid
         }
         let existingAll = try modelContext.fetch(FetchDescriptor<SessionInfo>())
         var existingById: [String: SessionInfo] = [:]
@@ -489,12 +495,13 @@ actor SessionInfoBulkWorker {
         var processed = 0
         for sid in sessionIds {
             stats.sessionsRecomputed += 1
+            let samples = table.rows(at: grouped[sid])
             try syncAccountSessionRows(
-                context: modelContext, sessionId: sid, samples: grouped[sid] ?? [],
+                context: modelContext, sessionId: sid, samples: samples,
                 mode: mode, snapshot: snapshot)
             SessionInfoRecomputer.applySamples(
                 sessionId: sid,
-                samples: grouped[sid] ?? [],
+                samples: samples,
                 existing: existingById[sid],
                 mode: mode,
                 snapshot: snapshot,

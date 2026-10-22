@@ -136,6 +136,14 @@ targets:
         # (Sparkle applies them on the agent's next relaunch). Users who turn
         # off automatic updates in the updater prefs keep the prompt-first flow.
         SUAutomaticallyUpdate: true
+        # Hand freed heap back to the system (#337). libmalloc reads this once,
+        # at process start, so it has to come from the launch environment.
+        # Without it, a real-store upgrade left 3.3 GB of empty-but-dirty heap
+        # regions and a 4.5 GB footprint that `malloc_zone_pressure_relief`
+        # did not reduce; with it the same run ended at 70 MB, in the same
+        # time. The `[Memory] … launch` log line says whether it took.
+        LSEnvironment:
+          MallocSpaceEfficient: "1"
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.ericandrechek.pacer

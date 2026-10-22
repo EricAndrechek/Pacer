@@ -235,6 +235,10 @@ public final class SamplePersister {
         /// (a genuine replay we correctly ignored) — this one changed
         /// stored numbers, so it's worth seeing in the scan log.
         public var upgradedFromPartial: Int = 0
+        /// Stored rows given the pricing detail a re-read found (#218): a
+        /// fast-mode or residency marker, or a multi-call response's own
+        /// per-call counts.
+        public var patchedPricingDetail: Int = 0
         /// Sessions newly marked polluted, by why (`SessionPollution`) — the
         /// scan log's `sPol=`. A polluted session skips the rollup fast path
         /// and re-fetches every sample it has, which on a long session is most
@@ -260,6 +264,8 @@ public final class SamplePersister {
         case all
         /// Turns whose project path was re-canonicalised.
         case alias
+        /// A price it was costed at changed (#217).
+        case reprice
     }
 
     public private(set) var stats: Stats
@@ -423,6 +429,19 @@ public final class SamplePersister {
         }
     }
 
+    /// Set for a full re-read of history (a `currentScanVersion` bump): a
+    /// duplicate of a stored turn that carries pricing detail the stored
+    /// row predates is applied to it, through the same rewrite an upgrade
+    /// uses. Off for live cycles, where the first copy already carried it.
+    public var backfillsPricingDetail = false {
+        // Only a full re-read patches, so its keys are spent when it ends.
+        didSet { if !backfillsPricingDetail { patchedKeys = [] } }
+    }
+    /// Keys patched during this re-read, so a turn is patched at most once.
+    /// Hashed, like `bestOutputByKey`: a `String` each kept the importer's
+    /// copy of every patched turn's key alive for the life of the app (#337).
+    private var patchedKeys: Set<DedupIndex.Key> = []
+
     /// Returns true if the entry was inserted, false if it was a
     /// duplicate. Marks `(date, model)` and `(projectPath, date)` dirty
     /// on insert.
@@ -438,6 +457,14 @@ public final class SamplePersister {
                 // finished message and what we stored was a mid-stream
                 // snapshot; anything else is a true duplicate.
                 guard entry.breakdown.outputTokens > bestSoFar else {
+                    // The same finished copy (equal output, never a smaller
+                    // partial one) carrying detail an old row lacks.
+                    if backfillsPricingDetail, entry.carriesPricingDetail,
+                       entry.breakdown.outputTokens == bestSoFar,
+                       pendingUpgrades[key] == nil, patchedKeys.insert(hashed).inserted {
+                        pendingUpgrades[key] = entry
+                        stats.patchedPricingDetail += 1
+                    }
                     stats.skippedAsDuplicate += 1
                     return false
                 }
@@ -560,7 +587,7 @@ public final class SamplePersister {
     private func applyPendingUpgrades() throws {
         guard !pendingUpgrades.isEmpty else { return }
         let wanted = pendingUpgrades
-        var applied = 0
+        var applied: Set<String> = []
 
         // Two strategies, because the two call shapes are wildly different —
         // the same lesson `saveCursors` taught. A live cycle upgrades a
@@ -572,74 +599,93 @@ public final class SamplePersister {
         // an upgrade pending. Fetching per key unconditionally was the
         // previous bug in the other direction: 98% CPU and >2 GB resident
         // during a repair.
-        let rows: [TokenSample]
         if wanted.count < Self.bulkUpgradeThreshold {
-            var found: [TokenSample] = []
             for key in wanted.keys {
                 let k = key
                 var d = FetchDescriptor<TokenSample>(
                     predicate: #Predicate<TokenSample> { $0.dedupKey == k })
                 d.fetchLimit = 1
-                if let row = try context.fetch(d).first { found.append(row) }
-            }
-            rows = found
-        } else {
-            rows = try context.fetch(FetchDescriptor<TokenSample>())
-        }
-
-        for sample in rows {
-            guard let key = sample.dedupKey, let entry = wanted[key] else { continue }
-            // What the partial copy contributed, before it is overwritten.
-            let old = SampleSnapshot.Row(
-                date: sample.date, model: sample.model, projectPath: sample.projectPath,
-                sessionId: sample.sessionId, sampledAt: sample.sampledAt,
-                localHour: sample.localHour, ccVersion: sample.ccVersion,
-                breakdown: sample.breakdown, sourceCostUSD: sample.sourceCostUSD,
-                accountId: sample.accountId)
-            sample.inputTokens = entry.breakdown.inputTokens
-            sample.outputTokens = entry.breakdown.outputTokens
-            sample.cacheReadTokens = entry.breakdown.cacheReadTokens
-            sample.cacheCreation5mTokens = entry.breakdown.cacheCreation5mTokens
-            sample.cacheCreation1hTokens = entry.breakdown.cacheCreation1hTokens
-            sample.sourceCostUSD = entry.storedCostUSD
-
-            let pair = DateModelPair(date: sample.date, model: sample.model)
-            dirtyPairs.insert(pair)
-            pollutedDailyPairs.insert(pair)
-            pendingPairSamples[pair] = nil
-
-            let path = sample.projectPath ?? ProjectDailyAggregate.unknownProjectPath
-            let projectPair = ProjectDatePair(projectPath: path, date: sample.date)
-            dirtyProjectDates.insert(projectPair)
-            pollutedProjectPairs.insert(projectPair)
-            pendingProjectSamples[projectPair] = nil
-
-            let hourBucket = DateHourModelTriple(
-                date: sample.date, hour: Self.localHour(of: sample), model: sample.model)
-            dirtyHourBuckets.insert(hourBucket)
-            pollutedHourBuckets.insert(hourBucket)
-            pendingHourSamples[hourBucket] = nil
-
-            // The session takes the upgrade as a delta. The day, hour and
-            // project buckets above are still rebuilt: one turn's bucket is
-            // tens of milliseconds, where a long session is most of a second.
-            if let sid = sample.sessionId, !sid.isEmpty {
-                dirtySessionIds.insert(sid)
-                if pollutedSessionIds.contains(sid) {
-                    // Rebuilt from its samples anyway.
-                } else if pendingSessionSamples[sid]?.contains(where: { $0 === sample }) == true {
-                    // Inserted this pass: the pending add already reads the
-                    // finished counts off the same object, so a delta too
-                    // would count the upgrade twice.
-                } else {
-                    pendingSessionUpgrades[sid, default: []]
-                        .append(SessionUpgrade(old: old, new: sample))
+                if let row = try context.fetch(d).first, let entry = wanted[k] {
+                    apply(entry, to: row)
+                    applied.insert(k)
                 }
             }
-            applied += 1
-            if applied == wanted.count { break }   // nothing left to find
+        } else {
+            // The scan, in batches (#327). One `fetch` of the whole table held
+            // every TokenSample at once, in the scan context — the one that
+            // lives as long as the app — to rewrite a fraction of them; on a
+            // real-store upgrade the footprint rose ~3 GB during that pass and
+            // stayed. Rows inserted this pass aren't on disk yet, so they come
+            // from the context first, and `applied` keeps the walk from
+            // rewriting any row twice.
+            for case let sample as TokenSample in context.insertedModelsArray {
+                guard let key = sample.dedupKey, let entry = wanted[key],
+                      applied.insert(key).inserted else { continue }
+                apply(entry, to: sample)
+            }
+            try context.enumerate(FetchDescriptor<TokenSample>(), batchSize: 5_000,
+                                  allowEscapingMutations: true) { sample in
+                guard let key = sample.dedupKey, let entry = wanted[key],
+                      applied.insert(key).inserted else { return }
+                apply(entry, to: sample)
+            }
         }
         pendingUpgrades.removeAll(keepingCapacity: false)
+    }
+
+    /// Overwrite a stored row with the copy that supersedes it, and invalidate
+    /// every bucket its old numbers fed. See `applyPendingUpgrades`.
+    private func apply(_ entry: ParsedUsageEntry, to sample: TokenSample) {
+        // What the partial copy contributed, before it is overwritten.
+        let old = SampleSnapshot.Row(
+            date: sample.date, model: sample.model, projectPath: sample.projectPath,
+            sessionId: sample.sessionId, sampledAt: sample.sampledAt,
+            localHour: sample.localHour, ccVersion: sample.ccVersion,
+            breakdown: sample.breakdown, sourceCostUSD: sample.sourceCostUSD,
+            accountId: sample.accountId, speed: sample.speed,
+            inferenceGeo: sample.inferenceGeo)
+        sample.inputTokens = entry.breakdown.inputTokens
+        sample.outputTokens = entry.breakdown.outputTokens
+        sample.cacheReadTokens = entry.breakdown.cacheReadTokens
+        sample.cacheCreation5mTokens = entry.breakdown.cacheCreation5mTokens
+        sample.cacheCreation1hTokens = entry.breakdown.cacheCreation1hTokens
+        sample.sourceCostUSD = entry.storedCostUSD
+        sample.speed = entry.speed
+        sample.inferenceGeo = entry.inferenceGeo
+
+        let pair = DateModelPair(date: sample.date, model: sample.model)
+        dirtyPairs.insert(pair)
+        pollutedDailyPairs.insert(pair)
+        pendingPairSamples[pair] = nil
+
+        let path = sample.projectPath ?? ProjectDailyAggregate.unknownProjectPath
+        let projectPair = ProjectDatePair(projectPath: path, date: sample.date)
+        dirtyProjectDates.insert(projectPair)
+        pollutedProjectPairs.insert(projectPair)
+        pendingProjectSamples[projectPair] = nil
+
+        let hourBucket = DateHourModelTriple(
+            date: sample.date, hour: Self.localHour(of: sample), model: sample.model)
+        dirtyHourBuckets.insert(hourBucket)
+        pollutedHourBuckets.insert(hourBucket)
+        pendingHourSamples[hourBucket] = nil
+
+        // The session takes the upgrade as a delta. The day, hour and
+        // project buckets above are still rebuilt: one turn's bucket is
+        // tens of milliseconds, where a long session is most of a second.
+        if let sid = sample.sessionId, !sid.isEmpty {
+            dirtySessionIds.insert(sid)
+            if pollutedSessionIds.contains(sid) {
+                // Rebuilt from its samples anyway.
+            } else if pendingSessionSamples[sid]?.contains(where: { $0 === sample }) == true {
+                // Inserted this pass: the pending add already reads the
+                // finished counts off the same object, so a delta too
+                // would count the upgrade twice.
+            } else {
+                pendingSessionUpgrades[sid, default: []]
+                    .append(SessionUpgrade(old: old, new: sample))
+            }
+        }
     }
 
     /// Hourly rows with no samples behind them, drained once. The caller
@@ -845,9 +891,9 @@ public final class SamplePersister {
     /// each session id so the recomputer's fast path won't apply —
     /// the existing `SessionInfo` row's `topModel` / cumulative
     /// columns can't be trusted under recovery semantics.
-    public func addDirtySessionIds(_ ids: Set<String>) {
+    public func addDirtySessionIds(_ ids: Set<String>, reason: SessionPollution = .recovery) {
         dirtySessionIds.formUnion(ids)
-        for sid in ids { polluteSession(sid, .recovery) }
+        for sid in ids { polluteSession(sid, reason) }
     }
 
     /// Collapse turns that got stored more than once.
@@ -878,10 +924,14 @@ public final class SamplePersister {
         var duplicated: Set<String> = []
         var keyOnly = FetchDescriptor<TokenSample>()
         keyOnly.propertiesToFetch = [\.dedupKey]
-        try context.enumerate(keyOnly, batchSize: 5_000) { sample in
+        // Read-only, so paged through throwaway contexts (#337); the turns
+        // this cycle hasn't saved yet are in the context, not the store.
+        func note(_ sample: TokenSample) {
             guard let key = sample.dedupKey, !key.isEmpty else { return }
             if !seen.insert(key).inserted { duplicated.insert(key) }
         }
+        try ModelWalk.forEach(keyOnly, in: context.container, note)
+        for case let sample as TokenSample in context.insertedModelsArray { note(sample) }
         guard !duplicated.isEmpty else { return 0 }
 
         // Pass 2: gather only the offending rows, keep the best of each.
@@ -1015,37 +1065,46 @@ public final class SamplePersister {
         // a cost-recompute version bump and every HourlyAggregate
         // would silently keep its pre-bump cost numbers.
         descriptor.propertiesToFetch = [\.date, \.model, \.projectPath, \.sessionId, \.sampledAt, \.localHour]
-        // Batched for the same reason the preload is: this walks the whole
-        // table, and materializing it all at once is the cost (see
-        // `preloadFromStore`).
-        try context.enumerate(descriptor, batchSize: 5_000) { sample in
-            // Backfill the stored hour while we're walking every row anyway.
-            // Rows written before the field existed carry -1 and would keep
-            // deriving — and drifting — otherwise.
-            if sample.localHour < 0 {
-                sample.localHour = Self.localHour(of: sample.sampledAt)
-            }
-            let pair = DateModelPair(date: sample.date, model: sample.model)
-            dirtyPairs.insert(pair)
-            // Pollute so any concurrent insert(_:) in the same cycle
-            // doesn't trip the recomputer's fast path. The whole reason
-            // this method runs is that the existing aggregate rows
-            // have wrong cost — incrementally ADDING to them would
-            // compound the error. Full recompute is mandatory.
-            pollutedDailyPairs.insert(pair)
-            let path = sample.projectPath ?? ProjectDailyAggregate.unknownProjectPath
-            let projectPair = ProjectDatePair(projectPath: path, date: sample.date)
-            dirtyProjectDates.insert(projectPair)
-            pollutedProjectPairs.insert(projectPair)
-            let hour = Self.localHour(of: sample)
-            let hourBucket = DateHourModelTriple(
-                date: sample.date, hour: hour, model: sample.model)
-            dirtyHourBuckets.insert(hourBucket)
-            pollutedHourBuckets.insert(hourBucket)
-            if let sid = sample.sessionId, !sid.isEmpty {
-                dirtySessionIds.insert(sid)
-                polluteSession(sid, .all)
-            }
+        // Paged through throwaway contexts, for the same reason the preload
+        // is (#337): marking only reads. The turns this cycle hasn't saved
+        // yet aren't in the store, so they are marked from the context.
+        try ModelWalk.forEach(descriptor, in: context.container) { markForRebuild($0) }
+        for case let sample as TokenSample in context.insertedModelsArray { markForRebuild(sample) }
+
+        // Backfill the stored hour on rows written before the field existed:
+        // they carry -1 and would keep deriving — and drifting — otherwise.
+        // A write, so through the persister's own context; on a store that
+        // has been through this once there is nothing left to match.
+        var unstamped = FetchDescriptor<TokenSample>(predicate: #Predicate { $0.localHour < 0 })
+        unstamped.propertiesToFetch = [\.sampledAt, \.localHour]
+        try context.enumerate(unstamped, batchSize: 5_000) { sample in
+            sample.localHour = Self.localHour(of: sample.sampledAt)
+        }
+    }
+
+    /// Mark every bucket `sample` feeds dirty AND polluted — see
+    /// `markEverySampleDirty`.
+    private func markForRebuild(_ sample: TokenSample) {
+        let pair = DateModelPair(date: sample.date, model: sample.model)
+        dirtyPairs.insert(pair)
+        // Pollute so any concurrent insert(_:) in the same cycle
+        // doesn't trip the recomputer's fast path. The whole reason
+        // this method runs is that the existing aggregate rows
+        // have wrong cost — incrementally ADDING to them would
+        // compound the error. Full recompute is mandatory.
+        pollutedDailyPairs.insert(pair)
+        let path = sample.projectPath ?? ProjectDailyAggregate.unknownProjectPath
+        let projectPair = ProjectDatePair(projectPath: path, date: sample.date)
+        dirtyProjectDates.insert(projectPair)
+        pollutedProjectPairs.insert(projectPair)
+        let hour = Self.localHour(of: sample)
+        let hourBucket = DateHourModelTriple(
+            date: sample.date, hour: hour, model: sample.model)
+        dirtyHourBuckets.insert(hourBucket)
+        pollutedHourBuckets.insert(hourBucket)
+        if let sid = sample.sessionId, !sid.isEmpty {
+            dirtySessionIds.insert(sid)
+            polluteSession(sid, .all)
         }
     }
 
@@ -1229,8 +1288,10 @@ public final class SamplePersister {
         // profiled on a real 189k-row store that was ~500 MB resident at
         // idle, for objects nothing ever reads again.
         //
-        // A scratch context frees the lot when it goes out of scope.
-        let scratchContext = ModelContext(context.container)
+        // A scratch context frees the lot when it goes out of scope — and
+        // `ModelWalk` takes a fresh one per page, because a single context
+        // `enumerate`d over the table still peaked at 3.3 GB on a 746k-row
+        // store; paged, a whole rebuild peaked at 317 MB (#337).
         var samplePairs: Set<DateModelPair> = []
         var sampleProjectPairs: Set<ProjectDatePair> = []
         var sampleHourBuckets: Set<DateHourModelTriple> = []
@@ -1240,12 +1301,12 @@ public final class SamplePersister {
         // becomes the index watermark.
         var maxSampledAt = Date(timeIntervalSince1970: 0)
         let tWalk = Date()
-        // `enumerate`, not `fetch`. Instrumented on a real 189k-row store, the
+        // Paged, not one `fetch`. Instrumented on a real 189k-row store, the
         // eager fetch was **11,564 ms of a 12,545 ms startup** — pure
         // materialization; the loop below is only 853 ms of it and the
-        // aggregate-gap queries 128 ms. Batching drains each chunk before
-        // pulling the next, so the whole table never exists as objects at once.
-        try scratchContext.enumerate(sampleDescriptor, batchSize: 5_000) { sample in
+        // aggregate-gap queries 128 ms. Each page is released before the next
+        // is pulled, so the whole table never exists as objects at once.
+        try ModelWalk.forEach(sampleDescriptor, in: context.container) { sample in
             rowCount += 1
             if sample.sampledAt > maxSampledAt { maxSampledAt = sample.sampledAt }
             if let key = sample.dedupKey {
