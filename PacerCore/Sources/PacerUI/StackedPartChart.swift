@@ -284,7 +284,9 @@ public struct PacerStackedPartChart: View {
         // The segment gap in cost units: about `segmentGap` points on a plot
         // whose height is the frame less the label room, the x axis and the
         // legend. An estimate, close enough for a hairline.
-        let gap = yMax * Self.segmentGap / max(40, height - Self.labelRoom - 44)
+        // Typed in steps: Xcode 16 finds `-` ambiguous across CGFloat/Double.
+        let plotPoints: CGFloat = max(40, height - Self.labelRoom - 44)
+        let gap: Double = yMax * Self.segmentGap / Double(plotPoints)
         Chart {
             ForEach(buckets) { bucket in
                 // Once per bar, not per segment: it runs a date formatter.
