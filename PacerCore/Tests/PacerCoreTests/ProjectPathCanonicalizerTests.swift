@@ -153,3 +153,34 @@ import Testing
         )
     }
 }
+
+@Suite("Subproject of a raw cwd")
+struct SubprojectKeyTests {
+    let repo = "/Users/dev/code/mono"
+
+    @Test("the repo root and its subfolders are the main checkout")
+    func mainCheckout() {
+        #expect(ProjectPathCanonicalizer.subproject(of: repo, in: repo) == ("", nil))
+        let api = ProjectPathCanonicalizer.subproject(of: repo + "/packages/api", in: repo)
+        #expect(api.subpath == "packages/api")
+        #expect(api.worktree == nil)
+    }
+
+    @Test("a worktree folds into the subfolder it is a checkout of")
+    func worktreesFold() {
+        let agent = ProjectPathCanonicalizer.subproject(
+            of: repo + "/.claude/worktrees/agent-20/packages/api", in: repo)
+        #expect(agent.subpath == "packages/api")
+        #expect(agent.worktree == "agent-20")
+        let handMade = ProjectPathCanonicalizer.subproject(of: repo + "/.worktrees/feature-x", in: repo)
+        #expect(handMade.subpath == "")
+        #expect(handMade.worktree == "feature-x")
+    }
+
+    @Test("a path outside the repo (an aliased sibling checkout) is its root, from another checkout")
+    func aliasedSibling() {
+        let sibling = ProjectPathCanonicalizer.subproject(of: "/Users/dev/code/mono-feature", in: repo)
+        #expect(sibling.subpath == "")
+        #expect(sibling.worktree == "mono-feature")
+    }
+}

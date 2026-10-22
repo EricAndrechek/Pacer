@@ -324,13 +324,12 @@ struct ProjectDetailView: View {
     /// What `loadDetail` sums, as plain values: it runs off the main actor.
     struct DetailLoad: Sendable {
         struct Path: Sendable {
-            /// The original cwd verbatim — the bucket and the row's id.
-            let originalPath: String
-            /// Path relative to the canonical project root, e.g.
-            /// `local/potato`. Empty for samples whose original path IS the
-            /// canonical (runs at repo root, or legacy samples backfilled to
-            /// canonical).
-            let relativeSubpath: String
+            /// Where in the repo the work ran, worktrees folded in
+            /// (`ProjectPathCanonicalizer.subproject`), e.g. `packages/api`.
+            /// Empty for the repo root. The bucket and the row's id.
+            let subpath: String
+            /// Worktrees (other checkouts) that contributed to this subpath.
+            let worktrees: Int
             let tokens: TokenBreakdown
             let costParts: CostComponents
             let sessions: Int
@@ -354,6 +353,7 @@ struct ProjectDetailView: View {
             var tokens = TokenBreakdown.zero
             var cost = CostComponents.zero
             var sessions: Set<String> = []
+            var worktrees: Set<String> = []
         }
         let context = ModelContext(container)
         let path = projectPath
@@ -400,17 +400,19 @@ struct ProjectDetailView: View {
         for s in samples {
             let tokens = s.breakdown
             let cost = CostCalculator.sampleCost(s, mode: mode, snapshot: pricing).components
-            // Fall back to the canonical when originalProjectPath
-            // is nil (rows inserted before the field existed and
-            // missed the migration somehow). This keeps them
-            // counted instead of silently dropped — they just
-            // bucket under the canonical's "root" row.
-            let key = s.originalProjectPath ?? projectPath
-            var a = byPath[key] ?? Acc()
+            // Bucket by where in the repo the work ran, with worktrees folded
+            // into the subfolder they are a checkout of: one row per real
+            // subproject, not one per worktree. A nil originalProjectPath
+            // (a row from before the field existed that missed the
+            // backfill) counts as the root rather than being dropped.
+            let place = ProjectPathCanonicalizer.subproject(
+                of: s.originalProjectPath ?? projectPath, in: projectPath)
+            var a = byPath[place.subpath] ?? Acc()
             a.tokens += tokens
             a.cost += cost
             if let sid = s.sessionId, !sid.isEmpty { a.sessions.insert(sid) }
-            byPath[key] = a
+            if let w = place.worktree { a.worktrees.insert(w) }
+            byPath[place.subpath] = a
             var m = byModel[s.model] ?? Acc()
             m.tokens += tokens
             m.cost += cost
@@ -419,8 +421,7 @@ struct ProjectDetailView: View {
         var load = DetailLoad()
         load.paths = byPath.map { key, a in
             DetailLoad.Path(
-                originalPath: key,
-                relativeSubpath: relativeSubpath(canonical: projectPath, from: key),
+                subpath: key, worktrees: a.worktrees.count,
                 tokens: a.tokens, costParts: a.cost, sessions: a.sessions.count)
         }
         load.models = byModel.map { model, a in
@@ -433,13 +434,13 @@ struct ProjectDetailView: View {
     private static func rows(_ load: DetailLoad) -> Detail {
         Detail(
             subprojects: load.paths.map { p in
-                // Empty `relativeSubpath` means "samples taken at the repo
-                // root, not a subdir" — label it explicitly so a (root) row
-                // reads as intentional, not as a missing field.
+                // An empty subpath is work at the repo root; label it so the
+                // row reads as intentional, not as a missing field.
                 PacerUsageRow(
-                    id: p.originalPath,
-                    label: p.relativeSubpath.isEmpty ? "(root)" : p.relativeSubpath,
-                    subtitle: p.originalPath,
+                    id: p.subpath,
+                    label: p.subpath.isEmpty ? "(root)" : p.subpath,
+                    subtitle: p.worktrees == 0 ? nil
+                        : "+\(p.worktrees) worktree\(p.worktrees == 1 ? "" : "s")",
                     tokens: p.tokens, costParts: p.costParts,
                     extra: DetailPathExtra(sessions: p.sessions))
             },
@@ -447,23 +448,6 @@ struct ProjectDetailView: View {
                 DetailModalCards.modelRow(model: m.model, tokens: m.tokens, costParts: m.costParts,
                                           cost: m.costParts.total)
             })
-    }
-
-    /// Trim the canonical project's prefix off a sample's original
-    /// path. `/Users/.../support-infra/local/potato` → `local/potato`
-    /// when called with canonical `/Users/.../support-infra`. Empty
-    /// string when the paths are equal (sample was taken at repo
-    /// root, not a subdir).
-    private nonisolated static func relativeSubpath(canonical: String, from descendant: String) -> String {
-        guard canonical != descendant else { return "" }
-        let normalizedCanon = canonical.hasSuffix("/") ? String(canonical.dropLast()) : canonical
-        let prefix = normalizedCanon + "/"
-        if descendant.hasPrefix(prefix) {
-            return String(descendant.dropFirst(prefix.count))
-        }
-        // Doesn't share the canonical's prefix — fall back to the
-        // path's basename so the user has something readable.
-        return (descendant as NSString).lastPathComponent
     }
 
     var body: some View {
