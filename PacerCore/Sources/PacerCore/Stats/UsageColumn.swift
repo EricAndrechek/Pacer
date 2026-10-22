@@ -83,10 +83,9 @@ public enum UsageColumn: String, CaseIterable, Sendable {
     /// "Out %": output's share of the row's cost, one whole percent. How
     /// much of the money went on the response, without the token columns.
     ///
-    /// Round 6 tried it as "In / Out" printing both halves ("87 / 13"), and
-    /// the owner kept the one number: it is cleaner, and plain about what the
-    /// column sorts on. The two-part form stays beside the cache hit figures
-    /// (`pacerInOutText`), not in a table.
+    /// One number, not both halves: it is plain about what the column sorts
+    /// on. Both halves appear only as the quiet "Input 92% · Output 8%" text
+    /// beside the cache hit figures (`pacerInOutText`), never in a table.
     case outputShare = "outShare"
     case cost
     /// "Mix": the five cost parts as one 100% bar. Declared after a
