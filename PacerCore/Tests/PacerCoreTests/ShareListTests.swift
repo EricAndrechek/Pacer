@@ -231,6 +231,7 @@ struct ShareListTests {
     }
 
     @Test("the label column is as wide as its longest label, its title's at least, and no wider than its cap")
+    @MainActor
     func labelWidth() {
         func width(_ labels: [String], title: String = "Model") -> CGFloat {
             let rows: [Row] = labels.enumerated().map { i, label in
