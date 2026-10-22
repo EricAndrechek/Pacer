@@ -1611,20 +1611,24 @@ public actor UsageIntelligenceEngine {
         return out
     }
 
-    /// The pricing a cost snapshot's dollars were computed under (#329).
+    /// The pricing a cost snapshot's dollars were computed under (#329):
+    /// `cost-v<N>+ledger-<fingerprint>`.
     ///
-    /// The store's recorded cost-recompute version, not this build's
-    /// constant. The scan writes the version only after the rebuild it
-    /// triggers has saved, so the stored value is the pricing the rollups
-    /// actually hold; a refit that runs before the rebuild finishes still
-    /// tags the old one. The price ledger rewrites its records in place and
-    /// carries no revision of its own, so when it lands it adds its
-    /// fingerprint here.
+    /// Two parts, because prices change two ways. A cost-recompute bump
+    /// rebuilds everything; it is the store's recorded version, not this
+    /// build's constant, because the scan writes it only after the rebuild
+    /// it triggers has saved. A price-ledger change (a catalog refresh, a
+    /// curated correction) rebuilds only the buckets it priced and bumps
+    /// nothing, so the ledger's fingerprint names those. Either can run a
+    /// moment ahead of the rollups while their rebuild finishes.
     private func costPricingVersion() -> String? {
         let key = ClaudeCodeMetaKey.costRecomputeVersion
         var descriptor = FetchDescriptor<ClaudeCodeMeta>(predicate: #Predicate { $0.key == key })
         descriptor.fetchLimit = 1
-        return (try? modelContext.fetch(descriptor))?.first.map { "cost-v\($0.value)" }
+        let recompute = (try? modelContext.fetch(descriptor))?.first.map { "cost-v\($0.value)" }
+        let ledger = SampleCostCache.current().ledger
+        let prices = "ledger-" + (ledger.isProvisional ? "provisional-" : "") + ledger.fingerprint
+        return [recompute, prices].compactMap { $0 }.joined(separator: "+")
     }
 
     /// Change/heartbeat write policy — pure, so the policy tests directly.

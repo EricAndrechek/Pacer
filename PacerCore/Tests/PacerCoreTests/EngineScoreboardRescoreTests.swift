@@ -255,7 +255,9 @@ struct EngineScoreboardRescoreTests {
         let snaps = try ModelContext(container).fetch(FetchDescriptor<PredictionSnapshot>())
         let eod = snaps.filter { $0.surface == EngineSelfEval.surfaceEOD }
         #expect(!eod.isEmpty)
-        #expect(eod.allSatisfy { $0.pricingVersion == "cost-v17" })
+        let expected = "cost-v17+ledger-" + (SampleCostCache.current().ledger.isProvisional ? "provisional-" : "")
+            + SampleCostCache.current().ledger.fingerprint
+        #expect(eod.allSatisfy { $0.pricingVersion == expected })
         let rl = snaps.filter { $0.surface.hasPrefix("rl-") }
         #expect(!rl.isEmpty)
         #expect(rl.allSatisfy { $0.pricingVersion == nil })

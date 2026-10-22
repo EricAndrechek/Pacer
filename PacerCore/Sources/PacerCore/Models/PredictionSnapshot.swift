@@ -71,8 +71,9 @@ public final class PredictionSnapshot {
     // Cost specifics (nil on rate-limit surfaces).
     /// Spend already realized within the period at prediction time.
     public var spendSoFar: Double?
-    /// The pricing the dollar figures were computed under, `cost-v<N>` for
-    /// cost-recompute version N (#329). History gets repriced after a snapshot
+    /// The pricing the dollar figures were computed under,
+    /// `cost-v<N>+ledger-<fingerprint>`: the cost-recompute version and the
+    /// price ledger's `fingerprint` (#329). History gets repriced after a snapshot
     /// is written and the snapshot is never rewritten (it is what was shown),
     /// so this is how an analysis tells one pricing from another. Nil on
     /// rate-limit surfaces and on rows written before it existed.

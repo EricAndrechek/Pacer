@@ -3041,12 +3041,7 @@ public final class ScanCoordinator {
     /// FNV-1a 64-bit hash of the joined string, rendered as hex. Tiny,
     /// stable across processes, no external dependency.
     nonisolated private static func fnv1aHex(_ s: String) -> String {
-        var hash: UInt64 = 0xcbf2_9ce4_8422_2325
-        for byte in s.utf8 {
-            hash ^= UInt64(byte)
-            hash = hash &* 0x100_0000_01b3
-        }
-        return String(hash, radix: 16)
+        String(StableHash.fnv1a64(s), radix: 16)
     }
 
     private func fetchMeta(_ key: String) throws -> String? {
