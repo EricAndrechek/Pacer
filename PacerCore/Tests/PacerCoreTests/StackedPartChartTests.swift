@@ -189,15 +189,6 @@ struct StackedPartChartTests {
         #expect(november == novemberExpected)
     }
 
-    @Test func precomputedModelCostsLeaveTokensUnknown() {
-        var builder = PacerChartBucketBuilder()
-        let costs: [String: Double] = ["opus": 4, "haiku": 1]
-        builder.add("2026-10-01", spread(5, input: 9, output: 9, read: 9), modelCosts: costs)
-        let top: [PacerChartModelCost] = builder.buckets()[0].topModels
-        #expect(top.allSatisfy { $0.tokens == nil })
-        #expect(top[0].percentLabel == "80%")
-    }
-
     @Test func builderOrdersByKeyAndKeepsTheNewest() {
         var builder = PacerChartBucketBuilder()
         for day in ["2026-10-03", "2026-10-01", "2026-10-04", "2026-10-02"] {
@@ -205,16 +196,6 @@ struct StackedPartChartTests {
         }
         let ids: [String] = builder.buckets(last: 2).map(\.id)
         #expect(ids == ["2026-10-03", "2026-10-04"])
-    }
-
-    @Test func builderTakesPrecomputedModelCosts() {
-        var builder = PacerChartBucketBuilder()
-        let costs: [String: Double] = ["opus": 4, "haiku": 1]
-        builder.add("2026-10-01", breakdown(read: 5), modelCosts: costs)
-        builder.add("2026-10-01", breakdown(read: 1), modelCosts: ["haiku": 1])
-        let top: [PacerChartModelCost] = builder.buckets()[0].topModels
-        #expect(top.map(\.model) == ["opus", "haiku"])
-        #expect(abs(top[1].usd - 2) < 1e-9)
     }
 
     @Test func hourBucketsFillEveryHour() {

@@ -192,16 +192,6 @@ public struct PacerChartBucketBuilder: Sendable {
         modelTokens[key, default: [:]][model, default: 0] += breakdown.tokens.all
     }
 
-    /// A row that already carries its per-model costs — the project rollup's
-    /// `modelCostJSON`. Its models' tokens are left unknown: that rollup
-    /// keeps only input + output per model (see `PacerChartModelCost.tokens`).
-    public mutating func add(_ key: String, _ breakdown: CostBreakdown, modelCosts costs: [String: Double]) {
-        breakdowns[key, default: .zero] += breakdown
-        for (model, usd) in costs {
-            modelCosts[key, default: [:]][model, default: 0] += usd
-        }
-    }
-
     /// The buckets in key order. `keys` fixes the set and its order (the hour
     /// chart's 24 hours, quiet ones as empty bars); `last` keeps the newest.
     public func buckets(keys: [String]? = nil, last: Int? = nil) -> [PacerChartBucket] {

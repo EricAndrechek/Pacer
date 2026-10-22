@@ -65,6 +65,15 @@ public struct PacerShareListColumn: Identifiable, Sendable, Equatable {
     /// screen asks otherwise, as every table is.
     public static let standard: [PacerShareListColumn] = standard()
 
+    /// The columns of a donut card that a full table follows (Projects,
+    /// Models, a modal's By model): each row's share of the tokens and of the
+    /// cost, under the same titles and in the same order as `standard`. The
+    /// table below prints the amounts, and a page prints a number once.
+    public static let shares: [PacerShareListColumn] = [
+        .share(of: UsageColumn.tokens.rawValue, title: "Tokens", format: .tokens, help: "Share of every token"),
+        .share(of: UsageColumn.cost.rawValue, title: "Cost", format: .cost, help: "Share of the cost"),
+    ]
+
     /// `standard`, for a card that holds less than every token for its rows
     /// (Project detail's models carry uncached input and output only): the
     /// same columns in the same places, with what the card has under Tokens,

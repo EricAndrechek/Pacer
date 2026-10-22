@@ -100,23 +100,3 @@ public extension ProjectDailyReadable {
         ProjectModelBreakdowns.decode(modelBreakdownJSON) ?? [:]
     }
 }
-
-// MARK: - Transitional
-
-// The two side-tables `modelBreakdownJSON` replaced, rebuilt from it in their
-// old shapes so `ProjectDetailView` keeps compiling and showing what it showed
-// until it reads `modelBreakdowns` directly. Nothing else may use them; delete
-// this extension in the commit that rewires that view.
-public extension ProjectDailyReadable {
-    /// JSON `[model: input + output tokens]`, as `modelTokensJSON` stored.
-    @available(*, deprecated, message: "Read modelBreakdowns: all five parts per model, and their costs.")
-    var modelTokensJSON: Data {
-        (try? JSONEncoder().encode(modelBreakdowns.mapValues(\.tokens.uncached))) ?? Data()
-    }
-
-    /// JSON `[model: total cost]`, as `modelCostJSON` stored.
-    @available(*, deprecated, message: "Read modelBreakdowns: all five parts per model, and their costs.")
-    var modelCostJSON: Data {
-        (try? JSONEncoder().encode(modelBreakdowns.mapValues(\.total))) ?? Data()
-    }
-}

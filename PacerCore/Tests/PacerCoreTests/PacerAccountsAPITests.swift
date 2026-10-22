@@ -65,11 +65,13 @@ struct PacerAccountsAPITests {
         #expect(list.accounts.filter(\.unattributed).count == 1)
     }
 
-    /// The alias exists because the rollup's own key starts with U+0000, to be
-    /// impossible to type — which also makes it impossible to send.
+    /// The API names the unattributed row by its own stable alias, not by the
+    /// rollup's internal key. That key must also survive SQLite: it once
+    /// started with U+0000, which SQLite cut off (the store read it back as "").
     @Test func unattributedAliasIsURLSafeUnlikeTheRollupKey() {
         #expect(PacerAccountsBuilder.unattributedAlias == "unattributed")
-        #expect(AccountDailyAggregate.unattributedKey.contains("\u{0000}"))
+        #expect(!AccountDailyAggregate.unattributedKey.contains("\u{0000}"))
+        #expect(AccountDailyAggregate.unattributedKey != PacerAccountsBuilder.unattributedAlias)
         #expect(PacerAccountsBuilder.unattributedAlias
             .addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)
             == PacerAccountsBuilder.unattributedAlias)

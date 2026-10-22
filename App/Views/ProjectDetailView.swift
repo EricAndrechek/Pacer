@@ -177,46 +177,37 @@ struct ProjectDetailView: View {
         var firstDay: String?
         var lastDay: String?
         /// The daily chart's bars, each with its breakdown and top models
-        /// (by cost, from `modelCostJSON`) precomputed for the hover card,
-        /// so a hover reads them rather than decoding anything.
+        /// precomputed for the hover card, so a hover decodes nothing.
         var dailySeries: [PacerChartBucket] = []
-        /// Each model's cost, from the rollup's `modelCostJSON`: By model's
-        /// rows until the raw-sample load has the full ones. The rollup keeps
-        /// no token parts per model, so these carry none.
+        /// Each model's five token parts and cost by part over the range,
+        /// summed from the rollup's per-model split (`modelBreakdowns`): By
+        /// model and the Models table, drawn with the rest of the modal.
         var modelRows: [DetailModalCards.ModelRow] = []
     }
 
-    /// The raw-sample load's values, as rows.
+    /// The raw-sample load's values, as rows: only Subprojects needs the
+    /// samples, for the cwd each ran in.
     private struct Detail {
         var subprojects: [PacerUsageRow<DetailPathExtra>] = []
-        /// Nil until the first load lands: By model draws the rollup's
-        /// cost-only rows until then, and the Models table waits.
-        var models: [DetailModalCards.ModelRow]?
     }
 
-    /// The models By model and the Models table draw: the load's, with every
-    /// token part, once it has landed; the rollup's costs before that.
-    private var modelRows: [DetailModalCards.ModelRow] {
-        cachedDetail.models ?? cachedDerived.modelRows
-    }
+    /// The models By model and the Models table draw.
+    private var modelRows: [DetailModalCards.ModelRow] { cachedDerived.modelRows }
 
     /// Single derivation pass over `aggregates`: the breakdown, the facts,
-    /// the daily series and each model's cost. Reuses one `JSONDecoder` for
-    /// the entire pass instead of allocating per row.
+    /// the daily series and each model's totals.
     private func refreshDerived() {
         let rows = aggregates
         var d = Derived()
-        var byModel: [String: Double] = [:]
+        var byModel: [String: CostBreakdown] = [:]
         var days = PacerChartBucketBuilder()
-        let decoder = JSONDecoder()
         for r in rows {
             d.breakdown += r.costBreakdown
-            // Decoded once per row, for the chart's per-day top models and
-            // By model's per-model cost below.
-            let costs = (try? decoder.decode([String: Double].self, from: r.modelCostJSON)) ?? [:]
-            days.add(r.date, r.costBreakdown, modelCosts: costs)
-            for (model, c) in costs {
-                byModel[model, default: 0] += c
+            // Decoded once per row; its models sum to the row, so the day's
+            // bar is the sum of its models' parts.
+            for (model, b) in r.modelBreakdowns {
+                days.add(r.date, b, model: model)
+                byModel[model, default: .zero] += b
             }
         }
         // The builder orders by date rather than leaning on the
@@ -226,8 +217,8 @@ struct ProjectDetailView: View {
         d.activeDays = d.dailySeries.count
         d.firstDay = d.dailySeries.first?.id
         d.lastDay = d.dailySeries.last?.id
-        d.modelRows = byModel.map { model, cost in
-            DetailModalCards.modelRow(model: model, tokens: .zero, costParts: .zero, cost: cost)
+        d.modelRows = byModel.map { model, b in
+            DetailModalCards.modelRow(model: model, tokens: b.tokens, costParts: b.cost, cost: b.total)
         }
         cachedDerived = d
     }
@@ -335,14 +326,7 @@ struct ProjectDetailView: View {
             let sessions: Int
         }
 
-        struct Model: Sendable {
-            let model: String
-            let tokens: TokenBreakdown
-            let costParts: CostComponents
-        }
-
         var paths: [Path] = []
-        var models: [Model] = []
     }
 
     private nonisolated static func loadDetail(
@@ -396,7 +380,6 @@ struct ProjectDetailView: View {
         // main-actor only; the snapshot it reads is not, so read it once.
         let pricing = SampleCostCache.current()
         var byPath: [String: Acc] = [:]
-        var byModel: [String: Acc] = [:]
         for s in samples {
             let tokens = s.breakdown
             let cost = CostCalculator.sampleCost(s, mode: mode, snapshot: pricing).components
@@ -413,19 +396,12 @@ struct ProjectDetailView: View {
             if let sid = s.sessionId, !sid.isEmpty { a.sessions.insert(sid) }
             if let w = place.worktree { a.worktrees.insert(w) }
             byPath[place.subpath] = a
-            var m = byModel[s.model] ?? Acc()
-            m.tokens += tokens
-            m.cost += cost
-            byModel[s.model] = m
         }
         var load = DetailLoad()
         load.paths = byPath.map { key, a in
             DetailLoad.Path(
                 subpath: key, worktrees: a.worktrees.count,
                 tokens: a.tokens, costParts: a.cost, sessions: a.sessions.count)
-        }
-        load.models = byModel.map { model, a in
-            DetailLoad.Model(model: model, tokens: a.tokens, costParts: a.cost)
         }
         return load
     }
@@ -443,10 +419,6 @@ struct ProjectDetailView: View {
                         : "+\(p.worktrees) worktree\(p.worktrees == 1 ? "" : "s")",
                     tokens: p.tokens, costParts: p.costParts,
                     extra: DetailPathExtra(sessions: p.sessions))
-            },
-            models: load.models.map { m in
-                DetailModalCards.modelRow(model: m.model, tokens: m.tokens, costParts: m.costParts,
-                                          cost: m.costParts.total)
             })
     }
 
@@ -513,11 +485,10 @@ struct ProjectDetailView: View {
                     rows: models, sort: modelShareSort, subject: displayName,
                     onSort: { modelShareSortRaw = $0.column; modelShareSortDescending = $0.descending })
             }
-            // The table waits for the raw-sample load: the rollup has no
-            // token parts per model, and a table of zeros would be wrong.
-            if let loaded = detail.models, !loaded.isEmpty {
+            // From the rollup's per-model split, so it draws with the rest.
+            if !models.isEmpty {
                 DetailModalCards.modelsTableCard(
-                    rows: loaded, tableId: "projectDetail.models", sort: modelsSort,
+                    rows: models, tableId: "projectDetail.models", sort: modelsSort,
                     onSort: { modelsSortRaw = $0.column; modelsSortDescending = $0.descending })
             }
             // Hidden when there's only one bucket (no drill-down value).
@@ -596,7 +567,7 @@ struct ProjectDetailView: View {
             Button("Merge") { quickMerge(into: target) }
             Button("Cancel", role: .cancel) { pendingMergeTarget = nil }
         } message: { target in
-            Text("Existing samples for \(pacerShortPath(projectPath)) will be re-attributed to \(pacerShortPath(target)) on the next scan cycle. You can undo from Settings → Project Aliases.")
+            Text(Self.mergeMessage(from: projectPath, into: target))
         }
         .alert(
             "Could not merge",
@@ -606,6 +577,15 @@ struct ProjectDetailView: View {
         } message: {
             Text(mergeError ?? "")
         }
+    }
+
+    /// The quick-merge dialog's message, built outside `body`'s modifier
+    /// chain: inline, its interpolation pushed that one long expression past
+    /// the type checker's time limit.
+    private static func mergeMessage(from source: String, into target: String) -> String {
+        let from: String = pacerShortPath(source)
+        let to: String = pacerShortPath(target)
+        return "Existing samples for \(from) will be re-attributed to \(to) on the next scan cycle. You can undo from Settings → Project Aliases."
     }
 
     // MARK: - Project status
@@ -783,7 +763,7 @@ struct ProjectDetailView: View {
 
     /// The project's cost per active day, stacked by part — the shared
     /// `PacerStackedPartChart`, with the same hover card as every cost chart.
-    /// Its top models are by cost, from the rollup's `modelCostJSON`.
+    /// Its top models are by cost, from the rollup's per-model split.
     /// Clicking a bar opens that day.
     private func dailyChartCard(_ series: [PacerChartBucket]) -> some View {
         PacerCard("Daily activity") {

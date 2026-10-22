@@ -17,14 +17,9 @@ enum DetailModalCards {
     /// and a busy day or project does not make the modal very long.
     static let maxVisibleRows: Int = PacerSessionsTable.maxVisibleRows
 
-    /// By model's columns: each model's share of the cost and of the tokens,
-    /// as the Models tab's Share card has them. Shares, not amounts: the
-    /// Models table under the card prints the amounts, and a modal prints a
-    /// number once.
-    static let modelShareColumns: [PacerShareListColumn] = [
-        .share(of: UsageColumn.cost.rawValue, title: "Cost", format: .cost, help: "Share of the cost"),
-        .share(of: UsageColumn.tokens.rawValue, title: "Tokens", format: .tokens, help: "Share of every token"),
-    ]
+    /// By model's columns: shares, as every donut card a table follows has
+    /// them (`PacerShareListColumn.shares`); the Models table prints amounts.
+    static let modelShareColumns: [PacerShareListColumn] = PacerShareListColumn.shares
 
     /// A modal's models, as the donut card and the table both take them.
     typealias ModelRow = PacerUsageRow<PacerUsageNoExtra>

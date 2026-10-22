@@ -603,7 +603,8 @@ private struct ProjectsContent: View {
     /// Round 4 printed shares of the cost, the tokens and the sessions under
     /// those titles, where every other card printed amounts: the same title
     /// meant a percent here and dollars a card away.
-    private static let topColumns: [PacerShareListColumn] = PacerShareListColumn.standard
+    // Shares: the All projects table under it prints the amounts.
+    private static let topColumns: [PacerShareListColumn] = PacerShareListColumn.shares
 
     /// The five largest projects by the card's sort, and the rest as one
     /// Other line and wedge: the share is of everything the table lists.

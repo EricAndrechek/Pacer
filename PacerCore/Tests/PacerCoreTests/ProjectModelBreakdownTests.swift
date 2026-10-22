@@ -452,3 +452,25 @@ struct ProjectModelBreakdownTests {
         #expect(try context.fetch(FetchDescriptor<AccountSessionInfo>()).first?.topModel == "claude-y")
     }
 }
+
+@Suite("Unattributed sentinel")
+struct UnattributedSentinelTests {
+    @Test("unattributed rows survive a save: the key is not cut short by SQLite")
+    func unattributedRowsRoundTrip() throws {
+        let container = try ModelContainer(
+            for: AccountDailyAggregate.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true))
+        let context = ModelContext(container)
+        let key: String = AccountDailyAggregate.unattributedKey
+        for date in ["2026-10-01", "2026-10-02"] {
+            context.insert(AccountDailyAggregate(
+                accountId: key, date: date, model: "claude-x",
+                inputTokens: 1, outputTokens: 1, cacheReadTokens: 0,
+                cacheCreation5mTokens: 0, cacheCreation1hTokens: 0, totalCostUSD: 0))
+        }
+        try context.save()
+        let rows: [AccountDailyAggregate] = try ModelContext(container).fetch(FetchDescriptor<AccountDailyAggregate>())
+        #expect(rows.count == 2)
+        #expect(rows.allSatisfy { $0.accountId == key })
+    }
+}

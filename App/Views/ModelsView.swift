@@ -446,7 +446,8 @@ private struct ModelsContent: View {
     /// so this card reads like Today by model and Top projects. Round 4
     /// printed shares under Cost and Tokens here, and dollars under the
     /// same titles on the other cards.
-    private static let shareColumns: [PacerShareListColumn] = PacerShareListColumn.standard
+    // Shares: the All models table under it prints the amounts.
+    private static let shareColumns: [PacerShareListColumn] = PacerShareListColumn.shares
 
     /// Eight models with a wedge and a line of their own, and the rest as
     /// one: the legend used to stop at eight while the donut drew every row,

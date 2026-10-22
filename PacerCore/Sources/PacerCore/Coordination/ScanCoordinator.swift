@@ -195,7 +195,11 @@ public final class ScanCoordinator {
     ///          input + output (#215). Existing rows carry no split until
     ///          rebuilt — the incremental path declines such a row and
     ///          rebuilds it, but only this pass reaches buckets nothing
-    ///          writes to again. Every column total is unchanged.
+    ///          writes to again. Every column total is unchanged. The same
+    ///          pass re-keys unattributed rows to `~unattributed`: the old
+    ///          U+0000-prefixed sentinel was cut short by SQLite, which
+    ///          collapsed each account rollup's unattributed rows into one.
+    ///          Each rebuilt bucket deletes the old row as an orphan.
     public static let currentCostRecomputeVersion = "19"
 
     /// Generation of the duplicate-turn repair.
