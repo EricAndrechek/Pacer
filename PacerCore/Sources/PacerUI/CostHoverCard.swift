@@ -12,10 +12,10 @@ public struct PacerCostHoverCard: View {
     private let breakdown: CostBreakdown
     private let topModels: [PacerChartModelCost]
 
-    /// Wide enough for the breakdown's five part columns to keep their
-    /// labels and dollars on one line each; a narrower chart gets the
+    /// The compact breakdown is one row per part, about 217pt wide; this
+    /// leaves room for the header line and padding. A narrower chart gets the
     /// chart's width.
-    nonisolated public static let idealWidth: CGFloat = 540
+    nonisolated public static let idealWidth: CGFloat = 300
 
     public init(title: String, breakdown: CostBreakdown, topModels: [PacerChartModelCost] = []) {
         self.title = title
@@ -40,7 +40,7 @@ public struct PacerCostHoverCard: View {
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.secondary)
             }
-            PacerCostBreakdownView(breakdown)
+            PacerCostBreakdownView(breakdown, style: .compact)
             if !topModels.isEmpty {
                 Divider()
                 VStack(alignment: .leading, spacing: 2) {
