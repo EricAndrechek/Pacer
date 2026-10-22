@@ -45,14 +45,29 @@ struct CostBreakdownRenderTests {
             inputTokens: 8_100, outputTokens: 728_000,
             cacheReadTokens: 123_400_000, cacheCreation5mTokens: 2_380_000))
 
-    private func render(_ name: String, width: CGFloat, dark: Bool, _ view: some View) throws {
+    /// A real Today's traffic: input $0.04 of ~$489 (0.008%), output 10.5%,
+    /// reads 56.2%, 5m writes 13.2%, 1h writes 20.1%. The input part is a
+    /// twentieth of a point at card width: the sliver that drew a hairline,
+    /// a gap and a bar end that looked cut off.
+    private static let sliver = CostBreakdown(
+        cost: CostComponents(
+            input: 0.04, output: 51.3, cacheRead: 274.8,
+            cacheWrite5m: 64.5, cacheWrite1h: 98.3),
+        tokens: TokenBreakdown(
+            inputTokens: 9_300, outputTokens: 2_050_000,
+            cacheReadTokens: 549_600_000, cacheCreation5mTokens: 10_320_000,
+            cacheCreation1hTokens: 9_830_000))
+
+    private func render(
+        _ name: String, width: CGFloat, dark: Bool, scale: CGFloat = 2, _ view: some View
+    ) throws {
         let framed = view
             .padding(16)
             .frame(width: width, alignment: .topLeading)
             .background(dark ? Color(white: 0.13) : Color(white: 0.98))
             .environment(\.colorScheme, dark ? .dark : .light)
         let renderer = ImageRenderer(content: framed)
-        renderer.scale = 2
+        renderer.scale = scale
         renderer.proposedSize = ProposedViewSize(width: width, height: nil)
         let image = try #require(renderer.cgImage)
         try FileManager.default.createDirectory(at: outputDir, withIntermediateDirectories: true)
@@ -62,6 +77,27 @@ struct CostBreakdownRenderTests {
             url as CFURL, UTType.png.identifier as CFString, 1, nil))
         CGImageDestinationAddImage(dest, image, nil)
         #expect(CGImageDestinationFinalize(dest))
+    }
+
+    /// The sliver case at full card width, as Today's traffic draws it, and
+    /// the bar's two ends blown up.
+    @Test("a sliver at the bar's end, light and dark")
+    func renderSliver() throws {
+        for dark in [false, true] {
+            try render("breakdown-sliver-card", width: 860, dark: dark,
+                       PacerCard("Today's traffic") {
+                           PacerCostBreakdownView(Self.sliver) {
+                               Text("52× reuse")
+                                   .font(.system(size: 11))
+                                   .foregroundStyle(.tertiary)
+                           }
+                       })
+            try render("breakdown-sliver-bar-zoom", width: 260, dark: dark, scale: 8,
+                       PacerCostBar(Self.sliver, height: 10))
+            // The tables' Mix bar: 6 pt high, so a 3 pt part is a sliver.
+            try render("breakdown-sliver-mix-zoom", width: 120, dark: dark, scale: 8,
+                       PacerCostBar(Self.sliver, height: 6))
+        }
     }
 
     @Test("regular and compact, light and dark")

@@ -368,21 +368,152 @@ struct StackedPartChartTests {
 
 @Suite("Stacked part chart segment gaps")
 struct StackedPartChartGapTests {
-    @Test("every segment but the top one gives up the gap; a sliver keeps half its height")
-    func spansLeaveAGapBetweenParts() {
-        let cost = CostComponents(input: 0.01, output: 2, cacheRead: 5, cacheWrite5m: 1, cacheWrite1h: 0)
+    private func spans(
+        input: Double = 0, output: Double = 0, read: Double = 0,
+        w5m: Double = 0, w1h: Double = 0, gap: Double = 0.1
+    ) -> (PacerChartBucket, [PacerStackSpan]) {
+        let cost = CostComponents(input: input, output: output, cacheRead: read, cacheWrite5m: w5m, cacheWrite1h: w1h)
         let bucket = PacerChartBucket(id: "2026-10-01", breakdown: CostBreakdown(cost: cost))
-        let spans: [PacerStackSpan] = bucket.spans(gap: 0.1)
+        return (bucket, bucket.spans(gap: gap))
+    }
+
+    @Test("a gap above every part but the top one when every part is readable")
+    func readablePartsAreGapped() {
+        let (bucket, spans) = spans(input: 1, output: 2, read: 5, w5m: 1)
         #expect(spans.map(\.part.component) == [.input, .output, .cacheRead, .cacheWrite5m])
-        // The input sliver is smaller than twice the gap: it keeps half.
         let input: PacerStackSpan = spans[0]
-        #expect(abs(input.end - 0.005) < 1e-9)
-        // Output starts where input's full value ends, and loses the gap.
+        #expect(abs(input.end - 0.9) < 1e-9)
+        // Output starts where input's full value ends, and gives up the gap.
         let output: PacerStackSpan = spans[1]
-        #expect(abs(output.start - 0.01) < 1e-9)
-        #expect(abs(output.end - 1.91) < 1e-9)
+        #expect(abs(output.start - 1) < 1e-9)
+        #expect(abs(output.end - 2.9) < 1e-9)
         // The top segment is whole, so the bar still reaches the total.
         let top: PacerStackSpan = spans[3]
         #expect(abs(top.end - bucket.total) < 1e-9)
+    }
+
+    @Test("a sliver at the foot of the bar sits flush: no gap above it")
+    func footSliverIsFlush() {
+        // The input sliver is under twice the gap.
+        let (_, spans) = spans(input: 0.01, output: 2, read: 5, w5m: 1)
+        let input: PacerStackSpan = spans[0]
+        #expect(input.start == 0)
+        #expect(abs(input.end - 0.01) < 1e-9)
+        // Output meets it, and keeps its own gap to the reads above.
+        let output: PacerStackSpan = spans[1]
+        #expect(abs(output.start - input.end) < 1e-9)
+        #expect(abs(output.end - 1.91) < 1e-9)
+    }
+
+    @Test("a sliver in the middle gets no gap on either side")
+    func middleSliverIsFlushBothWays() {
+        let (_, spans) = spans(output: 2, read: 5, w5m: 0.05, w1h: 1)
+        let read: PacerStackSpan = spans[1]
+        let sliver: PacerStackSpan = spans[2]
+        let top: PacerStackSpan = spans[3]
+        // No gap below the sliver: the reads run whole up to it.
+        #expect(abs(read.end - 7) < 1e-9)
+        #expect(abs(sliver.start - 7) < 1e-9)
+        // No gap above it: the top part starts where it ends.
+        #expect(abs(sliver.end - 7.05) < 1e-9)
+        #expect(abs(top.start - sliver.end) < 1e-9)
+        // The parts below the sliver still keep their gap.
+        let output: PacerStackSpan = spans[0]
+        #expect(abs(output.end - 1.9) < 1e-9)
+    }
+
+    @Test("a sliver on top: no gap below it, and the bar still reaches the total")
+    func topSliverIsFlush() {
+        let (bucket, spans) = spans(output: 2, read: 5, w1h: 0.02)
+        let read: PacerStackSpan = spans[1]
+        let top: PacerStackSpan = spans[2]
+        #expect(abs(read.end - 7) < 1e-9)
+        #expect(abs(top.start - 7) < 1e-9)
+        #expect(abs(top.end - bucket.total) < 1e-9)
+    }
+
+    @Test("a part exactly twice the gap is readable")
+    func thresholdIsInclusive() {
+        let (_, spans) = spans(input: 0.2, output: 2)
+        let input: PacerStackSpan = spans[0]
+        #expect(abs(input.end - 0.1) < 1e-9)
+    }
+}
+
+@Suite("Cost bar gap placement")
+struct PacerCostBarLayoutTests {
+    /// A real Today's traffic case: input $0.04 of ~$489, about 0.05 pt of
+    /// a card-wide bar.
+    private static let todayShares: [Double] = {
+        let usd: [Double] = [0.04, 51.3, 274.8, 64.5, 98.3]
+        let total: Double = usd.reduce(0, +)
+        return usd.map { $0 / total }
+    }()
+
+    private func layout(_ shares: [Double], width: CGFloat = 640) -> PacerCostBarLayout {
+        PacerCostBarLayout(shares: shares, width: width, gap: 2, sliver: 5)
+    }
+
+    private func used(_ layout: PacerCostBarLayout) -> CGFloat {
+        layout.segments.reduce(CGFloat(0)) { $0 + $1.width + $1.trailingGap }
+    }
+
+    @Test("a sliver at the front sits flush: the next part fills the rounded end")
+    func frontSliverIsFlush() {
+        let l: PacerCostBarLayout = layout(Self.todayShares)
+        #expect(l.segments[0].trailingGap == 0)
+        #expect(l.segments[0].width < 1)
+        // Every readable neighbour pair keeps its gap; the last part has none.
+        let gaps: [CGFloat] = l.segments.map(\.trailingGap)
+        #expect(gaps == [0, 2, 2, 2, 0])
+        // The parts and gaps fill the bar exactly.
+        let total: CGFloat = used(l)
+        #expect(abs(total - 640) < 1e-6)
+    }
+
+    @Test("a sliver in the middle gets no gap on either side")
+    func middleSliverIsFlushBothWays() {
+        let l: PacerCostBarLayout = layout([0.3, 0.4, 0.004, 0.296, 0])
+        let gaps: [CGFloat] = l.segments.map(\.trailingGap)
+        #expect(gaps == [2, 0, 0, 0, 0])
+        let total: CGFloat = used(l)
+        #expect(abs(total - 640) < 1e-6)
+    }
+
+    @Test("a sliver at the end sits flush against the part before it")
+    func endSliverIsFlush() {
+        let l: PacerCostBarLayout = layout([0, 0.2, 0.6, 0.197, 0.003])
+        let gaps: [CGFloat] = l.segments.map(\.trailingGap)
+        #expect(gaps == [0, 2, 2, 0, 0])
+    }
+
+    @Test("a $0 part is skipped: the gap goes between the shown parts either side of it")
+    func zeroPartsAreSkipped() {
+        let l: PacerCostBarLayout = layout([0.5, 0, 0.5, 0, 0])
+        #expect(l.segments[1].width == 0)
+        let gaps: [CGFloat] = l.segments.map(\.trailingGap)
+        #expect(gaps == [2, 0, 0, 0, 0])
+        let half: CGFloat = 319
+        #expect(abs(l.segments[0].width - half) < 1e-6)
+    }
+
+    @Test("whether a part is a sliver is judged at the bar's full width")
+    func sliverJudgedAtFullWidth() {
+        // 5 / 640 of the bar is exactly the threshold: readable, gapped.
+        let edge: Double = 5.0 / 640.0
+        let l: PacerCostBarLayout = layout([edge, 1 - edge])
+        #expect(l.segments[0].trailingGap == 2)
+        // A narrower bar makes the same share a sliver.
+        let narrow: PacerCostBarLayout = layout([edge, 1 - edge], width: 320)
+        #expect(narrow.segments[0].trailingGap == 0)
+    }
+
+    @Test("one part, or none, has no gaps")
+    func singleAndEmpty() {
+        let one: PacerCostBarLayout = layout([0, 0, 1, 0, 0])
+        #expect(one.segments.allSatisfy { $0.trailingGap == 0 })
+        #expect(abs(one.segments[2].width - 640) < 1e-6)
+        let none: PacerCostBarLayout = layout([0, 0, 0, 0, 0])
+        #expect(none.segments.allSatisfy { $0.width == 0 && $0.trailingGap == 0 })
     }
 }

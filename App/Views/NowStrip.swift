@@ -629,60 +629,6 @@ struct NowStrip: View {
     }
 }
 
-// MARK: - Spent → projected bar
-
-/// "spent so far → projected total", in the same fill-on-a-track grammar
-/// as the budget bar. Replaces the RangeBar, which layered four encodings
-/// (track, range segment, point marker, reference tick) on an unlabeled
-/// dollar axis and never read clearly even with a legend — the calibrated
-/// range and accuracy live in the tooltip instead.
-struct SpendProgressBar: View {
-    let spent: Double
-    /// Always ≥ spent (callers clamp).
-    let projected: Double
-    var projectedLabel: String
-    var help: String = ""
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 4) {
-                Text("\(pacerCost(spent)) spent")
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-                Spacer(minLength: 8)
-                Text(projectedLabel)
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-            }
-            GeometryReader { geo in
-                let fraction = projected > 0 ? min(1, max(0, spent / projected)) : 0
-                ZStack(alignment: .leading) {
-                    Capsule()
-                        .fill(Color.accentColor.opacity(0.18))
-                    Capsule()
-                        .fill(Color.accentColor)
-                        .frame(width: max(4, geo.size.width * fraction))
-                }
-            }
-            .frame(height: 5)
-        }
-        .modifier(OptionalBarHelp(text: help))
-    }
-}
-
-private struct OptionalBarHelp: ViewModifier {
-    let text: String
-    func body(content: Content) -> some View {
-        if text.isEmpty {
-            content
-        } else {
-            content.help(text)
-        }
-    }
-}
-
 // MARK: - Tile chrome
 
 /// Shared tile surface for the strip — the PacerCard look with an eyebrow

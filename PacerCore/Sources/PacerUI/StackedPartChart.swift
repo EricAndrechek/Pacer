@@ -94,19 +94,25 @@ public struct PacerChartBucket: Sendable, Equatable, Identifiable {
     /// `nil` for a $0 bucket.
     public var stackTop: CostComponent? { segments.last?.component }
 
-    /// The drawn segments as y spans, stacked in order, each but the top one
-    /// trimmed by `gap` (cost units) so the card shows between neighbouring
-    /// parts. Two hues a colour-blind reader sees as close still get an edge.
-    /// A sliver smaller than twice the gap keeps half its height rather than
-    /// vanishing. The top segment is not trimmed, so the bar's height is still
-    /// the total its label prints.
+    /// The drawn segments as y spans, stacked in order. Between two
+    /// neighbouring parts the lower one gives up `gap` (cost units) off its
+    /// top, so the card shows between them and two hues a colour-blind reader
+    /// sees as close still get an edge.
+    ///
+    /// A sliver — shorter than twice the gap — gets no gap above or below it
+    /// and sits flush against its neighbours, the rule `PacerCostBar` follows.
+    /// Gapped, it was a hairline of colour floating under a gap at the foot
+    /// of the bar. The top segment is never trimmed, so the bar's height is
+    /// still the total its label prints.
     public func spans(gap: Double) -> [PacerStackSpan] {
+        let sliver: Double = gap * 2
         var spans: [PacerStackSpan] = []
         var start = 0.0
         for (i, part) in segments.enumerated() {
-            let end = start + part.usd
-            let trim = i == segments.count - 1 ? 0 : min(gap, part.usd / 2)
-            spans.append(PacerStackSpan(part: part, start: start, end: end - trim))
+            let end: Double = start + part.usd
+            let next: CostBreakdown.Part? = i + 1 < segments.count ? segments[i + 1] : nil
+            let gapped: Bool = next.map { part.usd >= sliver && $0.usd >= sliver } ?? false
+            spans.append(PacerStackSpan(part: part, start: start, end: gapped ? end - gap : end))
             start = end
         }
         return spans
@@ -271,7 +277,8 @@ public struct PacerStackedPartChart: View {
     /// the data's max. (Not `chartPlotStyle` padding: that moves the marks
     /// and leaves the gridlines and axis labels where they were.)
     nonisolated static let labelRoom: CGFloat = 14
-    /// Points of card between two stacked parts (see `PacerChartBucket.spans`).
+    /// Points of card between two stacked parts (see `PacerChartBucket.spans`,
+    /// which leaves it out beside a part under twice this tall).
     nonisolated static let segmentGap: Double = 1.5
 
     public var body: some View {

@@ -14,12 +14,12 @@ import PacerUI
 /// bar to drill into the per-day modal (same view the History tab's heatmap
 /// opens).
 ///
-/// The month section is what "This week" is for its seven days — cost,
-/// tokens, active days and the shared breakdown — plus the engine's
-/// month-end projection. Every number in it is the month's own; on a day
-/// when the month's active days are exactly today's or this week's, its
-/// totals would repeat the Now strip or "This week", so it shows only the
-/// projection and keeps them in that tile's tooltip (`PeriodWindows`).
+/// Under the chart, the month so far (`PacerMonthSummary`): cost, tokens,
+/// active days and the engine's month-end projection, the spent → projected
+/// bar, and the shared breakdown. It opens with an eyebrow, not a second
+/// title, so this is one card with one title. Every tile is drawn every day,
+/// the 1st included, when the month's numbers are today's: the owner chose
+/// a card that looks the same every day over hiding a repeat.
 struct DailyCostChartCard: View {
     /// Optional callback fired when the user clicks a bar. Wiring is
     /// at the parent (DashboardView), so each surface can decide whether to
@@ -86,62 +86,53 @@ struct DailyCostChartCard: View {
     /// breakdown and top models, built here, so hovering a bar reads
     /// precomputed numbers and never re-sums the rows.
     ///
-    /// The clock is an input (the month, its days left, which days are
-    /// "this week"), read at each refresh. A new day rebuilds the whole page
-    /// (`ContentView`'s `.id(dayKey)`), so the month rolls over with it.
+    /// The clock is an input (the month, its days left, the day of the month
+    /// the pace hint divides by), read at each refresh and nowhere else. The
+    /// refresh is keyed on the day (`PacerToday`), so the month rolls over at
+    /// midnight even before `ContentView`'s `.id(dayKey)` rebuilds the page.
     private struct Derived {
         var buckets: [PacerChartBucket] = []
         var totalCost: Double = 0
-        /// The 30-day total would print a number another card already does:
-        /// the month's (every active day is this month's), or today's or
-        /// this week's.
-        var totalRepeats = false
         var month = MonthTotals()
     }
 
     struct MonthTotals: Equatable {
         var breakdown = CostBreakdown.zero
         var activeDays = 0
-        var daysLeft = 0
+        var dayOfMonth = 1
+        var daysInMonth = 30
         /// "October"
         var name = ""
-        /// Its cost, tokens and breakdown are today's or this week's.
-        var repeatsShorterWindow = false
 
         var cost: Double { breakdown.total }
-        var tokens: Int64 { breakdown.tokens.all }
-        var hasData: Bool { activeDays > 0 }
-        var averageActiveDayCost: Double { activeDays > 0 ? cost / Double(activeDays) : 0 }
+        var daysLeft: Int { max(0, daysInMonth - dayOfMonth) }
     }
 
     private func refreshDerived() {
         let now = Date()
         let cal = Calendar.current
-        let windows = PeriodWindows(now: now, calendar: cal)
+        let today = TokenSample.formatDate(now)
+        let monthStart = TokenSample.formatDate(cal.dateInterval(of: .month, for: now)?.start ?? now)
         var builder = PacerChartBucketBuilder()
         var month = MonthTotals()
-        var active = Set<String>()
+        var monthDays = Set<String>()
         for row in aggregates {
             builder.add(row.date, row.costBreakdown, model: row.model)
-            active.insert(row.date)
-            if row.date >= windows.monthStart && row.date <= windows.today {
+            if row.date >= monthStart && row.date <= today {
                 month.breakdown += row.costBreakdown
+                monthDays.insert(row.date)
             }
         }
         let buckets = builder.buckets(last: 30)
-        let monthDays = windows.month(active)
         month.activeDays = monthDays.count
-        let daysInMonth = cal.range(of: .day, in: .month, for: now)?.count ?? 30
-        month.daysLeft = max(0, daysInMonth - cal.component(.day, from: now))
+        month.dayOfMonth = cal.component(.day, from: now)
+        month.daysInMonth = cal.range(of: .day, in: .month, for: now)?.count ?? 30
         month.name = Self.monthName.string(from: now)
-        month.repeatsShorterWindow = windows.repeatsTodayOrWeek(monthDays, in: active)
-        // The chart's days, not every row fetched: the header total is the
-        // last 30 bars' sum.
-        let chartDays = Set(buckets.map(\.id)).intersection(active)
         cachedDerived = Derived(
             buckets: buckets,
+            // The chart's days, not every row fetched: the header total is
+            // the last 30 bars' sum.
             totalCost: buckets.reduce(0) { $0 + $1.total },
-            totalRepeats: chartDays == monthDays || windows.repeatsTodayOrWeek(chartDays, in: active),
             month: month
         )
     }
@@ -162,11 +153,13 @@ struct DailyCostChartCard: View {
         // Read here as well as inside `PacerCard`'s stored closures (#140).
         let d = cachedDerived
         let projection = self.projection
+        // Read in body so a new day is a tracked input (see `Derived`).
+        let day = PacerToday.shared.key
         PacerCard("Last 30 days", trailing: {
             // The hovered day's numbers are in the card floating over the
             // chart, so this slot no longer swaps on hover and the header
             // never moves.
-            if d.totalCost > 0 && !d.totalRepeats {
+            if d.totalCost > 0 {
                 Text("total \(pacerCost(d.totalCost))")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
@@ -184,12 +177,14 @@ struct DailyCostChartCard: View {
                         .accessibilityLabel("Daily cost by part over the last 30 days")
                         .accessibilityHint(onDayTap != nil ? "Click a bar to drill into that day" : "")
                     Divider()
-                    monthSection(d.month, projection: projection)
+                    PacerMonthSummary(monthModel(d.month, projection: projection))
                 }
             }
         }
         .onAppear { refreshDerived() }
         .onChange(of: scanMeta.first?.value) { _, _ in refreshDerived() }
+        // The clock: the month, its days left and the pace hint's day.
+        .onChange(of: day) { _, _ in refreshDerived() }
         // The scope is a refresh trigger like any other. Without it the cache
         // holds the previous account's numbers until the *next scan cycle*
         // happens to fire — which on an idle machine is seven to ten seconds,
@@ -197,7 +192,8 @@ struct DailyCostChartCard: View {
         .onChange(of: scope.accountId) { _, _ in refreshDerived() }
         // Keyed on the scope for the same reason: the month-end projection
         // is that account's engine's, and kept the old one's until a refit.
-        .task(id: scope.accountId) {
+        // And on the day: a new month is a new question.
+        .task(id: ProjectionKey(account: scope.accountId, day: day)) {
             self.projection = nil
             await refreshProjection()
         }
@@ -208,102 +204,54 @@ struct DailyCostChartCard: View {
 
     // MARK: - This month
 
-    @ViewBuilder
-    private func monthSection(_ month: MonthTotals, projection: Estimate?) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .firstTextBaseline) {
-                Text("This month")
-                    .font(.headline)
-                Spacer(minLength: 8)
-                Text("\(month.name) · \(month.daysLeft) day\(month.daysLeft == 1 ? "" : "s") left")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-            }
-            if !month.hasData {
-                Text("No usage this month yet.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-            } else {
-                VStack(alignment: .leading, spacing: 18) {
-                    LazyVGrid(
-                        columns: Array(
-                            repeating: GridItem(.flexible(), spacing: 16, alignment: .topLeading),
-                            count: 4
-                        ),
-                        alignment: .leading,
-                        spacing: 12
-                    ) {
-                        if !month.repeatsShorterWindow {
-                            MetricTile(
-                                value: pacerCost(month.cost),
-                                label: "cost",
-                                tooltip: pacerCostExact(month.cost)
-                            )
-                            MetricTile(
-                                value: pacerTokens(month.tokens),
-                                label: "tokens",
-                                tooltip: pacerTokensExact(month.tokens)
-                            )
-                            MetricTile(
-                                value: "\(month.activeDays)",
-                                label: "active days",
-                                hint: "avg \(pacerCost(month.averageActiveDayCost)) each",
-                                tooltip: "\(pacerCostExact(month.averageActiveDayCost)) per active day"
-                            )
-                        }
-                        // Always drawn, "—" until the engine answers: a tile
-                        // that appeared seconds after the card would grow it.
-                        MetricTile(
-                            value: projectionValue(projection, month: month),
-                            label: "by month end",
-                            tooltip: projectionHelp(projection, month: month)
-                        )
-                    }
-                    if !month.repeatsShorterWindow, PacerCostBreakdownView.hasContent(month.breakdown) {
-                        PacerCostBreakdownView(month.breakdown)
-                    }
-                }
-            }
-        }
+    /// What the projection task is keyed on.
+    private struct ProjectionKey: Equatable {
+        let account: String?
+        let day: String
     }
 
-    /// "≈$3.4k", a point value; never below what the month has already
-    /// spent. "—" until there is an answer worth showing.
-    private func projectionValue(_ p: Estimate?, month: MonthTotals) -> String {
-        guard let p, !p.isInsufficient else { return "—" }
-        return "≈\(IntelligenceFormatting.approxCost(max(p.value, month.cost)))"
+    /// The month section's plain value: the cached totals and the engine's
+    /// answer, formatted. O(1), so it is built in `body`.
+    private func monthModel(_ month: MonthTotals, projection p: Estimate?) -> PacerMonthSummary.Model {
+        let state: PacerMonthSummary.Projection
+        if let p, !p.isInsufficient {
+            // A point value, never below what the month has already spent.
+            let usd = max(p.value, month.cost)
+            state = .estimate(
+                usd: usd,
+                label: "≈\(IntelligenceFormatting.approxCost(usd))",
+                help: projectionHelp(p, usd: usd, month: month))
+        } else if p != nil {
+            state = .unavailable(help: "Not enough of this month yet to project")
+        } else {
+            state = .pending
+        }
+        return PacerMonthSummary.Model(
+            name: month.name,
+            daysLeft: month.daysLeft,
+            breakdown: month.breakdown,
+            activeDays: month.activeDays,
+            projection: state)
     }
 
     /// The exact projection, its calibrated range and how it compares with
-    /// the month's pace so far. When the month section is down to this one
-    /// tile, the month-to-date figures it left off ride here too.
-    private func projectionHelp(_ p: Estimate?, month: MonthTotals) -> String {
-        var parts: [String] = []
-        if let p, !p.isInsufficient {
-            parts.append(pacerCostExact(max(p.value, month.cost)))
-            if let band = p.interval80 {
-                parts.append(IntelligenceFormatting.anchors(band))
-            }
-            if let hint = paceHint(p, month: month) { parts.append(hint) }
-        } else {
-            parts.append("Not enough of this month yet to project")
+    /// the month's pace so far.
+    private func projectionHelp(_ p: Estimate, usd: Double, month: MonthTotals) -> String {
+        var parts: [String] = [pacerCostExact(usd)]
+        if let band = p.interval80 {
+            parts.append(IntelligenceFormatting.anchors(band))
         }
-        if month.repeatsShorterWindow {
-            parts.append("so far \(pacerCostExact(month.cost)) · \(pacerTokensExact(month.tokens)) tokens")
-        }
+        if let hint = paceHint(p, month: month) { parts.append(hint) }
         return parts.joined(separator: " · ")
     }
 
     /// "↑ 18% above pace" — the engine's projection vs a pure linear
     /// forward-fill of the current run rate. Only meaningful past the
-    /// first few days.
+    /// first few days. The day of the month is the cached one, so no clock
+    /// is read here.
     private func paceHint(_ p: Estimate, month: MonthTotals) -> String? {
-        let cal = Calendar.current
-        let now = Date()
-        let dayOfMonth = cal.component(.day, from: now)
-        let daysInMonth = cal.range(of: .day, in: .month, for: now)?.count ?? 30
-        guard dayOfMonth >= 3 else { return "if rate holds" }
-        let purePace = month.cost / Double(dayOfMonth) * Double(daysInMonth)
+        guard month.dayOfMonth >= 3 else { return "if rate holds" }
+        let purePace = month.cost / Double(month.dayOfMonth) * Double(month.daysInMonth)
         guard purePace > 0.01 else { return "if rate holds" }
         let ratio = p.value / purePace
         if ratio > 1.05 {

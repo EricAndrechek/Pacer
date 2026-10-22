@@ -28,18 +28,22 @@ public struct PacerCostBar: View {
     public var body: some View {
         let parts = breakdown.parts
         let shown = parts.filter { $0.share > 0 }.count
+        // The bar's corner radius is also the narrowest part worth a gap: a
+        // part thinner than the rounding sits inside the curve of the end.
+        let radius: CGFloat = height / 2
         GeometryReader { geo in
-            let room = max(0, geo.size.width - Self.gap * CGFloat(max(0, shown - 1)))
+            let layout = PacerCostBarLayout(
+                shares: parts.map(\.share), width: geo.size.width,
+                gap: Self.gap, sliver: radius)
             HStack(spacing: 0) {
                 // Every part gets a segment, zero-width when it is $0, so the
-                // row's identity does not change as a part comes and goes. The
-                // gap trails each shown part but the last shown one.
+                // row's identity does not change as a part comes and goes.
                 ForEach(Array(parts.enumerated()), id: \.element.id) { i, part in
-                    let trails = part.share > 0 && parts[(i + 1)...].contains { $0.share > 0 }
+                    let segment: PacerCostBarLayout.Segment = layout.segments[i]
                     Rectangle()
                         .fill(part.component.color)
-                        .frame(width: max(0, room * part.share))
-                        .padding(.trailing, trails ? Self.gap : 0)
+                        .frame(width: segment.width)
+                        .padding(.trailing, segment.trailingGap)
                 }
             }
         }
@@ -52,6 +56,58 @@ public struct PacerCostBar: View {
         .accessibilityElement()
         .accessibilityLabel("Cost by part")
         .accessibilityValue(pacerCostBreakdownSpoken(breakdown))
+    }
+}
+
+/// Where each part of a `PacerCostBar` goes: its width, and the gap after it.
+/// Pure, so where the gaps fall is tested without drawing a bar.
+///
+/// A gap goes between two shown parts only when both are wide enough to
+/// read. A sliver — narrower than `sliver` — gets no gap on either side and
+/// sits flush against its neighbours. Gapping it drew a hairline of colour,
+/// then a gap, then the next part: at the bar's end that hairline is all
+/// that fills the rounded corner, and the end looked cut off rather than
+/// round. Flush, the neighbour fills the curve and the sliver is a thin edge
+/// on it.
+struct PacerCostBarLayout: Equatable {
+    struct Segment: Equatable {
+        let width: CGFloat
+        /// The gap after this part: the bar's gap between two readable
+        /// parts, 0 beside a sliver, after the last part, or for a $0 part.
+        let trailingGap: CGFloat
+    }
+
+    let segments: [Segment]
+
+    /// - Parameters:
+    ///   - shares: every part's share of the cost in bar order, 0 for a part
+    ///     with nothing (it keeps a zero-width segment).
+    ///   - width: the bar's width.
+    ///   - gap: the gap between two readable parts.
+    ///   - sliver: the narrowest a part can be and still get a gap. Judged at
+    ///     the bar's full width, before the gaps are taken out, so whether a
+    ///     part is a sliver does not depend on how many gaps there are.
+    init(shares: [Double], width: CGFloat, gap: CGFloat, sliver: CGFloat) {
+        let full: CGFloat = max(0, width)
+        // The shown parts, in order; $0 parts are skipped when finding a
+        // part's neighbour.
+        let shown: [Int] = shares.indices.filter { shares[$0] > 0 }
+        var trailing: [CGFloat] = Array(repeating: 0, count: shares.count)
+        var gaps: Int = 0
+        for (a, b) in zip(shown, shown.dropFirst()) {
+            let left: CGFloat = full * CGFloat(shares[a])
+            let right: CGFloat = full * CGFloat(shares[b])
+            if left >= sliver && right >= sliver {
+                trailing[a] = gap
+                gaps += 1
+            }
+        }
+        let taken: CGFloat = gap * CGFloat(gaps)
+        let room: CGFloat = max(0, full - taken)
+        segments = shares.indices.map { i -> Segment in
+            let share: CGFloat = CGFloat(max(0, shares[i]))
+            return Segment(width: room * share, trailingGap: trailing[i])
+        }
     }
 }
 
