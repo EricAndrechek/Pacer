@@ -186,7 +186,17 @@ public final class ScanCoordinator {
     ///          mode too, as `.auto` already did, and an unpriced model's
     ///          split uses list-price ratios rather than token counts. Only
     ///          the per-part columns move; every total is unchanged.
-    public static let currentCostRecomputeVersion = "18"
+    /// - "19" — 2026-10-22: the project rollups (global and per account)
+    ///          store every model's five token parts and the cost of each
+    ///          (`modelBreakdownJSON`), replacing a per-model input + output
+    ///          count and a per-model cost total, so a project's By model
+    ///          card can show what its models really used. Session rows'
+    ///          `topModel` is re-picked by all five parts rather than by
+    ///          input + output (#215). Existing rows carry no split until
+    ///          rebuilt — the incremental path declines such a row and
+    ///          rebuilds it, but only this pass reaches buckets nothing
+    ///          writes to again. Every column total is unchanged.
+    public static let currentCostRecomputeVersion = "19"
 
     /// Generation of the duplicate-turn repair.
     ///

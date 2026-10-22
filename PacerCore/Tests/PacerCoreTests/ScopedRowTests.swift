@@ -87,15 +87,13 @@ struct ScopedRowTests {
             inputTokens: 1, outputTokens: 2, cacheReadTokens: 3,
             cacheCreation5mTokens: 4, cacheCreation1hTokens: 5,
             totalCostUSD: 9.5, sessionCount: 2, modelCount: 1,
-            lastActive: at, sessionIdsJSON: Data(), modelTokensJSON: Data(),
-            modelCostJSON: Data())
+            lastActive: at, sessionIdsJSON: Data(), modelBreakdownJSON: nil)
         let scoped: any ProjectDailyReadable = AccountProjectDailyAggregate(
             accountId: "org-a", projectPath: "/p", date: "2026-09-03",
             inputTokens: 1, outputTokens: 2, cacheReadTokens: 3,
             cacheCreation5mTokens: 4, cacheCreation1hTokens: 5,
             totalCostUSD: 9.5, sessionCount: 2, modelCount: 1,
-            lastActive: at, sessionIdsJSON: Data(), modelTokensJSON: Data(),
-            modelCostJSON: Data())
+            lastActive: at, sessionIdsJSON: Data(), modelBreakdownJSON: nil)
         #expect(global.projectPath == scoped.projectPath)
         #expect(global.totalCostUSD == scoped.totalCostUSD)
         #expect(global.sessionCount == scoped.sessionCount)
@@ -114,13 +112,13 @@ struct ScopedRowTests {
             projectPath: "/p", date: "d", inputTokens: 10, outputTokens: 20,
             cacheReadTokens: 30, cacheCreation5mTokens: 0, cacheCreation1hTokens: 0,
             totalCostUSD: 5, sessionCount: 1, modelCount: 1, lastActive: at,
-            sessionIdsJSON: Data(), modelTokensJSON: Data(), modelCostJSON: Data())])
+            sessionIdsJSON: Data(), modelBreakdownJSON: nil)])
         let s = totals([AccountProjectDailyAggregate(
             accountId: "org-a", projectPath: "/p", date: "d",
             inputTokens: 10, outputTokens: 20, cacheReadTokens: 30,
             cacheCreation5mTokens: 0, cacheCreation1hTokens: 0,
             totalCostUSD: 5, sessionCount: 1, modelCount: 1, lastActive: at,
-            sessionIdsJSON: Data(), modelTokensJSON: Data(), modelCostJSON: Data())])
+            sessionIdsJSON: Data(), modelBreakdownJSON: nil)])
         #expect(g?.cost == s?.cost)
         #expect(g?.tokens == s?.tokens)
         #expect(g?.sessionCount == s?.sessionCount)

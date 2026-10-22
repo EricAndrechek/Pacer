@@ -198,8 +198,7 @@ Confirmed against this machine: only `~/.claude/` is currently active
     var modelCount: Int
     var lastActive: Date
     var sessionIdsJSON: Data       // [String]
-    var modelTokensJSON: Data      // [String: Int64]
-    var modelCostJSON: Data        // [String: Double]
+    var modelBreakdownJSON: Data?  // [model: five token parts + their costs]
 }
 
 @Model class RateLimitSample {
@@ -222,7 +221,7 @@ Confirmed against this machine: only `~/.claude/` is currently active
     var cumulativeCacheReadTokens: Int64
     var cumulativeCacheCreation5mTokens: Int64
     var cumulativeCacheCreation1hTokens: Int64
-    var topModel: String          // model with most tokens in this session
+    var topModel: String          // model with most tokens (all five parts) in this session
 }
 
 @Model class ClaudeCodeMeta {

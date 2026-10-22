@@ -199,6 +199,54 @@ check "account-session tokens equal session" 0 "$(q "
 check "account-session cost equals session" "$(q "SELECT ROUND(SUM(ZCUMULATIVECOSTUSD),2) FROM ZSESSIONINFO")" \
   "$(q "SELECT ROUND(SUM(ZCUMULATIVECOSTUSD),2) FROM ZACCOUNTSESSIONINFO")"
 
+# The project rollups store each row split by model (`modelBreakdownJSON`,
+# recompute version 19): per model, five token counts `t` and the cost of each
+# `c`, in the order input, output, cache read, 5m write, 1h write (pinned by
+# `ProjectModelBreakdownTests.theStoredFormIsPinned`). Each row's models must
+# add up to the row, and every project's share of a model on a day must add up
+# to that model's daily row — the second is what proves the split put each
+# turn under the right model, not just that it kept the totals.
+printf '\n%s==>%s Project split by model — models sum to the row, projects to the day\n' "$B" "$X"
+if [ -z "$(q "SELECT 1 FROM pragma_table_info('ZPROJECTDAILYAGGREGATE') WHERE name='ZMODELBREAKDOWNJSON'")" ]; then
+  printf '  - skipped: this store predates the split\n'
+else
+  split_sums() { # table
+    echo "
+      WITH m AS (
+        SELECT a.Z_PK pk, COUNT(*) n,
+               SUM(json_extract(j.value,'\$.t[0]')) i, SUM(json_extract(j.value,'\$.t[1]')) o,
+               SUM(json_extract(j.value,'\$.t[2]')) r, SUM(json_extract(j.value,'\$.t[3]')) w5,
+               SUM(json_extract(j.value,'\$.t[4]')) w1,
+               SUM(json_extract(j.value,'\$.c[0]')) ci, SUM(json_extract(j.value,'\$.c[1]')) co,
+               SUM(json_extract(j.value,'\$.c[2]')) cr, SUM(json_extract(j.value,'\$.c[3]')) cw5,
+               SUM(json_extract(j.value,'\$.c[4]')) cw1
+        FROM $1 a, json_each(CAST(a.ZMODELBREAKDOWNJSON AS TEXT)) j GROUP BY a.Z_PK)
+      SELECT COUNT(*) FROM $1 a LEFT JOIN m ON m.pk=a.Z_PK
+      WHERE m.pk IS NULL OR m.n<>a.ZMODELCOUNT
+         OR m.i<>a.ZINPUTTOKENS OR m.o<>a.ZOUTPUTTOKENS OR m.r<>a.ZCACHEREADTOKENS
+         OR m.w5<>a.ZCACHECREATION5MTOKENS OR m.w1<>a.ZCACHECREATION1HTOKENS
+         OR ABS(m.ci-a.ZCOSTINPUT) > 1e-9 OR ABS(m.co-a.ZCOSTOUTPUT) > 1e-9
+         OR ABS(m.cr-a.ZCOSTCACHEREAD) > 1e-9 OR ABS(m.cw5-a.ZCOSTCACHEWRITE5M) > 1e-9
+         OR ABS(m.cw1-a.ZCOSTCACHEWRITE1H) > 1e-9"
+  }
+  check "project: every row's models sum to it" 0 "$(q "$(split_sums ZPROJECTDAILYAGGREGATE)")"
+  check "account-project: every row's models sum to it" 0 "$(q "$(split_sums ZACCOUNTPROJECTDAILYAGGREGATE)")"
+  check "project split by model equals daily" 0 "$(q "
+    WITH p AS (
+      SELECT a.ZDATE d, j.key m,
+             SUM(json_extract(j.value,'\$.t[0]')) i, SUM(json_extract(j.value,'\$.t[1]')) o,
+             SUM(json_extract(j.value,'\$.t[2]')) r, SUM(json_extract(j.value,'\$.t[3]')) w5,
+             SUM(json_extract(j.value,'\$.t[4]')) w1,
+             SUM(json_extract(j.value,'\$.c[0]') + json_extract(j.value,'\$.c[1]')
+                 + json_extract(j.value,'\$.c[2]') + json_extract(j.value,'\$.c[3]')
+                 + json_extract(j.value,'\$.c[4]')) c
+      FROM ZPROJECTDAILYAGGREGATE a, json_each(CAST(a.ZMODELBREAKDOWNJSON AS TEXT)) j GROUP BY d, m)
+    SELECT COUNT(*) FROM ZDAILYAGGREGATE g LEFT JOIN p ON p.d=g.ZDATE AND p.m=g.ZMODEL
+    WHERE p.d IS NULL OR p.i<>g.ZINPUTTOKENS OR p.o<>g.ZOUTPUTTOKENS OR p.r<>g.ZCACHEREADTOKENS
+       OR p.w5<>g.ZCACHECREATION5MTOKENS OR p.w1<>g.ZCACHECREATION1HTOKENS
+       OR ABS(p.c-g.ZTOTALCOSTUSD) > 1e-6")"
+fi
+
 # Two TokenSamples sharing a dedup key is the one thing the dedup guard exists
 # to prevent — it means the same turn was counted twice, inflating tokens and
 # cost for whatever day it lands on. Reported, never auto-repaired: raw samples

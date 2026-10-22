@@ -48,7 +48,7 @@ import SwiftData
 /// Brand-new `@Model`, so SwiftData's lightweight migration adds it
 /// additively — no store reset, no migration plan, no version bump.
 /// Reference lists are JSON-encoded `Data` columns (matching
-/// `ProjectDailyAggregate.modelTokensJSON` et al.) for forward-compat:
+/// `ProjectDailyAggregate.sessionIdsJSON` et al.) for forward-compat:
 /// adding a richer rule grammar later is a decode change, not a schema
 /// change.
 @Model

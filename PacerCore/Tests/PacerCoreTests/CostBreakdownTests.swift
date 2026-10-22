@@ -181,7 +181,7 @@ struct CostBreakdownTests {
                 cacheCreation5mTokens: 700, cacheCreation1hTokens: 300,
                 totalCostUSD: 0, sessionCount: 1, modelCount: 1,
                 lastActive: .distantPast, sessionIdsJSON: Data(),
-                modelTokensJSON: Data(), modelCostJSON: Data())
+                modelBreakdownJSON: nil)
             s.costComponents = c
             ctx.insert(g)
             ctx.insert(s)

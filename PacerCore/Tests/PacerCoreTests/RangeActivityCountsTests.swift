@@ -32,8 +32,7 @@ struct RangeActivityCountsTests {
             inputTokens: 0, outputTokens: 0, cacheReadTokens: 0,
             cacheCreation5mTokens: 0, cacheCreation1hTokens: 0,
             totalCostUSD: 0, sessionCount: 0, modelCount: 0,
-            lastActive: noon(day), sessionIdsJSON: Data(), modelTokensJSON: Data(),
-            modelCostJSON: Data())
+            lastActive: noon(day), sessionIdsJSON: Data(), modelBreakdownJSON: nil)
     }
 
     private func session(_ id: String, first: Int, last: Date) -> SessionInfo {

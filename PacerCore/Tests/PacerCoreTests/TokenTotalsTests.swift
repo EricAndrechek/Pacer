@@ -108,7 +108,7 @@ struct TokenTotalsTests {
             cacheCreation5mTokens: Self.write5m, cacheCreation1hTokens: Self.write1h,
             totalCostUSD: 1, sessionCount: 1, modelCount: 1,
             lastActive: Date(timeIntervalSince1970: 0), sessionIdsJSON: Data(),
-            modelTokensJSON: Data(), modelCostJSON: Data())
+            modelBreakdownJSON: nil)
         #expect(global.tokens == expected)
         #expect(scoped.tokens == expected)
         #expect(global.costBreakdown.tokens == expected)
