@@ -2,29 +2,28 @@ import Foundation
 import Testing
 @testable import PacerCore
 
-/// Ground-truth comparison: Pacer's parser must produce the same
-/// per-day token totals as `bun x ccusage daily --json` did when the
-/// snapshot at `docs/research/ccusage-outputs/daily.json` was captured.
+/// A parity check against `ccusage`, kept as a reference, not a gate (#299).
 ///
-/// **Deviation 1 — cache tiers.** ccusage flattens
-/// `cache_creation_input_tokens` into a single `cacheCreationTokens`
-/// field; Pacer keeps the 5m/1h split (`cacheCreation5mTokens` +
-/// `cacheCreation1hTokens`). The comparison sums Pacer's two columns
-/// to recover ccusage's flat number — *that* match must be exact, the
-/// split itself is the deliberate Pacer-better-than-ccusage extension
-/// and isn't comparable. (See AGENTS.md "Non-negotiable correctness
-/// rules" §5.)
+/// Ground truth is the raw JSONL, checked by Pacer's own passes: the
+/// hand-computed fixtures (`JSONLScannerFixtureTests` for tokens and the
+/// dollars they cost, `PriceLedgerTests`, `CuratedPriceHistoryTests`),
+/// `make test-ingest-parity`, and `make verify-data` on a real store. These
+/// tests ask a narrower question: do the token counts both tools count the
+/// same way still agree? That is input, cache read, and cache creation as
+/// one flat number.
 ///
-/// **Deviation 2 — output tokens no longer match, on purpose.** ccusage
-/// dedups first-wins. Claude Code writes the same assistant message to the
-/// transcript several times while it streams, and only the last copy carries
-/// the real `output_tokens`, so first-wins keeps the mid-stream snapshot.
-/// Measured on a real 1,697-file corpus that under-counts output by
-/// 29,533,409 tokens — 63% of what gets recorded. Pacer keeps the finished
-/// copy (correctness rule §7), so **Pacer's output totals are legitimately
-/// HIGHER than ccusage's** and these snapshots cannot be expected to match on
-/// that field until ccusage fixes the same bug. A failure here showing Pacer
-/// ahead on output is the fix working; do not "correct" it.
+/// **What is not compared, and why.**
+/// - **The 5m/1h cache split.** ccusage flattens `cache_creation`; Pacer keeps
+///   both tiers (correctness rule §5). Pacer's two columns are summed to get
+///   ccusage's flat number, and *that* must match exactly.
+/// - **Output tokens.** ccusage dedups first-wins and keeps the mid-stream copy
+///   of a streamed message; Pacer keeps the finished one (rule §7). On a real
+///   1,697-file corpus first-wins under-counts output by 29,533,409 tokens, 63%
+///   of it. Pacer's output is legitimately higher, so it isn't compared.
+/// - **Cost.** ccusage prices every day at today's catalog rate. Pacer prices
+///   each request at the rate in effect when it was made, with request tiers,
+///   fast mode and data residency. Once any rate has changed, ccusage's
+///   `totalCost` is the wrong answer to compare against.
 ///
 /// **Opt-in.** These captured-snapshot tests are gated behind
 /// `PACER_RUN_CCUSAGE_SNAPSHOT_TEST=1` and skip otherwise. They compare a
@@ -54,20 +53,16 @@ private func capturedSnapshotTestsEnabled() -> Bool {
 private struct CcusageDay: Decodable {
     let date: String
     let inputTokens: Int64
-    let outputTokens: Int64
     let cacheCreationTokens: Int64
     let cacheReadTokens: Int64
-    let totalCost: Double
     let modelBreakdowns: [CcusageModelBreakdown]
 }
 
 private struct CcusageModelBreakdown: Decodable {
     let modelName: String
     let inputTokens: Int64
-    let outputTokens: Int64
     let cacheCreationTokens: Int64
     let cacheReadTokens: Int64
-    let cost: Double
 }
 
 private struct CcusageSnapshot: Decodable {
@@ -154,10 +149,6 @@ private func locateCcusageSnapshot() -> URL? {
             "input mismatch on \(date): pacer=\(pacer.inputTokens) ccusage=\(ccu.inputTokens)"
         )
         #expect(
-            pacer.outputTokens == ccu.outputTokens,
-            "output mismatch on \(date): pacer=\(pacer.outputTokens) ccusage=\(ccu.outputTokens)"
-        )
-        #expect(
             pacer.cacheReadTokens == ccu.cacheReadTokens,
             "cacheRead mismatch on \(date): pacer=\(pacer.cacheReadTokens) ccusage=\(ccu.cacheReadTokens)"
         )
@@ -238,9 +229,6 @@ private func locateCcusageSnapshot() -> URL? {
         if differsBeyondTolerance(pacer.inputTokens, ccu.inputTokens) {
             divergentDays.append((ccu.date, "input pacer=\(pacer.inputTokens) ccu=\(ccu.inputTokens)"))
         }
-        if differsBeyondTolerance(pacer.outputTokens, ccu.outputTokens) {
-            divergentDays.append((ccu.date, "output pacer=\(pacer.outputTokens) ccu=\(ccu.outputTokens)"))
-        }
         if differsBeyondTolerance(pacer.cacheReadTokens, ccu.cacheReadTokens) {
             divergentDays.append((ccu.date, "cacheRead pacer=\(pacer.cacheReadTokens) ccu=\(ccu.cacheReadTokens)"))
         }
@@ -286,150 +274,12 @@ private actor DateModelCollector {
     func byDateModel() -> [String: [String: TokenBreakdown]] { totals }
 }
 
-/// Per-day, per-model `CostCalculator` totals plus tracking of any
-/// 1h-cache tokens (so divergences can be classified — see the cost
-/// test's docstring for the cache-1h caveat).
-private actor PerModelCostCollector {
-    private var costs: [String: [String: Double]] = [:]  // date -> model -> cost
-    private var oneHour: [String: [String: Int64]] = [:] // date -> model -> 1h tokens
-    private let calculator: CostCalculator
-
-    init(mode: CostMode = .auto) {
-        self.calculator = CostCalculator(mode: mode)
-    }
-
-    func add(_ entry: ParsedUsageEntry) async {
-        let date = TokenSample.formatDate(entry.timestamp)
-        let cost = await calculator.cost(for: entry)
-        var dayCosts = costs[date] ?? [:]
-        dayCosts[entry.model, default: 0] += cost
-        costs[date] = dayCosts
-        var dayOneHour = oneHour[date] ?? [:]
-        dayOneHour[entry.model, default: 0] += entry.breakdown.cacheCreation1hTokens
-        oneHour[date] = dayOneHour
-    }
-
-    func costs(date: String, model: String) -> Double {
-        costs[date]?[model] ?? 0
-    }
-
-    func has1hCache(date: String, model: String) -> Bool {
-        (oneHour[date]?[model] ?? 0) > 0
-    }
-}
-
-/// Like `DateCollector` but also runs `CostCalculator` per entry so
-/// the total per-day cost can be compared against ccusage's
-/// `totalCost` field. We accumulate cost during the scan rather than
-/// after so we don't have to retain per-entry breakdowns; the
-/// calculator runs in `.auto` mode (matches ccusage default).
-private actor CostCollector {
-    private var costByDate: [String: Double] = [:]
-    private var oneHourCacheByDate: [String: Int64] = [:]
-    private let calculator: CostCalculator
-
-    init(mode: CostMode = .auto) {
-        self.calculator = CostCalculator(mode: mode)
-    }
-
-    func add(_ entry: ParsedUsageEntry) async {
-        let date = TokenSample.formatDate(entry.timestamp)
-        let cost = await calculator.cost(for: entry)
-        costByDate[date, default: 0] += cost
-        oneHourCacheByDate[date, default: 0] += entry.breakdown.cacheCreation1hTokens
-    }
-
-    func byDate() -> [String: Double] { costByDate }
-    func oneHourCache() -> [String: Int64] { oneHourCacheByDate }
-}
-
-/// End-to-end cost comparison: Pacer's per-day cost must match
-/// ccusage's `totalCost` for the same range, modulo the legitimate
-/// cache-creation-1h divergence. ccusage applies a single
-/// `cacheCreationInputTokenCost` rate to all cache-creation tokens
-/// (because it flattens 5m+1h into one bucket); Pacer applies the
-/// 1h-specific rate when present in pricing data, so on a day with
-/// 1h-cached tokens *Pacer is more accurate than ccusage*. We
-/// surface that case as a soft divergence (logged, not failed) and
-/// require exact match on days without 1h cache tokens.
-@Test func dailyCostsMatchCapturedCcusageSnapshot() async throws {
-    guard capturedSnapshotTestsEnabled() else { return }
-    guard let snapshotURL = locateCcusageSnapshot() else { return }
-    let snapshot = try JSONDecoder().decode(
-        CcusageSnapshot.self,
-        from: try Data(contentsOf: snapshotURL)
-    )
-
-    let resolver = ClaudePathResolver()
-    let roots: [ClaudePathResolver.ResolvedRoot]
-    do { roots = try resolver.resolve() } catch { return }
-    guard !roots.isEmpty else { return }
-
-    let collector = CostCollector(mode: .auto)
-    let scanner = JSONLScanner()
-    _ = try await scanner.scan(roots: roots) { entry in
-        await collector.add(entry)
-    }
-    let pacerCostByDate = await collector.byDate()
-    let oneHourCacheByDate = await collector.oneHourCache()
-
-    let mostRecentDate = snapshot.daily.map(\.date).max() ?? ""
-    var checkedStrict = 0
-    var divergencesOn1hDays: [String] = []
-
-    for ccu in snapshot.daily where ccu.date != mostRecentDate {
-        guard let pacerCost = pacerCostByDate[ccu.date] else { continue }
-        let absDiff = abs(pacerCost - ccu.totalCost)
-        let larger = max(abs(pacerCost), abs(ccu.totalCost))
-        let relDiff = larger > 0 ? absDiff / larger : 0
-        let has1hCache = (oneHourCacheByDate[ccu.date] ?? 0) > 0
-
-        if has1hCache {
-            // Legitimate divergence on this day — log only.
-            if relDiff > 0.001 {
-                divergencesOn1hDays.append(
-                    "\(ccu.date): pacer=$\(String(format: "%.4f", pacerCost)) ccu=$\(String(format: "%.4f", ccu.totalCost)) (1h-cache divergence)"
-                )
-            }
-        } else {
-            // Strict match. Float tolerance: $0.001 absolute or 0.01% relative.
-            checkedStrict += 1
-            let withinTolerance = absDiff < 0.001 || relDiff < 0.0001
-            #expect(
-                withinTolerance,
-                "cost mismatch on \(ccu.date): pacer=$\(pacerCost) ccusage=$\(ccu.totalCost) diff=$\(absDiff) rel=\(relDiff)"
-            )
-        }
-    }
-
-    // Don't fail on no-overlap (test scaffolds skip silently); but if
-    // we found overlap, at least some strict comparisons should have
-    // happened — otherwise the test passed for the wrong reason.
-    if !pacerCostByDate.isEmpty && !snapshot.daily.isEmpty {
-        #expect(
-            checkedStrict > 0 || !divergencesOn1hDays.isEmpty,
-            "expected at least one cost-comparable overlapping date"
-        )
-    }
-    if !divergencesOn1hDays.isEmpty {
-        // Surface but don't fail — these are the "Pacer is more correct"
-        // wins where the captured snapshot is from ccusage's
-        // less-accurate flat cache rate.
-        FileHandle.standardError.write(
-            Data("\n[CCusageGroundTruth] cache-1h cost divergences (Pacer more accurate):\n  - \(divergencesOn1hDays.joined(separator: "\n  - "))\n\n".utf8)
-        )
-    }
-}
-
 /// Per-model breakdown ground truth. For each completed day in the
 /// captured snapshot, verify that:
 ///   - Pacer sees the same set of models as ccusage.
-///   - Per (date, model), input/output/cacheRead tokens match exactly.
+///   - Per (date, model), input and cacheRead tokens match exactly.
 ///   - cacheCreation flat-sum (Pacer's 5m+1h) matches ccusage's flat
 ///     `cacheCreationTokens`.
-///   - Per-model cost matches strictly when the model has no 1h cache
-///     tokens that day; logged-only divergence otherwise (see the
-///     daily-cost test for the rationale).
 @Test func perModelTotalsMatchCapturedCcusageSnapshot() async throws {
     guard capturedSnapshotTestsEnabled() else { return }
     guard let snapshotURL = locateCcusageSnapshot() else { return }
@@ -444,16 +294,13 @@ private actor CostCollector {
     guard !roots.isEmpty else { return }
 
     let dmCollector = DateModelCollector()
-    let costCollector = PerModelCostCollector(mode: .auto)
     let scanner = JSONLScanner()
     _ = try await scanner.scan(roots: roots) { entry in
         await dmCollector.add(entry)
-        await costCollector.add(entry)
     }
     let pacerByDateModel = await dmCollector.byDateModel()
 
     let mostRecentDate = snapshot.daily.map(\.date).max() ?? ""
-    var costDivergencesOn1hDays: [String] = []
     var checkedModels = 0
 
     for ccu in snapshot.daily where ccu.date != mostRecentDate {
@@ -477,10 +324,6 @@ private actor CostCollector {
                 "input mismatch on \(ccu.date) \(ccuModel.modelName): pacer=\(pacer.inputTokens) ccusage=\(ccuModel.inputTokens)"
             )
             #expect(
-                pacer.outputTokens == ccuModel.outputTokens,
-                "output mismatch on \(ccu.date) \(ccuModel.modelName): pacer=\(pacer.outputTokens) ccusage=\(ccuModel.outputTokens)"
-            )
-            #expect(
                 pacer.cacheReadTokens == ccuModel.cacheReadTokens,
                 "cacheRead mismatch on \(ccu.date) \(ccuModel.modelName): pacer=\(pacer.cacheReadTokens) ccusage=\(ccuModel.cacheReadTokens)"
             )
@@ -489,27 +332,6 @@ private actor CostCollector {
                 pacerCacheCreationFlat == ccuModel.cacheCreationTokens,
                 "cacheCreation flat-sum mismatch on \(ccu.date) \(ccuModel.modelName): pacer=\(pacerCacheCreationFlat) ccusage=\(ccuModel.cacheCreationTokens)"
             )
-
-            // Per-model cost comparison with the same 1h-cache caveat
-            // as the day-level cost test.
-            let pacerCost = await costCollector.costs(date: ccu.date, model: ccuModel.modelName)
-            let has1h = await costCollector.has1hCache(date: ccu.date, model: ccuModel.modelName)
-            let absDiff = abs(pacerCost - ccuModel.cost)
-            let larger = max(abs(pacerCost), abs(ccuModel.cost))
-            let relDiff = larger > 0 ? absDiff / larger : 0
-            if has1h {
-                if relDiff > 0.001 {
-                    costDivergencesOn1hDays.append(
-                        "\(ccu.date)/\(ccuModel.modelName): pacer=$\(String(format: "%.4f", pacerCost)) ccu=$\(String(format: "%.4f", ccuModel.cost))"
-                    )
-                }
-            } else {
-                let withinTolerance = absDiff < 0.001 || relDiff < 0.0001
-                #expect(
-                    withinTolerance,
-                    "per-model cost mismatch on \(ccu.date) \(ccuModel.modelName): pacer=$\(pacerCost) ccusage=$\(ccuModel.cost) diff=$\(absDiff)"
-                )
-            }
         }
     }
 

@@ -8,26 +8,40 @@ See `docs/design.md` for the full v1 design.
 ## Where to look first
 
 - `docs/design.md` — full architecture, data sources, schema, IPC, scope.
-- `docs/research/ccusage-reference.md` — ground-truth analysis of `ccusage`
-  internals: path discovery, JSONL schema, cost modes, dedup correctness,
-  pricing source. Read before touching parsing or cost code.
+- `docs/research/ccusage-reference.md` — analysis of `ccusage` internals:
+  path discovery, JSONL schema, cost modes, dedup correctness, pricing
+  source. Read before touching parsing or cost code: it is the tool Pacer
+  was ported from, and most of its parsing rules still hold.
 - `docs/research/realtime-mechanisms.md` — analysis of statusline, hooks,
   OTel, MCP for live Claude Code data.
 - `docs/research/tcc-app-management.md` — investigation of the
   every-launch "would like to access data from other apps" prompt,
   what was tried, current signing/notarization state, and the
   open SMAppService verification question for v1 release.
-- `docs/research/ccusage-outputs/` — captured `bun x ccusage` JSON outputs
-  for the local dataset. **Use these as ground-truth in tests** — every
-  metric Pacer surfaces should match `ccusage`'s number for the same
-  range, with exactly **two deliberate deviations**:
-  1. the cache 5m/1h split (we track them separately, ccusage flattens);
-  2. **output tokens on streamed messages** — ccusage dedups first-wins,
-     which keeps the mid-stream snapshot instead of the finished message
-     and under-counts output by ~63% on a real corpus (correctness rule
-     §7). Pacer is deliberately higher here. If a ccusage comparison
-     shows us reporting *more* output than ccusage, that is the fix
-     working — do not "correct" it back.
+- **Ground truth is the raw JSONL, not ccusage (#299).** Pacer's numbers
+  are checked by its own independent passes: hand-computed fixtures
+  (`JSONLScannerFixtureTests` for tokens and what they cost,
+  `PriceLedgerTests`, `CuratedPriceHistoryTests`), `make
+  test-ingest-parity` (the line parser and the DuckDB importer must leave
+  identical rows), the DuckDB differential gate (`docs/duckdb-archive.md`),
+  `make verify-data` (every rollup against the raw samples of a real
+  store), and `PACER_COLD_START_PROBE` on a frozen real `~/.claude`
+  (correctness rule 8). `ccusage` is a reference: the opt-in
+  `CCusageGroundTruthTests` compare the token counts both tools count the
+  same way (input, cache read, flat cache creation) against
+  `docs/research/ccusage-outputs/`. Where Pacer differs, on purpose:
+
+  | What | ccusage | Pacer | Why |
+  | --- | --- | --- | --- |
+  | Cache writes | one flat number | 5m and 1h kept apart | They are priced differently (rule 5). |
+  | Streamed output | first copy wins | the finished copy wins | First-wins keeps the mid-stream snapshot and under-counts output by ~63% (rule 7). If Pacer shows *more* output than ccusage, that is the fix working. |
+  | Price | today's catalog rate, for every day | the rate in effect when the request was made | A price change must not rewrite history (`PriceLedger`). |
+  | Long-context tier | only the tokens above 200k at the higher rate | the whole request at the tier rate once its prompt crosses the threshold | That is how Anthropic bills it. |
+  | Data residency (`inference_geo`) | not priced (per `ccusage-reference.md`) | a multiplier on the standard rate | Anthropic documents it as one. |
+  | Claude Desktop | not read | its agent-mode sessions are counted too | Desktop usage draws on the same limits. |
+
+  None of these is a test target. When a ccusage comparison disagrees on
+  one of them, Pacer is right.
 - **`AGENTS.md` → "SwiftUI state and data flow"** (below) — read before
   adding any `@State`, binding, sheet, modal, cached value, reload signal or
   `ModelContext` use. A view updates only on what its own `body` read;
@@ -1084,7 +1098,7 @@ add a new rollup following the template. The full set of touchpoints:
 1. **`@Model` type** in `PacerCore/Sources/PacerCore/Models/` — `@Attribute(.unique)` PK string `"date|model|..."`, `#Index` for every column used in a predicate or sort, columns mirror the rollup's metric needs (tokens, totalCostUSD, sampleCount). Register in `PacerStore.makeModelContainer()`'s schema list.
 2. **Dirty-set in `SamplePersister`** — `dirtyXBuckets: Set<...Triple>` populated by `insert(_:)`, also from `markEverySampleDirty()` (cost-recompute version bump), cleared in `clearDirtyPairs()`. Add `addDirtyXBuckets(_:)` for external folding.
 3. **Recovery drain** — `missingXBuckets: Set<...>` computed during `preloadFromStore()` as `sampleXBuckets.subtracting(existingRollupXBuckets)`. `consumeMissingXBuckets()` returns and clears, one-shot.
-4. **Recomputer** in `PacerCore/Sources/PacerCore/Persistence/` — `@MainActor` class with per-pair path, plus a sister `@ModelActor` worker for the bulk path above the 64-pair threshold. Cost mode + `PricingTable` threaded through both paths; per-entry cost summation (not sum-tokens-then-price; see comment in `AggregateRecomputer` for the ccusage-parity reasoning).
+4. **Recomputer** in `PacerCore/Sources/PacerCore/Persistence/` — `@MainActor` class with per-pair path, plus a sister `@ModelActor` worker for the bulk path above the 64-pair threshold. Cost mode + `PricingTable` threaded through both paths; per-entry cost summation, never sum-tokens-then-price: a request's price depends on its own timestamp (the rate in effect then) and its own prompt size (the tier), so a day's tokens have no single price (see the comment in `AggregateRecomputer`).
 5. **Wire into `ScanCoordinator.runScanCycle`** — drain the missing set into the dirty set, log the recovery line, run the recomputer in the existing sequence, include its stats in `ScanReport` and `cycleDidWork`, add to `formatReport`.
 6. **Tests** in `PacerCoreTests/` — single insert→dirty, clearDirty, recomputer single-bucket, multi-bucket, multi-model-within-bucket, upsert-on-second-pass, missing-bucket-bootstrap. Float-cost expects need an epsilon (`abs(actual - expected) < 1e-9`).
 7. **Update the in-memory test container** in `PersistenceTests.swift` and `ScanCoordinatorTests.swift` so the new `@Model` registers.
@@ -1157,10 +1171,12 @@ The level of paranoia in M1/M2 sets the bar — keep it or raise it:
   defensive parse-or-skip on every line. The `docs/research/` notes
   call out specific things ccusage flattens or skips that we don't —
   preserve those deltas; the comments in code mark them.
-- **Validate against ground truth.** `bun x ccusage daily --json` is
-  the canonical reference. Whenever a feature surfaces a number, add
-  a test that compares to ccusage's output for the same range
-  (modulo the cache-tier split deviation).
+- **Validate against ground truth: the raw JSONL.** Whenever a feature
+  surfaces a number, add a test that computes it by hand from a fixture
+  (`JSONLScannerFixtureTests` is the pattern) and, for anything stored,
+  make sure `make verify-data` can check it against the raw samples. A
+  ccusage comparison is optional, and only meaningful for the token
+  counts both tools count the same way (see "Ground truth" at the top).
 - **Comments explain *why*, not *what*.** Especially load-bearing on
   decisions where Pacer deviates from ccusage — leave a "we keep this,
   ccusage doesn't, here's why" comment so future readers don't "fix"

@@ -255,3 +255,75 @@ private actor EntryCollector {
     private(set) var all: [ParsedUsageEntry] = []
     func add(_ entry: ParsedUsageEntry) { all.append(entry) }
 }
+
+// MARK: - Cost
+
+/// Per-MTok rates, so the hand arithmetic below reads as dollars.
+private func perMTok(_ input: Double, _ output: Double, _ read: Double,
+                     _ write5m: Double, _ write1h: Double) -> PriceRates {
+    PriceRates(input: input / 1e6, output: output / 1e6, cacheRead: read / 1e6,
+               cacheWrite5m: write5m / 1e6, cacheWrite1h: write1h / 1e6)
+}
+
+private let fixturePriceChange = ISO8601DateFormatter().date(from: "2026-03-02T00:00:00Z")!
+
+/// Opus drops in price at the start of 2026-03-02, between the fixture's two
+/// days. Sonnet has one rate throughout. Rates are made up so no catalog
+/// refresh can move them, and every category's rate differs, so a swapped
+/// column changes the total. Keyed by `parse`, as the ledger looks a
+/// transcript's model up: it drops the `-20250514` date suffix.
+private let fixtureLedger = PriceLedger(records: [
+    PriceRecordValue(key: CanonicalModelID.parse(opus), rates: perMTok(15, 75, 1.5, 18.75, 30),
+                     effectiveFrom: .distantPast, effectiveTo: fixturePriceChange, source: .curated),
+    PriceRecordValue(key: CanonicalModelID.parse(opus), rates: perMTok(5, 25, 0.5, 6.25, 10),
+                     effectiveFrom: fixturePriceChange, source: .curated),
+    PriceRecordValue(key: CanonicalModelID.parse(sonnet), rates: perMTok(3, 15, 0.3, 3.75, 6),
+                     effectiveFrom: .distantPast, source: .curated),
+])
+
+private actor FixtureCostCollector {
+    private static let utc = TimeZone(identifier: "UTC")!
+    private var byDateModel: [String: [String: Double]] = [:]
+
+    func add(_ entry: ParsedUsageEntry) {
+        let date = TokenSample.formatDate(entry.timestamp, timeZone: Self.utc)
+        let cost = CostCalculator.sampleCost(
+            storedCostUSD: entry.storedCostUSD, model: entry.model, sampledAt: entry.timestamp,
+            breakdown: entry.breakdown, mode: .calculate, ledger: fixtureLedger
+        ).total
+        byDateModel[date, default: [:]][entry.model, default: 0] += cost
+    }
+
+    func cost(_ date: String, _ model: String) -> Double { byDateModel[date]?[model] ?? 0 }
+}
+
+/// Cost ground truth is Pacer's own (#299): the scanner fixture above, priced
+/// by hand. It used to be ccusage's `totalCost`, which prices every day at
+/// today's catalog rate and so cannot be right once a rate has changed.
+///
+/// This pins the whole path from a transcript line to dollars: dedup (the
+/// replayed msg1 is priced once), the legacy summed cache write landing on
+/// the 5m rate, the 1h tier at its own rate, and each turn priced at the
+/// rate in effect on its own date, not today's.
+@Test func scannerFixtureIsPricedPerTurnAtItsOwnDatesRate() async throws {
+    let (root, cleanup) = try makeFixtureRoot()
+    defer { cleanup() }
+
+    let collector = FixtureCostCollector()
+    _ = try await JSONLScanner().scan(roots: [root]) { entry in await collector.add(entry) }
+
+    // 2026-03-01 opus, the old rate: 105 in, 207 out, 1,003 read, 90 5m, 10 1h.
+    // 105×15 + 207×75 + 1003×1.5 + 90×18.75 + 10×30 = 20,592 → $0.020592
+    let d1Opus: Double = await collector.cost("2026-03-01", opus)
+    #expect(abs(d1Opus - 0.020592) < 1e-12)
+
+    // 2026-03-01 sonnet: 20×3 + 30×15 = 510 → $0.000510
+    let d1Sonnet: Double = await collector.cost("2026-03-01", sonnet)
+    #expect(abs(d1Sonnet - 0.000510) < 1e-12)
+
+    // 2026-03-02 opus, the new rate: 1 in, 2 out, 3 read, 4 5m, 5 1h.
+    // 1×5 + 2×25 + 3×0.5 + 4×6.25 + 5×10 = 131.5 → $0.0001315
+    // (at the old rate it would be 1×15 + 2×75 + 3×1.5 + 4×18.75 + 5×30 = 394.5)
+    let d2Opus: Double = await collector.cost("2026-03-02", opus)
+    #expect(abs(d2Opus - 0.0001315) < 1e-12)
+}
