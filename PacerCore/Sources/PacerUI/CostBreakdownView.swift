@@ -588,19 +588,23 @@ extension View {
     }
 }
 
-/// "87 / 13": how the cost splits between the prompt (cache reads, cache
-/// writes and uncached input) and the output, in whole percent. The one
-/// formatter for the "In / Out" table column and the line beside every
-/// cache hit rate; nil when nothing was spent.
-///
-/// Output's percent is the one the breakdown's legend prints for it ("13% of
-/// cost"): the five parts rounded together so they add up to 100
-/// (`CostBreakdown.Part.percent`). Rounded on its own, a 12.6% output read
-/// "87 / 13" one line under a legend that said "12% of cost".
-public func pacerInOutText(_ cost: CostComponents) -> String? {
+/// Output's whole-percent share of the cost, exactly as the breakdown's
+/// legend prints it ("13% of cost"): the five parts rounded together so
+/// they add up to 100 (`CostBreakdown.Part.percent`). Every surface that
+/// prints output's share reads it here, the Out % column and the In / Out
+/// line alike. Rounded on its own, a 12.6% output read 13 one line under a
+/// legend that said 12. Nil when nothing was spent.
+public func pacerOutputPercent(_ cost: CostComponents) -> Int? {
     guard cost.outputShare != nil else { return nil }
     let parts: [CostBreakdown.Part] = CostBreakdown(cost: cost).parts
-    let outPercent: Int = parts.first { $0.component == .output }?.percent ?? 0
+    return parts.first { $0.component == .output }?.percent ?? 0
+}
+
+/// "87 / 13": how the cost splits between the prompt (cache reads, cache
+/// writes and uncached input) and the output, in whole percent, for the line
+/// beside every cache hit rate. Nil when nothing was spent.
+public func pacerInOutText(_ cost: CostComponents) -> String? {
+    guard let outPercent = pacerOutputPercent(cost) else { return nil }
     return "\(100 - outPercent) / \(outPercent)"
 }
 

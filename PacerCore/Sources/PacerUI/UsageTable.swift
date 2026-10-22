@@ -141,7 +141,13 @@ public extension UsageColumn {
                 help: "\(total): 5m \(fiveMinute) · 1h \(oneHour)")
         case .outputShare:
             let help = "Output \(pacerCostExact(max(0, costParts.output))) of \(pacerCostExact(costParts.total))"
-            return PacerUsageCellText(share: costParts.outputShare, help: help, none: "No cost")
+            // Rounded as the breakdown's legend rounds output, so a row and
+            // the legend above it never print different percents.
+            guard let percent = pacerOutputPercent(costParts) else {
+                return PacerUsageCellText(text: "–", help: "No cost")
+            }
+            let positive: Bool = (costParts.outputShare ?? 0) > 0
+            return PacerUsageCellText(text: percent == 0 && positive ? "<1%" : "\(percent)%", help: help)
         case .cacheHitRate:
             // At the precision every other surface prints a hit rate
             // (`pacerCacheHitText`): it sits near 98% on most rows, and a
