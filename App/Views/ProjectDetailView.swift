@@ -717,10 +717,13 @@ struct ProjectDetailView: View {
     private var summaryCard: some View {
         let t = totals
         return PacerCard("Summary") {
+            // Cost, then every token (#215). The per-part token tiles that sat
+            // here are in the Cost breakdown card's legend now, beside their
+            // dollars; printing them twice breaks the page's rule.
             LazyVGrid(
                 columns: Array(
                     repeating: GridItem(.flexible(), spacing: 16, alignment: .topLeading),
-                    count: 5
+                    count: 4
                 ),
                 alignment: .leading,
                 spacing: 12
@@ -730,16 +733,8 @@ struct ProjectDetailView: View {
                     tooltip: pacerCostExact(t.cost)
                 )
                 MetricTile(
-                    value: pacerTokens(t.tokens.inputTokens), label: "input",
-                    tooltip: pacerTokensExact(t.tokens.inputTokens)
-                )
-                MetricTile(
-                    value: pacerTokens(t.tokens.outputTokens), label: "output",
-                    tooltip: pacerTokensExact(t.tokens.outputTokens)
-                )
-                MetricTile(
-                    value: pacerTokens(t.tokens.cacheReadTokens), label: "cache read",
-                    tooltip: pacerTokensExact(t.tokens.cacheReadTokens)
+                    value: pacerTokens(t.tokens.all), label: "tokens",
+                    tooltip: pacerTokensExact(t.tokens.all)
                 )
                 MetricTile(value: "\(aggregates.count)", label: "active days")
             }
