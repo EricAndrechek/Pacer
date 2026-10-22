@@ -365,3 +365,24 @@ struct StackedPartChartTests {
         #expect(p.y == 10)
     }
 }
+
+@Suite("Stacked part chart segment gaps")
+struct StackedPartChartGapTests {
+    @Test("every segment but the top one gives up the gap; a sliver keeps half its height")
+    func spansLeaveAGapBetweenParts() {
+        let cost = CostComponents(input: 0.01, output: 2, cacheRead: 5, cacheWrite5m: 1, cacheWrite1h: 0)
+        let bucket = PacerChartBucket(id: "2026-10-01", breakdown: CostBreakdown(cost: cost))
+        let spans: [PacerStackSpan] = bucket.spans(gap: 0.1)
+        #expect(spans.map(\.part.component) == [.input, .output, .cacheRead, .cacheWrite5m])
+        // The input sliver is smaller than twice the gap: it keeps half.
+        let input: PacerStackSpan = spans[0]
+        #expect(abs(input.end - 0.005) < 1e-9)
+        // Output starts where input's full value ends, and loses the gap.
+        let output: PacerStackSpan = spans[1]
+        #expect(abs(output.start - 0.01) < 1e-9)
+        #expect(abs(output.end - 1.91) < 1e-9)
+        // The top segment is whole, so the bar still reaches the total.
+        let top: PacerStackSpan = spans[3]
+        #expect(abs(top.end - bucket.total) < 1e-9)
+    }
+}

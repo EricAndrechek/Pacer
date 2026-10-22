@@ -61,6 +61,14 @@ public struct PacerChartModelCost: Sendable, Equatable, Identifiable {
 /// A plain value, built in the caller's cached derive step (usually through
 /// `PacerChartBucketBuilder`), so the hover card reads precomputed numbers
 /// and a pointer move never re-sums anything.
+/// One drawn segment of a stacked bar: its part and where it sits on y.
+public struct PacerStackSpan: Sendable, Equatable, Identifiable {
+    public let part: CostBreakdown.Part
+    public let start: Double
+    public let end: Double
+    public var id: CostBreakdown.Part.ID { part.id }
+}
+
 public struct PacerChartBucket: Sendable, Equatable, Identifiable {
     /// The x-value, in the kind's id format. Also what a click reports.
     public let id: String
@@ -85,6 +93,24 @@ public struct PacerChartBucket: Sendable, Equatable, Identifiable {
     /// The topmost drawn part — the top of the stack, where the total goes.
     /// `nil` for a $0 bucket.
     public var stackTop: CostComponent? { segments.last?.component }
+
+    /// The drawn segments as y spans, stacked in order, each but the top one
+    /// trimmed by `gap` (cost units) so the card shows between neighbouring
+    /// parts. Two hues a colour-blind reader sees as close still get an edge.
+    /// A sliver smaller than twice the gap keeps half its height rather than
+    /// vanishing. The top segment is not trimmed, so the bar's height is still
+    /// the total its label prints.
+    public func spans(gap: Double) -> [PacerStackSpan] {
+        var spans: [PacerStackSpan] = []
+        var start = 0.0
+        for (i, part) in segments.enumerated() {
+            let end = start + part.usd
+            let trim = i == segments.count - 1 ? 0 : min(gap, part.usd / 2)
+            spans.append(PacerStackSpan(part: part, start: start, end: end - trim))
+            start = end
+        }
+        return spans
+    }
 
     /// Whether the bucket has anything to say on hover. An hour with tokens
     /// but no price still does; an empty hour does not.
@@ -245,6 +271,8 @@ public struct PacerStackedPartChart: View {
     /// the data's max. (Not `chartPlotStyle` padding: that moves the marks
     /// and leaves the gridlines and axis labels where they were.)
     nonisolated static let labelRoom: CGFloat = 14
+    /// Points of card between two stacked parts (see `PacerChartBucket.spans`).
+    nonisolated static let segmentGap: Double = 1.5
 
     public var body: some View {
         let axis = PacerChartXAxis(kind: kind, ids: buckets.map(\.id))
@@ -252,6 +280,11 @@ public struct PacerStackedPartChart: View {
         let cap = Self.barCap(kind)
         let width = PacerSparseBars.width(count: buckets.count, cap: cap)
         let hover = self.hover
+        let yMax = Self.yMax(buckets)
+        // The segment gap in cost units: about `segmentGap` points on a plot
+        // whose height is the frame less the label room, the x axis and the
+        // legend. An estimate, close enough for a hairline.
+        let gap = yMax * Self.segmentGap / max(40, height - Self.labelRoom - 44)
         Chart {
             ForEach(buckets) { bucket in
                 // Once per bar, not per segment: it runs a date formatter.
@@ -259,10 +292,12 @@ public struct PacerStackedPartChart: View {
                 // One segment per priced part, stacked in `CostComponent`
                 // order (the style scale's domain below), so a part sits in
                 // the same band on every bar.
-                ForEach(bucket.segments) { part in
+                ForEach(bucket.spans(gap: gap)) { span in
+                    let part = span.part
                     BarMark(
                         x: .value("Bucket", bucket.id),
-                        y: .value("Cost", part.usd),
+                        yStart: .value("Cost", span.start),
+                        yEnd: .value("Cost", span.end),
                         width: width
                     )
                     .foregroundStyle(by: .value("Part", part.component.label))
@@ -289,7 +324,7 @@ public struct PacerStackedPartChart: View {
         // An explicit band domain keeps every bucket — a quiet hour with no
         // marks would otherwise drop out of the axis — and keeps their order.
         .chartXScale(domain: buckets.map(\.id))
-        .chartYScale(domain: 0...Self.yMax(buckets))
+        .chartYScale(domain: 0...yMax)
         .chartForegroundStyleScale(
             domain: PacerCostPalette.chartDomain,
             range: PacerCostPalette.chartRange

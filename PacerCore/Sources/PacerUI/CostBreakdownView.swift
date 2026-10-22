@@ -19,21 +19,34 @@ public struct PacerCostBar: View {
         self.height = height
     }
 
+    /// The gap between two parts, in points. Neighbouring parts never meet
+    /// colour to colour: the card shows through between them, so two hues a
+    /// colour-blind reader sees as close still have an edge (the data-viz
+    /// mark spec's 2px surface gap).
+    nonisolated static let gap: CGFloat = 2
+
     public var body: some View {
         let parts = breakdown.parts
+        let shown = parts.filter { $0.share > 0 }.count
         GeometryReader { geo in
+            let room = max(0, geo.size.width - Self.gap * CGFloat(max(0, shown - 1)))
             HStack(spacing: 0) {
                 // Every part gets a segment, zero-width when it is $0, so the
-                // row's identity does not change as a part comes and goes.
-                ForEach(parts) { part in
+                // row's identity does not change as a part comes and goes. The
+                // gap trails each shown part but the last shown one.
+                ForEach(Array(parts.enumerated()), id: \.element.id) { i, part in
+                    let trails = part.share > 0 && parts[(i + 1)...].contains { $0.share > 0 }
                     Rectangle()
                         .fill(part.component.color)
-                        .frame(width: max(0, geo.size.width * part.share))
+                        .frame(width: max(0, room * part.share))
+                        .padding(.trailing, trails ? Self.gap : 0)
                 }
             }
         }
         .frame(height: height)
-        .background(Color.primary.opacity(0.08))
+        // The track only shows when there is nothing to draw; behind parts it
+        // would fill the gaps and undo them.
+        .background(shown == 0 ? Color.primary.opacity(0.08) : Color.clear)
         .clipShape(RoundedRectangle(cornerRadius: height / 2))
         .help(pacerCostBreakdownHelp(breakdown))
         .accessibilityElement()

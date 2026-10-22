@@ -203,15 +203,56 @@ struct CostBreakdownTests {
         }
     }
 
-    @Test("the two cache-write tiers are warm neighbours, apart from reads")
-    func writeTiersReadAsAPair() {
-        func gap(_ a: CostComponent, _ b: CostComponent) -> Double {
-            let d = abs(PacerCostPalette.hue(a) - PacerCostPalette.hue(b))
-            return min(d, 360 - d)
+    @Test("neighbouring parts stay apart under red- and green-weak vision")
+    func neighboursSurviveColourBlindness() throws {
+        // Parts stack in `CostComponent` order, so each touches the next in
+        // every bar. The bar for that is the data-viz CVD check: Machado 2009
+        // at severity 1.0, distance in OKLab ×100, target 8. Output was purple
+        // beside the blue reads and measured 5.9 under protanopia.
+        let protan: [[Double]] = [[0.152286, 1.052583, -0.204868],
+                                  [0.114503, 0.786281, 0.099216],
+                                  [-0.003882, -0.048116, 1.051998]]
+        let deutan: [[Double]] = [[0.367322, 0.860646, -0.227968],
+                                  [0.280085, 0.672501, 0.047413],
+                                  [-0.011820, 0.042940, 0.968881]]
+        let parts: [CostComponent] = CostComponent.allCases
+        let linear: [[Double]] = try parts.map { try #require(Self.linearRGB(hex($0.color))) }
+        for i in 0..<(parts.count - 1) {
+            for m in [protan, deutan] {
+                let a: [Double] = Self.oklab(Self.apply(m, linear[i]))
+                let b: [Double] = Self.oklab(Self.apply(m, linear[i + 1]))
+                let d: Double = Self.distance(a, b) * 100
+                #expect(d >= 8, "\(parts[i]) vs \(parts[i + 1]): ΔE \(d)")
+            }
         }
-        #expect(gap(.cacheWrite5m, .cacheWrite1h) < 60)
-        #expect(gap(.cacheRead, .cacheWrite5m) > 90)
-        #expect(gap(.cacheRead, .cacheWrite1h) > 90)
+    }
+
+    private static func linearRGB(_ hex: String?) -> [Double]? {
+        guard let hex, hex.count >= 7, let v = UInt32(hex.dropFirst().prefix(6), radix: 16) else { return nil }
+        let channels: [Double] = [Double((v >> 16) & 0xff), Double((v >> 8) & 0xff), Double(v & 0xff)]
+        return channels.map { c in
+            let x: Double = c / 255
+            return x <= 0.04045 ? x / 12.92 : pow((x + 0.055) / 1.055, 2.4)
+        }
+    }
+
+    private static func apply(_ m: [[Double]], _ v: [Double]) -> [Double] {
+        m.map { row in min(max(row[0] * v[0] + row[1] * v[1] + row[2] * v[2], 0), 1) }
+    }
+
+    private static func oklab(_ rgb: [Double]) -> [Double] {
+        let l: Double = cbrt(0.4122214708 * rgb[0] + 0.5363325363 * rgb[1] + 0.0514459929 * rgb[2])
+        let m: Double = cbrt(0.2119034982 * rgb[0] + 0.6806995451 * rgb[1] + 0.1073969566 * rgb[2])
+        let s: Double = cbrt(0.0883024619 * rgb[0] + 0.2817188376 * rgb[1] + 0.6299787005 * rgb[2])
+        let lightness: Double = 0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s
+        let a: Double = 1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s
+        let b: Double = 0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s
+        return [lightness, a, b]
+    }
+
+    private static func distance(_ x: [Double], _ y: [Double]) -> Double {
+        let d0: Double = x[0] - y[0], d1: Double = x[1] - y[1], d2: Double = x[2] - y[2]
+        return (d0 * d0 + d1 * d1 + d2 * d2).squareRoot()
     }
 
     @Test("a cost bar's tooltip names all five parts, in order, with exact dollars")
