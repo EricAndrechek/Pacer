@@ -94,25 +94,20 @@ public struct PacerChartBucket: Sendable, Equatable, Identifiable {
     /// `nil` for a $0 bucket.
     public var stackTop: CostComponent? { segments.last?.component }
 
-    /// The drawn segments as y spans, stacked in order, with the card
-    /// showing between them: `gap` (cost units) between two parts of one
-    /// side, `sideGap` between the prompt and the reply, placed by
-    /// `PacerPartGaps` — the rule `PacerCostBar` follows, so a sliver (under
-    /// twice `gap`) sits flush against its neighbours rather than floating
-    /// as a hairline between two gaps, and the prompt/reply break is judged
-    /// on the two sides, not on the uncached-input sliver that usually tops
-    /// the prompt.
+    /// The drawn segments as y spans, stacked in order, with `gap` (cost
+    /// units) of card showing between two parts, placed by `PacerPartGaps` —
+    /// the rule `PacerCostBar` follows, so a sliver (under twice `gap`) sits
+    /// flush against its neighbours rather than floating as a hairline
+    /// between two gaps. Every gap is the same.
     ///
     /// The gaps come out of the bar in proportion: every segment is drawn at
     /// the same fraction of its value, so a bar's parts keep their true
     /// shares, and the top segment still ends at the total its label prints.
-    /// Taking each gap off the part below it, as round 3 did, would shrink
-    /// whichever part sits at the wider break by the whole break.
-    public func spans(gap: Double, sideGap: Double) -> [PacerStackSpan] {
+    /// Taking each gap off the part below it, as round 3 did, shrank the
+    /// parts under the gaps and left the top one whole.
+    public func spans(gap: Double) -> [PacerStackSpan] {
         let values: [Double] = segments.map(\.usd)
-        let trailing: [Double] = PacerPartGaps.trailing(
-            values, sides: segments.map(\.component.side),
-            gap: gap, sideGap: sideGap, sliver: gap * 2)
+        let trailing: [Double] = PacerPartGaps.trailing(values, gap: gap, sliver: gap * 2)
         let total: Double = values.reduce(0, +)
         let taken: Double = trailing.reduce(0, +)
         // The sliver rule keeps the gaps well under the bar's height (each
@@ -288,11 +283,10 @@ public struct PacerStackedPartChart: View {
     /// the data's max. (Not `chartPlotStyle` padding: that moves the marks
     /// and leaves the gridlines and axis labels where they were.)
     nonisolated static let labelRoom: CGFloat = 14
-    /// Points of card between two stacked parts of one side, and between the
-    /// prompt and the reply (see `PacerChartBucket.spans`, which leaves a gap
-    /// out beside a part under twice `segmentGap` tall).
+    /// Points of card between two stacked parts, every pair the same (see
+    /// `PacerChartBucket.spans`, which leaves a gap out beside a part under
+    /// twice `segmentGap` tall).
     nonisolated static let segmentGap: Double = 2.5
-    nonisolated static let sideGap: Double = 6
 
     public var body: some View {
         let axis = PacerChartXAxis(kind: kind, ids: buckets.map(\.id))
@@ -308,7 +302,6 @@ public struct PacerStackedPartChart: View {
         let plotPoints: CGFloat = max(40, height - Self.labelRoom - 44)
         let pointUnits: Double = yMax / Double(plotPoints)
         let gap: Double = pointUnits * Self.segmentGap
-        let sideGap: Double = pointUnits * Self.sideGap
         Chart {
             ForEach(buckets) { bucket in
                 // Once per bar, not per segment: it runs a date formatter.
@@ -316,7 +309,7 @@ public struct PacerStackedPartChart: View {
                 // One segment per priced part, stacked in `CostComponent`
                 // order (the style scale's domain below), so a part sits in
                 // the same band on every bar.
-                ForEach(bucket.spans(gap: gap, sideGap: sideGap)) { span in
+                ForEach(bucket.spans(gap: gap)) { span in
                     let part = span.part
                     BarMark(
                         x: .value("Bucket", bucket.id),
@@ -353,8 +346,9 @@ public struct PacerStackedPartChart: View {
             domain: PacerCostPalette.chartDomain,
             range: PacerCostPalette.chartRange
         )
-        // Its own legend rather than Charts' generated one, which cannot
-        // show the prompt/reply split the bars draw.
+        // Its own legend rather than Charts' generated one, so the key
+        // reads like every other breakdown legend: the parts' own names in
+        // a neutral secondary rather than the chart's tint.
         .chartLegend(position: .bottom, alignment: .leading, spacing: 8) {
             PacerCostKey()
         }

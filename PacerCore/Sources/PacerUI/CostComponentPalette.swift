@@ -17,8 +17,8 @@ import PacerCore
 ///
 /// **Output is purple, but not the ridge's purple.** Output used to stack
 /// directly on the blue reads; parts now run in prompt order (reads, writes,
-/// uncached input, then output across a wider gap), but the two still share
-/// every legend and every hover card. At the ridge's lightness they were
+/// uncached input, then output), but the two still share every legend and
+/// every hover card. At the ridge's lightness they were
 /// ΔE 5.9 apart under protanopia (OKLab ×100, Machado 2009 simulation), below
 /// the 6 floor and the 8 target, and a colour-blind owner could not tell them
 /// apart. Same hue family, different lightness: a deep violet on light

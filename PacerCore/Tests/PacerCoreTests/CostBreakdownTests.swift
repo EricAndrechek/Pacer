@@ -43,14 +43,10 @@ struct CostBreakdownTests {
         // Anthropic orders breakpoints), the uncached tail, then the reply.
         let order: [CostComponent] = CostComponent.allCases
         #expect(order == [.cacheRead, .cacheWrite1h, .cacheWrite5m, .input, .output])
-        // Every prompt part comes before output, so the sides are two runs.
-        let sides: [CostSide] = order.map(\.side)
-        #expect(sides == [.input, .input, .input, .input, .output])
         // Only the drawing order moved: the raw values are the stable names.
         let raw: [String] = order.map(\.rawValue)
         #expect(raw == ["cacheRead", "cacheWrite1h", "cacheWrite5m", "input", "output"])
         #expect(CostComponent.input.label == "Uncached input")
-        #expect(CostSide.allCases.map(\.label) == ["Input", "Output"])
     }
 
     @Test("the order does not follow size")

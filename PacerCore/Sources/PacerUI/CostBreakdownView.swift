@@ -11,9 +11,11 @@ import PacerCore
 /// of the cost, in `CostComponent` order. The exact dollars are in its
 /// tooltip.
 ///
-/// The four prompt parts come first and output last, with a wider break
-/// between the two sides than between parts of one side, so where the
-/// prompt ends and the reply starts can be read off any bar.
+/// Every gap between two parts is the same width. Round 4 put a wider break
+/// between the prompt's four parts and output, with "Input" and "Output"
+/// headings over the legend; the legend's columns are equal and the bar's
+/// segments are proportional, so the headings and the break never landed in
+/// the same place, and the owner had both taken out.
 public struct PacerCostBar: View {
     private let breakdown: CostBreakdown
     private let height: CGFloat
@@ -23,8 +25,7 @@ public struct PacerCostBar: View {
         self.height = height
     }
 
-    /// The gap between two parts of one side, and the wider one between the
-    /// prompt and the reply, for a bar `height` tall: 3 pt and 7 pt on the
+    /// The gap between two parts, for a bar `height` tall: 3 pt on the
     /// breakdown's 10 pt bar, in proportion on the thinner ones (the tables'
     /// 6 pt Mix bar would lose a sixth of its width to fixed 3 pt gaps).
     ///
@@ -32,10 +33,8 @@ public struct PacerCostBar: View {
     /// between them, so two hues a colour-blind reader sees as close still
     /// have an edge. Round 3's 2 pt was a hairline next to colours that
     /// close; 3 pt reads as a gap.
-    nonisolated static func gaps(height: CGFloat) -> (part: CGFloat, side: CGFloat) {
-        let part: CGFloat = height * 3 / 10
-        let side: CGFloat = height * 7 / 10
-        return (part, side)
+    nonisolated static func gap(height: CGFloat) -> CGFloat {
+        height * 3 / 10
     }
 
     public var body: some View {
@@ -44,11 +43,10 @@ public struct PacerCostBar: View {
         // The bar's corner radius is also the narrowest part worth a gap: a
         // part thinner than the rounding sits inside the curve of the end.
         let radius: CGFloat = height / 2
-        let gaps = Self.gaps(height: height)
+        let gap: CGFloat = Self.gap(height: height)
         GeometryReader { geo in
             let layout = PacerCostBarLayout(
-                shares: parts.map(\.share), sides: parts.map(\.component.side),
-                width: geo.size.width, gap: gaps.part, sideGap: gaps.side, sliver: radius)
+                shares: parts.map(\.share), width: geo.size.width, gap: gap, sliver: radius)
             HStack(spacing: 0) {
                 // Every part gets a segment, zero-width when it is $0, so the
                 // row's identity does not change as a part comes and goes.
@@ -73,44 +71,42 @@ public struct PacerCostBar: View {
     }
 }
 
-/// Which boundaries between the parts of one stacked bar get a gap, and how
-/// wide — the one rule `PacerCostBar` and the stacked chart both follow.
+/// Which boundaries between the parts of one stacked bar get a gap — the one
+/// rule `PacerCostBar` and the stacked chart both follow. Every gap is the
+/// same width, and every two readable parts (at least `sliver`) have one
+/// between them.
 ///
-/// - Between two parts of one side: `gap`, when both are at least `sliver`.
-/// - Between the prompt and the reply: `sideGap`, when both sides are at
-///   least `sliver` in all. It is judged on the sides, not on the two parts
-///   that meet there: uncached input, the last prompt part, is usually a
-///   twentieth of a point, and judging it would lose the split on nearly
-///   every bar. The sliver still sits flush against the prompt part before
-///   it, at the near edge of the break.
+/// A sliver never gets a gap of its own (round 3's rule). Gapping it drew a
+/// hairline of colour between two gaps, and at the bar's end that hairline
+/// was all that filled the rounded corner, so the end looked cut off rather
+/// than round. So a sliver rides flush on the part before it, and the gap
+/// that part would have had moves past the sliver, to the next readable
+/// part; at the front of a bar, where nothing comes before it, it rides on
+/// the part after it. It is never between two gaps and never alone in a
+/// rounded end.
 ///
-/// A sliver gets no gap beside it within its side. Gapping it drew a hairline
-/// of colour between two gaps, and at the bar's end that hairline was all
-/// that filled the rounded corner, so the end looked cut off rather than
-/// round. Flush, the neighbour fills the curve and the sliver is a thin edge
-/// on it. A side thinner than `sliver` is treated the same way.
+/// Riding on a neighbour, rather than flush on both sides as round 3 had it,
+/// matters because of where the usual sliver sits: uncached input is a
+/// twentieth of a point on most bars, between the 5m writes and output.
+/// Flush both ways, those two met colour to colour on nearly every bar, one
+/// missing gap in an otherwise even row.
 enum PacerPartGaps {
     /// - Parameters:
     ///   - values: each part's size in the bar's own unit (points across a
     ///     bar, dollars up a chart), in drawing order; 0 for a part that is
     ///     not drawn, which is skipped when finding a part's neighbour.
-    ///   - sides: each part's side, in the same order.
     /// - Returns: the gap after each part, 0 after the last drawn one.
-    static func trailing(
-        _ values: [Double], sides: [CostSide], gap: Double, sideGap: Double, sliver: Double
-    ) -> [Double] {
+    static func trailing(_ values: [Double], gap: Double, sliver: Double) -> [Double] {
         let shown: [Int] = values.indices.filter { values[$0] > 0 }
-        var sideTotal: [CostSide: Double] = [:]
-        for i in shown { sideTotal[sides[i], default: 0] += values[i] }
         var trailing: [Double] = Array(repeating: 0, count: values.count)
+        // Whether a readable part has been drawn yet: slivers before the
+        // first one ride on it, so no gap goes in until there is one.
+        var readableSoFar: Bool = false
         for (a, b) in zip(shown, shown.dropFirst()) {
-            if sides[a] == sides[b] {
-                if values[a] >= sliver && values[b] >= sliver { trailing[a] = gap }
-            } else {
-                let left: Double = sideTotal[sides[a]] ?? 0
-                let right: Double = sideTotal[sides[b]] ?? 0
-                if left >= sliver && right >= sliver { trailing[a] = sideGap }
-            }
+            if values[a] >= sliver { readableSoFar = true }
+            // A gap only ever goes in front of a readable part, so a sliver
+            // never has one before it.
+            if readableSoFar && values[b] >= sliver { trailing[a] = gap }
         }
         return trailing
     }
@@ -124,8 +120,7 @@ struct PacerCostBarLayout: Equatable {
     struct Segment: Equatable {
         let width: CGFloat
         /// The gap after this part: the bar's gap between two readable
-        /// parts of one side, the wider one between the two sides, 0 beside
-        /// a sliver, after the last part, or for a $0 part.
+        /// parts, 0 beside a sliver, after the last part, or for a $0 part.
         let trailingGap: CGFloat
     }
 
@@ -134,21 +129,15 @@ struct PacerCostBarLayout: Equatable {
     /// - Parameters:
     ///   - shares: every part's share of the cost in bar order, 0 for a part
     ///     with nothing (it keeps a zero-width segment).
-    ///   - sides: every part's side, in the same order.
     ///   - width: the bar's width.
-    ///   - gap: the gap between two readable parts of one side.
-    ///   - sideGap: the gap between the prompt and the reply.
+    ///   - gap: the gap between two readable parts.
     ///   - sliver: the narrowest a part can be and still get a gap. Judged at
     ///     the bar's full width, before the gaps are taken out, so whether a
     ///     part is a sliver does not depend on how many gaps there are.
-    init(
-        shares: [Double], sides: [CostSide], width: CGFloat,
-        gap: CGFloat, sideGap: CGFloat, sliver: CGFloat
-    ) {
+    init(shares: [Double], width: CGFloat, gap: CGFloat, sliver: CGFloat) {
         let full: CGFloat = max(0, width)
         let points: [Double] = shares.map { Double(full) * max(0, $0) }
-        let trailing: [Double] = PacerPartGaps.trailing(
-            points, sides: sides, gap: Double(gap), sideGap: Double(sideGap), sliver: Double(sliver))
+        let trailing: [Double] = PacerPartGaps.trailing(points, gap: Double(gap), sliver: Double(sliver))
         let taken: Double = trailing.reduce(0, +)
         let room: CGFloat = max(0, full - CGFloat(taken))
         segments = shares.indices.map { i -> Segment in
@@ -161,14 +150,12 @@ struct PacerCostBarLayout: Equatable {
 /// How much room a `PacerCostBreakdownView` has.
 public enum PacerCostBreakdownStyle: Sendable, Equatable {
     /// A card's width: the stacked bar, then the five parts side by side in
-    /// equal columns, each with its dollars, share and tokens, under an
-    /// "Input" and an "Output" heading.
+    /// equal columns, each with its dollars, share and tokens.
     case regular
     /// A hover card (~280 pt): the five parts as rows, one line each — dot,
-    /// name, dollars, share, tokens under one-word headings — with a rule
-    /// between the prompt's rows and output's, and no bar. A compact
-    /// breakdown sits beside a chart that already draws the mix, and the
-    /// share column says what a 250 pt bar would.
+    /// name, dollars, share, tokens under one-word headings — and no bar. A
+    /// compact breakdown sits beside a chart that already draws the mix, and
+    /// the share column says what a 250 pt bar would.
     case compact
 }
 
@@ -218,10 +205,12 @@ public struct PacerCostBreakdownView: View {
         }
     }
 
-    /// The five parts in equal columns, under a quiet heading per side: the
-    /// prompt's four under "Input", the reply under "Output", each heading a
-    /// rule across its own columns, so the split the bar draws is in the
-    /// legend too.
+    /// The five parts in equal columns, in bar order.
+    ///
+    /// No heading over them: the columns are equal and the bar's segments
+    /// are proportional, so nothing written over a run of columns can sit
+    /// over the part of the bar it names (round 4's "Input" and "Output"
+    /// headings did not, and came out in round 5).
     ///
     /// Each share reads "56% of cost" where every column has room for it,
     /// and "56%" where one does not (a Day detail modal). The choice is the
@@ -237,30 +226,10 @@ public struct PacerCostBreakdownView: View {
         }
 
         private func columns(ofCost: Bool) -> some View {
-            let prompt: Int = parts.filter { $0.component.side == .input }.count
-            return PacerEqualColumns(columns: parts.count, spacing: 12, rowSpacing: 7) {
-                SideHeading(side: .input)
-                    .layoutValue(key: PacerColumnSpan.self, value: prompt)
-                SideHeading(side: .output)
-                    .layoutValue(key: PacerColumnSpan.self, value: parts.count - prompt)
+            PacerEqualColumns(columns: parts.count, spacing: 12) {
                 ForEach(parts) { part in
                     PartCell(part: part, ofCost: ofCost)
                 }
-            }
-        }
-    }
-
-    /// "INPUT ────────" over the columns of one side.
-    private struct SideHeading: View {
-        let side: CostSide
-
-        var body: some View {
-            HStack(spacing: 6) {
-                Eyebrow(text: side.label, color: .secondary)
-                    .fixedSize()
-                Rectangle()
-                    .fill(Color.primary.opacity(0.12))
-                    .frame(height: 1)
             }
         }
     }
@@ -312,8 +281,7 @@ public struct PacerCostBreakdownView: View {
         }
     }
 
-    /// The five parts as rows under "of cost" and "tokens" headings, with a
-    /// rule between the prompt's rows and output's.
+    /// The five parts as rows under "of cost" and "tokens" headings.
     private struct CompactLegend: View {
         let parts: [CostBreakdown.Part]
 
@@ -332,17 +300,6 @@ public struct PacerCostBreakdownView: View {
                         .pacerCompactColumn(PacerCompactColumns.tokens)
                 }
                 ForEach(parts) { part in
-                    // The prompt ends before output: a rule, not a heading
-                    // row, because every row the card spends is chart it
-                    // covers.
-                    if part.component.side == .output, part.id != parts.first?.id {
-                        Divider()
-                            // Without this a divider makes every column of
-                            // the grid as wide as it can be, and the names
-                            // truncate to make room.
-                            .gridCellUnsizedAxes(.horizontal)
-                            .padding(.vertical, 1)
-                    }
                     PartRow(part: part)
                 }
             }
@@ -411,51 +368,32 @@ public struct PacerCostBreakdownView: View {
     }
 }
 
-/// How many of `PacerEqualColumns`' columns a child spans; 1 by default.
-struct PacerColumnSpan: LayoutValueKey {
-    static let defaultValue: Int = 1
-}
-
-/// Children in equal-width columns, left to right, wrapping into rows; a
-/// child spans `PacerColumnSpan` columns.
+/// Children in equal-width columns, left to right on one row.
 ///
 /// Not a `Grid`: a grid's ideal width is the sum of its columns' widest
 /// cells, but laid out these columns are equal, so the widest cell of all
 /// decides whether the content fits. This reports that as its ideal width
-/// (the widest single-column child times the columns), so a `ViewThatFits`
-/// around it chooses exactly.
+/// (the widest child times the columns), so a `ViewThatFits` around it
+/// chooses exactly.
 struct PacerEqualColumns: Layout {
     let columns: Int
     let spacing: CGFloat
-    let rowSpacing: CGFloat
-
-    private struct Item {
-        let index: Int
-        let column: Int
-        let span: Int
-    }
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
         let width: CGFloat = proposal.width ?? idealWidth(subviews)
         let column: CGFloat = columnWidth(width)
-        var height: CGFloat = 0
-        for (r, row) in rows(subviews).enumerated() {
-            if r > 0 { height += rowSpacing }
-            height += rowHeight(row, subviews: subviews, column: column)
-        }
+        let height: CGFloat = subviews.map { child -> CGFloat in
+            child.sizeThatFits(ProposedViewSize(width: column, height: nil)).height
+        }.max() ?? 0
         return CGSize(width: width, height: height)
     }
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
         let column: CGFloat = columnWidth(bounds.width)
-        var y: CGFloat = bounds.minY
-        for row in rows(subviews) {
-            for item in row {
-                let x: CGFloat = bounds.minX + CGFloat(item.column) * (column + spacing)
-                let size = ProposedViewSize(width: spanWidth(item.span, column: column), height: nil)
-                subviews[item.index].place(at: CGPoint(x: x, y: y), anchor: .topLeading, proposal: size)
-            }
-            y += rowHeight(row, subviews: subviews, column: column) + rowSpacing
+        for (i, child) in subviews.enumerated() {
+            let x: CGFloat = bounds.minX + CGFloat(i) * (column + spacing)
+            child.place(at: CGPoint(x: x, y: bounds.minY), anchor: .topLeading,
+                        proposal: ProposedViewSize(width: column, height: nil))
         }
     }
 
@@ -465,46 +403,11 @@ struct PacerEqualColumns: Layout {
         return max(0, (width - gaps) / n)
     }
 
-    private func spanWidth(_ span: Int, column: CGFloat) -> CGFloat {
-        let n: CGFloat = CGFloat(max(1, span))
-        return column * n + spacing * (n - 1)
-    }
-
-    /// The widest any child needs its columns to be, times the columns.
+    /// The widest any child needs its column to be, times the columns.
     private func idealWidth(_ subviews: Subviews) -> CGFloat {
-        var widest: CGFloat = 0
-        for child in subviews {
-            let n: CGFloat = CGFloat(max(1, child[PacerColumnSpan.self]))
-            let ideal: CGFloat = child.sizeThatFits(.unspecified).width
-            widest = max(widest, (ideal - spacing * (n - 1)) / n)
-        }
+        let widest: CGFloat = subviews.map { $0.sizeThatFits(.unspecified).width }.max() ?? 0
         let n: CGFloat = CGFloat(max(1, columns))
         return widest * n + spacing * (n - 1)
-    }
-
-    private func rowHeight(_ row: [Item], subviews: Subviews, column: CGFloat) -> CGFloat {
-        row.map { item -> CGFloat in
-            let size = ProposedViewSize(width: spanWidth(item.span, column: column), height: nil)
-            return subviews[item.index].sizeThatFits(size).height
-        }.max() ?? 0
-    }
-
-    private func rows(_ subviews: Subviews) -> [[Item]] {
-        var rows: [[Item]] = []
-        var row: [Item] = []
-        var column: Int = 0
-        for (i, child) in subviews.enumerated() {
-            let span: Int = min(max(1, child[PacerColumnSpan.self]), max(1, columns))
-            if column + span > columns, !row.isEmpty {
-                rows.append(row)
-                row = []
-                column = 0
-            }
-            row.append(Item(index: i, column: column, span: span))
-            column += span
-        }
-        if !row.isEmpty { rows.append(row) }
-        return rows
     }
 }
 
@@ -566,20 +469,13 @@ public extension PacerCostBreakdownRow where Trailing == EmptyView {
 
 /// The parts' colour key on one line, for a chart stacked by part:
 /// "● Cache reads  ● 1h cache writes  ● 5m cache writes  ● Uncached input
-/// │ ● Output", with a hairline where the prompt ends, as the bars break
-/// there.
+/// ● Output", evenly spaced, as the bars' gaps are.
 public struct PacerCostKey: View {
     public init() {}
 
     public var body: some View {
-        let parts: [CostComponent] = CostComponent.allCases
         HStack(spacing: 12) {
-            ForEach(Array(parts.enumerated()), id: \.element) { i, part in
-                if i > 0, parts[i - 1].side != part.side {
-                    Rectangle()
-                        .fill(Color.primary.opacity(0.2))
-                        .frame(width: 1, height: 11)
-                }
+            ForEach(CostComponent.allCases, id: \.self) { part in
                 HStack(spacing: 4) {
                     Circle()
                         .fill(part.color)

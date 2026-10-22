@@ -100,6 +100,34 @@ struct CostBreakdownRenderTests {
         }
     }
 
+    /// The first card of each detail modal, at the card's width in the
+    /// modal's default size (Day 612 pt, Project 712 pt): the big figure,
+    /// the facts beside it, the chip in the title row, the breakdown under.
+    @Test("the detail modals' first card, light and dark")
+    func renderDetailSummary() throws {
+        let day: [PacerSummaryFact] = [
+            .init("sessions", "12"), .init("models", "3"), .init("projects", "4"),
+            .init("active hours", "9"), .init("first active", "9 AM"), .init("last active", "11 PM"),
+        ]
+        let project: [PacerSummaryFact] = [
+            .init("sessions", "37"), .init("models", "4"), .init("per active day", "$88.2"),
+            .init("active days", "22"), .init("first active", "Sep 3"), .init("last active", "Oct 21"),
+        ]
+        for dark in [false, true] {
+            // `render` pads 16 a side, so the card is the width less 32.
+            try render("detail-summary-day", width: 644, dark: dark,
+                       PacerDetailSummaryCard(breakdown: Self.today, facts: day))
+            try render("detail-summary-day-sliver", width: 644, dark: dark,
+                       PacerDetailSummaryCard(breakdown: Self.sliver, facts: day))
+            try render("detail-summary-project", width: 744, dark: dark,
+                       PacerDetailSummaryCard(breakdown: Self.lifetime, facts: project) {
+                           Chip(text: "git", systemImage: "arrow.triangle.branch", tint: .secondary, size: .compact)
+                       })
+            try render("detail-summary-empty", width: 644, dark: dark,
+                       PacerDetailSummaryCard(breakdown: .zero, facts: day.map { .init($0.label, "–") }))
+        }
+    }
+
     @Test("regular and compact, light and dark")
     func renderBreakdowns() throws {
         for dark in [false, true] {
