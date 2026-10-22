@@ -306,35 +306,56 @@ private struct LifetimeSummaryContent: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
             } else {
-                // Cost, then every token (#215). The input / output / cache
-                // read tiles that used to sit here are in the Cost breakdown
-                // card's legend now, each beside its dollars, so printing them
-                // here as well would put the same numbers on the page twice.
-                // Sessions and projects took their places: how much work the
-                // range held, which no other card on the page counts.
-                LazyVGrid(
-                    columns: Array(
-                        repeating: GridItem(.flexible(), spacing: 16, alignment: .topLeading),
-                        count: 6
-                    ),
-                    alignment: .leading,
-                    spacing: 12
-                ) {
-                    MetricTile(
-                        value: pacerCost(t.cost),
-                        label: "cost",
-                        size: .hero,
-                        tooltip: pacerCostExact(t.cost)
-                    )
-                    MetricTile(
-                        value: pacerTokens(t.tokens.all),
-                        label: "tokens",
-                        tooltip: pacerTokensExact(t.tokens.all)
-                    )
-                    MetricTile(value: "\(t.distinctDays)", label: "active days")
-                    MetricTile(value: Self.count(counts.sessions), label: "sessions")
-                    MetricTile(value: Self.count(counts.projects), label: "projects")
-                    MetricTile(value: "\(t.distinctModels)", label: "models")
+                // The money, then the tokens split the way a request is: the
+                // prompt (cache reads + writes + uncached input) and the
+                // response, so input + output = tokens. Per-part detail is in
+                // the Cost breakdown card below. The second row counts how
+                // much work the range held, which no other card does.
+                VStack(alignment: .leading, spacing: 14) {
+                    LazyVGrid(
+                        columns: Array(
+                            repeating: GridItem(.flexible(), spacing: 16, alignment: .topLeading),
+                            count: 4
+                        ),
+                        alignment: .leading,
+                        spacing: 12
+                    ) {
+                        MetricTile(
+                            value: pacerCost(t.cost),
+                            label: "cost",
+                            size: .hero,
+                            tooltip: pacerCostExact(t.cost)
+                        )
+                        MetricTile(
+                            value: pacerTokens(t.tokens.all),
+                            label: "tokens",
+                            tooltip: pacerTokensExact(t.tokens.all)
+                        )
+                        MetricTile(
+                            value: pacerTokens(t.tokens.promptTokens),
+                            label: "input",
+                            tooltip: "\(pacerTokensExact(t.tokens.promptTokens)) prompt tokens: cache reads, cache writes and uncached input"
+                        )
+                        MetricTile(
+                            value: pacerTokens(t.tokens.outputTokens),
+                            label: "output",
+                            tooltip: pacerTokensExact(t.tokens.outputTokens)
+                        )
+                    }
+                    Divider()
+                    LazyVGrid(
+                        columns: Array(
+                            repeating: GridItem(.flexible(), spacing: 16, alignment: .topLeading),
+                            count: 4
+                        ),
+                        alignment: .leading,
+                        spacing: 12
+                    ) {
+                        MetricTile(value: "\(t.distinctDays)", label: "active days", size: .compact)
+                        MetricTile(value: Self.count(counts.sessions), label: "sessions", size: .compact)
+                        MetricTile(value: Self.count(counts.projects), label: "projects", size: .compact)
+                        MetricTile(value: "\(t.distinctModels)", label: "models", size: .compact)
+                    }
                 }
             }
         }
