@@ -17,10 +17,6 @@ enum DetailModalCards {
     /// and a busy day or project does not make the modal very long.
     static let maxVisibleRows: Int = PacerSessionsTable.maxVisibleRows
 
-    /// By model's columns: shares, as every donut card a table follows has
-    /// them (`PacerShareListColumn.shares`); the Models table prints amounts.
-    static let modelShareColumns: [PacerShareListColumn] = PacerShareListColumn.shares
-
     /// A modal's models, as the donut card and the table both take them.
     typealias ModelRow = PacerUsageRow<PacerUsageNoExtra>
 
@@ -31,13 +27,14 @@ enum DetailModalCards {
                       tokens: tokens, costParts: costParts, cost: cost)
     }
 
-    /// How the models divide the cost and the tokens: the shared donut card.
-    /// Clicking Cost or Tokens ranks the list by it and turns the ring to it.
+    /// How the models divide the cost and the tokens: the shared donut card,
+    /// with every donut list's columns (Mix, Tokens, Cost, Share). Clicking
+    /// Cost or Tokens ranks the list by it and turns the ring to it.
     static func modelShareCard(
         rows: [ModelRow], sort: PacerUsageSort, subject: String,
         onSort: @escaping (PacerUsageSort) -> Void
     ) -> some View {
-        let data = PacerShareListData(rows: rows, sort: sort, columns: modelShareColumns, maxSlices: 8)
+        let data = PacerShareListData(rows: rows, sort: sort, maxSlices: 8)
         return PacerDonutListCard(
             "By model",
             data: data,
@@ -46,11 +43,9 @@ enum DetailModalCards {
             onSort: onSort)
     }
 
-    /// Every model, in the usage table's narrow form: Tokens, Hit %, Out %
-    /// and Cost, the token parts and Mix one right-click away. More than the
-    /// By model list above it, which has only each model's shares: round 5
-    /// opened this on Tokens and Cost alone, and the owner found it repeating
-    /// the donut card.
+    /// Every model, in the usage table with every table's columns (Tokens,
+    /// Hit %, Out %, Cost and Mix), the token parts one right-click away.
+    /// Round 6 opened it without Mix; round 7 gave every table one set.
     static func modelsTableCard(
         rows: [ModelRow], tableId: String, sort: PacerUsageSort,
         onSort: @escaping (PacerUsageSort) -> Void
@@ -62,17 +57,16 @@ enum DetailModalCards {
                 labelTitle: "Model",
                 sort: sort,
                 onSort: onSort,
-                maxVisibleRows: maxVisibleRows,
-                defaultColumns: UsageColumn.narrowDefaults)
+                maxVisibleRows: maxVisibleRows)
         }
     }
 
-    /// A day's projects or a project's subprojects: the usage table as it
-    /// stands on its own (Tokens, Hit %, Out %, Cost and Mix), with how many
-    /// sessions ran in each path, seven columns, capped at `maxVisibleRows`
-    /// with its own scroll. No donut card lists these, so the table has the
-    /// Mix bar the page tables have. Both modals' path tables are this one,
-    /// so Project detail's subprojects open as Day detail's projects do.
+    /// A day's projects or a project's subprojects: the usage table with
+    /// every table's columns (Tokens, Hit %, Out %, Cost and Mix) and how
+    /// many sessions ran in each path, seven columns, capped at
+    /// `maxVisibleRows` with its own scroll. Both modals' path tables are
+    /// this one, so Project detail's subprojects open as Day detail's
+    /// projects do.
     static func pathsTableCard<RowMenu: View>(
         _ title: String,
         labelTitle: String,
@@ -92,7 +86,6 @@ enum DetailModalCards {
                 onSort: onSort,
                 onOpen: onOpen,
                 maxVisibleRows: maxVisibleRows,
-                defaultColumns: UsageColumn.wideDefaults,
                 extraColumns: {
                     PacerUsageColumns.extra(DetailPathExtra.sessions, title: "Sessions",
                                             of: DetailPathExtra.self,

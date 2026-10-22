@@ -4,9 +4,8 @@ import PacerCore
 import PacerUI
 
 /// Today's per-model breakdown: the shared donut card (`PacerDonutListCard`),
-/// the ring beside the list every donut card has, Tokens, Cost and Share
-/// (`PacerShareListColumn.standard`), and each model's Mix bar after them: no
-/// table follows this card, so the bars are drawn here once. Pulls from
+/// the ring beside the list every donut card has: Mix, Tokens, Cost and Share
+/// (`PacerShareListColumn.standard`). Pulls from
 /// `DailyAggregate` filtered to today — same source as `TodayDetailsCard` but
 /// kept as its own card so the @Query stays scoped (a model-only view
 /// doesn't need to invalidate when the total-cost number changes).
@@ -38,8 +37,6 @@ struct PerModelTodayCard: View {
     @AppStorage("pacer.todayByModel.sortField", store: PacerSettings.store)
     private var sortRaw: String = UsageColumn.cost.rawValue
 
-    /// The list's columns: every donut card's, and the Mix bar.
-    private static let columns: [PacerShareListColumn] = PacerShareListColumn.standard + [.mixBar]
     @AppStorage("pacer.todayByModel.sortDescending", store: PacerSettings.store)
     private var sortDescending: Bool = true
 
@@ -85,7 +82,7 @@ struct PerModelTodayCard: View {
         // Built in the body: a day has a handful of models, and the ring
         // must follow the sort the moment a title is clicked. The hover
         // lives inside the donut, so it does not run this again.
-        let data = PacerShareListData(rows: rows, sort: sort, columns: Self.columns, maxSlices: 8)
+        let data = PacerShareListData(rows: rows, sort: sort, maxSlices: 8)
         Group {
             if rows.isEmpty {
                 PacerCard("Today by model") {

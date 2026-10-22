@@ -598,17 +598,10 @@ private struct ProjectsContent: View {
         cachedTop = Self.top(tableRows, sort: builtTopSort)
     }
 
-    /// Top projects' columns: every donut card's, Tokens, Cost and Share.
-    /// Round 4 printed shares of the cost, the tokens and the sessions under
-    /// those titles, where every other card printed amounts: the same title
-    /// meant a percent here and dollars a card away.
-    // Shares: the All projects table under it prints the amounts.
-    private static let topColumns: [PacerShareListColumn] = PacerShareListColumn.shares
-
     /// The five largest projects by the card's sort, and the rest as one
     /// Other line and wedge: the share is of everything the table lists.
     private static func top(_ rows: [PacerUsageRow<ProjectRow>], sort: PacerUsageSort) -> PacerShareListData<ProjectRow> {
-        PacerShareListData(rows: rows, sort: sort, columns: topColumns, maxSlices: 5)
+        PacerShareListData(rows: rows, sort: sort, maxSlices: 5)
     }
 
     /// The table's plain-value rows: the project's name over its path, in
@@ -887,9 +880,10 @@ private struct ProjectsContent: View {
 
     /// The five projects with the largest share of the card's sort (cost by
     /// default), and the rest as one line: the shared donut card, with the
-    /// columns every donut card has. Clicking one ranks the list by it and
-    /// turns the ring to it. A line opens its project, as the table's rows
-    /// do.
+    /// columns every donut card has (Mix, Tokens, Cost, Share). Round 6 gave
+    /// this one shares under Tokens and Cost, and the owner found it "lacking"
+    /// beside the others. Clicking a title ranks the list by it and turns
+    /// the ring to it. A line opens its project, as the table's rows do.
     private var topProjectsCard: some View {
         let tableRows = cachedTableRows ?? Self.tableRows(rows)
         let top = cachedTop ?? Self.top(tableRows, sort: topSort)
@@ -904,7 +898,7 @@ private struct ProjectsContent: View {
 
     /// Every project, in the shared usage table as its own card: Tokens,
     /// Hit %, Out %, Cost, Last active and the Mix bar, seven columns with
-    /// the label (`UsageColumn.wideDefaults`); Sessions and the token parts
+    /// the label (`UsageColumn.defaults`); Sessions and the token parts
     /// are in the header's menu. Of its two columns of its own, Last active
     /// stays, as it does on Models: which projects are current reads at a
     /// glance, and the session count is one right-click away. Click a row for Project detail; right-click for

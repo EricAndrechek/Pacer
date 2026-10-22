@@ -35,9 +35,10 @@ import Foundation
 ///   named for what it is ("Uncached", "Cache read").
 /// - **One order.** A table: the label, a screen's leading columns, the token
 ///   parts in the parts' order, Tokens, Hit %, Out %, Cost, the screen's own
-///   columns, Mix (`displayOrder`). A donut list keeps the table's order for
-///   what it has: the label, Tokens, Cost, then Share
-///   (`PacerShareListColumn.standard`).
+///   columns, Mix (`displayOrder`). A donut list: the label, Mix, Tokens,
+///   Cost, Share (`PacerShareListColumn.standard`), the same four on every
+///   card. Round 7 put the list's Mix bar first, beside the names, at the
+///   owner's ask; a table keeps it last.
 /// - **One format per kind.** A cost prints compact ("$12.3k",
 ///   `pacerCost`), exact in its tooltip; a token count compact ("86.0M",
 ///   `pacerTokens`), exact in its tooltip; a share as a whole percent ("38%",
@@ -47,15 +48,14 @@ import Foundation
 ///   Relative to now ("2h ago"), the exact time in its tooltip; a row known
 ///   only to the day (a model, from the daily rollup) prints the day relative
 ///   to today ("yesterday").
-/// - **Seven columns by default, at most.** A table opens on the label,
-///   Tokens, Hit %, Out %, Cost and Mix (`wideDefaults`; `narrowDefaults`
-///   leaves out Mix), plus at most one column of the screen's own on a wide
-///   table, two on a narrow one (`maxDefaultColumns`). Everything else is one
+/// - **One set of defaults, seven columns at most.** Every table opens on the
+///   label, Tokens, Hit %, Out %, Cost and Mix (`defaults`), plus at most one
+///   column of the screen's own (`maxDefaultColumns`). Everything else is one
 ///   right-click on the header away.
-/// - **A donut list holds only amounts that add up**, the kind a ring can be
-///   made of: cost, tokens, a token part, a screen's own count
-///   (`UsageAmount`). Never a ratio: Hit % and Out % are not shares of
-///   anything, so they cannot make a ring or be compared as one.
+/// - **A donut list holds only amounts that add up** as numbers, the kind a
+///   ring can be made of: cost and tokens (`UsageAmount`). Never a ratio: Hit
+///   % and Out % are not shares of anything, so they cannot make a ring or be
+///   compared as one. Its Mix bar is drawn, never a number or a ring.
 public enum UsageColumn: String, CaseIterable, Sendable {
     /// The row's label: a model, a project, a date, a session.
     case name
@@ -167,26 +167,21 @@ public enum UsageColumn: String, CaseIterable, Sendable {
     /// label A to Z.
     public var sortsDescendingFirst: Bool { self != .name }
 
-    /// What a table that stands on its own shows until its user changes it:
-    /// the label, Tokens, Hit %, Out %, Cost and the Mix bar. Top days, All
-    /// projects, All models and Day detail's projects. A screen adds at most
-    /// one of its own (Models' and Projects' Last active, a modal's Sessions),
-    /// which is seven; the rest of a screen's own (Models' Days, Projects'
-    /// Sessions) and the token parts are in the header's menu.
+    /// What every table shows until its user changes it: the label, Tokens,
+    /// Hit %, Out %, Cost and the Mix bar. A screen adds at most one of its
+    /// own (Models' and Projects' Last active, a modal path table's Sessions,
+    /// Day detail's sessions' Project), which is seven; the rest of a screen's
+    /// own (Models' Days, Projects' Sessions, a session's Duration) and the
+    /// token parts are in the header's menu.
     ///
-    /// Round 6: the owner wanted "a sortable cache and in/out column by
-    /// default too", and to keep Mix ("that mix column is awesome visually
-    /// there"). Round 4 opened every wide table on all four token parts, which
-    /// was too many to read at a glance; round 5 cut them to Tokens, Cost and
-    /// Mix. Each change clears a table's saved layout once, so its users see
-    /// the new defaults (`PacerUsageTableMetrics.layoutDefaultsVersions`).
-    public static let wideDefaults: Set<UsageColumn> = [.name, .tokens, .cacheHitRate, .outputShare, .cost, .mix]
-
-    /// What a table in a tight space shows: the label, Tokens, Hit %, Out %
-    /// and Cost. A modal's Models (under its By model donut, whose list has
-    /// only the shares, so the table shows more than the list: round 6) and
-    /// the sessions lists. The Mix bar waits in the menu with the parts.
-    public static let narrowDefaults: Set<UsageColumn> = [.name, .tokens, .cacheHitRate, .outputShare, .cost]
+    /// Round 6 opened the tables that stand on their own on these and the
+    /// ones under a donut card (a modal's Models, the sessions lists) on the
+    /// same less Mix. The owner, round 7: Mix "on tables like this too… more
+    /// consistency in the UI and tables and pie chart cards etc across all
+    /// the places". One set, so no screen picks its own. Each change clears a
+    /// table's saved layout once, so its users see the new defaults
+    /// (`PacerUsageTableMetrics.layoutDefaultsVersions`).
+    public static let defaults: Set<UsageColumn> = [.name, .tokens, .cacheHitRate, .outputShare, .cost, .mix]
 
     /// The most columns a table opens on, label and the screen's own
     /// columns included (`UsageTableLayoutTests` checks every screen's).

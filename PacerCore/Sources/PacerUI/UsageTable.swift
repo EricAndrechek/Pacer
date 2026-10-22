@@ -22,10 +22,12 @@ import PacerCore
 // included: they are how a Mac table says its columns resize. The right-click
 // column menu, reordering, resizing and the saved layout are all SwiftUI's.
 //
-// It opens on at most seven columns (`UsageColumn.wideDefaults`, plus at most
-// one of the screen's own): the owner found every token part at once too many
-// to read. Everything else is in the header's menu, which also resets the
-// layout (`PacerTableHeaderMenu`).
+// Every table opens on the same columns (`UsageColumn.defaults`: Tokens, Hit %,
+// Out %, Cost and Mix, plus at most one of the screen's own, seven at most):
+// the owner found every token part at once too many to read, and then asked
+// for one set "across all the places" (round 7). No screen picks its own.
+// Everything else is in the header's menu, which also resets the layout
+// (`PacerTableHeaderMenu`).
 //
 // It never scrolls sideways. Columns start at widths their content needs
 // (`UsageColumn.idealWidth`), and each screen's defaults fit its card at the
@@ -540,20 +542,25 @@ public enum PacerUsageTableMetrics {
     ///
     /// - Round 5 (version 1) cut every wide table from up to ten columns to
     ///   six: the tables that opened on the token parts.
-    /// - Round 6 put Hit % and Out % into every table's defaults
-    ///   (`UsageColumn.wideDefaults`, `.narrowDefaults`), so every table moves
-    ///   on one: the round-5 tables to 2, the rest to 1. Models and Projects
-    ///   also hide one of their own columns (Days, Sessions) to stay at seven.
+    /// - Round 6 put Hit % and Out % into every table's defaults, so every
+    ///   table moved on one: the round-5 tables to 2, the rest to 1. Models
+    ///   and Projects also hid one of their own columns (Days, Sessions) to
+    ///   stay at seven.
+    /// - Round 7 gave every table one set of defaults (`UsageColumn.defaults`),
+    ///   which put Mix into the tables that opened without it: a modal's
+    ///   Models and both sessions lists. Day detail's sessions also hide Last
+    ///   active, to keep one column of their own (Project). The tables whose
+    ///   defaults did not change keep their versions.
     static let layoutDefaultsVersions: [String: Int] = [
         "models": 2,
         "projects": 2,
         "topDays": 2,
-        "dayDetail.models": 2,
+        "dayDetail.models": 3,
         "dayDetail.projects": 2,
-        "dayDetail.sessions": 1,
-        "projectDetail.models": 1,
+        "dayDetail.sessions": 2,
+        "projectDetail.models": 2,
         "projectDetail.subprojects": 1,
-        "projectDetail.sessions": 1,
+        "projectDetail.sessions": 2,
     ]
 
     /// Where the layout-defaults version a table's saved layout is at is
@@ -608,11 +615,11 @@ extension Notification.Name {
 /// - `onOpen`: a click on a row, or Return (or a double-click) on the row
 ///   the arrow keys reached. Rows that open nothing keep the native
 ///   selection instead.
-/// - `defaultColumns`: the standard columns shown until the user changes
-///   them — `UsageColumn.wideDefaults` or `.narrowDefaults`. With the
-///   screen's own columns that is at most `UsageColumn.maxDefaultColumns`;
-///   the rest are one right-click away. A screen's defaults fit its card at
-///   the window's default size, with its own columns.
+/// - The standard columns it opens on are every table's
+///   (`UsageColumn.defaults`). With the screen's own columns shown by default
+///   that is at most `UsageColumn.maxDefaultColumns`; the rest are one
+///   right-click away. A screen's defaults fit its card at the window's
+///   default size, with its own columns.
 /// - `leadingColumns`: screen columns that belong beside the label (a
 ///   sessions list's Project), built with `PacerUsageColumns.extra`.
 /// - `extraColumns`: the screen's own columns, built with
@@ -637,7 +644,10 @@ where Leading.TableRowValue == PacerUsageRow<Extra>,
     let onSort: (PacerUsageSort) -> Void
     let onOpen: ((Row) -> Void)?
     let maxVisibleRows: Int
-    let defaultColumns: Set<UsageColumn>
+    /// The standard columns shown until the user changes them: every
+    /// table's. Only a test opens a table on others
+    /// (`withDefaultColumns(_:)`); a screen never picks its own.
+    private(set) var defaultColumns: Set<UsageColumn> = UsageColumn.defaults
     let leadingColumns: () -> Leading
     let extraColumns: () -> Extras
     let labelAccessory: (Row) -> Accessory
@@ -660,7 +670,6 @@ where Leading.TableRowValue == PacerUsageRow<Extra>,
         onSort: @escaping (PacerUsageSort) -> Void,
         onOpen: ((Row) -> Void)? = nil,
         maxVisibleRows: Int = PacerUsageTableMetrics.defaultMaxVisibleRows,
-        defaultColumns: Set<UsageColumn> = UsageColumn.wideDefaults,
         store: UserDefaults = PacerPreferences.store,
         @TableColumnBuilder<Row, Comparator> leadingColumns: @escaping () -> Leading,
         @TableColumnBuilder<Row, Comparator> extraColumns: @escaping () -> Extras,
@@ -674,7 +683,6 @@ where Leading.TableRowValue == PacerUsageRow<Extra>,
         self.onSort = onSort
         self.onOpen = onOpen
         self.maxVisibleRows = maxVisibleRows
-        self.defaultColumns = defaultColumns
         self.leadingColumns = leadingColumns
         self.extraColumns = extraColumns
         self.labelAccessory = labelAccessory
@@ -685,6 +693,14 @@ where Leading.TableRowValue == PacerUsageRow<Extra>,
             wrappedValue: TableColumnCustomization<Row>(),
             PacerUsageTableMetrics.columnsKey(tableId: tableId),
             store: store)
+    }
+
+    /// This table opening on `columns` rather than every table's defaults:
+    /// for the tests that measure every column at once.
+    func withDefaultColumns(_ columns: Set<UsageColumn>) -> Self {
+        var table = self
+        table.defaultColumns = columns
+        return table
     }
 
     public var body: some View {
@@ -870,7 +886,6 @@ public extension PacerUsageTable where Leading == PacerUsageNoColumns<Extra> {
         onSort: @escaping (PacerUsageSort) -> Void,
         onOpen: ((Row) -> Void)? = nil,
         maxVisibleRows: Int = PacerUsageTableMetrics.defaultMaxVisibleRows,
-        defaultColumns: Set<UsageColumn> = UsageColumn.wideDefaults,
         store: UserDefaults = PacerPreferences.store,
         @TableColumnBuilder<Row, Comparator> extraColumns: @escaping () -> Extras,
         @ViewBuilder labelAccessory: @escaping (Row) -> Accessory,
@@ -878,7 +893,7 @@ public extension PacerUsageTable where Leading == PacerUsageNoColumns<Extra> {
     ) {
         self.init(rows: rows, tableId: tableId, labelTitle: labelTitle, sort: sort,
                   onSort: onSort, onOpen: onOpen, maxVisibleRows: maxVisibleRows,
-                  defaultColumns: defaultColumns, store: store,
+                  store: store,
                   leadingColumns: pacerUsageNoColumns, extraColumns: extraColumns,
                   labelAccessory: labelAccessory, rowMenu: rowMenu)
     }
@@ -894,14 +909,13 @@ public extension PacerUsageTable where Leading == PacerUsageNoColumns<Extra>, Ac
         onSort: @escaping (PacerUsageSort) -> Void,
         onOpen: ((Row) -> Void)? = nil,
         maxVisibleRows: Int = PacerUsageTableMetrics.defaultMaxVisibleRows,
-        defaultColumns: Set<UsageColumn> = UsageColumn.wideDefaults,
         store: UserDefaults = PacerPreferences.store,
         @TableColumnBuilder<Row, Comparator> extraColumns: @escaping () -> Extras,
         @ViewBuilder rowMenu: @escaping (Row) -> RowMenu
     ) {
         self.init(rows: rows, tableId: tableId, labelTitle: labelTitle, sort: sort,
                   onSort: onSort, onOpen: onOpen, maxVisibleRows: maxVisibleRows,
-                  defaultColumns: defaultColumns, store: store,
+                  store: store,
                   leadingColumns: pacerUsageNoColumns, extraColumns: extraColumns,
                   labelAccessory: { _ in EmptyView() }, rowMenu: rowMenu)
     }
@@ -917,14 +931,13 @@ public extension PacerUsageTable where Accessory == EmptyView, RowMenu == EmptyV
         onSort: @escaping (PacerUsageSort) -> Void,
         onOpen: ((Row) -> Void)? = nil,
         maxVisibleRows: Int = PacerUsageTableMetrics.defaultMaxVisibleRows,
-        defaultColumns: Set<UsageColumn> = UsageColumn.wideDefaults,
         store: UserDefaults = PacerPreferences.store,
         @TableColumnBuilder<Row, Comparator> leadingColumns: @escaping () -> Leading,
         @TableColumnBuilder<Row, Comparator> extraColumns: @escaping () -> Extras
     ) {
         self.init(rows: rows, tableId: tableId, labelTitle: labelTitle, sort: sort,
                   onSort: onSort, onOpen: onOpen, maxVisibleRows: maxVisibleRows,
-                  defaultColumns: defaultColumns, store: store,
+                  store: store,
                   leadingColumns: leadingColumns, extraColumns: extraColumns,
                   labelAccessory: { _ in EmptyView() }, rowMenu: { _ in EmptyView() })
     }
@@ -941,13 +954,12 @@ where Leading == PacerUsageNoColumns<Extra>, Accessory == EmptyView, RowMenu == 
         onSort: @escaping (PacerUsageSort) -> Void,
         onOpen: ((Row) -> Void)? = nil,
         maxVisibleRows: Int = PacerUsageTableMetrics.defaultMaxVisibleRows,
-        defaultColumns: Set<UsageColumn> = UsageColumn.wideDefaults,
         store: UserDefaults = PacerPreferences.store,
         @TableColumnBuilder<Row, Comparator> extraColumns: @escaping () -> Extras
     ) {
         self.init(rows: rows, tableId: tableId, labelTitle: labelTitle, sort: sort,
                   onSort: onSort, onOpen: onOpen, maxVisibleRows: maxVisibleRows,
-                  defaultColumns: defaultColumns, store: store,
+                  store: store,
                   leadingColumns: pacerUsageNoColumns, extraColumns: extraColumns,
                   labelAccessory: { _ in EmptyView() }, rowMenu: { _ in EmptyView() })
     }
@@ -965,13 +977,12 @@ where Leading == PacerUsageNoColumns<Extra>, Extras == PacerUsageNoColumns<Extra
         onSort: @escaping (PacerUsageSort) -> Void,
         onOpen: ((Row) -> Void)? = nil,
         maxVisibleRows: Int = PacerUsageTableMetrics.defaultMaxVisibleRows,
-        defaultColumns: Set<UsageColumn> = UsageColumn.wideDefaults,
         store: UserDefaults = PacerPreferences.store,
         @ViewBuilder rowMenu: @escaping (Row) -> RowMenu
     ) {
         self.init(rows: rows, tableId: tableId, labelTitle: labelTitle, sort: sort,
                   onSort: onSort, onOpen: onOpen, maxVisibleRows: maxVisibleRows,
-                  defaultColumns: defaultColumns, store: store,
+                  store: store,
                   leadingColumns: pacerUsageNoColumns, extraColumns: pacerUsageNoColumns,
                   labelAccessory: { _ in EmptyView() }, rowMenu: rowMenu)
     }
@@ -989,12 +1000,11 @@ where Leading == PacerUsageNoColumns<Extra>, Extras == PacerUsageNoColumns<Extra
         onSort: @escaping (PacerUsageSort) -> Void,
         onOpen: ((Row) -> Void)? = nil,
         maxVisibleRows: Int = PacerUsageTableMetrics.defaultMaxVisibleRows,
-        defaultColumns: Set<UsageColumn> = UsageColumn.wideDefaults,
         store: UserDefaults = PacerPreferences.store
     ) {
         self.init(rows: rows, tableId: tableId, labelTitle: labelTitle, sort: sort,
                   onSort: onSort, onOpen: onOpen, maxVisibleRows: maxVisibleRows,
-                  defaultColumns: defaultColumns, store: store,
+                  store: store,
                   leadingColumns: pacerUsageNoColumns, extraColumns: pacerUsageNoColumns,
                   labelAccessory: { _ in EmptyView() }, rowMenu: { _ in EmptyView() })
     }

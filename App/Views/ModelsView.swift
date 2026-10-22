@@ -440,19 +440,12 @@ private struct ModelsContent: View {
         )
     }
 
-    /// The Share card's columns: every donut card's, Tokens, Cost and Share,
-    /// so this card reads like Today by model and Top projects. Round 4
-    /// printed shares under Cost and Tokens here, and dollars under the
-    /// same titles on the other cards.
-    // Shares: the All models table under it prints the amounts.
-    private static let shareColumns: [PacerShareListColumn] = PacerShareListColumn.shares
-
     /// Eight models with a wedge and a line of their own, and the rest as
     /// one: the legend used to stop at eight while the donut drew every row,
     /// so a ninth was an unlabelled sliver.
     private static func share(_ rows: [PacerUsageRow<ModelTableExtra>],
                               sort: PacerUsageSort) -> PacerShareListData<ModelTableExtra> {
-        PacerShareListData(rows: rows, sort: sort, columns: shareColumns, maxSlices: 8)
+        PacerShareListData(rows: rows, sort: sort, maxSlices: 8)
     }
 
     /// Color for a slice/label. Ungrouped uses the curated blend palette; a
@@ -508,14 +501,15 @@ private struct ModelsContent: View {
         }
     }
 
-    /// How the models divide the cost and the tokens: the shared donut card.
-    /// Clicking Cost or Tokens ranks the list by it and turns the ring to it,
-    /// where a picker in the header used to.
+    /// How the models divide the cost and the tokens: the shared donut card,
+    /// with every donut list's columns (Mix, Tokens, Cost, Share). Clicking
+    /// Cost or Tokens ranks the list by it and turns the ring to it, where a
+    /// picker in the header used to.
     private var shareCard: some View {
         let derived = self.derived
         // Compared with the sort the list runs in, which for a sort it has
         // no column for is not the stored one.
-        let effective = PacerShareListData<ModelTableExtra>.effectiveSort(shareSort, columns: Self.shareColumns)
+        let effective = PacerShareListData<ModelTableExtra>.effectiveSort(shareSort)
         let share = derived.share.flatMap { $0.sort == effective ? $0 : nil }
             ?? Self.share(derived.tableRows, sort: shareSort)
         return PacerDonutListCard(
@@ -693,7 +687,6 @@ private struct ModelsContent: View {
                 // menu: of the two counts of its own, Last active says more
                 // on a list that keeps models long retired, and Projects
                 // keeps the same one.
-                defaultColumns: UsageColumn.wideDefaults,
                 extraColumns: {
                     PacerUsageColumns.extra(ModelTableExtra.days, title: "Days",
                                             of: ModelTableExtra.self,

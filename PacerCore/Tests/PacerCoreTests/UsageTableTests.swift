@@ -281,23 +281,21 @@ struct UsageColumnTests {
         #expect(UsageColumn.displayOrder.count == UsageColumn.allCases.count)
     }
 
-    @Test("a table opens on its label, Tokens, Hit %, Out %, Cost and Mix (narrow: no Mix)")
+    @Test("every table opens on its label, Tokens, Hit %, Out %, Cost and Mix: one set")
     func defaults() {
-        let wide: [UsageColumn] = UsageColumn.displayOrder.filter { UsageColumn.wideDefaults.contains($0) }
-        let narrow: [UsageColumn] = UsageColumn.displayOrder.filter { UsageColumn.narrowDefaults.contains($0) }
-        // Round 6: "a sortable cache and in/out column by default too", and
-        // the Mix bar on the tables that stand on their own.
-        #expect(wide == [.name, .tokens, .cacheHitRate, .outputShare, .cost, .mix])
-        #expect(narrow == [.name, .tokens, .cacheHitRate, .outputShare, .cost])
-        #expect(UsageColumn.wideDefaults == UsageColumn.narrowDefaults.union([.mix]))
+        let shown: [UsageColumn] = UsageColumn.displayOrder.filter { UsageColumn.defaults.contains($0) }
+        // Round 6: "a sortable cache and in/out column by default too";
+        // round 7: Mix on every table, one set "across all the places".
+        #expect(shown == [.name, .tokens, .cacheHitRate, .outputShare, .cost, .mix])
         // No token part opens shown: they are in the menu.
-        #expect(UsageColumn.wideDefaults.isDisjoint(with: UsageColumn.partColumns))
-        #expect(UsageColumn.narrowDefaults.isDisjoint(with: UsageColumn.partColumns))
-        // Seven at most: a wide table with one column of its screen's, a
-        // narrow one with two (a sessions list's Project and Last active).
+        #expect(UsageColumn.defaults.isDisjoint(with: UsageColumn.partColumns))
+        // Seven at most: the set and one column of the screen's own.
         #expect(UsageColumn.maxDefaultColumns == 7)
-        #expect(UsageColumn.wideDefaults.count + 1 <= UsageColumn.maxDefaultColumns)
-        #expect(UsageColumn.narrowDefaults.count + 2 <= UsageColumn.maxDefaultColumns)
+        #expect(UsageColumn.defaults.count + 1 == UsageColumn.maxDefaultColumns)
+        // A donut list's amounts are columns every table shows, under the
+        // same titles.
+        let listed: [UsageColumn] = PacerShareListColumn.standard.compactMap { UsageColumn(rawValue: $0.id) }
+        #expect(Set(listed).isSubset(of: UsageColumn.defaults))
         let ascendingFirst: [UsageColumn] = UsageColumn.allCases.filter { !$0.sortsDescendingFirst }
         #expect(ascendingFirst == [.name])
         #expect(PacerUsageSort.costDescending == PacerUsageSort(column: "cost", descending: true))
@@ -582,11 +580,5 @@ struct SessionsTableTests {
         #expect(late.sortKey(forColumn: PacerSessionExtra.duration) == .number(110))
         #expect(late.sortKey(forColumn: PacerSessionExtra.project) == .text("Alpha"))
         #expect(early.sortKey(forColumn: "cost") == nil)
-    }
-
-    @Test("by default a sessions table shows a modal table's columns: Tokens, Hit %, Out %, Cost")
-    func defaults() {
-        let shown: [UsageColumn] = UsageColumn.allCases.filter { PacerSessionsTable.defaultColumns.contains($0) }
-        #expect(shown == [.name, .tokens, .cacheHitRate, .outputShare, .cost])
     }
 }
