@@ -107,7 +107,7 @@ public struct PacerSessionsTable: View {
             if showProject {
                 PacerUsageColumns.extra(PacerSessionExtra.project, title: "Project",
                                         of: PacerSessionExtra.self, numeric: false,
-                                        minWidth: 70, idealWidth: 120, descendingFirst: false) { row in
+                                        minWidth: 70, idealWidth: 100, descendingFirst: false) { row in
                     Text(row.extra.projectName)
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
@@ -118,8 +118,8 @@ public struct PacerSessionsTable: View {
             }
         } extraColumns: {
             PacerUsageColumns.extra(PacerSessionExtra.duration, title: "Duration",
-                                    of: PacerSessionExtra.self, help: "First seen to last seen",
-                                    minWidth: 48, idealWidth: 60, visibleByDefault: false) { row in
+                                    of: PacerSessionExtra.self,
+                                    minWidth: 48, idealWidth: 56, visibleByDefault: false) { row in
                 Text(pacerSessionDuration(row.extra.duration))
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
@@ -128,7 +128,7 @@ public struct PacerSessionsTable: View {
             }
             PacerUsageColumns.extra(PacerSessionExtra.lastSeen, title: "Last seen",
                                     of: PacerSessionExtra.self,
-                                    minWidth: 60, idealWidth: 76) { row in
+                                    minWidth: 60, idealWidth: 64) { row in
                 // Judged against the clock, so it needs one: nothing else
                 // redraws an open detail on an idle machine, and "2 min ago"
                 // stayed "2 min ago".

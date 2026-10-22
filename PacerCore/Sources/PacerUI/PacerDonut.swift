@@ -1,5 +1,6 @@
 import SwiftUI
 import Charts
+import PacerCore
 
 /// One wedge of a ``PacerDonut``: a stable, unique `id` (which is also the
 /// color-scale key and what hover compares against), its magnitude, and its
@@ -16,17 +17,16 @@ public struct PacerDonutSlice: Identifiable {
     }
 }
 
-/// The shared identity donut behind every "share" card — Top projects, Token
-/// share, the dashboard per-model card, project detail, and day detail. The
-/// `SectorMark` ring, color pinning, hover-highlight opacity, and
-/// accessibility used to be copy-pasted five times (and drifted); they live
-/// here now.
+/// The shared identity donut behind every "share" ring: Models' Token share,
+/// Project detail's models, and, through ``PacerShareDonut``, Today by model
+/// and the Projects list. The `SectorMark` ring, color pinning,
+/// hover-highlight opacity, and accessibility used to be copy-pasted five
+/// times (and drifted); they live here now.
 ///
-/// Callers keep their own hover *state* — each card derives the hovered slice
-/// its own (often perf-tuned) way — and pass in the hovered slice `id` plus
-/// the angle-selection binding. The legend stays per-card because its
-/// trailing content differs, but every legend shares ``PacerDonutLegendRow``
-/// so the color swatch is defined once.
+/// Callers keep their own hover *state* and pass in the hovered slice `id`
+/// plus the angle-selection binding (``PacerShareDonut`` is one such caller).
+/// A legend, where a card has one, shares ``PacerDonutLegendRow`` so the
+/// color swatch is defined once.
 public struct PacerDonut: View {
     private let slices: [PacerDonutSlice]
     private let innerRatio: Double
@@ -116,6 +116,272 @@ public struct PacerDonutLegendRow<Trailing: View>: View {
                 .frame(maxWidth: labelMaxWidth, alignment: .leading)
             Spacer(minLength: 8)
             trailing
+        }
+    }
+}
+
+// MARK: - A share donut beside its table
+
+/// What a share donut measures: one column whose values add up to a whole
+/// (a cost, a token count, a count of sessions).
+public struct PacerShareMetric: Equatable, Sendable {
+    /// The table column it follows: a `UsageColumn` raw value or a screen's
+    /// own column id.
+    public let column: String
+    /// What the donut's centre names it: "Cost", "Tokens", "Sessions".
+    public let title: String
+
+    public init(column: String, title: String) {
+        self.column = column
+        self.title = title
+    }
+
+    public static let cost = PacerShareMetric(column: UsageColumn.cost.rawValue, title: "Cost")
+}
+
+public extension UsageColumn {
+    /// The metric a donut beside the table measures while it is sorted by
+    /// this column, or nil for a column whose values do not add up to a
+    /// whole: the label, the two ratios, the Mix bar.
+    var shareMetric: PacerShareMetric? {
+        switch self {
+        case .cost:
+            return .cost
+        case .name, .outputShare, .cacheWriteShare, .mix:
+            return nil
+        case .tokens:
+            // "Total" is the column's title; on its own in the donut it
+            // would not say total of what.
+            return PacerShareMetric(column: rawValue, title: "Tokens")
+        case .input, .output, .cacheRead, .cacheWrite, .cacheWrite5m, .cacheWrite1h:
+            return PacerShareMetric(column: rawValue, title: title(label: ""))
+        }
+    }
+}
+
+/// The wedges of a share donut, built from the rows of the table beside it.
+///
+/// The donut measures whatever the table is sorted by, when that adds up
+/// (cost, a token column, a screen's count), and cost otherwise (the label,
+/// a ratio, a date): the table's header is the donut's metric picker, so
+/// there is one control rather than two that can disagree. The wedges run
+/// largest first whatever the sort's direction: flipping it reorders the
+/// table, not the ring.
+///
+/// Plain and `Equatable`, built where the screen caches its rows: a hover
+/// changes only the donut's own state, never this.
+public struct PacerShareDonutData: Equatable {
+    public struct Slice: Identifiable, Equatable {
+        public let id: String
+        public let label: String
+        public let value: Double
+        public let color: Color
+        /// Rows folded into this wedge: one, or the tail's count for Other.
+        public let rows: Int
+    }
+
+    /// The id of the wedge the tail folds into.
+    public static let otherID = "__other__"
+
+    public let metric: PacerShareMetric
+    public let slices: [Slice]
+    public let total: Double
+    /// Each wedge's end on the ring (a running total), for hover lookups.
+    let ends: [Double]
+
+    /// - `maxSlices`: how many rows get a wedge of their own before the rest
+    ///   fold into one Other wedge. A single leftover row keeps its own: an
+    ///   Other of one would hide a name to save nothing.
+    public init<Extra: PacerUsageExtra>(
+        rows: [PacerUsageRow<Extra>],
+        sort: PacerUsageSort,
+        maxSlices: Int = .max
+    ) {
+        let metric = Self.metric(for: sort, extra: Extra.self)
+        let valued: [(row: PacerUsageRow<Extra>, value: Double)] = rows.compactMap { row in
+            let value = Self.value(of: row, metric)
+            return value > 0 ? (row, value) : nil
+        }
+        let ordered = valued.sorted {
+            $0.value != $1.value ? $0.value > $1.value : $0.row.id < $1.row.id
+        }
+        var slices: [Slice] = []
+        // At least two rows past the cap (written so `.max` cannot overflow).
+        let folds = ordered.count - 1 > maxSlices
+        let named = folds ? Array(ordered.prefix(maxSlices)) : ordered
+        for entry in named {
+            slices.append(Slice(id: entry.row.id, label: entry.row.label, value: entry.value,
+                                color: entry.row.color ?? .gray, rows: 1))
+        }
+        if folds {
+            let tail = ordered.dropFirst(maxSlices)
+            let sum: Double = tail.reduce(0) { $0 + $1.value }
+            slices.append(Slice(id: Self.otherID, label: "\(tail.count) others", value: sum,
+                                color: .secondary, rows: tail.count))
+        }
+        var running = 0.0
+        var ends: [Double] = []
+        for slice in slices {
+            running += slice.value
+            ends.append(running)
+        }
+        self.metric = metric
+        self.slices = slices
+        self.total = running
+        self.ends = ends
+    }
+
+    /// The metric for `sort`: its column when that adds up, cost otherwise.
+    static func metric<Extra: PacerUsageExtra>(for sort: PacerUsageSort, extra: Extra.Type) -> PacerShareMetric {
+        if let standard = UsageColumn(rawValue: sort.column) {
+            return standard.shareMetric ?? .cost
+        }
+        return Extra.shareMetric(forColumn: sort.column) ?? .cost
+    }
+
+    static func value<Extra: PacerUsageExtra>(of row: PacerUsageRow<Extra>, _ metric: PacerShareMetric) -> Double {
+        if let standard = UsageColumn(rawValue: metric.column) {
+            if standard == .cost { return row.cost }
+            return Double(standard.tokenCount(of: row.tokens) ?? 0)
+        }
+        return row.extra.shareValue(forColumn: metric.column) ?? 0
+    }
+
+    /// The wedge at `angle`, the value `chartAngleSelection` reports: a
+    /// point on the ring's running total.
+    public func slice(at angle: Double?) -> Slice? {
+        guard let angle, !slices.isEmpty else { return nil }
+        for (index, end) in ends.enumerated() where angle <= end {
+            return slices[index]
+        }
+        return slices.last
+    }
+
+    /// A wedge's share of the ring, 0...1.
+    public func share(of slice: Slice) -> Double {
+        total > 0 ? slice.value / total : 0
+    }
+
+    /// What VoiceOver reads in place of the ring: the five largest shares.
+    var spokenSummary: String {
+        guard total > 0 else { return "no data yet" }
+        return slices.prefix(5).map { slice in
+            "\(slice.label) \(Int((share(of: slice) * 100).rounded())) percent"
+        }.joined(separator: ", ")
+    }
+}
+
+/// A share donut with its own hover: the ring in the rows' colours, and in
+/// its centre the metric it measures, or, under the pointer, that wedge's
+/// share and name. The numbers themselves are in the table beside it.
+public struct PacerShareDonut: View {
+    let data: PacerShareDonutData
+    let size: CGFloat
+    let accessibilityLabel: String
+    /// The hover lives here, so moving the pointer over the ring redraws the
+    /// ring and its centre, not the card or the table beside it.
+    @State private var hoveredAngle: Double?
+
+    static let innerRatio: Double = 0.62
+
+    public init(_ data: PacerShareDonutData, size: CGFloat = 140, accessibilityLabel: String) {
+        self.init(data, size: size, accessibilityLabel: accessibilityLabel, hoveredAngle: nil)
+    }
+
+    /// With a hover already in place: for the render tests, which cannot
+    /// move a pointer.
+    init(_ data: PacerShareDonutData, size: CGFloat = 140, accessibilityLabel: String,
+         hoveredAngle: Double?) {
+        self.data = data
+        self.size = size
+        self.accessibilityLabel = accessibilityLabel
+        _hoveredAngle = State(initialValue: hoveredAngle)
+    }
+
+    public var body: some View {
+        let hovered = data.slice(at: hoveredAngle)
+        PacerDonut(
+            slices: data.slices.map { PacerDonutSlice(id: $0.id, value: $0.value, color: $0.color) },
+            innerRatio: Self.innerRatio,
+            size: size,
+            hoveredID: hovered?.id,
+            hoveredAngle: $hoveredAngle,
+            accessibilityLabel: accessibilityLabel,
+            accessibilityValue: data.spokenSummary)
+            .overlay {
+                centre(hovered)
+                    // The ring takes the pointer; the text must not.
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+            }
+    }
+
+    @ViewBuilder
+    private func centre(_ hovered: PacerShareDonutData.Slice?) -> some View {
+        let inner: CGFloat = size * CGFloat(Self.innerRatio) - 12
+        VStack(spacing: 1) {
+            if let hovered {
+                Text(PacerUsageCellText(share: data.share(of: hovered), help: "", none: "–").text)
+                    .font(.system(size: 17, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+                Text(hovered.label)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            } else {
+                // Which column the ring measures: it follows the table's sort.
+                Text(data.metric.title)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        }
+        .frame(width: inner)
+    }
+}
+
+/// A share donut beside the table it summarises: Today by model and the
+/// Projects list. The donut measures what the table is sorted by
+/// (`PacerShareDonutData`), the rows' colour dots are its legend, and the
+/// table carries every number, so none is printed twice.
+public struct PacerDonutBesideTable<Table: View>: View {
+    let data: PacerShareDonutData
+    let donutSize: CGFloat
+    let accessibilityLabel: String
+    let hoveredAngle: Double?
+    let table: Table
+
+    public init(
+        _ data: PacerShareDonutData,
+        donutSize: CGFloat = 140,
+        accessibilityLabel: String,
+        @ViewBuilder table: () -> Table
+    ) {
+        self.init(data, donutSize: donutSize, accessibilityLabel: accessibilityLabel,
+                  hoveredAngle: nil, table: table)
+    }
+
+    /// With a hover already in place, for the render tests.
+    init(
+        _ data: PacerShareDonutData,
+        donutSize: CGFloat = 140,
+        accessibilityLabel: String,
+        hoveredAngle: Double?,
+        @ViewBuilder table: () -> Table
+    ) {
+        self.data = data
+        self.donutSize = donutSize
+        self.accessibilityLabel = accessibilityLabel
+        self.hoveredAngle = hoveredAngle
+        self.table = table()
+    }
+
+    public var body: some View {
+        HStack(alignment: .top, spacing: 24) {
+            PacerShareDonut(data, size: donutSize, accessibilityLabel: accessibilityLabel,
+                            hoveredAngle: hoveredAngle)
+            table
         }
     }
 }

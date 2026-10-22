@@ -6,10 +6,10 @@ import Testing
 
 // The shared usage table hosted off-screen, measured against the real
 // `NSTableView` SwiftUI builds for it: the frame it sets itself fits its rows,
-// its columns start as specified per table, the column layout a user makes
-// (visibility, order) survives into the next table with the same id — a
-// layout saved by the round-1 table included — and the styler leaves the
-// table looking like the app's lists without taking its behaviour away.
+// its columns start as specified per table and fit the cards they live in,
+// the column layout a user makes (visibility, order) survives into the next
+// table with the same id — a layout saved by the round-1 table included —
+// "Reset columns" undoes it, and the header is the system's own.
 //
 // The host is an `NSHostingView` in a borderless window that is never
 // ordered in. Without a window the table does not make its cell views, and
@@ -74,8 +74,8 @@ struct UsageTableLayoutTests {
         return Hosted(host: host, window: window)
     }
 
-    /// Lay out, make every cell, and let SwiftUI's run-loop work — and the
-    /// styler, which runs on the next turn of the run loop — land.
+    /// Lay out, make every cell, and let SwiftUI's run-loop work (a reset's
+    /// rebuild, a selection's `onChange`) land.
     private static func settle(_ host: NSView) {
         for _ in 0..<3 {
             host.layoutSubtreeIfNeeded()
@@ -198,8 +198,7 @@ struct UsageTableLayoutTests {
         #expect(table.allowsColumnResizing)
         // AppKit's own header menu (macOS 14) lists the columns its delegate
         // says the user may hide; SwiftUI answers from `customizationID` and
-        // `disabledCustomizationBehavior`. The styler's header cells change
-        // none of it.
+        // `disabledCustomizationBehavior`.
         let delegate = try #require(table.delegate)
         var hideable: [String] = []
         for column in table.tableColumns
@@ -316,60 +315,281 @@ struct UsageTableLayoutTests {
 
     // MARK: Look
 
-    @Test("the header is the app's: its own cells, tooltips, the sort marked, no grid")
-    func styled() throws {
+    @Test("the header is the system's: its own cells and dividers, the sort marked natively")
+    func nativeHeader() throws {
         let (store, suite) = Self.store()
         defer { UserDefaults().removePersistentDomain(forName: suite) }
         let hosted = Self.host(Harness(rows: Self.rows(3, subtitles: true),
-                                       tableId: "styled", store: store))
+                                       tableId: "native", store: store))
         let table = try #require(Self.table(in: hosted.host))
-        let foreign: [String] = table.tableColumns
-            .filter { !($0.headerCell is PacerTableHeaderCell) }.map(\.title)
-        #expect(foreign.isEmpty)
+        // Nothing of Pacer's in the header: every cell is the one SwiftUI
+        // made, in the module SwiftUI made it in.
+        let ours: [String] = table.tableColumns
+            .filter { String(reflecting: type(of: $0.headerCell)).hasPrefix("PacerUI.") }
+            .map(\.title)
+        #expect(ours.isEmpty)
+        #expect(table.headerView != nil)
+        #expect(table.style == .inset)
         #expect(!table.usesAlternatingRowBackgroundColors)
-        #expect(table.gridStyleMask.isEmpty)
-        #expect(table.pacerSortMark == PacerTableSortMark(title: "Cost", descending: true))
-        let ratio = try #require(Self.column("Out %", in: table))
-        #expect(ratio.headerToolTip == UsageColumn.outputShare.headerHelp)
-        // AppKit copies a header cell to draw a column being dragged.
-        let cell = try #require(Self.column("Cost", in: table)?.headerCell)
-        let copy = cell.copy() as? PacerTableHeaderCell
-        #expect(copy?.stringValue == "Cost")
+        // The sort is the table's own sort descriptor, which is what the
+        // system header draws its indicator from: Cost, largest first.
+        let cost = try #require(Self.column("Cost", in: table))
+        let first = try #require(table.sortDescriptors.first)
+        #expect(first.key == cost.sortDescriptorPrototype?.key)
+        #expect(first.ascending == false)
     }
 
-    private struct SortingHarness: View {
+    @Test("every title fits its column's starting width but the two cache titles")
+    func titlesFit() throws {
+        let (store, suite) = Self.store()
+        defer { UserDefaults().removePersistentDomain(forName: suite) }
+        let hosted = Self.host(Harness(rows: Self.rows(2, subtitles: false), tableId: "titles",
+                                       store: store, defaults: Set(UsageColumn.allCases)), width: 1400)
+        let table = try #require(Self.table(in: hosted.host))
+        // Measured with the header's own cell, on whichever OS runs this:
+        // the font and padding are the system's. Cost is the sorted column,
+        // so its measure includes the sort indicator.
+        let shortened: [UsageColumn] = [.cacheRead, .cacheWrite]
+        for column in UsageColumn.allCases where column != .name && !shortened.contains(column) {
+            let header = try #require(Self.column(column.title(label: "Model"), in: table)?.headerCell)
+            let needed: CGFloat = header.cellSize.width
+            #expect(needed <= column.idealWidth + 0.5,
+                    "\(column) needs \(needed)pt for its title, starts at \(column.idealWidth)pt")
+        }
+    }
+
+    /// Two screen columns, with the widths and the widest text of the
+    /// screens' own: Models' Days and Last seen, or the Projects list's
+    /// Sessions and Last active.
+    struct TwoExtras: PacerUsageExtra, Sendable {
+        func sortKey(forColumn id: String) -> PacerUsageSortKey? { nil }
+    }
+
+    struct ExtraColumn {
+        let title: String
+        let min: CGFloat
+        let ideal: CGFloat
+        let sample: String
+        let font: Font
+        var visible = true
+    }
+
+    private struct ExtrasHarness: View {
+        let rows: [PacerUsageRow<TwoExtras>]
+        let tableId: String
+        let store: UserDefaults
+        let defaults: Set<UsageColumn>
+        let extras: [ExtraColumn]
+        let width: CGFloat
+        var body: some View {
+            let first = extras[0], second = extras[1]
+            PacerUsageTable(rows: rows, tableId: tableId, labelTitle: "Model",
+                            sort: .costDescending, onSort: { _ in },
+                            defaultColumns: defaults, store: store) {
+                PacerUsageColumns.extra("first", title: first.title, of: TwoExtras.self,
+                                        minWidth: first.min, idealWidth: first.ideal,
+                                        visibleByDefault: first.visible) { _ in
+                    Text(first.sample).font(first.font).monospacedDigit()
+                }
+                PacerUsageColumns.extra("second", title: second.title, of: TwoExtras.self,
+                                        minWidth: second.min, idealWidth: second.ideal,
+                                        visibleByDefault: second.visible) { _ in
+                    Text(second.sample).font(second.font)
+                }
+            }
+            .frame(width: width)
+        }
+    }
+
+    /// A row with the widest numbers each column prints: five-character
+    /// counts, a six-character cost, a three-digit share.
+    private static func widestRows() -> [PacerUsageRow<TwoExtras>] {
+        let wide = PacerUsageRow(
+            id: "wide", label: "Sonnet 4.6", subtitle: "claude-sonnet-4-6",
+            tokens: TokenBreakdown(inputTokens: 88_800, outputTokens: 88_800_000,
+                                   cacheReadTokens: 888_800_000, cacheCreation5mTokens: 48_800_000,
+                                   cacheCreation1hTokens: 40_000_000),
+            costParts: CostComponents(output: 12_340),
+            cost: 12_340, extra: TwoExtras())
+        let other = PacerUsageRow(
+            id: "other", label: "Opus 4.7", subtitle: "claude-opus-4-7",
+            tokens: TokenBreakdown(inputTokens: 1, outputTokens: 1),
+            costParts: CostComponents(input: 1), extra: TwoExtras())
+        return [wide, other]
+    }
+
+    static let modelsExtras = [
+        ExtraColumn(title: "Days", min: 34, ideal: 34, sample: "123", font: .system(size: 12)),
+        ExtraColumn(title: "Last seen", min: 70, ideal: 70, sample: "2026-10-20",
+                    font: .system(size: 11, design: .monospaced)),
+    ]
+    static let projectsExtras = [
+        ExtraColumn(title: "Sessions", min: 44, ideal: 62, sample: "1234", font: .system(size: 12)),
+        ExtraColumn(title: "Last active", min: 60, ideal: 64, sample: "59 min ago", font: .system(size: 11)),
+    ]
+
+    @Test("a default layout fits the card it lives in at the window's default size, numbers whole",
+          arguments: [
+            // Models: the wide columns, Mix, Days and Last seen, in its card.
+            (CGFloat(761), "models"),
+            // The Projects list beside its 140pt donut (Today by model is
+            // the same less two columns).
+            (597, "projects"),
+            // Day detail's projects, in the modal at its ideal width.
+            (572, "dayProjects"),
+          ])
+    func defaultLayoutFits(width: CGFloat, layout: String) throws {
+        let (store, suite) = Self.store()
+        defer { UserDefaults().removePersistentDomain(forName: suite) }
+        let defaults: Set<UsageColumn>
+        let extras: [ExtraColumn]
+        switch layout {
+        case "models":
+            defaults = UsageColumn.wideDefaults.union([.mix])
+            extras = Self.modelsExtras
+        case "projects":
+            defaults = UsageColumn.narrowDefaults
+            extras = Self.projectsExtras
+        default:
+            defaults = UsageColumn.wideDefaults
+            extras = [ExtraColumn(title: "A", min: 40, ideal: 40, sample: "", font: .body, visible: false),
+                      ExtraColumn(title: "B", min: 40, ideal: 40, sample: "", font: .body, visible: false)]
+        }
+        let hosted = Self.host(ExtrasHarness(rows: Self.widestRows(), tableId: "default-\(layout)",
+                                             store: store, defaults: defaults, extras: extras,
+                                             width: width), width: width)
+        let table = try #require(Self.table(in: hosted.host))
+        let clip = try #require(table.enclosingScrollView?.contentView)
+        #expect(table.frame.width <= clip.bounds.width + 0.5,
+                "columns \(table.frame.width)pt wide in \(clip.bounds.width)pt")
+        // No number cut short: each cell's own fitting width is within its
+        // column.
+        for (index, column) in table.tableColumns.enumerated()
+        where !column.isHidden && column.title != "Model" && column.title != "Mix" {
+            let cell = try #require(table.view(atColumn: index, row: 0, makeIfNecessary: true))
+            let needed: CGFloat = cell.fittingSize.width
+            #expect(needed <= column.width + 0.5,
+                    "\(column.title) needs \(needed)pt, has \(column.width)pt")
+        }
+    }
+
+    private struct ResetHarness: View {
         let rows: [PacerUsageRow<PacerUsageNoExtra>]
         let store: UserDefaults
-        @State var sort = PacerUsageSort.costDescending
+        @State var sort = PacerUsageSort(.tokens, descending: false)
         var body: some View {
-            PacerUsageTable(rows: rows, tableId: "resort", labelTitle: "Model",
-                            sort: sort, onSort: { sort = $0 }, store: store)
+            VStack {
+                PacerUsageTable(rows: rows, tableId: "reset", labelTitle: "Model",
+                                sort: sort, onSort: { sort = $0 }, store: store)
+                Text(sort.column + (sort.descending ? " desc" : " asc"))
+            }
+            .frame(width: 900)
+        }
+    }
+
+    @Test("Reset columns brings back the default columns, order and widths, and keeps the sort")
+    func resetColumns() throws {
+        let (store, suite) = Self.store()
+        defer { UserDefaults().removePersistentDomain(forName: suite) }
+        // What a fresh table looks like, for comparison.
+        let fresh = Self.host(Harness(rows: Self.rows(2, subtitles: false), tableId: "reset-fresh",
+                                      store: store))
+        let freshTable = try #require(Self.table(in: fresh.host))
+        let freshWidths: [String: CGFloat] = Dictionary(
+            uniqueKeysWithValues: freshTable.tableColumns.filter { !$0.isHidden }.map { ($0.title, $0.width) })
+
+        let hosted = Self.host(ResetHarness(rows: Self.rows(2, subtitles: false), store: store))
+        var table = try #require(Self.table(in: hosted.host) as? NSOutlineView)
+        let delegate = try #require(table.delegate)
+        // The user drags Cost to second place, shows Write %, hides Input
+        // and widens the label.
+        let costIndex = try #require(table.tableColumns.firstIndex { $0.title == "Cost" })
+        table.moveColumn(costIndex, toColumn: 1)
+        let ratio = try #require(Self.column("Write %", in: table))
+        ratio.isHidden = false
+        let input = try #require(Self.column("Input", in: table))
+        input.isHidden = true
+        delegate.outlineView?(table, userDidChangeVisibilityOf: [ratio, input])
+        try #require(Self.column("Model", in: table)).width = 260
+        Self.settle(hosted.host)
+        #expect(Self.visibleTitles(table) == ["Model", "Cost", "Output", "Cache read", "Cache write",
+                                              "Total", "Write %"])
+
+        PacerUsageTableMetrics.resetColumns(tableId: "reset")
+        Self.settle(hosted.host)
+        // A new table: the reset builds it afresh, at its starting widths.
+        table = try #require(Self.table(in: hosted.host) as? NSOutlineView)
+        #expect(Self.visibleTitles(table) == Self.visibleTitles(freshTable))
+        for column in table.tableColumns where !column.isHidden {
+            #expect(abs(column.width - (freshWidths[column.title] ?? -1)) <= 0.5,
+                    "\(column.title) is \(column.width)pt after a reset, \(freshWidths[column.title] ?? -1)pt fresh")
+        }
+        // The saved layout is the default one again: nothing hidden or
+        // shown by hand.
+        let data = try #require(store.data(forKey: PacerUsageTableMetrics.columnsKey(tableId: "reset")))
+        let saved = try JSONDecoder().decode(
+            TableColumnCustomization<PacerUsageRow<PacerUsageNoExtra>>.self, from: data)
+        #expect(saved[visibility: UsageColumn.input.rawValue] == .automatic)
+        #expect(saved[visibility: UsageColumn.cacheWriteShare.rawValue] == .automatic)
+        // The sort is the screen's, and stays: Total, smallest first.
+        let total = try #require(Self.column("Total", in: table))
+        let first = try #require(table.sortDescriptors.first)
+        #expect(first.key == total.sortDescriptorPrototype?.key)
+        #expect(first.ascending)
+
+        // Another table's layout is untouched by this one's reset.
+        let other = Self.host(Harness(rows: Self.rows(2, subtitles: false), tableId: "reset-other",
+                                      store: store))
+        let otherTable = try #require(Self.table(in: other.host))
+        let otherCost = try #require(otherTable.tableColumns.firstIndex { $0.title == "Cost" })
+        otherTable.moveColumn(otherCost, toColumn: 1)
+        Self.settle(other.host)
+        PacerUsageTableMetrics.resetColumns(tableId: "reset")
+        Self.settle(other.host)
+        #expect(Self.visibleTitles(try #require(Self.table(in: other.host))).dropFirst().first == "Cost")
+    }
+
+    private struct OpeningHarness: View {
+        let rows: [PacerUsageRow<PacerUsageNoExtra>]
+        let store: UserDefaults
+        let opened: (String) -> Void
+        var body: some View {
+            PacerUsageTable(rows: rows, tableId: "open", labelTitle: "Model",
+                            sort: PacerUsageSort(.name, descending: false), onSort: { _ in },
+                            onOpen: { opened($0.id) }, store: store)
                 .frame(width: 900)
         }
     }
 
-    @Test("a header click re-marks the sort, and a shown column gets the app's header too")
-    func styledAfterChanges() throws {
+    @Test("a click opens its row and clears the selection; an arrow key only moves it")
+    func clickOpensKeysWalk() throws {
         let (store, suite) = Self.store()
         defer { UserDefaults().removePersistentDomain(forName: suite) }
-        let hosted = Self.host(SortingHarness(rows: Self.rows(3, subtitles: false), store: store))
-        let table = try #require(Self.table(in: hosted.host) as? NSOutlineView)
-        // What AppKit does on a click on the Total header.
-        let total = try #require(Self.column("Total", in: table))
-        let prototype = try #require(total.sortDescriptorPrototype)
-        table.sortDescriptors = [prototype]
-        let mix = try #require(Self.column("Mix", in: table))
-        mix.isHidden = false
-        table.delegate?.outlineView?(table, userDidChangeVisibilityOf: [mix])
+        final class Opened { var ids: [String] = [] }
+        let opened = Opened()
+        let hosted = Self.host(OpeningHarness(rows: Self.rows(3, subtitles: false), store: store,
+                                              opened: { opened.ids.append($0) }))
+        let table = try #require(Self.table(in: hosted.host))
+        defer { PacerTableInput.record(keyDown: false) }
+
+        // What the selection does after a key-down: the arrow keys walk.
+        PacerTableInput.record(keyDown: true)
+        table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
         Self.settle(hosted.host)
-        #expect(table.pacerSortMark == PacerTableSortMark(title: "Total", descending: true))
-        let foreign: [String] = table.tableColumns
-            .filter { !($0.headerCell is PacerTableHeaderCell) }.map(\.title)
-        #expect(foreign.isEmpty)
+        #expect(opened.ids.isEmpty)
+        #expect(table.selectedRow == 1)
+
+        // After a button-down: the row opens, and nothing stays selected,
+        // so the same row opens again next time.
+        PacerTableInput.record(keyDown: false)
+        table.selectRowIndexes(IndexSet(integer: 2), byExtendingSelection: false)
+        Self.settle(hosted.host)
+        #expect(opened.ids == ["model-2"])
+        #expect(table.selectedRow == -1)
     }
 
     @Test("the columns fit the width they are given: nothing cut off at the edge",
-          arguments: [CGFloat(900), 560])
+          arguments: [CGFloat(900), 600])
     func fitsItsWidth(width: CGFloat) throws {
         let (store, suite) = Self.store()
         defer { UserDefaults().removePersistentDomain(forName: suite) }
@@ -429,7 +649,6 @@ struct UsageTableLayoutTests {
         // Two-line rows (model over the session's short id), all fitting.
         let last: NSRect = table.rect(ofRow: 2)
         #expect(last.height == PacerUsageTableMetrics.rowHeight(twoLine: true))
-        #expect(table.pacerSortMark == PacerTableSortMark(title: "Last seen", descending: true))
     }
 
     @Test("a long sessions list stops at its own cap")
@@ -448,11 +667,12 @@ struct UsageTableLayoutTests {
 
 /// `PACER_RENDER_UI=1 PACER_RENDER_DIR=<dir> swift test --filter UsageTableRender`
 /// draws the shared tables, in cards, to PNGs in light and dark, for a person
-/// to look at: Models (wide, with Days, Last seen and Mix), the same card at a
-/// narrow width, Today by model (donut beside the narrow table), and Day
-/// detail's sessions. A native `Table` does not draw through `ImageRenderer`,
-/// so this caches the hosting view's own display. Off by default: nothing is
-/// written in CI.
+/// to look at: Models (wide, with Days, Last seen and Mix) at the window's
+/// default width and wider, Today by model and the Projects list (the shared
+/// donut beside the table, the Projects one hovered and sorted by sessions),
+/// and Day detail's sessions. A native `Table` does not draw through
+/// `ImageRenderer`, so this caches the hosting view's own display. Off by
+/// default: nothing is written in CI.
 @MainActor
 @Suite("Usage table render", .enabled(if: ProcessInfo.processInfo.environment["PACER_RENDER_UI"] == "1"))
 struct UsageTableRender {
@@ -501,12 +721,12 @@ struct UsageTableRender {
                                 sort: sort, onSort: { sort = $0 },
                                 defaultColumns: UsageColumn.wideDefaults.union([.mix]), store: store) {
                     PacerUsageColumns.extra("days", title: "Days", of: Mix.self,
-                                            minWidth: 36, idealWidth: 44) { row in
+                                            minWidth: 34, idealWidth: 34) { row in
                         Text("\(row.extra.days)").font(.system(size: 12)).foregroundStyle(.secondary)
                             .monospacedDigit()
                     }
                     PacerUsageColumns.extra("lastSeen", title: "Last seen", of: Mix.self,
-                                            minWidth: 70, idealWidth: 80) { row in
+                                            minWidth: 70, idealWidth: 70) { row in
                         Text(row.extra.lastSeen).font(.system(size: 11, design: .monospaced))
                             .foregroundStyle(.secondary)
                     }
@@ -524,14 +744,73 @@ struct UsageTableRender {
                               costParts: $0.costParts)
             }
             PacerCard("Today by model") {
-                HStack(alignment: .top, spacing: 24) {
-                    PacerDonut(slices: rows.map { PacerDonutSlice(id: $0.id, value: Double($0.tokens.all),
-                                                                  color: $0.color ?? .gray) },
-                               innerRatio: 0.62, size: 140, hoveredAngle: .constant(nil),
-                               accessibilityLabel: "", accessibilityValue: "")
+                PacerDonutBesideTable(PacerShareDonutData(rows: rows, sort: sort, maxSlices: 8),
+                                      accessibilityLabel: "") {
                     PacerUsageTable(rows: rows, tableId: "render-today", labelTitle: "Model",
                                     sort: sort, onSort: { sort = $0 },
                                     defaultColumns: UsageColumn.narrowDefaults, store: store)
+                }
+            }
+        }
+    }
+
+    struct Project: PacerUsageExtra, Sendable {
+        let sessions: Int
+        let ago: String
+        func sortKey(forColumn id: String) -> PacerUsageSortKey? {
+            id == "sessions" ? .number(Double(sessions)) : nil
+        }
+        static func shareMetric(forColumn id: String) -> PacerShareMetric? {
+            id == "sessions" ? PacerShareMetric(column: id, title: "Sessions") : nil
+        }
+        func shareValue(forColumn id: String) -> Double? {
+            id == "sessions" ? Double(sessions) : nil
+        }
+    }
+
+    static func projectRows() -> [PacerUsageRow<Project>] {
+        let names = ["acme-web", "globex-api", "initech-tools", "hooli-infra", "umbrella-docs",
+                     "stark-sim", "wayne-ops", "pied-piper"]
+        return names.enumerated().map { i, name in
+            let s = Double(8 - i)
+            let parts = CostComponents(input: 0.4 * s, output: 30 * s + Double(i * 7), cacheRead: 70 * s,
+                                       cacheWrite5m: 9 * s, cacheWrite1h: 14 * s)
+            return PacerUsageRow(
+                id: "/tmp/\(name)", label: name, subtitle: "~/Code/\(name)",
+                color: pacerProjectColor(path: "/tmp/\(name)"),
+                tokens: TokenBreakdown(inputTokens: 9_000 * Int64(8 - i), outputTokens: 400_000 * Int64(8 - i),
+                                       cacheReadTokens: 90_000_000 * Int64(8 - i),
+                                       cacheCreation5mTokens: 1_100_000 * Int64(8 - i),
+                                       cacheCreation1hTokens: 1_600_000 * Int64(8 - i)),
+                costParts: parts,
+                extra: Project(sessions: [12, 40, 7, 22, 3, 9, 15, 4][i], ago: "\(i * 7 + 2) min ago"))
+        }
+    }
+
+    private struct ProjectsCard: View {
+        let store: UserDefaults
+        @State var sort: PacerUsageSort
+        /// A point on the ring to draw as hovered, to show the centre's
+        /// readout.
+        var hover: Double? = nil
+        var body: some View {
+            let rows = UsageTableRender.projectRows()
+            let data = PacerShareDonutData(rows: rows, sort: sort, maxSlices: 5)
+            PacerCard("All projects") {
+                PacerDonutBesideTable(data, accessibilityLabel: "", hoveredAngle: hover) {
+                    PacerUsageTable(rows: rows, tableId: "render-projects", labelTitle: "Project",
+                                    sort: sort, onSort: { sort = $0 },
+                                    defaultColumns: UsageColumn.narrowDefaults, store: store) {
+                        PacerUsageColumns.extra("sessions", title: "Sessions", of: Project.self,
+                                                minWidth: 44, idealWidth: 62) { row in
+                            Text("\(row.extra.sessions)").font(.system(size: 12)).foregroundStyle(.secondary)
+                                .monospacedDigit()
+                        }
+                        PacerUsageColumns.extra("lastActive", title: "Last active", of: Project.self,
+                                                minWidth: 60, idealWidth: 64) { row in
+                            Text(row.extra.ago).font(.system(size: 11)).foregroundStyle(.secondary)
+                        }
+                    }
                 }
             }
         }
@@ -600,11 +879,19 @@ struct UsageTableRender {
         let suite = "pacer.tests.usageTable.render.\(UUID().uuidString)"
         defer { UserDefaults().removePersistentDomain(forName: suite) }
         let store = UserDefaults(suiteName: suite)!
-        try render(ModelsCard(store: store), width: 900, name: "usage-table", dir: dir)
-        try render(ModelsCard(store: UserDefaults(suiteName: suite + ".narrow")!), width: 640,
-                   name: "usage-table-narrow", dir: dir)
-        try render(TodayCard(store: store), width: 760, name: "today-by-model", dir: dir)
+        // 849: the page at the window's default size (1080, less the
+        // sidebar); the card inside it is 48pt narrower.
+        try render(ModelsCard(store: store), width: 849, name: "usage-table", dir: dir)
+        try render(ModelsCard(store: UserDefaults(suiteName: suite + ".wide")!), width: 1100,
+                   name: "usage-table-wide", dir: dir)
+        try render(TodayCard(store: store), width: 849, name: "today-by-model", dir: dir)
+        try render(ProjectsCard(store: store, sort: .costDescending), width: 849,
+                   name: "projects", dir: dir)
+        try render(ProjectsCard(store: UserDefaults(suiteName: suite + ".sessions")!,
+                                sort: PacerUsageSort(column: "sessions", descending: true), hover: 50),
+                   width: 849, name: "projects-by-sessions-hover", dir: dir)
         try render(SessionsCard(store: store), width: 700, name: "sessions", dir: dir)
-        UserDefaults().removePersistentDomain(forName: suite + ".narrow")
+        UserDefaults().removePersistentDomain(forName: suite + ".wide")
+        UserDefaults().removePersistentDomain(forName: suite + ".sessions")
     }
 }

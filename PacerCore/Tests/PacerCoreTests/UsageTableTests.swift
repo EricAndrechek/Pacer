@@ -138,9 +138,6 @@ struct UsageColumnTests {
         #expect(UsageColumn.outputShare.rawValue == "outShare")
         #expect(UsageColumn.cacheWriteShare.rawValue == "writeShare")
         #expect(UsageColumn.mix.rawValue == "mix")
-        // Every column but the label and Cost explains itself on hover.
-        let silent: [UsageColumn] = UsageColumn.allCases.filter { $0.headerHelp == nil }
-        #expect(silent == [.name, .cost])
         #expect(UsageColumn(rawValue: "cost") == .cost)
         #expect(UsageColumn(rawValue: "name") == .name)
     }

@@ -380,8 +380,8 @@ struct DayDetailView: View {
                 defaultColumns: UsageColumn.narrowDefaults
             ) {
                 PacerUsageColumns.extra(DayModelShare.column, title: "Share",
-                                        of: DayModelShare.self, help: "Share of the day's cost",
-                                        minWidth: 40, idealWidth: 48) { row in
+                                        of: DayModelShare.self,
+                                        minWidth: 40, idealWidth: 44) { row in
                     Text("\(Int((row.extra.share * 100).rounded()))%")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)

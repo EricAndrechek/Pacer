@@ -77,8 +77,8 @@ struct HeatmapCard: View {
 
     /// Persisted in App Group `UserDefaults` so the user's chosen
     /// coloring survives launches. Lives next to other view-state
-    /// keys but is heatmap-specific (the projects view has its own
-    /// `overviewMetric`).
+    /// keys but is heatmap-specific (the Projects list's donut follows
+    /// its table's sort instead).
     @AppStorage("pacer.heatmap.metric", store: PacerSettings.store)
     private var metricRaw: String = ProjectMetric.cost.rawValue
 

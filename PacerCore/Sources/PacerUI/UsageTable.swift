@@ -13,12 +13,23 @@ import PacerCore
 // `SortableColumnHeader`s over an `HStack` per row, and they had drifted: one
 // counted three token parts, another two, and none could show the parts.
 //
-// Native does not have to mean stock. `PacerTableStyler` reaches the
-// `NSTableView` underneath and gives it the header every other list in the app
-// has (small, uppercase, tracked, secondary; a chevron on the sorted column;
-// no column dividers), and fits the columns to the card so nothing scrolls
-// sideways. The right-click menu, reordering, resizing and the saved layout
-// are AppKit's and SwiftUI's, untouched.
+// It is styled only through SwiftUI's own API: the inset style with no
+// alternating rows, the card showing through, and a rounded hairline around
+// the table so it reads as one contained element, like the cards it sits in.
+// The header is the system's, dividers included: they are how a Mac table
+// says its columns resize. Round 2 drew its own (a custom header cell, an
+// override of a private AppKit method, and a view that found the
+// `NSTableView` by matching frames), which read worse for the missing
+// dividers and leaned on things no SDK promises. The right-click column
+// menu, reordering, resizing and the saved layout are all SwiftUI's.
+//
+// Columns start at widths their content needs (`UsageColumn.idealWidth`) and
+// AppKit's uniform autoresizing spreads the rest of the card between them, so
+// a default layout fills the card without cutting anything off. One thing
+// only `NSTableView` could fix, and the table no longer reaches it: SwiftUI
+// restores saved widths as they were, so a layout saved in a wider card
+// starts too wide in a narrower one and scrolls sideways until the window
+// widens. "Reset columns" in the table's context menu refits it.
 //
 // What a native `Table` costs inside a scrolling page is its height. It is an
 // `NSScrollView` and reports no content height of its own (an off-screen host
@@ -27,7 +38,7 @@ import PacerCore
 // `UsageTableLayoutTests` checks that height against the rows a real
 // `NSTableView` lays out, on whichever OS runs it.
 
-// MARK: - Column titles, tooltips and cell text
+// MARK: - Column titles, widths and cell text
 
 public extension UsageColumn {
     /// The header title. The label column takes the table's own ("Model",
@@ -49,51 +60,42 @@ public extension UsageColumn {
         }
     }
 
-    /// The header's tooltip: what the column counts, in a fragment.
-    var headerHelp: String? {
-        switch self {
-        case .name:            return nil
-        case .input:           return "Uncached prompt tokens"
-        case .output:          return "Response tokens"
-        case .cacheRead:       return "Prompt tokens read from the cache"
-        case .cacheWrite:      return "Prompt tokens written to the cache, 5m and 1h"
-        case .cacheWrite5m:    return "Tokens written to the 5-minute cache"
-        case .cacheWrite1h:    return "Tokens written to the 1-hour cache"
-        case .tokens:          return "Every token, all five parts"
-        case .outputShare:     return "Output's share of the cost"
-        case .cacheWriteShare: return "Cache writes' share of the cache cost"
-        case .cost:            return nil
-        case .mix:             return "Cost by part"
-        }
-    }
-
-    /// Column widths. A table starts each column at its ideal width and the
-    /// styler fits them to the card (`PacerTableStyler`), taking the same
-    /// few points from each, so the ideals are set for the header (10pt
-    /// tracked caps) to survive that: the two cache columns' titles are the
-    /// longest. The minimums are where a window narrowed later stops
-    /// shrinking them.
+    /// The width a column starts at: what its values need (a compact count
+    /// is at most five characters, "86.0M"; a cost six, "$12.3k" in
+    /// semibold), and what its title needs where that is more. AppKit's
+    /// uniform autoresizing then gives every column the same share of the
+    /// card's spare width, so these are deliberately the least each column
+    /// can live with: the sum is what decides whether a table fits its card
+    /// or scrolls sideways.
+    ///
+    /// The two cache titles are the exception. Fitting them would make the
+    /// Models table (ten columns) wider than its card at the window's default
+    /// size, so at that size they shorten ("Cache re…"), as a Finder column
+    /// title does, and come back whole in a wider window. A number never
+    /// shortens: the minimum keeps every number whole, and a window narrowed
+    /// past it scrolls instead. `UsageTableLayoutTests` measures the titles
+    /// and the fit against the real header on whichever OS runs it.
     var idealWidth: CGFloat {
         switch self {
-        case .name:            return 140
-        case .input:           return 50
-        case .output:          return 56
-        case .cacheRead:       return 78
-        case .cacheWrite:      return 84
-        case .cacheWrite5m:    return 62
-        case .cacheWrite1h:    return 60
-        case .tokens:          return 52
-        case .outputShare:     return 50
-        case .cacheWriteShare: return 56
-        case .cost:            return 60
-        case .mix:             return 64
+        case .name:            return 110
+        case .input:           return 46
+        case .output:          return 46
+        case .cacheRead:       return 58
+        case .cacheWrite:      return 62
+        case .cacheWrite5m:    return 52
+        case .cacheWrite1h:    return 50
+        case .tokens:          return 46
+        case .outputShare:     return 42
+        case .cacheWriteShare: return 50
+        case .cost:            return 50
+        case .mix:             return 40
         }
     }
 
     var minWidth: CGFloat {
         switch self {
-        case .name: return 110
-        case .mix:  return 48
+        case .name: return 96
+        case .cost: return 46
         default:    return 40
         }
     }
@@ -241,6 +243,20 @@ public protocol PacerUsageExtra {
     /// The key the column `id` sorts by, or nil if `id` is not one of this
     /// screen's columns.
     func sortKey(forColumn id: String) -> PacerUsageSortKey?
+
+    /// What a share donut beside the table measures while it is sorted by
+    /// the screen column `id`: nil unless the column's values add up to a
+    /// whole (a count of sessions does; a date does not). See
+    /// `PacerShareDonutData`.
+    static func shareMetric(forColumn id: String) -> PacerShareMetric?
+
+    /// This row's value in that metric.
+    func shareValue(forColumn id: String) -> Double?
+}
+
+public extension PacerUsageExtra {
+    static func shareMetric(forColumn id: String) -> PacerShareMetric? { nil }
+    func shareValue(forColumn id: String) -> Double? { nil }
 }
 
 /// A screen-specific column's sort key.
@@ -371,9 +387,9 @@ public enum PacerUsageTableMetrics {
     static let verticalInsets: CGFloat = 15
     /// What a row adds around its cell content.
     static let rowPadding: CGFloat = 8
-    /// How far the table reaches past its container on each side, so its
-    /// first column starts where the hand-rolled lists' did.
-    static let outdent: CGFloat = 8
+    /// The rounded hairline the table sits in: smaller than the card's 14,
+    /// so the two corners read as nested rather than competing.
+    static let cornerRadius: CGFloat = 8
     /// A little over, never under: a table one point short scrolls and
     /// clips its last row, one a few points tall just has a margin.
     static let slack: CGFloat = 3
@@ -400,6 +416,21 @@ public enum PacerUsageTableMetrics {
     public static func columnsKey(tableId: String) -> String {
         "pacer.table.\(tableId).columns"
     }
+
+    /// Puts the table `tableId` back to its defaults: its default columns,
+    /// in declaration order, at their starting widths. The sort is the
+    /// screen's and stays. What "Reset columns" in the table's context menu
+    /// does; every table on screen with that id follows.
+    @MainActor
+    public static func resetColumns(tableId: String) {
+        NotificationCenter.default.post(name: .pacerResetTableColumns, object: tableId)
+    }
+}
+
+extension Notification.Name {
+    /// Posted by `PacerUsageTableMetrics.resetColumns(tableId:)`; the object
+    /// is the table id.
+    static let pacerResetTableColumns = Notification.Name("PacerResetTableColumns")
 }
 
 // MARK: - Table
@@ -411,8 +442,9 @@ public enum PacerUsageTableMetrics {
 /// - `sort` / `onSort`: the sort is read by value and written through the
 ///   callback, so the screen that owns and persists it re-renders on a
 ///   header click (AGENTS.md, "SwiftUI state and data flow").
-/// - `onOpen`: a click on a row, or Return on the row the arrow keys
-///   reached. Rows that open nothing keep the native selection instead.
+/// - `onOpen`: a click on a row, or Return (or a double-click) on the row
+///   the arrow keys reached. Rows that open nothing keep the native
+///   selection instead.
 /// - `defaultColumns`: the standard columns shown until the user changes
 ///   them — `UsageColumn.wideDefaults` or `.narrowDefaults`, plus whatever a
 ///   screen adds. The rest are one right-click away.
@@ -421,7 +453,8 @@ public enum PacerUsageTableMetrics {
 /// - `extraColumns`: the screen's own columns, built with
 ///   `PacerUsageColumns.extra`, after Cost and before Mix.
 /// - `labelAccessory`: views after the label (Projects' git badge).
-/// - `rowMenu`: the row's context menu.
+/// - `rowMenu`: the row's context menu. "Reset columns" follows it on every
+///   table, and is the whole menu of a table with none.
 public struct PacerUsageTable<Extra: PacerUsageExtra, Leading: TableColumnContent,
                               Extras: TableColumnContent, Accessory: View, RowMenu: View>: View
 where Leading.TableRowValue == PacerUsageRow<Extra>,
@@ -432,6 +465,7 @@ where Leading.TableRowValue == PacerUsageRow<Extra>,
     public typealias Comparator = PacerUsageComparator<Extra>
 
     let rows: [Row]
+    let tableId: String
     let labelTitle: String
     let sort: PacerUsageSort
     let onSort: (PacerUsageSort) -> Void
@@ -447,10 +481,10 @@ where Leading.TableRowValue == PacerUsageRow<Extra>,
     /// stores `TableColumnCustomization` in `AppStorage` itself.
     @AppStorage private var columns: TableColumnCustomization<Row>
     @State private var selection: Row.ID?
-    /// The height of a legacy horizontal scroll bar while one is showing
-    /// (the columns cannot shrink into a narrow window), added to the frame
-    /// so the bar does not take it from the rows. Set by the styler.
-    @State private var scrollerAllowance: CGFloat = 0
+    /// Bumped by "Reset columns" to build the table afresh at its starting
+    /// widths: SwiftUI applies an emptied layout's visibility and order to
+    /// the table it already has, but not its widths.
+    @State private var layoutGeneration = 0
 
     public init(
         rows: [Row],
@@ -468,6 +502,7 @@ where Leading.TableRowValue == PacerUsageRow<Extra>,
         @ViewBuilder rowMenu: @escaping (Row) -> RowMenu
     ) {
         self.rows = rows
+        self.tableId = tableId
         self.labelTitle = labelTitle
         self.sort = sort
         self.onSort = onSort
@@ -515,28 +550,37 @@ where Leading.TableRowValue == PacerUsageRow<Extra>,
             extraColumns()
             mixColumn
         }
-        .tableStyle(.inset(alternatesRowBackgrounds: false))
-        // The card is the background.
+        .id(layoutGeneration)
+        .tableStyle(.inset)
+        // Off: on a table that hugs its rows, the stripe pattern carries on
+        // into the margin under the last row as a cut-off band.
+        .alternatingRowBackgrounds(.disabled)
+        // The card is the background, as it is for everything else in it.
         .scrollContentBackground(.hidden)
         // A table that fits its rows has nothing to scroll, and without this
         // it still rubber-bands, taking the wheel from the page around it.
         .scrollBounceBehavior(.basedOnSize, axes: [.horizontal, .vertical])
-        .background(PacerTableStyler(style: headerStyle,
-                                     onScrollerAllowance: { scrollerAllowance = $0 }))
         .frame(height: PacerUsageTableMetrics.height(
-            rowCount: sorted.count, twoLine: twoLine, maxVisibleRows: maxVisibleRows)
-            + scrollerAllowance)
-        // The inset style starts a row 16pt in; the lists it replaced started
-        // 8pt in from the card's padding, under the card's title.
-        .padding(.horizontal, -PacerUsageTableMetrics.outdent)
+            rowCount: sorted.count, twoLine: twoLine, maxVisibleRows: maxVisibleRows))
+        // One contained element, rounded like the card around it, in the
+        // colour the table draws its own separators in.
+        .clipShape(RoundedRectangle(cornerRadius: PacerUsageTableMetrics.cornerRadius, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: PacerUsageTableMetrics.cornerRadius, style: .continuous)
+                .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 1)
+                .allowsHitTesting(false)
+        }
         .contextMenu(forSelectionType: Row.ID.self) { ids in
-            if let id = ids.first, let row = sorted.first(where: { $0.id == id }) {
+            if RowMenu.self != EmptyView.self,
+               let id = ids.first, let row = sorted.first(where: { $0.id == id }) {
                 rowMenu(row)
+                Divider()
             }
+            Button("Reset columns") { PacerUsageTableMetrics.resetColumns(tableId: tableId) }
         } primaryAction: { ids in
-            // Return on the row the arrow keys reached. A double-click lands
-            // here too, but its first click already opened the row.
-            guard let onOpen, PacerTableEvents.lastWasKey,
+            // Return, or a double-click. A click has already opened its row
+            // (below), so only the keyboard's reaches `onOpen` here.
+            guard let onOpen, PacerTableInput.lastWasKey,
                   let id = ids.first, let row = sorted.first(where: { $0.id == id }) else { return }
             selection = nil
             onOpen(row)
@@ -545,29 +589,18 @@ where Leading.TableRowValue == PacerUsageRow<Extra>,
             guard let onOpen, let id else { return }
             // An arrow key moved the selection: leave it there, so the keys
             // walk the rows without opening each one, and Return opens.
-            if PacerTableEvents.lastWasKey { return }
+            if PacerTableInput.lastWasKey { return }
             // A click opens the row and leaves nothing selected, so the
             // same row opens again next time, as the hand-rolled rows did.
             selection = nil
             if let row = sorted.first(where: { $0.id == id }) { onOpen(row) }
         }
-    }
-
-    /// What the header draws: which title is sorted, and every column's
-    /// tooltip, by title (an `NSTableColumn` knows its title, not the id
-    /// SwiftUI customizes it under).
-    private var headerStyle: PacerTableHeaderStyle {
-        var help: [String: String] = [:]
-        for column in UsageColumn.allCases {
-            if let text = column.headerHelp { help[column.title(label: labelTitle)] = text }
+        .onReceive(NotificationCenter.default.publisher(for: .pacerResetTableColumns)) { note in
+            guard note.object as? String == tableId else { return }
+            columns = TableColumnCustomization()
+            layoutGeneration += 1
         }
-        let extras = PacerUsageColumns.registered(for: Extra.self)
-        for (_, column) in extras {
-            if let text = column.help { help[column.title] = text }
-        }
-        let sortedTitle = UsageColumn(rawValue: sort.column)?.title(label: labelTitle)
-            ?? extras[sort.column]?.title
-        return PacerTableHeaderStyle(sortedTitle: sortedTitle, descending: sort.descending, help: help)
+        .onAppear { PacerTableInput.watch() }
     }
 
     @TableColumnBuilder<Row, Comparator>
@@ -798,14 +831,11 @@ public enum PacerUsageColumns {
     /// One of a screen's own columns, set up the way the standard ones are:
     /// sortable by `Extra.sortKey(forColumn: id)`, hideable and reorderable
     /// under `id`, numbers right-aligned.
-    ///
-    /// - `help`: the header's tooltip.
     @MainActor
     public static func extra<Extra: PacerUsageExtra, Content: View>(
         _ id: String,
         title: String,
         of extra: Extra.Type,
-        help: String? = nil,
         numeric: Bool = true,
         minWidth: CGFloat = 40,
         idealWidth: CGFloat = 64,
@@ -813,8 +843,7 @@ public enum PacerUsageColumns {
         visibleByDefault: Bool = true,
         @ViewBuilder content: @escaping (PacerUsageRow<Extra>) -> Content
     ) -> some TableColumnContent<PacerUsageRow<Extra>, PacerUsageComparator<Extra>> {
-        register(Registered(title: title, help: help), id: id, for: Extra.self)
-        return TableColumn(
+        TableColumn(
             title,
             sortUsing: PacerUsageComparator<Extra>(column: id, order: descendingFirst ? .reverse : .forward),
             content: content)
@@ -823,381 +852,38 @@ public enum PacerUsageColumns {
             .customizationID(id)
             .defaultVisibility(visibleByDefault ? .automatic : .hidden)
     }
-
-    /// A screen column's header text, kept so the table's header can find
-    /// the sorted column and its tooltip by title: `NSTableColumn` knows its
-    /// title, not the id SwiftUI customizes it under. Keyed by the `Extra`
-    /// type, which is one per screen, so two screens' "share" columns do not
-    /// collide.
-    struct Registered: Equatable {
-        let title: String
-        let help: String?
-    }
-
-    @MainActor private static var registry: [String: [String: Registered]] = [:]
-
-    @MainActor
-    private static func register<Extra>(_ column: Registered, id: String, for _: Extra.Type) {
-        let key = String(reflecting: Extra.self)
-        if registry[key]?[id] != column { registry[key, default: [:]][id] = column }
-    }
-
-    @MainActor
-    static func registered<Extra>(for _: Extra.Type) -> [String: Registered] {
-        registry[String(reflecting: Extra.self)] ?? [:]
-    }
 }
 
-// MARK: - Keyboard
+// MARK: - Keyboard and mouse
 
-/// Whether the event being handled came from the keyboard: how the table
-/// tells an arrow key's selection change (walk, do not open) from a click's
-/// (open). `currentEvent` is the last event the app took off the queue, and
-/// SwiftUI delivers the change before taking the next.
+/// Whether the last key or mouse button pressed in the app was a key: how
+/// the table tells an arrow key's selection change (walk, do not open) from
+/// a click's (open), and Return from a double-click.
+///
+/// Round 2 read `NSApp.currentEvent`, the last event of any kind the app took
+/// off the queue. SwiftUI delivers a selection change on its next update,
+/// and a mouse-moved or scroll event taken in between made an arrow key look
+/// like a click and open the row. A local monitor sees only key-downs and
+/// button-downs, so whatever arrives in between cannot change the answer.
+/// It observes, and hands every event on unchanged.
 @MainActor
-enum PacerTableEvents {
-    static var lastWasKey: Bool {
-        NSApp?.currentEvent?.type == .keyDown
-    }
-}
+enum PacerTableInput {
+    private(set) static var lastWasKey = false
+    private static var monitor: Any?
 
-// MARK: - The app's look on the native table
-
-/// What the header shows: the sorted column (by title) and its direction,
-/// and each column's tooltip.
-struct PacerTableHeaderStyle: Equatable {
-    var sortedTitle: String?
-    var descending: Bool
-    var help: [String: String]
-}
-
-/// Gives the `NSTableView` under a SwiftUI `Table` the look of every other
-/// list in the app, without taking any of its behaviour away.
-///
-/// SwiftUI has no API for a table's header or grid, so this reaches the
-/// AppKit table the way a probe does: an empty view placed behind the
-/// `Table`, which finds the table whose frame it shares. It then
-///
-/// - swaps each column's header cell for `PacerTableHeaderCell`, which draws
-///   the title the way `Eyebrow` does (10pt semibold caps, tracked,
-///   secondary; primary with a chevron when sorted) and no column dividers;
-/// - sets each column's header tooltip;
-/// - turns off alternating rows and the vertical grid;
-/// - fits the columns to the card when their ideal widths add up to more,
-///   so a column is never cut off at the edge (the "2026-1" in round 1), and
-///   with legacy scroll bars a horizontal one never appears under the rows
-///   and steals the height the table set for them (the square in the
-///   corner was where the two scroll bars met).
-///
-/// The header's right-click menu, column drag, resize, sort clicks and the
-/// saved layout all stay AppKit's and SwiftUI's: the header view, the
-/// columns and their sort prototypes are untouched.
-struct PacerTableStyler: NSViewRepresentable {
-    let style: PacerTableHeaderStyle
-    /// Told the height of a legacy horizontal scroll bar while one shows
-    /// (zero otherwise), so the table can grow by it.
-    let onScrollerAllowance: (CGFloat) -> Void
-
-    func makeNSView(context: Context) -> PacerTableStylerView {
-        PacerTableStylerView()
-    }
-
-    func updateNSView(_ view: PacerTableStylerView, context: Context) {
-        view.style = style
-        view.onScrollerAllowance = onScrollerAllowance
-        view.scheduleApply()
-    }
-}
-
-final class PacerTableStylerView: NSView {
-    var style = PacerTableHeaderStyle(sortedTitle: nil, descending: true, help: [:])
-    var onScrollerAllowance: ((CGFloat) -> Void)?
-    private weak var table: NSTableView?
-    private var applyPending = false
-    private var reportedAllowance: CGFloat = 0
-
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        table = nil
-        scheduleApply()
-    }
-
-    // Never in the way of a click: the table it styles sits on top of it.
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
-
-    /// Once per run-loop turn, after SwiftUI has finished updating the table
-    /// it sits behind, so anything SwiftUI resets is set again.
-    ///
-    /// On the run loop rather than the main queue: a turn of the run loop
-    /// comes after SwiftUI's update either way, and a nested one (a modal
-    /// session, live resize, a test that spins the loop from a main-queue
-    /// block) still services it, where a serial queue already inside a block
-    /// would not.
-    func scheduleApply() {
-        guard !applyPending else { return }
-        applyPending = true
-        RunLoop.main.perform(inModes: [.common]) { [weak self] in
-            MainActor.assumeIsolated {
-                guard let self else { return }
-                self.applyPending = false
-                self.apply()
-            }
+    /// Starts watching, once per process. Every table calls it on appear.
+    static func watch() {
+        guard monitor == nil else { return }
+        monitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown]
+        ) { event in
+            let isKey = event.type == .keyDown
+            MainActor.assumeIsolated { record(keyDown: isKey) }
+            return event
         }
     }
 
-    func apply() {
-        guard let table = locateTable() else { return }
-        PacerTableAppearance.apply(style, to: table)
-        let allowance = PacerTableAppearance.scrollerAllowance(table)
-        if allowance != reportedAllowance {
-            reportedAllowance = allowance
-            onScrollerAllowance?(allowance)
-        }
-    }
-
-    /// The table this probe sits behind: the one whose scroll view covers
-    /// the probe's own frame. Several tables can share a page (Day detail
-    /// has three), so it is matched by frame, and searched for near the
-    /// probe rather than across the window.
-    private func locateTable() -> NSTableView? {
-        guard window != nil else { return nil }
-        let mine = convert(bounds, to: nil)
-        if let table, table.window === window, let scroll = table.enclosingScrollView,
-           Self.overlap(scroll.convert(scroll.bounds, to: nil), mine) > 0.9 {
-            return table
-        }
-        var ancestor = superview
-        for _ in 0..<4 {
-            guard let root = ancestor else { break }
-            var best: (table: NSTableView, overlap: CGFloat)?
-            Self.tables(in: root, depth: 6) { candidate in
-                guard let scroll = candidate.enclosingScrollView else { return }
-                let o = Self.overlap(scroll.convert(scroll.bounds, to: nil), mine)
-                if o > (best?.overlap ?? 0.9) { best = (candidate, o) }
-            }
-            if let best {
-                table = best.table
-                return best.table
-            }
-            ancestor = root.superview
-        }
-        return nil
-    }
-
-    private static func tables(in view: NSView, depth: Int, _ found: (NSTableView) -> Void) {
-        if let table = view as? NSTableView {
-            found(table)
-            return
-        }
-        guard depth > 0 else { return }
-        for sub in view.subviews { tables(in: sub, depth: depth - 1, found) }
-    }
-
-    /// The shared area over the larger of the two, so a match means the
-    /// same rectangle, not one inside the other.
-    private static func overlap(_ a: NSRect, _ b: NSRect) -> CGFloat {
-        let shared = a.intersection(b)
-        guard !shared.isNull, a.width > 0, a.height > 0, b.width > 0, b.height > 0 else { return 0 }
-        let area = shared.width * shared.height
-        return area / max(a.width * a.height, b.width * b.height)
-    }
-}
-
-enum PacerTableAppearance {
-    // The gap between columns is left at the inset style's 17pt: SwiftUI's
-    // row view spaces its cells by that figure whatever the table's
-    // `intercellSpacing` says, so narrowing it moved the header titles off
-    // their columns.
-
-    @MainActor
-    static func apply(_ style: PacerTableHeaderStyle, to table: NSTableView) {
-        if table.usesAlternatingRowBackgroundColors { table.usesAlternatingRowBackgroundColors = false }
-        if !table.gridStyleMask.isEmpty { table.gridStyleMask = [] }
-        var headerChanged = false
-        for column in table.tableColumns {
-            if !(column.headerCell is PacerTableHeaderCell) {
-                let cell = PacerTableHeaderCell(textCell: column.title)
-                cell.alignment = column.headerCell.alignment
-                cell.lineBreakMode = .byTruncatingTail
-                column.headerCell = cell
-                headerChanged = true
-            }
-            let help = style.help[column.title]
-            if column.headerToolTip != help { column.headerToolTip = help }
-        }
-        let sort = PacerTableSortMark(title: style.sortedTitle, descending: style.descending)
-        if table.pacerSortMark != sort {
-            table.pacerSortMark = sort
-            headerChanged = true
-        }
-        if headerChanged { table.headerView?.needsDisplay = true }
-        fitColumns(table)
-    }
-
-    /// The height a horizontal scroll bar takes from the rows: a legacy bar
-    /// ("Show scroll bars: Always", or a mouse attached) sits under the rows
-    /// once the columns are wider than the table even at their minimums.
-    /// Overlay bars float over the content and take nothing.
-    @MainActor
-    static func scrollerAllowance(_ table: NSTableView) -> CGFloat {
-        guard let scroll = table.enclosingScrollView, scroll.scrollerStyle == .legacy,
-              let scroller = scroll.horizontalScroller, !scroller.isHidden else { return 0 }
-        return scroller.frame.height
-    }
-
-    /// Shrinks the columns into the visible width when they add up to more,
-    /// the way the table's own uniform resizing does when its window narrows.
-    /// Only ever shrinks: a table that already fits keeps the widths the
-    /// user gave it.
-    @MainActor
-    static func fitColumns(_ table: NSTableView) {
-        guard let clip = table.enclosingScrollView?.contentView else { return }
-        let available = clip.bounds.width
-        guard available > 0, table.frame.width > available + 0.5 else { return }
-        table.sizeToFit()
-    }
-}
-
-/// The sort the header marks: a column title and a direction.
-struct PacerTableSortMark: Equatable {
-    var title: String?
-    var descending: Bool
-}
-
-private nonisolated(unsafe) var pacerSortMarkKey: UInt8 = 0
-
-/// Kept on the table rather than on the header cells: AppKit copies a header
-/// cell to draw a column being dragged, with a shallow copy that does not
-/// retain a Swift subclass's stored properties, so the cell holds none.
-private final class PacerTableSortMarkBox: NSObject {
-    let mark: PacerTableSortMark
-    init(_ mark: PacerTableSortMark) { self.mark = mark }
-}
-
-extension NSTableView {
-    var pacerSortMark: PacerTableSortMark? {
-        get { (objc_getAssociatedObject(self, &pacerSortMarkKey) as? PacerTableSortMarkBox)?.mark }
-        set {
-            objc_setAssociatedObject(self, &pacerSortMarkKey, newValue.map(PacerTableSortMarkBox.init),
-                                     .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
-        }
-    }
-}
-
-/// A column header drawn the way the rest of the app labels columns: the
-/// title in tracked 10pt semibold capitals, secondary; the sorted column in
-/// the primary colour with a chevron for its direction, as
-/// `SortableColumnHeader` drew it. No bezel and no divider: the columns are
-/// separated by their alignment, as they were in the hand-rolled lists.
-///
-/// Holds no stored properties (see `PacerTableSortMarkBox`).
-final class PacerTableHeaderCell: NSTableHeaderCell {
-    static var font: NSFont { .systemFont(ofSize: 10, weight: .semibold) }
-    static let tracking: CGFloat = 0.6
-    static let chevronGap: CGFloat = 4
-
-    override func drawInterior(withFrame cellFrame: NSRect, in controlView: NSView) {
-        let header = controlView as? NSTableHeaderView
-        let table = header?.tableView
-        let mark = table?.pacerSortMark
-        let sorted = mark?.title != nil && mark?.title == stringValue
-        var textRect = Self.contentRect(cellFrame, header: header)
-        guard sorted, let chevron = Self.chevron(descending: mark?.descending ?? true) else {
-            let title = Self.title(stringValue, sorted: false, alignment: alignment, width: textRect.width)
-            Self.drawTitle(title, in: textRect)
-            return
-        }
-        // Title then chevron, as `SortableColumnHeader` laid them out: at
-        // the right edge for a number column, after the title otherwise.
-        let size = chevron.size
-        textRect.size.width = max(0, textRect.width - size.width - Self.chevronGap)
-        let title = Self.title(stringValue, sorted: true, alignment: alignment, width: textRect.width)
-        let chevronX: CGFloat
-        if alignment == .right {
-            chevronX = textRect.maxX + Self.chevronGap
-        } else {
-            let textWidth = min(textRect.width, ceil(title.size().width))
-            chevronX = textRect.minX + textWidth + Self.chevronGap
-        }
-        Self.drawTitle(title, in: textRect)
-        let chevronRect = NSRect(x: chevronX, y: cellFrame.midY - size.height / 2,
-                                 width: size.width, height: size.height)
-        chevron.draw(in: chevronRect, from: .zero, operation: .sourceOver, fraction: 1,
-                     respectFlipped: true, hints: nil)
-    }
-
-    /// Where the column's cells put their content, so a title lines up with
-    /// the numbers under it. SwiftUI's row view spaces its cells by its own
-    /// figures, a few points off the column rectangle AppKit hands the header
-    /// (6pt into the first column, 8pt into the rest), so the cells are
-    /// asked where they are; with no row on screen, the column's width
-    /// centred in its rectangle is within a point or two.
-    private static func contentRect(_ cellFrame: NSRect, header: NSTableHeaderView?) -> NSRect {
-        guard let header, let table = header.tableView else { return cellFrame }
-        let index = header.column(at: NSPoint(x: cellFrame.midX, y: cellFrame.midY))
-        guard index >= 0, index < table.numberOfColumns else { return cellFrame }
-        let width = table.tableColumns[index].width
-        var rect = NSRect(x: cellFrame.minX + (cellFrame.width - width) / 2, y: cellFrame.minY,
-                          width: width, height: cellFrame.height)
-        let firstRow = table.rows(in: table.visibleRect).location
-        if firstRow != NSNotFound, firstRow < table.numberOfRows,
-           let cell = table.view(atColumn: index, row: firstRow, makeIfNecessary: false),
-           let rowView = cell.superview {
-            let frame = rowView.convert(cell.frame, to: table)
-            rect.origin.x = frame.minX
-            rect.size.width = frame.width
-        }
-        return rect
-    }
-
-    /// AppKit's header bezel: the divider at each column's edge, which is
-    /// most of what made the header read as a stock control on a card. Drawn
-    /// as nothing. SwiftUI's own header cell overrides this same method to
-    /// draw its version of it; the hairline under the whole header is the
-    /// header view's, and stays.
-    ///
-    /// The interior is the only drawing method overridden besides this one:
-    /// a cell that overrides `draw(withFrame:in:)` puts the header view on
-    /// an older drawing path that fills a band behind the titles.
-    @objc(_drawBezelWithFrame:highlighted:inView:)
-    func pacerDrawBezel(withFrame frame: NSRect, highlighted: Bool, in view: NSView) {}
-
-    // The chevron is drawn above, beside the title.
-    override func drawSortIndicator(withFrame cellFrame: NSRect, in controlView: NSView,
-                                    ascending: Bool, priority: Int) {}
-
-    /// The title, tracked like `Eyebrow`; untracked and then tightened
-    /// before it is cut short, when its column is too narrow for it.
-    private static func title(_ text: String, sorted: Bool, alignment: NSTextAlignment,
-                              width: CGFloat) -> NSAttributedString {
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.alignment = alignment
-        paragraph.lineBreakMode = .byTruncatingTail
-        paragraph.allowsDefaultTighteningForTruncation = true
-        var attributes: [NSAttributedString.Key: Any] = [
-            .font: font,
-            .kern: tracking,
-            .foregroundColor: sorted ? NSColor.labelColor : NSColor.secondaryLabelColor,
-            .paragraphStyle: paragraph,
-        ]
-        let caps = text.uppercased()
-        let tracked = NSAttributedString(string: caps, attributes: attributes)
-        if ceil(tracked.size().width) <= width { return tracked }
-        attributes[.kern] = 0
-        return NSAttributedString(string: caps, attributes: attributes)
-    }
-
-    private static func drawTitle(_ title: NSAttributedString, in rect: NSRect) {
-        let height = ceil(font.ascender - font.descender)
-        let line = NSRect(x: rect.minX, y: rect.midY - height / 2, width: max(0, rect.width), height: height)
-        title.draw(with: line, options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
-    }
-
-    private static func chevron(descending: Bool) -> NSImage? {
-        let name = descending ? "chevron.down" : "chevron.up"
-        let config = NSImage.SymbolConfiguration(pointSize: 8, weight: .semibold)
-            .applying(NSImage.SymbolConfiguration(paletteColors: [.labelColor]))
-        return NSImage(systemSymbolName: name, accessibilityDescription: nil)?
-            .withSymbolConfiguration(config)
+    static func record(keyDown: Bool) {
+        lastWasKey = keyDown
     }
 }

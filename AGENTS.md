@@ -457,7 +457,7 @@ App/
     DashboardView.swift         — header + WelcomeCard + Today + LiveActivity + PaceChart +
                                   DailyCost + PerModelToday.
     HistoryView.swift           — Lifetime + Heatmap + Monthly + TopDays. Sheet to DayDetail.
-    ProjectsView.swift          — range picker + search + Top-5 donut + full list. Sheet to
+    ProjectsView.swift          — range picker + search + the list beside its donut. Sheet to
                                   ProjectDetail.
     ModelsView.swift            — range picker + token-share donut + per-date stacked trend
                                   chart + full per-model table.

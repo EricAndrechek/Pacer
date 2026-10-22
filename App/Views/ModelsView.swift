@@ -827,8 +827,8 @@ private struct ModelsContent: View {
                     defaultColumns: UsageColumn.wideDefaults.union([.mix]),
                     extraColumns: {
                         PacerUsageColumns.extra(ModelTableExtra.days, title: "Days",
-                                                of: ModelTableExtra.self, help: "Days with usage",
-                                                minWidth: 36, idealWidth: 44) { row in
+                                                of: ModelTableExtra.self,
+                                                minWidth: 34, idealWidth: 34) { row in
                             Text("\(row.extra.activeDays)")
                                 .font(.system(size: 12))
                                 .foregroundStyle(.secondary)
@@ -836,7 +836,7 @@ private struct ModelsContent: View {
                         }
                         PacerUsageColumns.extra(ModelTableExtra.lastSeen, title: "Last seen",
                                                 of: ModelTableExtra.self,
-                                                minWidth: 70, idealWidth: 80) { row in
+                                                minWidth: 70, idealWidth: 70) { row in
                             Text(row.extra.lastSeen)
                                 .font(.system(size: 11, design: .monospaced))
                                 .foregroundStyle(.secondary)
