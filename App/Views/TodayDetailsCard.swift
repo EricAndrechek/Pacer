@@ -3,11 +3,12 @@ import SwiftData
 import PacerCore
 import PacerUI
 
-/// "Today details" — token-flow breakdown for the current day. The Now
-/// strip's Today tile carries the cost headline, so this card answers
-/// the next-level question: where did those tokens come from? Input vs
-/// output vs cache reads, how much cache writing happened, how many
-/// distinct models the user touched.
+/// "Today's traffic" — what the day's cost and tokens were made of. The Now
+/// strip's Today tile carries the headline (today's cost and today's total
+/// tokens), so this card prints neither: it answers the next question, which
+/// of the five priced parts they came from, through the shared
+/// `PacerCostBreakdownView` — each part's dollars, share and tokens — and
+/// the cache hit rate with what the cache saved.
 struct TodayDetailsCard: View {
     @Query private var globalAggregates: [DailyAggregate]
     /// The same rollup sliced to one account. Which of the two is
@@ -43,136 +44,65 @@ struct TodayDetailsCard: View {
     private var totals: Totals { Totals(rows: aggregates) }
 
     var body: some View {
-        // Fold the day's rows once per render, not once per tile — `totals`
-        // is a computed property read ~a dozen times across the grid and
-        // cache line below.
+        // Fold the day's rows once per render — `totals` is a computed
+        // property read several times below.
         let totals = totals
         return PacerCard("Today's traffic", trailing: {
-            Text(TokenSample.formatDate(Date()))
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundStyle(.secondary)
+            HStack(spacing: 8) {
+                if !totals.isEmpty {
+                    // Today's total tokens are on the Now strip's Today tile;
+                    // here they are the tooltip, not a second printed copy.
+                    Text("\(totals.distinctModels) model\(totals.distinctModels == 1 ? "" : "s")")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .help("\(pacerTokensExact(totals.breakdown.tokens.all)) tokens across \(totals.distinctModels) model\(totals.distinctModels == 1 ? "" : "s")")
+                }
+                Text(TokenSample.formatDate(Date()))
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
         }) {
             if totals.isEmpty {
                 Text("No usage logged today yet. Pacer will write within seconds of any Claude Code activity.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             } else {
-                VStack(alignment: .leading, spacing: 18) {
-                    metricGrid(totals)
-                    if totals.cacheReadTokens > 0 {
-                        cacheRatio(totals)
-                    }
+                PacerCostBreakdownView(totals.breakdown) {
+                    cacheExtras(totals)
                 }
             }
         }
     }
 
-    /// Four-up tile row: input, output, cache read, models. Wraps to
-    /// 2x2 on narrow widths via `LazyVGrid`.
-    private func metricGrid(_ totals: Totals) -> some View {
-        LazyVGrid(
-            columns: Array(
-                repeating: GridItem(.flexible(), spacing: 16, alignment: .topLeading),
-                count: 4
-            ),
-            alignment: .leading,
-            spacing: 12
-        ) {
-            MetricTile(
-                value: pacerTokens(totals.inputTokens),
-                label: "input",
-                tooltip: pacerTokensExact(totals.inputTokens)
-            )
-            MetricTile(
-                value: pacerTokens(totals.outputTokens),
-                label: "output",
-                tooltip: pacerTokensExact(totals.outputTokens)
-            )
-            MetricTile(
-                value: pacerTokens(totals.cacheReadTokens),
-                label: "cache read",
-                tooltip: pacerTokensExact(totals.cacheReadTokens)
-            )
-            MetricTile(value: "\(totals.distinctModels)", label: "models")
-        }
-    }
-
-    /// Cache-utilization line. Headline is the shared cache hit rate
-    /// (`TokenBreakdown.cacheHitRatio`: reads over every prompt token),
-    /// which actually moves session-to-session unlike the older
-    /// `read/(read+input)` definition that pegged at ~100%. Sub-line
-    /// shows absolute read / written counts, reuse factor (how many
-    /// times each written token paid off), and the dollar value the
-    /// cache saved vs a hypothetical no-cache day.
+    /// What Today adds to the shared cache-hit row: how many times each
+    /// written token was read back, and the dollars the cache saved against
+    /// a no-cache day. The read and written counts the old sub-line printed
+    /// are in the breakdown's legend now (cache reads, 5m and 1h writes).
     @ViewBuilder
-    private func cacheRatio(_ totals: Totals) -> some View {
-        let r = totals.cacheHitRate
-        let pctText = pacerCacheHitText(r)
+    private func cacheExtras(_ totals: Totals) -> some View {
         let savings = totals.cacheSavingsUSD(snapshot: SampleCostCache.current())
-        let written = totals.cacheCreation5mTokens + totals.cacheCreation1hTokens
-        let reuse = totals.cacheReuseFactor
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                Image(systemName: "bolt.horizontal.circle.fill")
-                    .foregroundStyle(.tint)
-                    .font(.body)
-                Text("Cache hit rate")
-                    .font(.callout)
-                    .fontWeight(.medium)
-                    .foregroundStyle(.secondary)
-                Spacer(minLength: 0)
-                ZStack(alignment: .leading) {
-                    RoundedRectangle(cornerRadius: 3)
-                        .fill(Color.primary.opacity(0.08))
-                        .frame(height: 6)
-                    GeometryReader { geo in
-                        RoundedRectangle(cornerRadius: 3)
-                            .fill(Color.accentColor)
-                            .frame(width: geo.size.width * r, height: 6)
-                    }
-                    .frame(height: 6)
-                }
-                .frame(maxWidth: 220)
-                Text(pctText)
-                    .font(.system(size: 12, weight: .semibold, design: .rounded))
-                    .monospacedDigit()
-                    .frame(width: 56, alignment: .trailing)
-                if savings > 0 {
-                    Text("saved \(pacerCost(savings))")
-                        .font(.system(size: 11, weight: .semibold, design: .rounded))
-                        .monospacedDigit()
-                        .foregroundStyle(.green)
-                        .frame(minWidth: 88, alignment: .trailing)
-                        .help("Saved \(pacerCostExact(savings)) by reusing cached prompts")
-                }
-            }
-            HStack(spacing: 4) {
-                // Indent past the icon column so the sub-line aligns
-                // with the label rather than the icon.
-                Spacer().frame(width: 21)
-                Text(subline(read: totals.cacheReadTokens, written: written, reuse: reuse))
-                    .help("\(pacerTokensExact(totals.cacheReadTokens)) read · \(pacerTokensExact(written)) written")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
-                    .monospacedDigit()
-                Spacer()
-            }
+        if let reuse = reuseText(totals.cacheReuseFactor) {
+            Text("\(reuse) reuse")
+                .font(.system(size: 11))
+                .foregroundStyle(.tertiary)
+                .monospacedDigit()
+                .help("Each cache-written token read back \(reuse)")
+        }
+        if savings > 0 {
+            Text("saved \(pacerCost(savings))")
+                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+                .foregroundStyle(.green)
+                .help("Saved \(pacerCostExact(savings)) by reusing cached prompts")
         }
     }
 
-    /// "1.59B read · 31.3M written · 51× reuse" — the three numbers
-    /// that together explain the headline hit rate. Reuse drops out
-    /// when there were no writes (trivially infinite).
-    private func subline(read: Int64, written: Int64, reuse: Double) -> String {
-        let base = "\(pacerTokens(read)) read · \(pacerTokens(written)) written"
-        guard reuse > 0 else { return base }
-        let reuseText: String
-        if reuse >= 10 {
-            reuseText = String(format: "%.0f×", reuse)
-        } else {
-            reuseText = String(format: "%.1f×", reuse)
-        }
-        return "\(base) · \(reuseText) reuse"
+    /// "51×" / "3.2×"; nil when there were no writes (trivially infinite).
+    private func reuseText(_ reuse: Double) -> String? {
+        guard reuse > 0 else { return nil }
+        return reuse >= 10
+            ? String(format: "%.0f×", reuse)
+            : String(format: "%.1f×", reuse)
     }
 }
 
@@ -182,40 +112,22 @@ struct TodayDetailsCard: View {
 /// a single average rate would mis-attribute Haiku/Opus savings.
 private struct Totals {
     let rows: [DailyRow]
-    let inputTokens: Int64
-    let outputTokens: Int64
-    let cacheReadTokens: Int64
-    let cacheCreation5mTokens: Int64
-    let cacheCreation1hTokens: Int64
-    let totalCostUSD: Double
+    /// The day's cost by priced part with the tokens behind each (#225),
+    /// summed from the rows the card already holds — no extra query. Its
+    /// hit rate is the shared `TokenBreakdown.cacheHitRatio`, so Today and
+    /// Day detail show the same number for the same day.
+    let breakdown: CostBreakdown
     let distinctModels: Int
 
     init(rows: [DailyRow]) {
         self.rows = rows
-        self.inputTokens = rows.reduce(0) { $0 + $1.inputTokens }
-        self.outputTokens = rows.reduce(0) { $0 + $1.outputTokens }
-        self.cacheReadTokens = rows.reduce(0) { $0 + $1.cacheReadTokens }
-        self.cacheCreation5mTokens = rows.reduce(0) { $0 + $1.cacheCreation5mTokens }
-        self.cacheCreation1hTokens = rows.reduce(0) { $0 + $1.cacheCreation1hTokens }
-        self.totalCostUSD = rows.reduce(0) { $0 + $1.totalCostUSD }
+        self.breakdown = CostBreakdown.sum(rows, \.costBreakdown)
         self.distinctModels = Set(rows.map(\.model)).count
     }
 
-    var isEmpty: Bool { inputTokens == 0 && outputTokens == 0 && cacheReadTokens == 0 }
-
-    /// The shared cache hit rate (`TokenBreakdown.cacheHitRatio`, #225):
-    /// reads over every prompt token, so Today and Day detail show the same
-    /// number for the same day. Unlike the old `reads/(reads+input)`, which
-    /// pegged at ~100% because input is negligible next to cache reads,
-    /// this moves: long agent runs that thrash the 1h cache window visibly
-    /// drop into the 80–95% range.
-    var cacheHitRate: Double {
-        TokenBreakdown(
-            inputTokens: inputTokens, outputTokens: outputTokens,
-            cacheReadTokens: cacheReadTokens,
-            cacheCreation5mTokens: cacheCreation5mTokens,
-            cacheCreation1hTokens: cacheCreation1hTokens
-        ).cacheHitRatio ?? 0
+    var isEmpty: Bool {
+        let t = breakdown.tokens
+        return t.inputTokens == 0 && t.outputTokens == 0 && t.cacheReadTokens == 0
     }
 
     /// How many times each cache-written token was read back. Tells
@@ -223,9 +135,9 @@ private struct Totals {
     /// costs 1.25× a fresh input token, so anything above 12.5× reuse
     /// is net-positive vs not caching.
     var cacheReuseFactor: Double {
-        let written = cacheCreation5mTokens + cacheCreation1hTokens
-        guard written > 0 else { return 0 }
-        return Double(cacheReadTokens) / Double(written)
+        let t = breakdown.tokens
+        guard t.cacheWrite > 0 else { return 0 }
+        return Double(t.cacheReadTokens) / Double(t.cacheWrite)
     }
 
     /// Dollar savings vs. a hypothetical day where every input-side

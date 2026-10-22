@@ -42,43 +42,86 @@ public struct PacerCostBar: View {
     }
 }
 
+/// How much room a `PacerCostBreakdownView` has.
+public enum PacerCostBreakdownStyle: Sendable, Equatable {
+    /// A card's width: the stacked bar, then the five parts side by side in
+    /// equal columns, each with its dollars, share and tokens.
+    case regular
+    /// A hover card (~280 pt): the five parts as rows, one line each — dot,
+    /// name, dollars, share, tokens under a one-word "tokens" heading — and
+    /// no bar. A compact breakdown sits beside a chart that already draws
+    /// the mix, and the share column says what a 250 pt bar would.
+    case compact
+}
+
 /// The breakdown for one total: the stacked bar, the five parts with their
-/// dollars and share, and the cache hit rate.
+/// dollars, share and tokens, and the cache hit rate.
+///
+/// One line, not two: tokens are ~98% cache reads, so a token bar would be a
+/// single colour. Each part's token count rides in its legend entry instead,
+/// read through `TokenBreakdown[_:]`.
 ///
 /// It does not print the total itself — every screen that shows it already
 /// has the total in its summary, and the parts are what this adds. With no
 /// cost to split (every model unpriced) it is only the hit rate: five $0
 /// parts would say nothing.
-public struct PacerCostBreakdownView: View {
+///
+/// `cacheHitTrailing` goes at the end of the cache-hit row, for a screen that
+/// has something of its own to say about the cache (Today's savings).
+public struct PacerCostBreakdownView<CacheHitTrailing: View>: View {
     private let breakdown: CostBreakdown
+    private let style: PacerCostBreakdownStyle
+    private let cacheHitTrailing: CacheHitTrailing
 
-    public init(_ breakdown: CostBreakdown) {
+    public init(
+        _ breakdown: CostBreakdown,
+        style: PacerCostBreakdownStyle = .regular,
+        @ViewBuilder cacheHitTrailing: () -> CacheHitTrailing
+    ) {
         self.breakdown = breakdown
-    }
-
-    /// Whether there is anything to show — callers hide the card otherwise.
-    public static func hasContent(_ breakdown: CostBreakdown) -> Bool {
-        breakdown.total > 0 || breakdown.cacheHitRatio != nil
+        self.style = style
+        self.cacheHitTrailing = cacheHitTrailing()
     }
 
     public var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: style == .compact ? 8 : 12) {
             if breakdown.total > 0 {
-                PacerCostBar(breakdown, height: 10)
-                LazyVGrid(
-                    columns: Array(
-                        repeating: GridItem(.flexible(), spacing: 12, alignment: .topLeading),
-                        count: CostComponent.allCases.count),
-                    alignment: .leading,
-                    spacing: 8
-                ) {
-                    ForEach(breakdown.parts) { part in
-                        PartCell(part: part)
+                switch style {
+                case .regular:
+                    PacerCostBar(breakdown, height: 10)
+                    LazyVGrid(
+                        columns: Array(
+                            repeating: GridItem(.flexible(), spacing: 12, alignment: .topLeading),
+                            count: CostComponent.allCases.count),
+                        alignment: .leading,
+                        spacing: 8
+                    ) {
+                        ForEach(breakdown.parts) { part in
+                            PartCell(part: part)
+                        }
+                    }
+                case .compact:
+                    Grid(alignment: .leading, horizontalSpacing: 6, verticalSpacing: 4) {
+                        // "tokens" once, over its column, rather than on every
+                        // row: five "21.5B tokens" cost the 37 pt that kept
+                        // "5m cache writes" from truncating at hover-card width.
+                        GridRow {
+                            Color.clear
+                                .gridCellUnsizedAxes([.horizontal, .vertical])
+                                .gridCellColumns(3)
+                            Text("tokens")
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(.tertiary)
+                                .gridColumnAlignment(.trailing)
+                        }
+                        ForEach(breakdown.parts) { part in
+                            PartRow(part: part)
+                        }
                     }
                 }
             }
             if let ratio = breakdown.cacheHitRatio {
-                PacerCacheHitRow(ratio: ratio)
+                PacerCacheHitRow(ratio: ratio) { cacheHitTrailing }
             }
         }
     }
@@ -98,23 +141,109 @@ public struct PacerCostBreakdownView: View {
                         .lineLimit(1)
                         .minimumScaleFactor(0.85)
                 }
-                HStack(alignment: .firstTextBaseline, spacing: 4) {
-                    Text(pacerCost(part.usd))
-                        .font(.system(size: 13, weight: .semibold, design: .rounded))
-                        .monospacedDigit()
-                    Text(part.percentLabel)
+                VStack(alignment: .leading, spacing: 1) {
+                    HStack(alignment: .firstTextBaseline, spacing: 4) {
+                        Text(pacerCost(part.usd))
+                            .font(.system(size: 13, weight: .semibold, design: .rounded))
+                            .monospacedDigit()
+                        Text(part.percentLabel)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.tertiary)
+                            .monospacedDigit()
+                    }
+                    Text(pacerPartTokens(part.tokens))
                         .font(.system(size: 11))
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(.secondary)
                         .monospacedDigit()
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
                 }
                 .padding(.leading, 13)
             }
             // A $0 part stays in its column, quieter, rather than leaving a
             // gap that would shift the others between days.
-            .opacity(part.usd > 0 ? 1 : 0.45)
-            .help("\(part.component.label): \(pacerCostExact(part.usd))")
+            .opacity(part.isQuiet ? 0.45 : 1)
+            .help(pacerPartHelp(part))
         }
     }
+
+    /// One compact row. The quiet/tooltip treatment goes on each cell, not
+    /// on the `GridRow`: a modified `GridRow` is no longer a row to `Grid`,
+    /// and its cells would stop lining up in columns.
+    private struct PartRow: View {
+        let part: CostBreakdown.Part
+
+        var body: some View {
+            GridRow {
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(part.component.color)
+                        .frame(width: 7, height: 7)
+                    Text(part.component.label)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .modifier(PartCellStyle(part: part))
+                // The numbers never truncate; if anything gives, the name does.
+                .layoutPriority(-1)
+                Text(pacerCost(part.usd))
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .gridColumnAlignment(.trailing)
+                    .modifier(PartCellStyle(part: part))
+                Text(part.percentLabel)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+                    .gridColumnAlignment(.trailing)
+                    .modifier(PartCellStyle(part: part))
+                Text(pacerTokens(part.tokens))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .gridColumnAlignment(.trailing)
+                    .modifier(PartCellStyle(part: part))
+            }
+        }
+    }
+
+    private struct PartCellStyle: ViewModifier {
+        let part: CostBreakdown.Part
+
+        func body(content: Content) -> some View {
+            content
+                .monospacedDigit()
+                .lineLimit(1)
+                .opacity(part.isQuiet ? 0.45 : 1)
+                .help(pacerPartHelp(part))
+        }
+    }
+}
+
+public extension PacerCostBreakdownView where CacheHitTrailing == EmptyView {
+    init(_ breakdown: CostBreakdown, style: PacerCostBreakdownStyle = .regular) {
+        self.init(breakdown, style: style) { EmptyView() }
+    }
+
+    /// Whether there is anything to show — callers hide the card otherwise.
+    static func hasContent(_ breakdown: CostBreakdown) -> Bool {
+        breakdown.total > 0 || breakdown.cacheHitRatio != nil
+    }
+}
+
+private extension CostBreakdown.Part {
+    /// Nothing to say: no dollars and no tokens. A part an unpriced model
+    /// filled has tokens but $0, and stays at full strength.
+    var isQuiet: Bool { usd <= 0 && tokens == 0 }
+}
+
+/// "21.5B tokens" — a part's tokens in its legend entry.
+func pacerPartTokens(_ tokens: Int64) -> String {
+    "\(pacerTokens(tokens)) tokens"
+}
+
+/// "Cache reads: $12,603.12 · 21,512,345,678 tokens" — a legend entry's
+/// tooltip, exact where the entry is compact.
+func pacerPartHelp(_ part: CostBreakdown.Part) -> String {
+    "\(part.component.label): \(pacerCostExact(part.usd)) · \(pacerTokensExact(part.tokens)) tokens"
 }
 
 /// One labelled stacked bar — a model's or a project's parts — with a
@@ -156,13 +285,16 @@ public extension PacerCostBreakdownRow where Trailing == EmptyView {
     }
 }
 
-/// The cache hit rate as a filled track and a percentage.
+/// The cache hit rate as a filled track and a percentage, with a
+/// caller-supplied trailing slot.
 /// `ratio` is `TokenBreakdown.cacheHitRatio`, the one definition.
-public struct PacerCacheHitRow: View {
+public struct PacerCacheHitRow<Trailing: View>: View {
     private let ratio: Double
+    private let trailing: Trailing
 
-    public init(ratio: Double) {
+    public init(ratio: Double, @ViewBuilder trailing: () -> Trailing) {
         self.ratio = ratio
+        self.trailing = trailing()
     }
 
     public var body: some View {
@@ -173,6 +305,9 @@ public struct PacerCacheHitRow: View {
             Text("Cache hit rate")
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(.secondary)
+                // One line in a narrow card: the track gives way instead.
+                .lineLimit(1)
+                .fixedSize()
             Spacer(minLength: 0)
             ZStack(alignment: .leading) {
                 RoundedRectangle(cornerRadius: 3)
@@ -190,8 +325,15 @@ public struct PacerCacheHitRow: View {
                 .font(.system(size: 12, weight: .semibold, design: .rounded))
                 .monospacedDigit()
                 .frame(width: 56, alignment: .trailing)
+            trailing
         }
         .help("Prompt tokens served from cache")
+    }
+}
+
+public extension PacerCacheHitRow where Trailing == EmptyView {
+    init(ratio: Double) {
+        self.init(ratio: ratio) { EmptyView() }
     }
 }
 

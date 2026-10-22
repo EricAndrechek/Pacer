@@ -6,7 +6,9 @@ import PacerUI
 /// "This 7 days vs the 7 before that" — a behavioral signal the
 /// dashboard otherwise lacks. The hero strip's trend chip uses the
 /// same week, but as a single ratio; this card breaks it down into
-/// cost, tokens, active days, and cache-hit-rate so the user can see
+/// cost, tokens, active days and cost per million tokens, then splits
+/// the week's cost by priced part (the shared `PacerCostBreakdownView`,
+/// with each part's tokens and the cache hit rate) so the user can see
 /// *why* the trend chip moved.
 ///
 /// Sources from `DailyAggregate` rolled up into two 7-day buckets.
@@ -64,16 +66,15 @@ struct WeeklyComparisonCard: View {
     private struct WeekTotals {
         var cost: Double = 0
         var tokens = TokenBreakdown.zero
+        /// The week's cost by priced part, with each part's tokens (#225),
+        /// summed from the same rows as `cost` and `tokens`.
+        var breakdown = CostBreakdown.zero
         var distinctDates: Set<String> = []
 
         /// All five parts (#215). This was input + output, which left out the
         /// cache reads and writes that are most of a week's tokens.
         var totalTokens: Int64 { tokens.all }
         var activeDays: Int { distinctDates.filter { _ in true }.count }
-        /// The shared cache hit rate (`TokenBreakdown.cacheHitRatio`,
-        /// #225): reads over every prompt token. The same number Today,
-        /// Day detail and the cost breakdowns show.
-        var cacheHitRatio: Double { tokens.cacheHitRatio ?? 0 }
         /// Cost per million tokens, every token counted — the blended rate
         /// the week paid. Cache reads are most of the volume and the
         /// cheapest part, so this sits well under a model's input rate; it
@@ -114,6 +115,7 @@ struct WeeklyComparisonCard: View {
             func add(to t: inout WeekTotals) {
                 t.cost += row.totalCostUSD
                 t.tokens += row.tokens
+                t.breakdown += row.costBreakdown
                 t.distinctDates.insert(row.date)
             }
             switch bucket {
@@ -149,6 +151,15 @@ struct WeeklyComparisonCard: View {
 
     @ViewBuilder
     private func content(thisWeek: WeekTotals, lastWeek: WeekTotals) -> some View {
+        VStack(alignment: .leading, spacing: 18) {
+            comparisonGrid(thisWeek: thisWeek, lastWeek: lastWeek)
+            if PacerCostBreakdownView.hasContent(thisWeek.breakdown) {
+                PacerCostBreakdownView(thisWeek.breakdown)
+            }
+        }
+    }
+
+    private func comparisonGrid(thisWeek: WeekTotals, lastWeek: WeekTotals) -> some View {
         LazyVGrid(
             columns: Array(
                 repeating: GridItem(.flexible(), spacing: 16, alignment: .topLeading),
@@ -184,11 +195,12 @@ struct WeeklyComparisonCard: View {
                     ? nil
                     : "vs \(lastWeek.distinctDates.count) prior"
             )
+            // No cache-hit hint under this tile any more: the breakdown below
+            // prints the week's hit rate in its own row.
             if let cpmt = thisWeek.costPerMillionTokens {
                 MetricTile(
                     value: pacerCost(cpmt),
                     label: "per 1M tokens",
-                    hint: cacheHitHint(thisWeek),
                     tooltip: pacerCostExact(cpmt)
                 )
             } else {
@@ -232,13 +244,5 @@ struct WeeklyComparisonCard: View {
     ) -> String {
         guard last > 0 else { return exact(this) }
         return "\(exact(last)) → \(exact(this))"
-    }
-
-    /// "82% cache hits" — only when there's enough data and only when
-    /// cache-read is meaningfully present (>5% of input).
-    private func cacheHitHint(_ t: WeekTotals) -> String? {
-        let r = t.cacheHitRatio
-        guard r > 0.05 else { return nil }
-        return String(format: "%.0f%% cache hits", r * 100)
     }
 }

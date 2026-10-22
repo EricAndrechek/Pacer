@@ -223,10 +223,14 @@ private struct LifetimeSummaryContent: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
             } else {
+                // Cost, then every token (#215). The input / output / cache
+                // read tiles that used to sit here are in the Cost breakdown
+                // card's legend now, each beside its dollars, so printing them
+                // here as well would put the same numbers on the page twice.
                 LazyVGrid(
                     columns: Array(
                         repeating: GridItem(.flexible(), spacing: 16, alignment: .topLeading),
-                        count: 6
+                        count: 4
                     ),
                     alignment: .leading,
                     spacing: 12
@@ -238,19 +242,9 @@ private struct LifetimeSummaryContent: View {
                         tooltip: pacerCostExact(t.cost)
                     )
                     MetricTile(
-                        value: pacerTokens(t.tokens.inputTokens),
-                        label: "input",
-                        tooltip: pacerTokensExact(t.tokens.inputTokens)
-                    )
-                    MetricTile(
-                        value: pacerTokens(t.tokens.outputTokens),
-                        label: "output",
-                        tooltip: pacerTokensExact(t.tokens.outputTokens)
-                    )
-                    MetricTile(
-                        value: pacerTokens(t.tokens.cacheReadTokens),
-                        label: "cache read",
-                        tooltip: pacerTokensExact(t.tokens.cacheReadTokens)
+                        value: pacerTokens(t.tokens.all),
+                        label: "tokens",
+                        tooltip: pacerTokensExact(t.tokens.all)
                     )
                     MetricTile(value: "\(t.distinctDays)", label: "active days")
                     MetricTile(value: "\(t.distinctModels)", label: "models")

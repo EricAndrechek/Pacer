@@ -41,6 +41,20 @@ public extension CostComponents {
 }
 
 public extension TokenBreakdown {
+    /// The tokens behind one priced part — the one place a `CostComponent`
+    /// maps to its token column, as `CostComponents[_:]` is for its dollars.
+    /// Every legend that prints a part's tokens reads them through this, so
+    /// "cache reads" cannot show the 5m-write count on one screen.
+    subscript(_ part: CostComponent) -> Int64 {
+        switch part {
+        case .input:        return inputTokens
+        case .output:       return outputTokens
+        case .cacheRead:    return cacheReadTokens
+        case .cacheWrite5m: return cacheCreation5mTokens
+        case .cacheWrite1h: return cacheCreation1hTokens
+        }
+    }
+
     /// Every token of the prompt side: fresh input, cache reads and both
     /// cache-write tiers. Output is the response, not the prompt.
     var promptTokens: Int64 {
@@ -98,6 +112,10 @@ public struct CostBreakdown: Sendable, Equatable {
         /// Whole-number percent, rounded so the five add up to 100
         /// (largest remainder). 0 for every part when the total is 0.
         public let percent: Int
+        /// The tokens this part priced (`TokenBreakdown[_:]`). Shown beside
+        /// the dollars because the two tell different stories: cache reads
+        /// are ~98% of the tokens and well under that share of the cost.
+        public let tokens: Int64
         public var id: CostComponent { component }
 
         /// "66%", "<1%" for a part too small to round to 1 but not
@@ -121,7 +139,8 @@ public struct CostBreakdown: Sendable, Equatable {
         return CostComponent.allCases.enumerated().map { i, c in
             Part(component: c, usd: values[i],
                  share: sum > 0 ? values[i] / sum : 0,
-                 percent: percents[i])
+                 percent: percents[i],
+                 tokens: tokens[c])
         }
     }
 
