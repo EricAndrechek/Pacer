@@ -587,8 +587,13 @@ struct PaceChartCard: View {
         let windowKey: String
         let title: String
         let duration: TimeInterval
-        /// Latest reading (nil ⇒ no sample yet — the genuine cold start).
+        /// Current utilization: the live meter's value when there is one
+        /// (`readout`), else the latest reading (nil ⇒ no sample yet — the
+        /// genuine cold start).
         let usedPct: Double?
+        /// The reading behind `usedPct` and the live value on it (#318), for
+        /// the hover text, the dotted segment and the forecast's start.
+        let readout: LiveMeterReadout?
         /// When that reading was taken.
         ///
         /// Needed because Pacer can only poll the account that currently owns
@@ -718,12 +723,16 @@ struct PaceChartCard: View {
                 let side = PaceColumnLayout.scopedSide(
                     group: row.group, duration: duration,
                     fiveHourDuration: Self.fiveHourDuration, sevenDayDuration: Self.sevenDayDuration)
+                let readout = Self.readout(account: entry.accountId, key: row.identity,
+                                           at: row.sampledAt, percent: row.percent,
+                                           resetsAt: row.resetsAt, now: now)
                 tagged.append((side, Column(
                     id: Self.columnID(entry.accountId, row.identity),
                     accountId: entry.accountId, windowKey: row.identity,
                     title: Self.decorate(row.label, with: entry.label),
                     duration: duration,
-                    usedPct: row.percent,
+                    usedPct: readout.percent,
+                    readout: readout,
                     readingAt: row.sampledAt, newestAnyAccountAt: newestAny,
                     typicalPollGap: pollGap,
                     resetsAt: row.resetsAt,
@@ -767,16 +776,30 @@ struct PaceChartCard: View {
         return "\(title) · \(label)"
     }
 
+    /// One window's number through the shared live meter (#318). Read from
+    /// `body` (through `columns`), so a new live value redraws the card.
+    private static func readout(account: String?, key: String, at: Date, percent: Double,
+                                resetsAt: Date?, now: Date) -> LiveMeterReadout {
+        LiveMeterBoard.shared.readout(account: account, window: key,
+                                      reading: MeterReading(at: at, percent: percent, resetsAt: resetsAt),
+                                      now: now)
+    }
+
     private func fixedColumn(_ entry: AccountSeries, title: String, key: String,
                              duration: TimeInterval,
                              samples: [LimitSamplePoint], now: Date,
                              newestAnyAccountAt: Date?, typicalPollGap: TimeInterval?) -> Column {
         let latest = samples.first
+        let readout = latest.map {
+            Self.readout(account: entry.accountId, key: key, at: $0.sampledAt, percent: $0.usedPercentage,
+                         resetsAt: $0.resetsAt, now: now)
+        }
         return Column(
             id: Self.columnID(entry.accountId, key),
             accountId: entry.accountId, windowKey: key,
             title: Self.decorate(title, with: entry.label), duration: duration,
-            usedPct: latest?.usedPercentage,
+            usedPct: readout?.percent ?? latest?.usedPercentage,
+            readout: readout,
             readingAt: latest?.sampledAt, newestAnyAccountAt: newestAnyAccountAt,
             typicalPollGap: typicalPollGap,
             resetsAt: latest?.resetsAt,
@@ -849,6 +872,13 @@ struct PaceChartCard: View {
         let plan: [(accountId: String?, scoped: [String])] = series.map {
             ($0.accountId, scopedRows($0).map(\.identity))
         }
+        // The live values the columns show, so every forecast starts where
+        // the number on screen is (#318). Taken here, on the main actor,
+        // and handed to the ask as values.
+        let liveByAccount: [String: [String: LiveMeterValue]] = Dictionary(
+            uniqueKeysWithValues: plan.compactMap { entry in
+                entry.accountId.map { ($0, LiveMeterBoard.shared.values[$0] ?? [:]) }
+            })
         var nextSelected: [String: WindowProjection] = [:]
         var nextOutlooks: [String: UsageIntelligenceEngine.BurnOutlook] = [:]
         var nextEnds: [String: Estimate] = [:]
@@ -858,6 +888,7 @@ struct PaceChartCard: View {
             let engine = engines.engine(forAccount: entry.accountId)
             let account = entry.accountId
             let scoped = entry.scoped
+            let live = account.flatMap { liveByAccount[$0] } ?? [:]
             let computed = await askEngine {
                 () -> ([String: WindowProjection],
                        [String: UsageIntelligenceEngine.BurnOutlook],
@@ -885,16 +916,18 @@ struct PaceChartCard: View {
                     }
                 }
                 for window in RateLimitWindowKind.allCases {
+                    let v = live[window.rawValue]
                     absorb(key: window.rawValue,
-                           outlook: await engine.burnOutlook(window: window),
-                           end: await engine.ask(.rateLimitOutlook(window)),
-                           list: await engine.rateLimitTrajectories(window: window))
+                           outlook: await engine.burnOutlook(window: window, live: v),
+                           end: await engine.ask(.rateLimitOutlook(window), live: v),
+                           list: await engine.rateLimitTrajectories(window: window, live: v))
                 }
                 for id in scoped {
+                    let v = live[id]
                     absorb(key: id,
-                           outlook: await engine.burnOutlook(windowKey: id),
-                           end: await engine.ask(.scopedOutlook(id)),
-                           list: await engine.rateLimitTrajectories(windowKey: id))
+                           outlook: await engine.burnOutlook(windowKey: id, live: v),
+                           end: await engine.ask(.scopedOutlook(id), live: v),
+                           list: await engine.rateLimitTrajectories(windowKey: id, live: v))
                 }
                 if let fittedAt { why["fit|\(account ?? "")"] = "\(Int(Date().timeIntervalSince(fittedAt)))s" }
                 return (sel, out, ends, why)
@@ -954,6 +987,10 @@ struct PaceChartCard: View {
         // changes (a scoped window appears / disappears, or an account joins).
         let windowKey = cols.map(\.id).joined(separator: ",")
         let hasScoped = cols.contains { $0.isScoped }
+        // The live numbers on screen: when one moves, the forecasts are
+        // re-asked from it (debounced with the engine's own refits).
+        let liveKey = cols.compactMap { c in c.readout?.live.map { "\(c.id)=\(Int($0.percent))" } }
+            .joined(separator: ",")
 
         // The "via oauth · just now" freshness chip lives in the page header
         // (`RateLimitSourceChip` in DashboardView) — it describes the whole
@@ -1073,6 +1110,7 @@ struct PaceChartCard: View {
         .onReceive(NotificationCenter.default.publisher(for: .pacerEngineDidRecompute)) { _ in
             scheduleProjectionRefresh()
         }
+        .onChange(of: liveKey) { _, _ in scheduleProjectionRefresh() }
         .task {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(60))
@@ -1411,17 +1449,20 @@ private struct PaceColumn: View {
         // whenever the account was last read. Drawing the dashed line anyway
         // projects from a point that has already moved.
         guard !isStale else { return base }
-        guard let projection else { return base }
-        // Re-anchor the forecast onto the live actual tail so the dashed line
-        // continues the solid one without a step.
-        guard let tail = base.points.last else { return base }
+        // The live meter's dotted stretch past the last reading (#318).
+        // `base` itself stays readings-only for the shared image.
+        let withLive = column.readout.map { base.withLive($0, now: base.points.last?.time ?? Date()) } ?? base
+        guard let projection else { return withLive }
+        // Re-anchor the forecast onto the line's tip (the live value, else
+        // the reading) so the dashed line continues it without a step.
+        guard let tail = withLive.tip else { return withLive }
         let rebased = projection.trajectory.reanchored(toTime: tail.time, value: tail.value)
         let pts = rebased.points.map { PaceChartView.Data.Point(time: $0.at, value: $0.usedPercentage) }
         // At/over the cap the trajectory collapses to its origin — fall back to
         // the projection-free chart.
-        guard pts.count >= 2 else { return base }
-        return base.withProjection(pts, crossesFullAt: rebased.crossesFullAt,
-                                   claimed: outlook?.willHitLimitBeforeReset ?? false)
+        guard pts.count >= 2 else { return withLive }
+        return withLive.withProjection(pts, crossesFullAt: rebased.crossesFullAt,
+                                       claimed: outlook?.willHitLimitBeforeReset ?? false)
     }
 
     var body: some View {
@@ -1545,9 +1586,11 @@ private struct PaceColumn: View {
     /// Everything the share sheet needs to render and name this window's chart
     /// as an image — built from the same resolved values the live chart draws.
     private func sharePayload(chartData: PaceChartView.Data?) -> PaceSharePayload? {
+        // The shared image is the readings, number included: an estimate
+        // has no place in a picture that leaves the app.
         guard let chartData,
               let cycle, !cycle.isAwaiting,
-              let used = column.usedPct, let resets = column.resetsAt
+              let used = column.readout?.reading.percent ?? column.usedPct, let resets = column.resetsAt
         else { return nil }
         let windowName: String
         let slug: String
@@ -1718,6 +1761,10 @@ private struct PaceColumn: View {
                     .font(.system(size: 26, weight: .semibold, design: .rounded))
                     .monospacedDigit()
                     .foregroundStyle(band.color)
+                    // "read 42% 3 min ago · live 45%"; nothing when the
+                    // number is the reading. The card's minute tick redraws
+                    // the age.
+                    .help(column.readout?.help(now: Date()) ?? "")
                 Text("/")
                     .font(.system(size: 16))
                     .foregroundStyle(.tertiary)

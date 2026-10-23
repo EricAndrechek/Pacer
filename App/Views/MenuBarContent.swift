@@ -12,22 +12,36 @@ import PacerUI
 /// here; a scoped window Anthropic adds appears with zero code change and one
 /// that vanishes drops out of the next `latestBatch`.
 enum MenuBarWindowSource {
+    /// `live` is the account's live meter values (`LiveMeterBoard`), read by
+    /// the caller in its `body` so a new value redraws it; each window's
+    /// number goes through `LiveMeterReadout` with the reading loaded here.
     static func items(
         fiveHour: LimitSamplePoint?,
         sevenDay: LimitSamplePoint?,
-        scoped: [ScopedWindowRow]
+        scoped: [ScopedWindowRow],
+        live: [String: LiveMeterValue] = [:],
+        now: Date = Date()
     ) -> [MenuBarWindowItem] {
+        func readout(_ key: String, _ at: Date?, _ pct: Double?, _ resets: Date?) -> LiveMeterReadout? {
+            guard let at, let pct else { return nil }
+            return LiveMeterReadout(reading: MeterReading(at: at, percent: pct, resetsAt: resets),
+                                    live: live[key], now: now)
+        }
         var items: [MenuBarWindowItem] = [
             MenuBarWindowItem(
                 key: RateLimitWindowName.fiveHour, displayName: "5-hour",
                 usedPercentage: fiveHour?.usedPercentage, resetsAt: fiveHour?.resetsAt,
                 duration: MenuBarWindows.fiveHourDuration, group: "",
-                isScoped: false, isActive: false),
+                isScoped: false, isActive: false,
+                readout: readout(RateLimitWindowName.fiveHour, fiveHour?.sampledAt,
+                                 fiveHour?.usedPercentage, fiveHour?.resetsAt)),
             MenuBarWindowItem(
                 key: RateLimitWindowName.sevenDay, displayName: "7-day",
                 usedPercentage: sevenDay?.usedPercentage, resetsAt: sevenDay?.resetsAt,
                 duration: MenuBarWindows.sevenDayDuration, group: "",
-                isScoped: false, isActive: false),
+                isScoped: false, isActive: false,
+                readout: readout(RateLimitWindowName.sevenDay, sevenDay?.sampledAt,
+                                 sevenDay?.usedPercentage, sevenDay?.resetsAt)),
         ]
         // Latest poll only. Account-wide `session`/`weekly_all` rows are
         // excluded in the fetch (`LimitScope.modelScopedLimits`) rather than
@@ -37,7 +51,8 @@ enum MenuBarWindowSource {
                 key: row.identity, displayName: row.label,
                 usedPercentage: row.percent, resetsAt: row.resetsAt,
                 duration: WindowSpec.scopedDuration(group: row.group), group: row.group,
-                isScoped: true, isActive: row.isActive))
+                isScoped: true, isActive: row.isActive,
+                readout: readout(row.identity, row.sampledAt, row.percent, row.resetsAt)))
         }
         return MenuBarWindows.ordered(items)
     }
@@ -153,24 +168,20 @@ struct MenuBarLabel: View {
 
     @MainActor
     func reloadWindows() {
-        let loaded = MenuBarWindowSource.load(
-            menuModelContext,
-            account: UsageScope.limitAccountId(in: menuModelContext))
+        let account = UsageScope.limitAccountId(in: menuModelContext)
+        let loaded = MenuBarWindowSource.load(menuModelContext, account: account)
         rateSamples = loaded.fixed
         scopedSamples = loaded.scoped
+        loadedAccount = account
 
         // Chips pinned to a named account need that account's own windows, not
         // the scoped one's. Loaded only for accounts a chip actually names, so
         // a user who pins nothing pays nothing — the ordinary case.
-        var pinned: [String: [MenuBarWindowItem]] = [:]
+        var pinned: [String: (fixed: [LimitSamplePoint], scoped: [ScopedWindowRow])] = [:]
         for id in Set(chipItems.compactMap(\.pinnedAccountId)) {
-            let other = MenuBarWindowSource.load(menuModelContext, account: id)
-            pinned[id] = MenuBarWindowSource.items(
-                fiveHour: other.fixed.first { $0.window == RateLimitWindowName.fiveHour },
-                sevenDay: other.fixed.first { $0.window == RateLimitWindowName.sevenDay },
-                scoped: other.scoped)
+            pinned[id] = MenuBarWindowSource.load(menuModelContext, account: id)
         }
-        pinnedWindows = pinned
+        pinnedLoaded = pinned
         let all = (try? menuModelContext.fetch(FetchDescriptor<Account>())) ?? []
         accountLabels = Dictionary(uniqueKeysWithValues: all.map { ($0.id, $0.shortLabel) })
     }
@@ -238,8 +249,19 @@ struct MenuBarLabel: View {
 
     // MARK: - Derived state
 
-    /// Live windows for each account a chip names, keyed by account id.
-    @State private var pinnedWindows: [String: [MenuBarWindowItem]] = [:]
+    /// The readings of each account a chip names, keyed by account id.
+    @State private var pinnedLoaded: [String: (fixed: [LimitSamplePoint], scoped: [ScopedWindowRow])] = [:]
+
+    /// Those accounts' windows, each through its own live values. Built in
+    /// `body`, so a new live value redraws the chip.
+    private func pinnedWindows(_ id: String) -> [MenuBarWindowItem]? {
+        guard let loaded = pinnedLoaded[id] else { return nil }
+        return MenuBarWindowSource.items(
+            fiveHour: loaded.fixed.first { $0.window == RateLimitWindowName.fiveHour },
+            sevenDay: loaded.fixed.first { $0.window == RateLimitWindowName.sevenDay },
+            scoped: loaded.scoped,
+            live: LiveMeterBoard.shared.values[id] ?? [:])
+    }
     /// Short names for those accounts, so a chip reads "personal 42%".
     @State private var accountLabels: [String: String] = [:]
 
@@ -268,10 +290,19 @@ struct MenuBarLabel: View {
     }
 
     /// Every rate-limit window currently in play (5h, 7d, each scoped) — the
-    /// candidate set the icon driver picks from.
+    /// candidate set the icon driver picks from — each at its live value.
+    /// The board is read here, inside `body`'s evaluation, so a new live
+    /// value redraws the label; `Render`'s equality keeps that from
+    /// re-rasterizing the status item unless a drawn number moved.
     private var windows: [MenuBarWindowItem] {
-        MenuBarWindowSource.items(fiveHour: fiveHour, sevenDay: sevenDay, scoped: scopedSamples)
+        MenuBarWindowSource.items(fiveHour: fiveHour, sevenDay: sevenDay, scoped: scopedSamples,
+                                  live: loadedAccount.flatMap { LiveMeterBoard.shared.values[$0] } ?? [:])
     }
+
+    /// Whose readings `rateSamples` are: the live values must be the same
+    /// account's, or a scope switch could pair one login's reading with the
+    /// other's estimate for the moment before the reload lands.
+    @State private var loadedAccount: String?
 
     /// The window whose utilization drives the icon: the user's pick when it's
     /// present, else the 5-hour anchor. `nil` only with no windows at all.
@@ -377,7 +408,12 @@ struct MenuBarLabel: View {
             case RateLimitWindowName.sevenDay: label = "7d"
             default: label = w.displayName
             }
-            parts.append("\(label): \(Int(pct.rounded()))%")
+            // The live number, with the reading under it when they differ.
+            // No age here: this text is pushed to AppKit once a minute, and
+            // the reading's age belongs on surfaces that redraw with it.
+            let read = (w.readout?.differsFromReading ?? false)
+                ? " (read \(Int((w.readout?.reading.percent ?? pct).rounded()))%)" : ""
+            parts.append("\(label): \(Int(pct.rounded()))%\(read)")
         }
         // Tooltip's reset hint reads from the 5-hour sample. When that
         // sample's cycle has already ended (Pacer hasn't ingested a fresh
@@ -432,9 +468,10 @@ struct MenuBarLabel: View {
             return .rings(rings.map(\.usedPercentage))
         case .fixed(.fiveHourPct):
             return .percent(prefix: fiveHourNeedsPrefix ? "5h " : nil,
-                            pct: fiveHour?.usedPercentage)
+                            pct: windows.first { $0.key == RateLimitWindowName.fiveHour }?.usedPercentage)
         case .fixed(.sevenDayPct):
-            return .percent(prefix: "7d ", pct: sevenDay?.usedPercentage)
+            return .percent(prefix: "7d ",
+                            pct: windows.first { $0.key == RateLimitWindowName.sevenDay }?.usedPercentage)
         case .fixed(.todayCost):
             return .text(pacerCost(todayCost))
         case .fixed(.todayTokens):
@@ -445,7 +482,7 @@ struct MenuBarLabel: View {
             // The account's own windows, and its own name in front of the
             // number — a chip that does not say whose percentage it is has no
             // business existing on a surface with several accounts on it.
-            guard let window = pinnedWindows[accountId]?.first(where: { $0.key == key }),
+            guard let window = pinnedWindows(accountId)?.first(where: { $0.key == key }),
                   let pct = window.usedPercentage else { return nil }
             let label = accountLabels[accountId] ?? window.displayName
             return .percent(prefix: "\(label) ", pct: pct)
@@ -646,9 +683,22 @@ struct MenuStatusContent: View {
         /// Other clients active on it (#245): "Desktop · Work". The CLI is
         /// `isActive`, said as "signed in".
         var clients: [String] = []
-        let windows: [MenuBarWindowItem]
+        let fixed: [LimitSamplePoint]
+        let scoped: [ScopedWindowRow]
+
+        /// Its windows at their live values. Built where `body` reads it,
+        /// so a new value redraws the row.
+        @MainActor var windows: [MenuBarWindowItem] {
+            MenuBarWindowSource.items(
+                fiveHour: fixed.first { $0.window == RateLimitWindowName.fiveHour },
+                sevenDay: fixed.first { $0.window == RateLimitWindowName.sevenDay },
+                scoped: scoped,
+                live: LiveMeterBoard.shared.values[id] ?? [:])
+        }
     }
     @State private var perAccount: [AccountWindows] = []
+    /// Whose readings `rateLimits` are; see `MenuBarLabel.loadedAccount`.
+    @State private var loadedAccount: String?
 
     /// The write signal and whose limits, both read here so either change
     /// re-runs the load. The account comes through the observable scope so a
@@ -664,11 +714,11 @@ struct MenuStatusContent: View {
 
     @MainActor
     func reloadWindows() {
-        let loaded = MenuBarWindowSource.load(
-            menuModelContext,
-            account: UsageScope.limitAccountId(in: menuModelContext))
+        let account = UsageScope.limitAccountId(in: menuModelContext)
+        let loaded = MenuBarWindowSource.load(menuModelContext, account: account)
         rateLimits = loaded.fixed
         scopedSamples = loaded.scoped
+        loadedAccount = account
 
         // Concurrent accounts get a group each; sequential ones do not.
         //
@@ -699,10 +749,7 @@ struct MenuStatusContent: View {
             return AccountWindows(
                 id: account.id, label: account.shortLabel, isActive: account.isActive,
                 clients: PacerClientChip.others(clients.active(on: account.id)).map(\.label),
-                windows: MenuBarWindowSource.items(
-                    fiveHour: its.fixed.first { $0.window == RateLimitWindowName.fiveHour },
-                    sevenDay: its.fixed.first { $0.window == RateLimitWindowName.sevenDay },
-                    scoped: its.scoped))
+                fixed: its.fixed, scoped: its.scoped)
         }
     }
 
@@ -801,9 +848,11 @@ struct MenuStatusContent: View {
     private var sevenDay: LimitSamplePoint? { rateLimits.first { $0.window == "seven_day" } }
 
     /// Every window the dropdown lists: 5h, 7d, then each scoped per-model
-    /// window in the latest poll, in the dashboard's glued-heroes order.
+    /// window in the latest poll, in the dashboard's glued-heroes order, at
+    /// their live values.
     private var windows: [MenuBarWindowItem] {
-        MenuBarWindowSource.items(fiveHour: fiveHour, sevenDay: sevenDay, scoped: scopedSamples)
+        MenuBarWindowSource.items(fiveHour: fiveHour, sevenDay: sevenDay, scoped: scopedSamples,
+                                  live: loadedAccount.flatMap { LiveMeterBoard.shared.values[$0] } ?? [:])
     }
 
     /// The account whose limits are on screen, named only when more than one
@@ -1042,6 +1091,9 @@ struct MenuStatusContent: View {
                         .lineLimit(1)
                         .fixedSize(horizontal: true, vertical: false)
                         .frame(minWidth: 32, alignment: .trailing)
+                        // The live value's reading. The menu re-reads on
+                        // every open, so "3 min ago" is as of the open.
+                        .pacerToolTip(window.readout?.help(now: Date()) ?? "")
 
                     Text("pace \(Int(pacePct.rounded()))%")
                         .font(.system(size: 11, weight: .medium))

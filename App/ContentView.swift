@@ -89,13 +89,29 @@ struct ContentView: View {
     /// the Dock or Cmd+Tab'd, macOS shows the title bar text; with
     /// this in place the user gets at-a-glance pacing without
     /// surfacing the dashboard.
-    private var windowSubtitle: String { Self.windowSubtitle(for: scopedAccount) }
+    private var windowSubtitle: String {
+        Self.windowSubtitle(for: scopedAccount,
+                            live: scopedAccount.flatMap { LiveMeterBoard.shared.values[$0.id] } ?? [:])
+    }
 
-    private static func windowSubtitle(for account: Account?) -> String {
+    /// Each window at its live value (#318), from the account's cached
+    /// latest readings. `live` is read in `body` (through `windowSubtitle`),
+    /// so a new value retitles the window.
+    private static func windowSubtitle(for account: Account?, live: [String: LiveMeterValue]) -> String {
         guard let account else { return "" }
+        let now = Date()
+        func shown(_ key: String, _ pct: Double?, _ resets: Date?) -> Double? {
+            guard let pct else { return nil }
+            // `latestPolledAt` is the poll's `sampledAt`, the instant the
+            // live value's reading carries too.
+            let reading = MeterReading(at: account.latestPolledAt ?? .distantPast, percent: pct, resetsAt: resets)
+            return LiveMeterReadout(reading: reading, live: live[key], now: now).percent
+        }
         let parts: [String?] = [
-            account.latestFiveHourPct.map { "5h \(Int($0.rounded()))%" },
-            account.latestSevenDayPct.map { "7d \(Int($0.rounded()))%" }
+            shown(RateLimitWindowName.fiveHour, account.latestFiveHourPct, account.latestFiveHourResetsAt)
+                .map { "5h \(Int($0.rounded()))%" },
+            shown(RateLimitWindowName.sevenDay, account.latestSevenDayPct, account.latestSevenDayResetsAt)
+                .map { "7d \(Int($0.rounded()))%" }
         ]
         return parts.compactMap { $0 }.joined(separator: " • ")
     }

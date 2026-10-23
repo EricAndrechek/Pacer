@@ -41,6 +41,12 @@ public struct PaceChartView: View {
         /// the claim withholds is drawn orange, like its "may hit limit in …"
         /// chip: a red line under an orange chip said two things at once.
         public let projectionClaimed: Bool
+        /// The live meter's value at now (#318), when it differs from the
+        /// last reading: drawn as a short dotted segment from that reading,
+        /// so the stretch past the last real data reads as an estimate.
+        /// `points` stays readings only. `nil` (the default) draws the line
+        /// as before, its tail held flat at the reading.
+        public let live: Point?
 
         public struct Point: Equatable, Identifiable, Sendable {
             public let time: Date
@@ -61,7 +67,8 @@ public struct PaceChartView: View {
             usedPct: Double,
             projection: [Point]? = nil,
             projectionCrossesFullAt: Date? = nil,
-            projectionClaimed: Bool = false
+            projectionClaimed: Bool = false,
+            live: Point? = nil
         ) {
             self.cycleStart = cycleStart
             self.resetsAt = resetsAt
@@ -71,7 +78,12 @@ public struct PaceChartView: View {
             self.projection = projection
             self.projectionCrossesFullAt = projectionCrossesFullAt
             self.projectionClaimed = projectionClaimed
+            self.live = live
         }
+
+        /// Where the line ends now: the live point when there is one, else
+        /// the last point. The forecast starts here.
+        public var tip: Point? { live ?? points.last }
     }
 
     public enum Style {
@@ -160,7 +172,9 @@ public struct PaceChartView: View {
     public var body: some View {
         let pts = plotPoints
         let runs = bandRuns(from: pts)
-        let tail = pts.last
+        // The dot sits at the live value when there is one: that is the
+        // number the hero shows.
+        let tail = data.live ?? pts.last
         // Colour the tail dot by the CURRENT point's band so it matches
         // the dashboard hero %, rather than the band the last run began in.
         let tailBand = tail.map { band(at: $0) } ?? .white
@@ -194,6 +208,21 @@ public struct PaceChartView: View {
                     .foregroundStyle(run.band.color)
                     .lineStyle(StrokeStyle(lineWidth: style.lineWidth, lineCap: .round))
                     .interpolationMethod(.monotone)
+                }
+            }
+
+            // The live meter's estimate past the last reading (#318): dotted,
+            // finer than the readings' line and the forecast's dashes, in the
+            // band the estimate lands in.
+            if let live = data.live, let last = pts.last, live.time > last.time {
+                ForEach([last, live]) { pt in
+                    LineMark(
+                        x: .value("time", pt.time),
+                        y: .value("pct", pt.value),
+                        series: .value("series", "live")
+                    )
+                    .foregroundStyle(tailBand.color)
+                    .lineStyle(StrokeStyle(lineWidth: style.lineWidth, lineCap: .round, dash: [0.5, 3.5]))
                 }
             }
 

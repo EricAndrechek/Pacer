@@ -91,7 +91,26 @@ public extension PaceChartView.Data {
             cycleStart: cycleStart, resetsAt: resetsAt, durationSeconds: durationSeconds,
             points: self.points, usedPct: usedPct,
             projection: points, projectionCrossesFullAt: crossesFullAt,
-            projectionClaimed: claimed)
+            projectionClaimed: claimed, live: live)
+    }
+
+    /// The same line ending at the live meter's value (#318): the readings
+    /// up to `readout`'s reading, then a dotted segment to the live value at
+    /// `now` in place of the flat tail `build` pinned there. Unchanged when
+    /// the live value is the reading (nothing to draw), restarted past a
+    /// reset (this chart is the old window's), or from another cycle.
+    func withLive(_ readout: LiveMeterReadout, now: Date) -> PaceChartView.Data {
+        guard let live = readout.live, readout.differsFromReading, !live.restarted,
+              readout.reading.at >= cycleStart, now > readout.reading.at, now <= resetsAt
+        else { return self }
+        let readings = points.filter { $0.time <= readout.reading.at }
+        guard !readings.isEmpty else { return self }
+        return PaceChartView.Data(
+            cycleStart: cycleStart, resetsAt: resetsAt, durationSeconds: durationSeconds,
+            points: readings, usedPct: usedPct,
+            projection: projection, projectionCrossesFullAt: projectionCrossesFullAt,
+            projectionClaimed: projectionClaimed,
+            live: Point(time: now, value: live.percent))
     }
 
     /// Clip to the cycle, sort ascending, and pin a tail at "now" so the line

@@ -19,9 +19,13 @@ public struct MenuBarWindowItem: Equatable, Sendable, Identifiable {
     public let key: String
     /// Human label — "5-hour", "7-day", or the scoped row's model/surface label.
     public let displayName: String
-    /// Latest utilization 0–100, or `nil` when no sample has landed yet
-    /// (the genuine cold start — the row renders "collecting…").
+    /// Current utilization 0–100: the live meter's value when there is one
+    /// (`readout`), else the latest reading; `nil` when no sample has landed
+    /// yet (the genuine cold start — the row renders "collecting…").
     public let usedPercentage: Double?
+    /// The reading and live value behind `usedPercentage`, for its hover
+    /// text. Nil with no reading.
+    public let readout: LiveMeterReadout?
     /// Window rollover; `nil` when idle / the server anchored no cycle.
     public let resetsAt: Date?
     /// Window length in seconds — feeds the dropdown row's pace/cycle math.
@@ -44,11 +48,13 @@ public struct MenuBarWindowItem: Equatable, Sendable, Identifiable {
         duration: TimeInterval,
         group: String,
         isScoped: Bool,
-        isActive: Bool
+        isActive: Bool,
+        readout: LiveMeterReadout? = nil
     ) {
         self.key = key
         self.displayName = displayName
-        self.usedPercentage = usedPercentage
+        self.usedPercentage = readout?.percent ?? usedPercentage
+        self.readout = readout
         self.resetsAt = resetsAt
         self.duration = duration
         self.group = group

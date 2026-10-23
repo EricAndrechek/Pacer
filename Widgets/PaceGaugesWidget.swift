@@ -127,12 +127,20 @@ struct PaceGaugesProvider: AppIntentTimelineProvider {
             let rows = try context.fetch(LimitScope.rateLimits(account: account, limit: 50))
             let five = rows.first { $0.window == "five_hour" }
             let seven = rows.first { $0.window == "seven_day" }
-            let scoped = Self.scopedGauges(context: context, account: account)
+            // Each gauge at the live meter's value as of this refresh (#318).
+            let now = Date()
+            let live = account.map { LiveMeterSource(context: context).currentValues(account: $0, now: now) } ?? [:]
+            func shown(_ row: RateLimitSample) -> Double {
+                LiveMeterReadout(reading: MeterReading(at: row.sampledAt, percent: row.usedPercentage,
+                                                       resetsAt: row.resetsAt),
+                                 live: live[row.window], now: now).percent
+            }
+            let scoped = Self.scopedGauges(context: context, account: account, live: live, now: now)
             let (primaryKey, secondaryKey) = Self.resolveKeys(primary: primary, secondary: secondary, scoped: scoped)
             return PaceGaugesEntry(
                 date: Date(),
-                fiveHour: five.map { .init(usedPct: $0.usedPercentage, resetsAt: $0.resetsAt) },
-                sevenDay: seven.map { .init(usedPct: $0.usedPercentage, resetsAt: $0.resetsAt) },
+                fiveHour: five.map { .init(usedPct: shown($0), resetsAt: $0.resetsAt) },
+                sevenDay: seven.map { .init(usedPct: shown($0), resetsAt: $0.resetsAt) },
                 scoped: scoped,
                 primaryKey: primaryKey, secondaryKey: secondaryKey
             )
@@ -146,8 +154,8 @@ struct PaceGaugesProvider: AppIntentTimelineProvider {
     /// The scoped per-model windows as gauges, active-first then hottest. Reads
     /// the latest poll's model/surface-scoped `limits[]` rows — fully dynamic,
     /// empty when the account has none.
-    private static func scopedGauges(context: ModelContext,
-                                     account: String?) -> [PaceGaugesEntry.ScopedGauge] {
+    private static func scopedGauges(context: ModelContext, account: String?,
+                                     live: [String: LiveMeterValue], now: Date) -> [PaceGaugesEntry.ScopedGauge] {
         let rows = (try? context.fetch(
             LimitScope.usageLimits(account: account, limit: 200))) ?? []
         return rows.latestBatch()
@@ -159,7 +167,11 @@ struct PaceGaugesProvider: AppIntentTimelineProvider {
             .map {
                 PaceGaugesEntry.ScopedGauge(
                     key: $0.identity,
-                    label: $0.label, usedPct: $0.percent, resetsAt: $0.resetsAt,
+                    label: $0.label,
+                    usedPct: LiveMeterReadout(
+                        reading: MeterReading(at: $0.sampledAt, percent: $0.percent, resetsAt: $0.resetsAt),
+                        live: live[$0.identity], now: now).percent,
+                    resetsAt: $0.resetsAt,
                     durationSeconds: WindowSpec.scopedDuration(group: $0.group),
                     isActive: $0.isActive)
             }
