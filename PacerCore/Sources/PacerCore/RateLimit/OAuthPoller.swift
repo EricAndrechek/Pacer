@@ -2093,6 +2093,17 @@ public actor OAuthPoller: TokenPoolTesting {
                 if wroteRows {
                     postScanCycleSummary(ScanCycleSummary(
                         rateLimitsChanged: true, rateLimitAccountId: key))
+                    // What the live meter showed just before this reading,
+                    // beside it, so drift shows in the log (#318). Off the
+                    // main actor: a few bounded reads of its own.
+                    let readings: [(key: String, percent: Double)] =
+                        [(RateLimitWindowName.fiveHour, captured.fiveHour?.usedPercentage),
+                         (RateLimitWindowName.sevenDay, captured.sevenDay?.usedPercentage)]
+                        .compactMap { key, pct in pct.map { (key, $0) } }
+                        + captured.limits.map { ($0.identity, $0.percent) }
+                    Task.detached(priority: .utility) {
+                        LiveMeterDrift.log(container: container, account: key, at: written, readings: readings)
+                    }
                 }
             } catch {
                 Log.write("OAuthPoller", "persist failed: \(error)")
