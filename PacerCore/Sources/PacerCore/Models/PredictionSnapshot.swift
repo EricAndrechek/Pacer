@@ -71,6 +71,13 @@ public final class PredictionSnapshot {
     // Cost specifics (nil on rate-limit surfaces).
     /// Spend already realized within the period at prediction time.
     public var spendSoFar: Double?
+    /// The pricing the dollar figures were computed under,
+    /// `cost-v<N>+ledger-<fingerprint>`: the cost-recompute version and the
+    /// price ledger's `fingerprint` (#329). History gets repriced after a snapshot
+    /// is written and the snapshot is never rewritten (it is what was shown),
+    /// so this is how an analysis tells one pricing from another. Nil on
+    /// rate-limit surfaces and on rows written before it existed.
+    public var pricingVersion: String?
 
     /// The selected model a stand-in replaced on this row, when the selected
     /// one could not fit the live cycle (#301). `method` is always the model
@@ -114,6 +121,7 @@ public final class PredictionSnapshot {
         bandStratum: String? = nil,
         residualCount: Int? = nil,
         spendSoFar: Double? = nil,
+        pricingVersion: String? = nil,
         replacedMethod: String? = nil,
         hitClaimed: Bool? = nil
     ) {
@@ -141,6 +149,7 @@ public final class PredictionSnapshot {
         self.bandStratum = bandStratum
         self.residualCount = residualCount
         self.spendSoFar = spendSoFar
+        self.pricingVersion = pricingVersion
         self.replacedMethod = replacedMethod
         self.hitClaimed = hitClaimed
     }

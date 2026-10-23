@@ -78,6 +78,20 @@ public struct PriceLedger: Sendable {
 
     public var keys: Set<CanonicalModelID> { Set(timelines.keys) }
 
+    /// A short name for these prices: the same in every process, and
+    /// different exactly when `samePrices(as:)` would say they differ. The
+    /// ledger rewrites its records in place and keeps no revision number, so
+    /// a cost forecast records this to say which prices its dollars used
+    /// (`PredictionSnapshot.pricingVersion`, #329).
+    public var fingerprint: String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        encoder.dateEncodingStrategy = .secondsSince1970
+        // `records` is sorted by id at init, so equal ledgers encode alike.
+        let data = (try? encoder.encode(records)) ?? Data()
+        return String(format: "%016llx", StableHash.fnv1a64(data))
+    }
+
     /// Content equality, for deciding whether installing this ledger changes
     /// any price.
     public func samePrices(as other: PriceLedger) -> Bool { records == other.records }

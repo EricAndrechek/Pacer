@@ -30,6 +30,22 @@ struct PriceLedgerTests {
 
     // MARK: At-time pricing
 
+    /// #329: what a cost forecast records about the prices it used.
+    @Test func theFingerprintChangesExactlyWhenThePricesDo() {
+        let a = Self.record("claude-opus-5", Self.rates(5), from: Self.t0)
+        let b = Self.record("claude-sonnet-5", Self.rates(3), from: Self.t0)
+        let ledger = PriceLedger(records: [a, b])
+        // Stable, and independent of the order records arrive in.
+        #expect(ledger.fingerprint == PriceLedger(records: [b, a]).fingerprint)
+        #expect(ledger.fingerprint.count == 16)
+        // A corrected rate, or a closed window, is a different ledger.
+        let corrected = Self.record("claude-sonnet-5", Self.rates(3, read: 0.03), from: Self.t0)
+        #expect(ledger.fingerprint != PriceLedger(records: [a, corrected]).fingerprint)
+        let closed = Self.record("claude-sonnet-5", Self.rates(3), from: Self.t0, to: Self.t0 + Self.day)
+        #expect(ledger.fingerprint != PriceLedger(records: [a, closed]).fingerprint)
+        #expect(ledger.samePrices(as: PriceLedger(records: [b, a])))
+    }
+
     @Test func samplesEitherSideOfABoundaryTakeTheirSidesRate() {
         let boundary = Self.t0.addingTimeInterval(10 * Self.day)
         let ledger = PriceLedger(records: [

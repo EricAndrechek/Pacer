@@ -13,8 +13,12 @@ import SwiftData
 /// reads the accumulated rows back to pick the per-user winner and to report
 /// "method X is right to Y% on your data". Because it persists, the track record
 /// survives restarts and keeps growing — the engine learns continuously from the
-/// user's own outcomes rather than re-deriving from scratch each launch, and it
-/// outlives the raw aggregates (which get pruned).
+/// user's own outcomes rather than re-deriving from scratch each launch.
+///
+/// Cost-surface rows are dollars computed from priced history, so they are
+/// only right while that history is. When a day is repriced the refit replays
+/// it and every later day over the stored rows (`EngineSelfEval.staleEODDays`,
+/// #329). Rate-limit rows are percentages and never move.
 @Model
 public final class EngineEvalOutcome {
     #Index<EngineEvalOutcome>([\.surface], [\.surface, \.bucket])
@@ -56,8 +60,21 @@ public final class EngineEvalOutcome {
         self.periodKey = periodKey
         self.predicted = predicted
         self.truth = truth
-        self.absPctError = truth > 0 ? abs(predicted - truth) / truth * 100 : .infinity
+        self.absPctError = Self.absPctError(predicted: predicted, truth: truth)
         self.recordedAt = recordedAt
+    }
+
+    /// Replace the scored values after the history they were computed from
+    /// changed (#329). `recordedAt` becomes the rescore time.
+    public func rescore(predicted: Double, truth: Double, at date: Date) {
+        self.predicted = predicted
+        self.truth = truth
+        self.absPctError = Self.absPctError(predicted: predicted, truth: truth)
+        self.recordedAt = date
+    }
+
+    static func absPctError(predicted: Double, truth: Double) -> Double {
+        truth > 0 ? abs(predicted - truth) / truth * 100 : .infinity
     }
 
     public static func makeKey(surface: String, method: String, bucket: String, periodKey: String) -> String {
