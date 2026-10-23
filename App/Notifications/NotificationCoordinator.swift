@@ -105,6 +105,10 @@ public final class NotificationCoordinator {
     /// the same window do not silence each other; `accountLabel` names the
     /// account in the banner and is nil on a single-account machine, where the
     /// wording is unchanged.
+    /// `estimated`: `currentPct` is the live meter's estimate in whole
+    /// points, not a reading (#318); the banner says so. Same per-cycle,
+    /// per-threshold dedup keys either way, so a line crossed by an estimate
+    /// and then by the reading is announced once.
     public func handleRateLimitUpdate(
         window: String,
         account: String?,
@@ -112,6 +116,7 @@ public final class NotificationCoordinator {
         currentPct: Double,
         previousPct: Double?,
         resetsAt: Date?,
+        estimated: Bool = false,
         context: ModelContext
     ) async {
         let defaults = PacerSettings.store
@@ -123,7 +128,7 @@ public final class NotificationCoordinator {
             label: Self.decorate(label, with: accountLabel),
             thresholds: thresholds,
             currentPct: currentPct, previousPct: previousPct,
-            resetsAt: resetsAt, context: context)
+            resetsAt: resetsAt, estimated: estimated, context: context)
     }
 
     /// `<key>#<account>`, the same `#` suffix `EngineScope` uses for a scoped
@@ -167,6 +172,7 @@ public final class NotificationCoordinator {
         currentPct: Double,
         previousPct: Double?,
         resetsAt: Date?,
+        estimated: Bool = false,
         context: ModelContext
     ) async {
         let defaults = PacerSettings.store
@@ -176,7 +182,7 @@ public final class NotificationCoordinator {
             label: Self.decorate(label, with: accountLabel),
             thresholds: thresholds,
             currentPct: currentPct, previousPct: previousPct,
-            resetsAt: resetsAt, context: context)
+            resetsAt: resetsAt, estimated: estimated, context: context)
     }
 
     /// The shared post path for both the fixed and scoped rate-limit threshold
@@ -190,23 +196,23 @@ public final class NotificationCoordinator {
         currentPct: Double,
         previousPct: Double?,
         resetsAt: Date?,
+        estimated: Bool = false,
         context: ModelContext
     ) async {
         // Ascending iteration — banners arrive in the order the user crossed
         // them (50% before 75% before 90%) when one sample crosses several.
-        let crossed = RateLimitThresholdPolicy.crossedThresholds(
-            previous: previousPct, current: currentPct, thresholds: thresholds)
-        guard !crossed.isEmpty else { return }
-        for threshold in crossed {
-            let cycleKey = "notif.\(windowKey).\(threshold).\(resetsAt.map { ISO8601DateFormatter().string(from: $0) } ?? "noreset")"
-            if alreadyNotified(key: cycleKey, in: context) {
-                continue
-            }
-
+        // Already-notified thresholds are dropped against every key the
+        // cycle has had (`RateLimitAlertRules.thresholdKeys`).
+        let toPost = RateLimitAlertRules.toPost(
+            windowKey: windowKey, previous: previousPct, current: currentPct, thresholds: thresholds,
+            resetsAt: resetsAt, notified: { alreadyNotified(key: $0, in: context) })
+        guard !toPost.isEmpty else { return }
+        for (threshold, cycleKey) in toPost {
             await requestAuthorizationIfNeeded()
             let content = UNMutableNotificationContent()
             content.title = "Pacer rate-limit warning"
-            content.body = "\(label) usage hit \(Int(currentPct.rounded()))% (threshold \(threshold)%)."
+            content.body = RateLimitAlertRules.thresholdBody(
+                label: label, percent: currentPct, threshold: threshold, estimated: estimated)
             content.sound = .default
             content.interruptionLevel = .timeSensitive
 
@@ -331,9 +337,8 @@ public final class NotificationCoordinator {
     ///
     /// Dedup is keyed on the NEW `resetsAt` so we fire at most once
     /// per cycle even when the OAuth poller writes multiple low
-    /// samples back-to-back as the new window starts at zero.
-    public static let resetPreviousHigh: Double = 50
-    public static let resetCurrentLow: Double = 10
+    /// samples back-to-back as the new window starts at zero. The rule is
+    /// `RateLimitAlertRules.isReset`.
 
     public func handleRateLimitReset(
         window: String,
@@ -349,15 +354,14 @@ public final class NotificationCoordinator {
         let defaults = PacerSettings.store
         guard defaults.bool(forKey: PacerSettings.Key.notificationsEnabled) else { return }
         guard defaults.bool(forKey: PacerSettings.Key.notifyOnReset) else { return }
-        guard let previousPct, previousPct >= Self.resetPreviousHigh else { return }
-        guard currentPct <= Self.resetCurrentLow else { return }
-        guard let resetsAt, let previousResetsAt, resetsAt > previousResetsAt else {
-            // No reset boundary movement — could be the same cycle's
-            // utilization dipping (server-side accounting recompute).
-            // Without the resetsAt advance we don't have proof the
-            // cycle actually rolled.
-            return
-        }
+        // Readings only: the alert monitor never passes an estimate here, so
+        // an estimate that climbed and was corrected down cannot read as a
+        // window that fell. Without the resetsAt advance (the same cycle's
+        // utilization dipping on a server-side recompute) there is no proof
+        // the cycle rolled.
+        guard RateLimitAlertRules.isReset(previousPct: previousPct, currentPct: currentPct,
+                                          previousResetsAt: previousResetsAt, resetsAt: resetsAt),
+              let resetsAt else { return }
 
         let cycleKey = "notif.reset.\(Self.scopedKey(window, account: account))."
             + ISO8601DateFormatter().string(from: resetsAt)

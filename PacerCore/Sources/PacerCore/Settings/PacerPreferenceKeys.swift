@@ -61,6 +61,9 @@ public enum PacerPreferenceKeys {
     /// moves forward). Useful for users who pace work around the 5-hour
     /// window — they can be told "OK, you can keep going."
     public static let notifyOnReset          = "pacer.notifications.reset"
+    /// What the 50/75/90% threshold alerts judge (#318):
+    /// `RateLimitAlertSource` raw value. Anthropic's readings by default.
+    public static let alertSource            = "pacer.notifications.alertSource"
     /// Fire a banner when Anthropic resets rate limits *early* — an
     /// off-schedule global reset where utilization collapses to near-zero
     /// but the `resetsAt` cycle anchor does NOT move forward (distinct

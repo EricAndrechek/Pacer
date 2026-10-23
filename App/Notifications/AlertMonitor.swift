@@ -60,6 +60,14 @@ final class AlertMonitor {
             await NotificationCoordinator.shared.requestAuthorizationIfNeeded()
             await self?.followRateLimitWrites()
         })
+        // The live meter's estimates, for users who chose to be warned from
+        // them (#318). The board republishes when a number moves.
+        tasks.append(Task { [weak self] in
+            while !Task.isCancelled {
+                await Self.nextLiveMeterChange()
+                await self?.judgeEstimates()
+            }
+        })
         // The daily summary, the day rolling over, and a safety net under the
         // two signals: any reading they missed is judged here.
         tasks.append(Task { [weak self] in
@@ -97,6 +105,56 @@ final class AlertMonitor {
                 _ = RateLimitWriteSignal.shared.generation
             } onChange: {
                 continuation.resume()
+            }
+        }
+    }
+
+    /// Returns at the next change of the live meter's values.
+    private static func nextLiveMeterChange() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            withObservationTracking {
+                _ = LiveMeterBoard.shared.values
+            } onChange: {
+                continuation.resume()
+            }
+        }
+    }
+
+    /// The last readings snapshot's banner labels and scoped thresholds, for
+    /// judging estimates between readings without a store read.
+    private var lastLabels: [String: String] = [:]
+    private var lastScoped: [String: [String: (thresholds: [Int], label: String)]] = [:]
+
+    /// Threshold crossings by the live meter's estimates, when Settings →
+    /// Notifications → "Alert from" includes them (#318).
+    ///
+    /// Thresholds only, whole points, the same per-cycle per-threshold dedup
+    /// keys as readings: a line crossed by an estimate and then by the reading
+    /// is announced once, as an estimate. Never a reset, a burn warning or
+    /// anything else: those judge readings alone, and an estimate's state
+    /// (`AlertCrossingState.advanceEstimate`) is kept apart from theirs, so
+    /// an estimate that climbs and is corrected down by the next reading
+    /// cannot look like a window that fell.
+    private func judgeEstimates() async {
+        guard RateLimitAlertSource.current() == .readingsAndEstimates else { return }
+        let coordinator = NotificationCoordinator.shared
+        for (account, windows) in LiveMeterBoard.shared.values {
+            let label = lastLabels[account]
+            for (key, live) in windows.sorted(by: { $0.key < $1.key }) {
+                guard let step = state.advanceEstimate("\(account)|\(key)", live: live) else { continue }
+                save()
+                if key == RateLimitWindowName.fiveHour || key == RateLimitWindowName.sevenDay {
+                    await coordinator.handleRateLimitUpdate(
+                        window: key, account: account, accountLabel: label,
+                        currentPct: live.percent, previousPct: step.previousPercent,
+                        resetsAt: live.reading.resetsAt, estimated: true, context: context)
+                } else if let scoped = lastScoped[account]?[key], !scoped.thresholds.isEmpty {
+                    await coordinator.handleScopedRateLimitUpdate(
+                        identity: key, account: account, accountLabel: label, label: scoped.label,
+                        thresholds: scoped.thresholds,
+                        currentPct: live.percent, previousPct: step.previousPercent,
+                        resetsAt: live.reading.resetsAt, estimated: true, context: context)
+                }
             }
         }
     }
@@ -167,6 +225,10 @@ final class AlertMonitor {
 
     private func judge(_ snapshot: LimitsSnapshot) async {
         let coordinator = NotificationCoordinator.shared
+        lastLabels = snapshot.labels
+        lastScoped = snapshot.scoped.mapValues { rows in
+            Dictionary(rows.map { ($0.row.identity, ($0.thresholds, $0.row.label)) }, uniquingKeysWith: { a, _ in a })
+        }
         for (account, rows) in snapshot.fixed {
             let label = snapshot.labels[account]
             for window in [RateLimitWindowName.fiveHour, RateLimitWindowName.sevenDay] {

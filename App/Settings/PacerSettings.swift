@@ -91,6 +91,7 @@ public enum PacerSettings {
         public static let notifyOnDailyCost      = PacerPreferenceKeys.notifyOnDailyCost
         public static let dailyCostThresholdUSD  = PacerPreferenceKeys.dailyCostThresholdUSD
         public static let notifyOnReset          = PacerPreferenceKeys.notifyOnReset
+        public static let alertSource            = PacerPreferenceKeys.alertSource
         public static let notifyGlobalReset      = PacerPreferenceKeys.notifyGlobalReset
         public static let notifyBurnRate         = PacerPreferenceKeys.notifyBurnRate
         public static let notifyBurnRateRearm    = PacerPreferenceKeys.notifyBurnRateRearm
@@ -138,6 +139,7 @@ public enum PacerSettings {
         Key.notifyOnDailyCost:     false,
         Key.dailyCostThresholdUSD: 50.0,
         Key.notifyOnReset:         false,
+        Key.alertSource:           RateLimitAlertSource.readings.rawValue,
         // On by default: an off-schedule global reset is rare and
         // high-value (fires at most once per cycle), so anyone who's
         // enabled notifications at all should hear about it without
