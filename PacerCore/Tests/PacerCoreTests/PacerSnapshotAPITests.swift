@@ -380,4 +380,107 @@ struct PacerSnapshotAPITests {
         #expect(snap.limits.all.isEmpty)
         #expect(try snap.encodedJSON().contains("\"scoped\" : ["))
     }
+
+    // MARK: - The live meter (#318)
+
+    /// Every table the live meter reads: the fits and the turns too.
+    private static func makeFullContainer() throws -> ModelContainer {
+        try ModelContainer(for: Schema(PacerStore.allModelTypes),
+                           configurations: ModelConfiguration(isStoredInMemoryOnly: true))
+    }
+
+    private static func fit(_ context: ModelContext, account: String, window: String,
+                            rates: [String: Double], pooled: Double, at: Date) {
+        context.insert(SpendMeterFit(result: SpendMeterFitResult(
+            accountId: account, window: window,
+            spanStart: at.addingTimeInterval(-14 * 86_400), spanEnd: at,
+            modelRates: rates, interceptPerHour: 40, pooledRate: pooled,
+            r2: 0.9, rmse: 1, pooledR2: 0.9, hours: 100, activeHours: 50,
+            totalSpendUSD: 1000, totalRise: 100, unfittedSpendUSD: 0,
+            interceptShare: 0.2, noSpendRiseShare: 0, method: SpendMeterFitter.method),
+            fittedDay: TokenSample.formatDate(at), fittedAt: at))
+    }
+
+    private static func turn(_ context: ModelContext, account: String, at: Date, model: String, usd: Double) {
+        let s = TokenSample(sampledAt: at, date: TokenSample.formatDate(at), model: model,
+                            inputTokens: 10, outputTokens: 10, cacheReadTokens: 0,
+                            cacheCreation5mTokens: 0, cacheCreation1hTokens: 0, sourceCostUSD: usd)
+        s.accountId = account
+        context.insert(s)
+    }
+
+    /// The seed, plus a 5-hour fit and a Fable-cap fit for the work login and
+    /// turns after its readings: $10 of Opus and $4 of Fable.
+    @MainActor
+    private static func seedLive(_ container: ModelContainer, now: Date) -> Date {
+        let context = ModelContext(container)
+        seed(context, now: now)
+        fit(context, account: work, window: RateLimitWindowName.fiveHour,
+            rates: ["claude-opus-5-5": 0.2], pooled: 0.15, at: now)
+        fit(context, account: work, window: "weekly_scoped|Fable|",
+            rates: ["claude-fable-5-1": 0.5], pooled: 0.5, at: now)
+        turn(context, account: work, at: now.addingTimeInterval(30), model: "claude-opus-5-5", usd: 10)
+        turn(context, account: work, at: now.addingTimeInterval(40), model: "claude-fable-5-1", usd: 4)
+        try? context.save()
+        return now.addingTimeInterval(60)
+    }
+
+    @MainActor
+    @Test func theLiveValueRidesBesideTheReading() throws {
+        let container = try Self.makeFullContainer()
+        let readAt = Date()
+        let now = Self.seedLive(container, now: readAt)
+        let limits = try Self.build(container, account: nil, now: now).limits
+
+        let five = try #require(limits.fiveHour)
+        #expect(five.usedPercent == 37)            // still the reading
+        // $10 Opus × 0.2 + $4 Fable at the pooled 0.15 = 2.6 → 2. Never the
+        // fit's intercept, which is 40 points an hour here.
+        #expect(five.livePercentage == 39)
+        #expect(five.liveAddedPoints == 2)
+        #expect(five.liveAsOf == now)
+
+        // No 7-day fit: no live value, and the reading alone.
+        let seven = try #require(limits.sevenDay)
+        #expect(seven.livePercentage == nil)
+        #expect(seven.liveAsOf == nil)
+        #expect(seven.usedPercent == 21)
+
+        // The Fable cap counts the Fable turn only: $4 × 0.5.
+        let fable = try #require(limits.scoped.first { $0.identity == "weekly_scoped|Fable|" })
+        #expect(fable.usedPercent == 16)
+        #expect(fable.livePercentage == 18)
+        let opus = try #require(limits.scoped.first { $0.identity == "weekly_scoped|Opus|" })
+        #expect(opus.livePercentage == nil)
+    }
+
+    /// Another account's spend never moves this one's meter, and an account
+    /// with no fit has no live value at all.
+    @MainActor
+    @Test func theLiveValueIsPerAccount() throws {
+        let container = try Self.makeFullContainer()
+        let now = Self.seedLive(container, now: Date())
+        let home = try Self.build(container, account: Self.home, now: now).limits
+        #expect(home.fiveHour?.usedPercent == 2)
+        #expect(home.fiveHour?.livePercentage == nil)
+    }
+
+    @MainActor
+    @Test func theLiveFieldsAreAbsentFromTheJSONWithoutAFit() throws {
+        let container = try Self.makeContainer()
+        let now = Date()
+        Self.seed(ModelContext(container), now: now)
+        let plain = try Self.build(container, account: nil, now: now).encodedJSON()
+        #expect(!plain.contains("livePercentage"))
+        #expect(!plain.contains("liveAsOf"))
+        #expect(plain.contains("\"usedPercent\" : 37"))
+
+        let full = try Self.makeFullContainer()
+        let later = Self.seedLive(full, now: now)
+        let live = try Self.build(full, account: nil, now: later).encodedJSON()
+        #expect(live.contains("\"livePercentage\" : 39"))
+        #expect(live.contains("\"liveAddedPoints\" : 2"))
+        #expect(live.contains("\"liveAsOf\""))
+        #expect(live.contains("\"usedPercent\" : 37"))
+    }
 }

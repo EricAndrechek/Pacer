@@ -142,6 +142,20 @@ public struct PacerMetrics: Sendable {
                                      help: "Age of the reading behind used_ratio when this was built; usage has kept moving since.",
                                      labels: labels))
             }
+            // The live meter (#318), beside the reading it starts from. Absent
+            // without a fit or a reading in the last hour; `used_ratio` is
+            // unchanged either way.
+            if let live = w.livePercentage {
+                m.append(PacerMetric("pacer_rate_limit_live_used_ratio", live / 100,
+                                     help: "Live estimate of utilization (0–1): used_ratio plus the whole points the API spend since that reading adds at the fitted per-model rates, capped at 1.",
+                                     labels: labels))
+                if let asOf = w.liveAsOf {
+                    m.append(PacerMetric("pacer_rate_limit_live_age_seconds",
+                                         Double(PacerSnapshotPayload.seconds(from: asOf, until: s.generatedAt)),
+                                         help: "Age of live_used_ratio: seconds since the spend behind it was read.",
+                                         labels: labels))
+                }
+            }
         }
         // Every window of every account passed in — the fixed 5h/7d blocks and
         // each scoped per-model cap, keyed by its own identity. `window=` used

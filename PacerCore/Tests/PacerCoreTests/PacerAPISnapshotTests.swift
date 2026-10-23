@@ -333,6 +333,23 @@ struct PacerSnapshotRebaseTests {
         #expect(w.resetsInSeconds == 1_600)
     }
 
+    /// The live value describes the moment it was built for; a rebase knows
+    /// no spend after that, so it travels as built and its age grows.
+    @Test func theLiveValueTravelsAsBuilt() {
+        let base = live
+        let built = PacerSnapshotPayload.Limits.Window(
+            identity: base.identity, label: base.label, group: base.group,
+            usedPercent: base.usedPercent, resetsAt: base.resetsAt, resetsInSeconds: base.resetsInSeconds,
+            sampledAt: base.sampledAt, sampleAgeSeconds: base.sampleAgeSeconds,
+            livePercentage: 43, liveAsOf: self.built, liveAddedPoints: 3)
+        let w = built.rebased(to: self.built.addingTimeInterval(100))
+        #expect(w.livePercentage == 43)
+        #expect(w.liveAsOf == self.built)
+        #expect(w.liveAddedPoints == 3)
+        #expect(w.usedPercent == 40)
+        #expect(live.rebased(to: self.built.addingTimeInterval(100)).livePercentage == nil)
+    }
+
     @Test func countdownsFloorAtZero() {
         let w = live.rebased(to: built.addingTimeInterval(4_000))
         #expect(w.resetsInSeconds == 0)

@@ -148,6 +148,20 @@ public struct PacerSnapshotPayload: Codable, Sendable {
             /// is: the usage has kept climbing since (pace's safe limit).
             public let sampledAt: Date?
             public let sampleAgeSeconds: Int?
+            /// The live meter (#318): `usedPercent` plus the whole points the
+            /// API spend since that reading adds, at each model's fitted rate,
+            /// capped at 100 and restarted at a reset. `nil` with no fit yet
+            /// (a new login, under 14 days of history) or no reading in the
+            /// last hour — read `usedPercent` then. Never stored as a reading.
+            ///
+            /// `usedPercent` keeps meaning the last reading, so a client that
+            /// never reads these sees exactly what it did before.
+            public let livePercentage: Double?
+            /// The moment `livePercentage` describes: when this payload was
+            /// built. It is not rebased; spend since then is not in it.
+            public let liveAsOf: Date?
+            /// `livePercentage` minus the reading (minus 0 after a reset).
+            public let liveAddedPoints: Double?
 
             public init(identity: String, label: String, group: String,
                         usedPercent: Double, resetsAt: Date?, resetsInSeconds: Int?,
@@ -159,7 +173,9 @@ public struct PacerSnapshotPayload: Codable, Sendable {
                         burnPercentPerHour: Double? = nil,
                         recentBurnPercentPerHour: Double? = nil,
                         isActive: Bool? = nil, severity: String? = nil,
-                        sampledAt: Date? = nil, sampleAgeSeconds: Int? = nil) {
+                        sampledAt: Date? = nil, sampleAgeSeconds: Int? = nil,
+                        livePercentage: Double? = nil, liveAsOf: Date? = nil,
+                        liveAddedPoints: Double? = nil) {
                 self.identity = identity
                 self.label = label
                 self.group = group
@@ -178,6 +194,9 @@ public struct PacerSnapshotPayload: Codable, Sendable {
                 self.severity = severity
                 self.sampledAt = sampledAt
                 self.sampleAgeSeconds = sampleAgeSeconds
+                self.livePercentage = livePercentage
+                self.liveAsOf = liveAsOf
+                self.liveAddedPoints = liveAddedPoints
             }
         }
 
@@ -332,7 +351,11 @@ public extension PacerSnapshotPayload.Limits.Window {
             isActive: isActive, severity: severity,
             sampledAt: sampledAt,
             sampleAgeSeconds: sampledAt.map { PacerSnapshotPayload.seconds(from: $0, until: now) }
-                ?? sampleAgeSeconds)
+                ?? sampleAgeSeconds,
+            // As built: the live value describes `liveAsOf`, and a rebase
+            // knows no spend after it. Its age is `now − liveAsOf`.
+            livePercentage: livePercentage, liveAsOf: liveAsOf,
+            liveAddedPoints: liveAddedPoints)
     }
 }
 
@@ -564,9 +587,9 @@ public enum PacerSnapshotBuilder {
             LimitScope.rateLimits(account: limitAccount, limit: 64))) ?? []
         let outlook = engineSnapshot(context: context, scope: scope)
 
-        let scopedHistory = ((try? context.fetch(LimitScope.modelScopedLimits(
-            account: limitAccount, limit: scopedFetchLimit))) ?? [])
-            .map(\.scopedWindowRow)
+        let scopedSamples = (try? context.fetch(LimitScope.modelScopedLimits(
+            account: limitAccount, limit: scopedFetchLimit))) ?? []
+        let scopedHistory = scopedSamples.map(\.scopedWindowRow)
         let scopedRows = scopedHistory
             .latestBatch()
             .sorted { $0.identity < $1.identity }
@@ -574,8 +597,14 @@ public enum PacerSnapshotBuilder {
             (outlook?.scoped ?? []).map { ($0.identity, $0.outlook) },
             uniquingKeysWith: { first, _ in first })
 
+        let fiveHourSample = rlRows.first { $0.window == fiveHourKey }
+        let sevenDaySample = rlRows.first { $0.window == sevenDayKey }
+        let live = liveValues(context: context, account: limitAccount,
+                              fiveHour: fiveHourSample, sevenDay: sevenDaySample,
+                              scoped: scopedRows, scopedSamples: scopedSamples, now: now)
+
         return PacerSnapshotPayload.Limits(
-            fiveHour: window(rlRows.first { $0.window == fiveHourKey },
+            fiveHour: window(fiveHourSample,
                              identity: fiveHourKey,
                              label: WindowSpec.fixed(.fiveHour).displayName,
                              group: fiveHourGroup,
@@ -583,8 +612,9 @@ public enum PacerSnapshotBuilder {
                              recentBurn: recentBurn(rlRows.filter { $0.window == fiveHourKey },
                                                     duration: WindowSpec.fixed(.fiveHour).duration,
                                                     now: now),
+                             live: live[fiveHourKey],
                              now: now),
-            sevenDay: window(rlRows.first { $0.window == sevenDayKey },
+            sevenDay: window(sevenDaySample,
                              identity: sevenDayKey,
                              label: WindowSpec.fixed(.sevenDay).displayName,
                              group: sevenDayGroup,
@@ -592,6 +622,7 @@ public enum PacerSnapshotBuilder {
                              recentBurn: recentBurn(rlRows.filter { $0.window == sevenDayKey },
                                                     duration: WindowSpec.fixed(.sevenDay).duration,
                                                     now: now),
+                             live: live[sevenDayKey],
                              now: now),
             scoped: scopedRows.map { row in
                 window(identity: row.identity, label: row.label, group: row.group,
@@ -606,8 +637,44 @@ public enum PacerSnapshotBuilder {
                                             resetsAt: $0.resetsAt) },
                            now: now,
                            duration: WindowSpec.scopedDuration(group: row.group)),
+                       live: live[row.identity],
                        now: now)
             })
+    }
+
+    /// The live meter for one account's windows (#318), from the readings
+    /// this build already holds. Empty with no account: the fits and the
+    /// turns are both per account, and "no scope known yet" has neither.
+    ///
+    /// A scoped cap counts only the spend of the model it names, taken from
+    /// its newest row that names one, as the daily fit does.
+    private static func liveValues(
+        context: ModelContext, account: String?,
+        fiveHour: RateLimitSample?, sevenDay: RateLimitSample?,
+        scoped: [ScopedWindowRow], scopedSamples: [UsageLimitSample], now: Date
+    ) -> [String: LiveMeterValue] {
+        guard let account else { return [:] }
+        var windows: [LiveMeterSource.Window] = []
+        for (sample, key, spec) in [(fiveHour, fiveHourKey, WindowSpec.fixed(.fiveHour)),
+                                    (sevenDay, sevenDayKey, WindowSpec.fixed(.sevenDay))] {
+            guard let sample else { continue }
+            windows.append(.init(key: key, duration: spec.duration,
+                                 reading: MeterReading(at: sample.sampledAt, percent: sample.usedPercentage,
+                                                       resetsAt: sample.resetsAt)))
+        }
+        for row in scoped {
+            // Newest first, so the first naming is the newest.
+            let named = scopedSamples.filter { $0.identity == row.identity }
+            windows.append(.init(
+                key: row.identity, duration: WindowSpec.scopedDuration(group: row.group),
+                reading: MeterReading(at: row.sampledAt, percent: row.percent, resetsAt: row.resetsAt),
+                capModelId: named.lazy.compactMap { $0.modelId?.isEmpty == false ? $0.modelId : nil }.first,
+                capModelName: named.lazy.compactMap {
+                    $0.modelDisplayName?.isEmpty == false ? $0.modelDisplayName : nil
+                }.first))
+        }
+        guard !windows.isEmpty else { return [:] }
+        return LiveMeterSource(context: context).values(account: account, windows: windows, now: now)
     }
 
     /// Measured burn over the last half hour for one fixed window.
@@ -627,13 +694,14 @@ public enum PacerSnapshotBuilder {
         identity: String, label: String, group: String,
         outlook: EngineSnapshot.WindowOutlook?,
         recentBurn: Double?,
+        live: LiveMeterValue?,
         now: Date
     ) -> PacerSnapshotPayload.Limits.Window? {
         guard let sample else { return nil }
         return window(identity: identity, label: label, group: group,
                       usedPercent: sample.usedPercentage, resetsAt: sample.resetsAt,
                       sampledAt: sample.sampledAt,
-                      outlook: outlook, recentBurn: recentBurn, now: now)
+                      outlook: outlook, recentBurn: recentBurn, live: live, now: now)
     }
 
     /// Assemble one window's live usage plus the engine's projection — but only
@@ -647,6 +715,7 @@ public enum PacerSnapshotBuilder {
         isActive: Bool? = nil, severity: String? = nil,
         outlook: EngineSnapshot.WindowOutlook?,
         recentBurn: Double?,
+        live: LiveMeterValue? = nil,
         now: Date
     ) -> PacerSnapshotPayload.Limits.Window {
         let resetsInSeconds = resetsAt.map { PacerSnapshotPayload.seconds(from: now, until: $0) }
@@ -682,7 +751,10 @@ public enum PacerSnapshotBuilder {
             isActive: isActive,
             severity: severity,
             sampledAt: sampledAt,
-            sampleAgeSeconds: sampledAt.map { PacerSnapshotPayload.seconds(from: $0, until: now) })
+            sampleAgeSeconds: sampledAt.map { PacerSnapshotPayload.seconds(from: $0, until: now) },
+            livePercentage: live?.percent,
+            liveAsOf: live?.asOf,
+            liveAddedPoints: live?.addedPoints)
     }
 
     /// The most recent session for one account, or across every account when
