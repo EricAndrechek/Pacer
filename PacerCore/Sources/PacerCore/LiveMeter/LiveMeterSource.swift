@@ -73,6 +73,7 @@ public struct LiveMeterSource {
     /// Every window of `account` that has a fit and a recent enough reading,
     /// keyed by `Window.key`.
     public func values(account: String, windows: [Window], now: Date) -> [String: LiveMeterValue] {
+        guard hasTables else { return [:] }
         var plans: [(window: Window, rates: LiveMeterRates, from: Date)] = []
         for w in windows {
             guard now.timeIntervalSince(w.reading.at) <= LiveMeter.maxReadingAge,
@@ -103,6 +104,16 @@ public struct LiveMeterSource {
     }
 
     // MARK: - Reads
+
+    /// Whether the container has the two tables this reads. A reduced schema
+    /// (a test's container of a few types) has no live value: fetching a type
+    /// the schema lacks is not documented to throw rather than trap, so it is
+    /// never asked.
+    private var hasTables: Bool {
+        let names = Set(context.container.schema.entities.map(\.name))
+        return names.contains(Schema.entityName(for: SpendMeterFit.self))
+            && names.contains(Schema.entityName(for: TokenSample.self))
+    }
 
     /// The newest fit for (account, window), whatever day it was made: rates
     /// drift slowly, and a Mac that has not run the daily job for a while
