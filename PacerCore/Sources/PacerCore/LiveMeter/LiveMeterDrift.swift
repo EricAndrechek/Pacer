@@ -8,8 +8,8 @@ import SwiftData
 ///
 /// Built from the previous reading and the turns between it and the new
 /// one, exactly as the snapshot built it then (`LiveMeterSource`). Windows
-/// with no fit say nothing, and neither does an idle window: no spend, and
-/// the reading unchanged.
+/// with no fit say nothing, and neither does a window where the meter did
+/// not move and the live value agreed with it.
 public enum LiveMeterDrift {
 
     /// `readings` are the new poll's: window key and percent. Reads only, on
@@ -23,7 +23,11 @@ public enum LiveMeterDrift {
         let values = source.values(account: account, windows: windows, now: at)
         for (key, percent) in readings {
             guard let v = values[key] else { continue }
-            if v.addedPoints == 0, !v.restarted, v.reading.percent == percent { continue }
+            // Only when there is something to compare: the meter moved, or
+            // the live value disagreed with it. A busy account is read every
+            // ~30 s, and a line for every poll that merely saw some spend was
+            // hundreds an hour that each said "they agree".
+            if !v.restarted, v.reading.percent == percent, v.percent == percent { continue }
             Log.write("LiveMeter", line(account: account, window: key, read: percent, live: v))
         }
     }
