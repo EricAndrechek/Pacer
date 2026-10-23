@@ -238,4 +238,26 @@ struct LiveMeterDisplayTests {
         #expect(pairs.map(\.0) == pairs.map(\.1))
         #expect(pairs.map(\.0) == ["just now", "just now", "1m ago", "2m ago", "3m ago", "4m ago"])
     }
+
+    // MARK: - Widgets read the widget clock
+
+    /// The README screenshots pin the widget extension's clock (`PacerClock`,
+    /// #154): a widget that reads `Date()` draws whenever it was run, and a
+    /// PR with no UI change gets a screenshot commit.
+    @Test func widgetsReadPacerClockNotDate() throws {
+        let widgets = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Widgets")
+        let files = try FileManager.default.contentsOfDirectory(at: widgets, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "swift" }
+        #expect(!files.isEmpty)
+        for file in files {
+            let source = try String(contentsOf: file, encoding: .utf8)
+            for (n, line) in source.components(separatedBy: "\n").enumerated() {
+                let code = line.components(separatedBy: "//").first ?? line
+                #expect(!code.contains("Date()"), "\(file.lastPathComponent):\(n + 1) reads Date()")
+            }
+        }
+    }
 }

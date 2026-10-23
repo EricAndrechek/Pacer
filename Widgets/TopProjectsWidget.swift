@@ -78,7 +78,7 @@ struct TopProjectsProvider: AppIntentTimelineProvider {
             ("scratch",      18.05),
         ].map { TopProjectsEntry.Row(displayName: $0.0, costUSD: $0.1) }
         return TopProjectsEntry(
-            date: Date(),
+            date: PacerClock.now,
             range: .days7,
             totalCostUSD: rows.reduce(0) { $0 + $1.costUSD },
             projectCount: rows.count,
@@ -93,7 +93,7 @@ struct TopProjectsProvider: AppIntentTimelineProvider {
 
     func timeline(for configuration: TopProjectsConfigurationIntent, in context: Context) async -> Timeline<TopProjectsEntry> {
         let entry = currentEntry(configuration: configuration)
-        let nextRefresh = Date().addingTimeInterval(1800)  // 30 min
+        let nextRefresh = WidgetRefresh.after(1800)  // 30 min, or midnight
         return Timeline(entries: [entry], policy: .after(nextRefresh))
     }
 
@@ -109,7 +109,7 @@ struct TopProjectsProvider: AppIntentTimelineProvider {
             // each 30-min widget refresh from a full-table fetch to a
             // 7/30/90-day range scan.
             let cutoff = TokenSample.formatDate(
-                Calendar.current.date(byAdding: .day, value: -(range.days - 1), to: Date()) ?? Date()
+                Calendar.current.date(byAdding: .day, value: -(range.days - 1), to: PacerClock.now) ?? PacerClock.now
             )
             // Follows the window's account scope, read from App Group
             // defaults.
@@ -139,7 +139,7 @@ struct TopProjectsProvider: AppIntentTimelineProvider {
                 }
                 let total = days.reduce(0) { $0 + $1.cost }
                 return TopProjectsEntry(
-                    date: Date(),
+                    date: PacerClock.now,
                     range: range,
                     totalCostUSD: total,
                     projectCount: 1,
@@ -169,7 +169,7 @@ struct TopProjectsProvider: AppIntentTimelineProvider {
                 )
             }
             return TopProjectsEntry(
-                date: Date(),
+                date: PacerClock.now,
                 range: range,
                 totalCostUSD: allRanked.reduce(0) { $0 + $1.cost },
                 projectCount: allRanked.count,
@@ -178,7 +178,7 @@ struct TopProjectsProvider: AppIntentTimelineProvider {
             )
         } catch {
             return TopProjectsEntry(
-                date: Date(),
+                date: PacerClock.now,
                 range: range,
                 totalCostUSD: 0,
                 projectCount: 0,

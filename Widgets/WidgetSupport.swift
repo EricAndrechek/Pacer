@@ -23,6 +23,20 @@ enum WidgetStyle {
 /// retunes both the dashboard cards and the widget container fills.
 var widgetCardBackground: Color { PacerDesign.cardBackground }
 
+/// When a widget's timeline asks to be rebuilt: `interval` from now, or the
+/// next local midnight when that comes first. A widget that shows today's
+/// numbers rolls over with the day rather than showing yesterday's for up to
+/// one more interval. Read through `PacerClock.now`, like every widget date
+/// (#154).
+enum WidgetRefresh {
+    static func after(_ interval: TimeInterval, now: Date = PacerClock.now) -> Date {
+        let next = now.addingTimeInterval(interval)
+        let cal = Calendar.current
+        guard let tomorrow = cal.date(byAdding: .day, value: 1, to: cal.startOfDay(for: now)) else { return next }
+        return min(next, tomorrow)
+    }
+}
+
 /// `0.6h` → `36m`, `6500s` → `1h 48m`. Used by elapsed/remaining
 /// captions in widgets where space rules out a long format. Stays
 /// widget-local because the dashboard doesn't have a parallel

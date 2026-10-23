@@ -88,9 +88,9 @@ struct PaceGaugesProvider: AppIntentTimelineProvider {
 
     func placeholder(in context: Context) -> PaceGaugesEntry {
         PaceGaugesEntry(
-            date: Date(),
-            fiveHour: .init(usedPct: 35, resetsAt: Date().addingTimeInterval(2 * 3600)),
-            sevenDay: .init(usedPct: 62, resetsAt: Date().addingTimeInterval(4 * 86400)),
+            date: PacerClock.now,
+            fiveHour: .init(usedPct: 35, resetsAt: PacerClock.now.addingTimeInterval(2 * 3600)),
+            sevenDay: .init(usedPct: 62, resetsAt: PacerClock.now.addingTimeInterval(4 * 86400)),
             primaryKey: "five_hour", secondaryKey: "seven_day"
         )
     }
@@ -101,7 +101,7 @@ struct PaceGaugesProvider: AppIntentTimelineProvider {
 
     func timeline(for configuration: PaceGaugesConfigurationIntent, in context: Context) async -> Timeline<PaceGaugesEntry> {
         let entry = currentEntry(primary: configuration.primaryWindow, secondary: configuration.secondaryWindow)
-        let nextRefresh = Date().addingTimeInterval(300)
+        let nextRefresh = PacerClock.now.addingTimeInterval(300)
         return Timeline(entries: [entry], policy: .after(nextRefresh))
     }
 
@@ -137,7 +137,7 @@ struct PaceGaugesProvider: AppIntentTimelineProvider {
             let five = rows.first { $0.window == "five_hour" }
             let seven = rows.first { $0.window == "seven_day" }
             // Each gauge at the live meter's value as of this refresh (#318).
-            let now = Date()
+            let now = PacerClock.now
             let live = account.map { LiveMeterSource(context: context).currentValues(account: $0, now: now) } ?? [:]
             func shown(_ row: RateLimitSample) -> PaceGaugesEntry.WindowState {
                 let r = LiveMeterReadout(reading: MeterReading(at: row.sampledAt, percent: row.usedPercentage,
@@ -149,7 +149,7 @@ struct PaceGaugesProvider: AppIntentTimelineProvider {
             let scoped = Self.scopedGauges(context: context, account: account, live: live, now: now)
             let (primaryKey, secondaryKey) = Self.resolveKeys(primary: primary, secondary: secondary, scoped: scoped)
             return PaceGaugesEntry(
-                date: Date(),
+                date: PacerClock.now,
                 fiveHour: five.map(shown),
                 sevenDay: seven.map(shown),
                 scoped: scoped,
@@ -157,7 +157,7 @@ struct PaceGaugesProvider: AppIntentTimelineProvider {
             )
         } catch {
             let (primaryKey, secondaryKey) = Self.resolveKeys(primary: primary, secondary: secondary, scoped: [])
-            return PaceGaugesEntry(date: Date(), fiveHour: nil, sevenDay: nil,
+            return PaceGaugesEntry(date: PacerClock.now, fiveHour: nil, sevenDay: nil,
                                    primaryKey: primaryKey, secondaryKey: secondaryKey)
         }
     }

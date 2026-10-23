@@ -135,7 +135,7 @@ struct PaceChartProvider: AppIntentTimelineProvider {
 
     func placeholder(in context: Context) -> PaceChartEntry {
         PaceChartEntry(
-            date: Date(),
+            date: PacerClock.now,
             fiveHour: Self.demoState(duration: K.fiveHourSeconds, usedPct: 38, sampleCount: 8),
             sevenDay: Self.demoState(duration: K.sevenDaySeconds, usedPct: 62, sampleCount: 12),
             primaryKey: "five_hour", secondaryKey: "seven_day"
@@ -148,7 +148,7 @@ struct PaceChartProvider: AppIntentTimelineProvider {
 
     func timeline(for configuration: PaceChartConfigurationIntent, in context: Context) async -> Timeline<PaceChartEntry> {
         let entry = currentEntry(primary: configuration.primaryWindow, secondary: configuration.secondaryWindow)
-        let next = Date().addingTimeInterval(K.refreshSeconds)
+        let next = PacerClock.now.addingTimeInterval(K.refreshSeconds)
         return Timeline(entries: [entry], policy: .after(next))
     }
 
@@ -177,7 +177,7 @@ struct PaceChartProvider: AppIntentTimelineProvider {
             // ~12 samples/hr × 2 windows ≈ 4600) but caps any future
             // burst: a stuck poller or a backfill event won't blow up
             // widget refresh memory.
-            let cutoff = Date().addingTimeInterval(-8 * 86400)
+            let cutoff = PacerClock.now.addingTimeInterval(-8 * 86400)
             // The window's scope, else the active login — read from App Group
             // defaults, which is why the scope lives there: this is a separate
             // process and cannot see the app's standard defaults. A widget
@@ -196,7 +196,7 @@ struct PaceChartProvider: AppIntentTimelineProvider {
             let snapshot = Self.engineSnapshot(context: context, account: account)
             // The live meter as of this refresh (#318), the same arithmetic
             // the app's surfaces read through `LiveMeterBoard`.
-            let live = account.map { LiveMeterSource(context: context).currentValues(account: $0, now: Date()) } ?? [:]
+            let live = account.map { LiveMeterSource(context: context).currentValues(account: $0, now: PacerClock.now) } ?? [:]
             let five = Self.window(rows: rows, key: "five_hour", duration: K.fiveHourSeconds,
                                    outlook: snapshot?.fiveHour, live: live["five_hour"])
             let seven = Self.window(rows: rows, key: "seven_day", duration: K.sevenDaySeconds,
@@ -204,14 +204,14 @@ struct PaceChartProvider: AppIntentTimelineProvider {
             let scoped = Self.scopedStates(context: context, snapshot: snapshot, account: account, live: live)
             let (primaryKey, secondaryKey) = Self.resolveKeys(primary: primary, secondary: secondary, scoped: scoped)
             return PaceChartEntry(
-                date: Date(), fiveHour: five, sevenDay: seven,
+                date: PacerClock.now, fiveHour: five, sevenDay: seven,
                 fiveHourIdle: five == nil ? Self.idleUsedPct(rows: rows, key: "five_hour") : nil,
                 sevenDayIdle: seven == nil ? Self.idleUsedPct(rows: rows, key: "seven_day") : nil,
                 scoped: scoped,
                 primaryKey: primaryKey, secondaryKey: secondaryKey)
         } catch {
             let (primaryKey, secondaryKey) = Self.resolveKeys(primary: primary, secondary: secondary, scoped: [])
-            return PaceChartEntry(date: Date(), fiveHour: nil, sevenDay: nil,
+            return PaceChartEntry(date: PacerClock.now, fiveHour: nil, sevenDay: nil,
                                   primaryKey: primaryKey, secondaryKey: secondaryKey)
         }
     }
@@ -303,7 +303,7 @@ struct PaceChartProvider: AppIntentTimelineProvider {
         let windowRows = rows.filter { $0.window == key }
         guard let latest = windowRows.first, let resetsAt = latest.resetsAt else { return nil }
         let cycleStart = resetsAt.addingTimeInterval(-duration)
-        let now = Date()
+        let now = PacerClock.now
         // The synthesized tail is clamped to the cycle: once `now > resetsAt`
         // (cycle ended, no fresh sample yet), a tail at `now` falls outside
         // `chartXScale`'s domain.
@@ -359,7 +359,7 @@ struct PaceChartProvider: AppIntentTimelineProvider {
         guard let resetsAt = row.resetsAt else { return nil }
         let duration = WindowSpec.scopedDuration(group: row.group)
         let cycleStart = resetsAt.addingTimeInterval(-duration)
-        let now = Date()
+        let now = PacerClock.now
         let tailTime = min(now, resetsAt)
         let readout = LiveMeterReadout(
             reading: MeterReading(at: row.sampledAt, percent: row.percent, resetsAt: resetsAt),
@@ -399,7 +399,7 @@ struct PaceChartProvider: AppIntentTimelineProvider {
         usedPct: Double,
         sampleCount: Int
     ) -> PaceChartEntry.WindowState {
-        let now = Date()
+        let now = PacerClock.now
         let resets = now.addingTimeInterval(duration * 0.55)
         let cycleStart = resets.addingTimeInterval(-duration)
         let elapsed = now.timeIntervalSince(cycleStart)
