@@ -452,31 +452,34 @@ struct ProjectionDetailView: View {
         return out
     }
 
-    /// "Live meter: 45.2%, read 42% 3 minutes ago · within 1 point of the
-    /// next reading 90% of the time today". Either half alone when only it
-    /// applies. The reading's age keeps itself current (`PacerReadAge`).
-    private var liveLine: Text? {
+    /// "Live meter: 45.2%, read 42% 3m ago · within 1 point of the next
+    /// reading 90% of the time today". Either half alone when only it
+    /// applies. The reading's age is on the shared minute schedule
+    /// (`PacerReadAge`).
+    @ViewBuilder
+    private var liveLine: some View {
         let agreement = liveReview?.agreement.map {
             "within 1 point of the next reading \(Int(($0.share * 100).rounded()))% of the time today"
         }
         if let r = liveReadout {
             let whole = PacerMeterFormat.percent(r.reading.percent, isEstimate: false)
-            let reset = r.live?.restarted == true ? Text(", reset since") : Text("")
-            let read = Text("\(PacerReadAge.label("Live meter: \(r.text), read \(whole)", r.reading.at))\(reset)")
-            return agreement.map { Text("\(read) · \($0)") } ?? read
+            let reset = r.live?.restarted == true ? ", reset since" : ""
+            let tail = agreement.map { " · \($0)" } ?? ""
+            PacerAgeLabel(r.reading.at) { age in
+                Text("Live meter: \(r.text), read \(whole) \(age)\(reset)\(tail)")
+            }
+        } else if let agreement {
+            Text("Live meter: \(agreement)")
         }
-        return agreement.map { Text("Live meter: \($0)") }
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             chart.frame(height: 240)
             liveComparison
-            if let liveLine {
-                liveLine
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-            }
+            liveLine
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
             accuracyTable
             Text(legendText)
                 .font(.system(size: 11))
@@ -726,9 +729,13 @@ struct ProjectionDetailView: View {
                     }
                     Spacer()
                     if let crossAt = st.trajectory.crossesFullAt {
-                        Text("limit \(pacerRelative(crossAt, style: .short))")
-                            .help(pacerRelativeExact(crossAt))
-                            .font(.system(size: 11)).foregroundStyle(.red.opacity(0.85))
+                        // Counts down on the shared minute schedule while the
+                        // sheet stays open.
+                        TimelineView(PacerReadAge.Schedule()) { context in
+                            Text("limit \(pacerRelative(crossAt, style: .short, now: context.date))")
+                                .help(pacerRelativeExact(crossAt))
+                                .font(.system(size: 11)).foregroundStyle(.red.opacity(0.85))
+                        }
                     }
                     Text(st.typicalAbsError.isFinite
                          ? String(format: "within ±%.0f%%", st.typicalAbsError)

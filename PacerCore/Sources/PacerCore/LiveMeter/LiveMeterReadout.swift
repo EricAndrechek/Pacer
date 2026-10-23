@@ -65,22 +65,46 @@ public struct LiveMeterReadout: Sendable, Equatable {
     /// "42%" for a reading, "42.6%" for an estimate.
     public var text: String { PacerMeterFormat.percent(percent, isEstimate: isEstimate) }
 
-    /// "read 42% 3 min. ago", always about `reading`; ", reset since" when
-    /// the estimate restarted past that reading's reset. `age` nil leaves the
-    /// age out ("read 42%"), for text compared rather than shown.
+    /// "read 42%": what Anthropic last said, for a surface with room beside
+    /// the number for only that (the dropdown's rows, the widgets).
+    public var readPercentText: String {
+        "read \(PacerMeterFormat.percent(reading.percent, isEstimate: false))"
+    }
+
+    /// The estimate restarted past its reading's reset: the reading is from
+    /// the window before.
+    var readBeforeReset: Bool { live?.isEstimate == true && live?.restarted == true }
+
+    /// "read 42% 3m ago", always about `reading`; ", reset since" when the
+    /// estimate restarted past that reading's reset. `age` nil leaves the age
+    /// out ("read 42%"), for text compared rather than shown.
     ///
     /// `age` is the reading's age as the surface writes it everywhere else
-    /// (`pacerRelative` in the app), so a hover and the "read 3 min. ago"
-    /// label beside it can never disagree: one reading, one clock, one
-    /// formatter.
+    /// (`PacerReadAge` in the app), so a hover and the "read 3m ago" caption
+    /// beside it can never disagree: one reading, one clock, one formatter.
     public func readText(age: String?) -> String {
-        let read = "read \(PacerMeterFormat.percent(reading.percent, isEstimate: false))"
-        let reset = (live?.isEstimate == true && live?.restarted == true) ? ", reset since" : ""
-        return (age.map { "\(read) \($0)" } ?? read) + reset
+        let reset = readBeforeReset ? ", reset since" : ""
+        return (age.map { "\(readPercentText) \($0)" } ?? readPercentText) + reset
+    }
+
+    /// The caption under a card's number, around the reading's age: what
+    /// Anthropic last read, always. Under an estimate, "estimate · Anthropic
+    /// read 42%" then the age (then ", reset since"); under a reading, "read"
+    /// then the age, since the number above it is that reading.
+    public var captionParts: (lead: String, trail: String) {
+        guard isEstimate else { return ("read", "") }
+        return ("estimate · Anthropic \(readPercentText)", readBeforeReset ? ", reset since" : "")
+    }
+
+    /// `captionParts` around `age`: "estimate · Anthropic read 42% 3m ago",
+    /// "read 3m ago".
+    public func caption(age: String) -> String {
+        let parts = captionParts
+        return "\(parts.lead) \(age)\(parts.trail)"
     }
 
     /// The hover on the number: `readText`, and for an estimate the number
-    /// it is: "read 42% 3 min. ago · estimate 42.6%".
+    /// it is: "read 42% 3m ago · estimate 42.6%".
     public func help(age: String) -> String {
         guard isEstimate else { return readText(age: age) }
         return "\(readText(age: age)) · estimate \(text)"

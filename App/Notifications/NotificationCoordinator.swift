@@ -450,7 +450,7 @@ public final class NotificationCoordinator {
         // between…" line where there's room for it.
         content.title = tier == .imminent
             ? "\(label) limit imminent — projected \(Self.formatRelative(projectedFullAt))"
-            : "On pace to hit the \(label) limit \(IntelligenceFormatting.relativeCrossingPhrase(at: projectedFullAt) ?? Self.formatRelative(projectedFullAt))"
+            : "On pace to hit the \(label) limit \(ForecastChip.relativeCrossing(projectedFullAt, now: PacerClock.now) ?? Self.formatRelative(projectedFullAt))"
 
         // Body: the hit (with its plausible range when meaningfully tight),
         // the reset it beats, the current level, and the pace multiple.

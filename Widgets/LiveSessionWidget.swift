@@ -209,7 +209,8 @@ struct LiveSessionWidgetView: View {
                 .foregroundStyle(.tertiary)
                 .lineLimit(1)
         case .recent, .idle:
-            Text("seen \(pacerRelative(s.lastSeenAt))")
+            // Keeps itself current between timeline refreshes (#318).
+            Text("seen \(PacerReadAge.widgetText(s.lastSeenAt))")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
                 .lineLimit(1)
@@ -224,7 +225,7 @@ struct LiveSessionWidgetView: View {
             case .active:
                 Text("\(formatDurationShort(s.elapsedSeconds)) elapsed")
             case .recent, .idle:
-                Text("last seen \(pacerRelative(s.lastSeenAt))")
+                Text("last seen \(PacerReadAge.widgetText(s.lastSeenAt))")
             }
             Spacer()
             // Show the started-at clock time on medium so the user

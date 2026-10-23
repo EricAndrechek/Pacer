@@ -443,8 +443,8 @@ struct NowStrip: View {
         if stats.hasFreshActivity {
             Chip(text: "live", systemImage: "bolt.fill", tint: .yellow, size: .compact)
         } else if let last = stats.lastSampleAt {
-            Text("last sample \(pacerRelative(last))")
-                .help(pacerRelativeExact(last))
+            // On the shared minute schedule, with every other age on screen.
+            PacerReadAge.label("last sample", last, help: { _ in pacerRelativeExact(last) })
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
         }
@@ -457,10 +457,11 @@ struct NowStrip: View {
                 Text("Nothing running.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
-                Text("Last activity \(pacerRelative(at)) — \(pacerModelDisplayName(model)).")
-                    .help(pacerRelativeExact(at))
-                    .font(.subheadline)
-                    .foregroundStyle(.tertiary)
+                PacerAgeLabel(at, help: { _ in pacerRelativeExact(at) }) { age in
+                    Text("Last activity \(age) — \(pacerModelDisplayName(model)).")
+                }
+                .font(.subheadline)
+                .foregroundStyle(.tertiary)
             }
         } else {
             Text("No samples yet. This tile lights up as Claude Code activity hits the store.")

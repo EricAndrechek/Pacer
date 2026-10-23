@@ -22,13 +22,20 @@ public struct CircularGauge: View {
     public let reading: Double?
     public var lineWidth: CGFloat
     public var labelFont: Font
-    /// The number is the live meter's estimate (#318): its label is written
-    /// with the decimal, lighter (`PacerMeterValue`), and without the "%",
-    /// which a two-digit ring has no room for beside a decimal.
-    public var isEstimate: Bool
+    /// The live meter's estimate on that reading (#318), when the number is
+    /// one. The ring draws the reading solid and the estimated stretch past
+    /// it as a lighter tail in the same colour, the way the chart draws its
+    /// dotted stretch; the label is the estimate, with its decimal.
+    public var estimate: Double?
+    /// The number inside the ring. Off where it is printed beside the ring
+    /// anyway: the dropdown's rows, whose 22 pt ring had no room for "50.7".
+    public var showsLabel: Bool
 
-    /// The reading, or 0 when there is none — kept for callers that read it.
-    public var percentage: Double { reading ?? 0 }
+    /// The number shown: the estimate, else the reading, else 0.
+    public var percentage: Double { estimate ?? reading ?? 0 }
+
+    /// The tail's strength against the solid reading.
+    public static let estimateOpacity = 0.45
 
     public init(
         percentage: Double,
@@ -40,57 +47,80 @@ public struct CircularGauge: View {
 
     public init(
         reading: Double?,
+        estimate: Double? = nil,
         lineWidth: CGFloat = 10,
         labelFont: Font = .system(size: 22, weight: .semibold, design: .rounded),
-        isEstimate: Bool = false
+        showsLabel: Bool = true
     ) {
         self.reading = reading
+        self.estimate = reading == nil ? nil : estimate
         self.lineWidth = lineWidth
         self.labelFont = labelFont
-        self.isEstimate = isEstimate
+        self.showsLabel = showsLabel
     }
 
-    private var fraction: CGFloat {
-        guard let reading else { return 0 }
-        return max(0, min(1, CGFloat(reading) / 100))
+    private static func fraction(_ percent: Double?) -> CGFloat {
+        guard let percent else { return 0 }
+        return max(0, min(1, CGFloat(percent) / 100))
     }
 
+    /// The band of the number shown, for both stretches: one window, one colour.
     private var color: Color {
         UsageBand(percentage: percentage).color
     }
 
     public var body: some View {
+        // An estimate below its reading has restarted past that reading's
+        // reset: the reading is the window before's, and only the estimate
+        // belongs to this one.
+        let restarted = estimate.map { $0 < (reading ?? 0) } ?? false
+        let solid = restarted ? 0 : Self.fraction(reading)
+        let tail = max(solid, Self.fraction(estimate))
         ZStack {
             Circle()
                 .stroke(Color.secondary.opacity(0.18), lineWidth: lineWidth)
+            // Under the solid arc, from 0, so its round cap never shows a
+            // gap where the two meet.
             Circle()
-                .trim(from: 0, to: fraction)
+                .trim(from: 0, to: tail)
+                .stroke(
+                    color.opacity(Self.estimateOpacity),
+                    style: StrokeStyle(lineWidth: lineWidth, lineCap: .round)
+                )
+                .rotationEffect(.degrees(-90))
+                .animation(.easeInOut(duration: 0.4), value: tail)
+            Circle()
+                .trim(from: 0, to: solid)
                 .stroke(
                     color,
                     style: StrokeStyle(lineWidth: lineWidth, lineCap: .round)
                 )
                 .rotationEffect(.degrees(-90))
-                .animation(.easeInOut(duration: 0.4), value: fraction)
-            label
-                .font(labelFont)
-                .monospacedDigit()
-                // "100%" is one glyph wider than every other reading, and the
-                // callers size this ring for two digits. Without these it
-                // wraps to two lines and spills outside the ring — reported as
-                // issue #125 against the 22pt menu-bar gauge.
-                //
-                // Shrink-to-fit rather than a smaller font for everyone:
-                // anything that already fits is untouched, so the dashboard
-                // and widget gauges render identically to before.
-                .lineLimit(1)
-                .minimumScaleFactor(isEstimate ? 0.55 : 0.65)
+                .animation(.easeInOut(duration: 0.4), value: solid)
+            if showsLabel {
+                label
+                    .font(labelFont)
+                    .monospacedDigit()
+                    // "100%" is one glyph wider than every other reading, and
+                    // the callers size this ring for two digits. Without these
+                    // it wraps to two lines and spills outside the ring —
+                    // reported as issue #125 against the 22pt menu-bar gauge.
+                    //
+                    // Shrink-to-fit rather than a smaller font for everyone:
+                    // anything that already fits is untouched.
+                    .lineLimit(1)
+                    .minimumScaleFactor(estimate != nil ? 0.55 : 0.65)
+            }
         }
     }
 
     @ViewBuilder
     private var label: some View {
-        if let reading {
-            PacerMeterValue(reading, isEstimate: isEstimate, percentSign: !isEstimate)
+        if let estimate {
+            // No "%": a two-digit ring has no room for it beside a decimal.
+            PacerMeterValue(estimate, isEstimate: true, percentSign: false)
+        } else if let reading {
+            PacerMeterValue(reading, isEstimate: false)
         } else {
             Text("—").foregroundStyle(.secondary)
         }

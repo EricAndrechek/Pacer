@@ -3,12 +3,14 @@ import PacerCore
 
 /// A window's current %, drawn the one way every surface draws it (#318):
 /// Anthropic's reading whole, "42%"; the live meter's estimate with its
-/// decimal, "42.6%", the decimal in a lighter tint of the same colour.
+/// decimal, "42.6%".
 ///
 /// The decimal is the mark, so the number says which it is without a hover
-/// (`PacerMeterFormat` has the reasoning). The tint is the drawn surfaces'
-/// echo of the chart, where the estimated stretch is the dotted one: the
-/// digit only the estimate has is the soft part of the number.
+/// (`PacerMeterFormat` has the reasoning). Every digit is set alike: an
+/// estimate that crosses into a new whole number has estimated its whole
+/// digits too, so a lighter decimal would have marked the wrong part as the
+/// soft one. What Anthropic last read is said beside it instead
+/// (`PacerMeterCaption`, or "read 42%" where there is room for only that).
 ///
 /// Plain values in, so the menu bar, the dropdown, the pace card, the
 /// comparison sheet and the widgets all take it whatever model type they
@@ -20,10 +22,6 @@ public struct PacerMeterValue: View {
     let color: Color
     let prefix: String
     let percentSign: Bool
-
-    /// The estimate's decimal against its whole number: light enough to read
-    /// as secondary, dark enough to stay legible in the menu bar.
-    public static let fractionOpacity = 0.55
 
     public init(_ percent: Double, isEstimate: Bool, color: Color = .primary,
                 prefix: String = "", percentSign: Bool = true) {
@@ -42,24 +40,47 @@ public struct PacerMeterValue: View {
     }
 
     public var body: some View {
-        let parts = PacerMeterFormat.parts(percent, isEstimate: isEstimate)
-        // One `Text` in both cases (an empty fraction for a reading), so a
-        // reading landing on an estimate changes a value, not the view.
-        Text("\(Text(prefix + parts.whole).foregroundStyle(color))\(Text(parts.fraction ?? "").foregroundStyle(color.opacity(Self.fractionOpacity)))\(Text(percentSign ? "%" : "").foregroundStyle(color))")
+        let number = PacerMeterFormat.number(percent, isEstimate: isEstimate)
+        Text(verbatim: prefix + number + (percentSign ? "%" : ""))
+            .foregroundStyle(color)
             .monospacedDigit()
     }
 }
 
-/// The hover on a window's number: "read 42% 3 minutes ago", and for an
-/// estimate "read 42% 3 minutes ago · estimate 42.6%". Aged by
-/// `PacerReadAge`, the formatter every "read … ago" label uses; draw it on
-/// `PacerReadAge.Schedule` beside such a label and the two change together.
+/// The line under a window's number on a card (#318): what Anthropic last
+/// read, always. "estimate · Anthropic read 50% 3m ago" under an estimate,
+/// "read 3m ago" under a reading. Drawn on `PacerReadAge.Schedule`, so it
+/// changes with every other age on screen.
+///
+/// Font and colour are the caller's (secondary, orange when the account has
+/// stopped being read).
+public struct PacerMeterCaption: View {
+    let readout: LiveMeterReadout
+    let help: String?
+
+    public init(_ readout: LiveMeterReadout, help: String? = nil) {
+        self.readout = readout
+        self.help = help
+    }
+
+    public var body: some View {
+        let parts = readout.captionParts
+        PacerAgeLabel(readout.reading.at, help: help.map { text in { _ in text } }) { age in
+            Text("\(parts.lead) \(age)\(parts.trail)")
+        }
+    }
+}
+
+/// The hover on a window's number: "read 42% 3m ago", and for an estimate
+/// "read 42% 3m ago · estimate 42.6%". Aged by `PacerReadAge`; build it with
+/// the date of the `PacerReadAge.Schedule` it is drawn on, and it changes
+/// with the caption beside it.
 public func pacerMeterHelp(_ readout: LiveMeterReadout, now: Date = PacerClock.now) -> String {
     readout.help(age: PacerReadAge.string(readout.reading.at, now: now))
 }
 
-/// "read 42% 3 minutes ago": the reading under a window's number, aged the
-/// same way (`pacerMeterHelp`).
+/// "read 42% 3m ago": the reading under a window's number, aged the same way
+/// (`pacerMeterHelp`).
 public func pacerMeterReadText(_ readout: LiveMeterReadout, now: Date = PacerClock.now) -> String {
     readout.readText(age: PacerReadAge.string(readout.reading.at, now: now))
 }

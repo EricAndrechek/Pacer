@@ -14,9 +14,12 @@ import Foundation
 /// number ("43.0%"), so the rule has no exception to learn.
 ///
 /// Not "≈": that already means a forecast ("≈52% at reset"). Not "~" either,
-/// which reads as the same thing. Drawn surfaces also set the decimal in a
-/// lighter tint (`PacerMeterValue` in PacerUI), the way the chart draws the
-/// estimated stretch dotted; the CLI, being text, adds the word "est".
+/// which reads as the same thing. Every digit is set alike: an estimate that
+/// crosses into a new whole number has estimated its whole digits too, so a
+/// lighter decimal (tried, and rejected) marked the wrong part as the soft
+/// one. What Anthropic last read is said beside the number instead: the
+/// card's caption, "estimate · Anthropic read 42% 3m ago"; "read 42%" in the
+/// dropdown and the widgets; the word "est" and the reading in the CLI.
 ///
 /// The whole points the gate and the alerts judge are `LiveMeterValue
 /// .percent`, never this: the shown decimal is cut, not rounded, so its whole

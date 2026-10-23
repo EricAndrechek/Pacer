@@ -124,9 +124,9 @@ struct LiveMeterShownValueTests {
     }
 }
 
-/// One reading, one clock, one formatter (#318): the "read … ago" labels keep
-/// themselves current, and a hover or tooltip built beside one says the same
-/// words on the instants those words change.
+/// One reading, one clock, one formatter (#318): a hover or tooltip built
+/// beside a "read … ago" label says the same words, on the same instants
+/// (`LiveMeterDisplayTests` has the schedule).
 @Suite("Live meter: the reading's age")
 struct LiveMeterReadAgeTests {
 
@@ -134,31 +134,11 @@ struct LiveMeterReadAgeTests {
 
     @Test func theHoverAndTheLabelUseOneFormatter() {
         let now = Self.at.addingTimeInterval(150)
-        let words = String(PacerReadAge.style(Self.at).format(now).characters)
-        #expect(PacerReadAge.string(Self.at, now: now) == words)
+        let words = PacerReadAge.string(Self.at, now: now)
         let readout = LiveMeterReadout(reading: MeterReading(at: Self.at, percent: 42, resetsAt: nil),
                                        live: nil, now: now)
         #expect(pacerMeterHelp(readout, now: now) == "read 42% \(words)")
         #expect(pacerMeterReadText(readout, now: now) == "read 42% \(words)")
-    }
-
-    /// The hover's schedule fires where the label's words change, and at
-    /// least once a minute.
-    @Test func theScheduleFiresWhereTheWordsChange() {
-        var entries = PacerReadAge.Schedule(Self.at).entries(from: Self.at, mode: .normal)
-        var dates: [Date] = []
-        for _ in 0..<12 { if let d = entries.next() { dates.append(d) } }
-        #expect(dates.first == Self.at)
-        for (a, b) in zip(dates, dates.dropFirst()) {
-            let gap = b.timeIntervalSince(a)
-            #expect(gap > 0 && gap <= 60)
-            // Inside a gap the words hold; the gap ends where they change,
-            // unless it is the minute cap.
-            let mid = PacerReadAge.string(Self.at, now: a.addingTimeInterval(gap / 2))
-            #expect(mid == PacerReadAge.string(Self.at, now: a.addingTimeInterval(0.01)))
-            if gap < 60 {
-                #expect(PacerReadAge.string(Self.at, now: b.addingTimeInterval(0.01)) != mid)
-            }
-        }
+        #expect(readout.caption(age: words) == "read \(words)")
     }
 }

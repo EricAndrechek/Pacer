@@ -73,6 +73,12 @@ struct PaceChartEntry: TimelineEntry {
         /// carries a live point only for an estimate (`Data.withLive`).
         var isEstimate: Bool { chart.live != nil }
 
+        /// What Anthropic last read: "read 50%" beside an estimate where the
+        /// canvas has room (#318). Nil for a reading, which needs no echo.
+        var readText: String? {
+            isEstimate ? "read \(PacerMeterFormat.percent(chart.usedPct, isEstimate: false))" : nil
+        }
+
         var band: PaceBand {
             PaceBand(usedPct: usedPct, paceEndPct: paceEndPct)
         }
@@ -518,11 +524,11 @@ struct PaceChartWidgetView: View {
                 // `compact: true` shortens "in 2 hr. · 10:23 AM" to
                 // "in 2h · 10p" so the 7-day form (~22 chars) clears the
                 // single-line budget on a 158pt small canvas.
-                Text(pacerResetCaption(
+                pacerWidgetResetCaption(
                     resetsAt: s.resetsAt,
                     durationSeconds: s.chart.durationSeconds,
                     compact: true
-                ))
+                )
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
                     .lineLimit(2)
@@ -618,17 +624,17 @@ struct PaceChartWidgetView: View {
             }
             if let state, !state.isAwaiting {
                 paceFraction(used: state.usedPct, isEstimate: state.isEstimate, pace: state.paceEndPct,
-                             compact: true)
+                             compact: true, read: state.readText)
                 // Caption goes above the chart so it has the column's
                 // full width (~148pt at medium) instead of being squeezed
                 // by the chart filling vertically below. Compact format
                 // keeps the 7-day form ("resets in 4d · Mon 3p", ~22
                 // chars) inside the column width budget.
-                Text(pacerResetCaption(
+                pacerWidgetResetCaption(
                     resetsAt: state.resetsAt,
                     durationSeconds: state.chart.durationSeconds,
                     compact: true
-                ))
+                )
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
                     .lineLimit(2)
@@ -680,7 +686,7 @@ struct PaceChartWidgetView: View {
                 Spacer()
                 if let state, !state.isAwaiting {
                     paceFraction(used: state.usedPct, isEstimate: state.isEstimate, pace: state.paceEndPct,
-                                 compact: dense)
+                                 compact: dense, read: state.readText)
                 } else if let idle {
                     idleNumber(idle, large: !dense)
                 }
@@ -692,11 +698,11 @@ struct PaceChartWidgetView: View {
                 // `.compact` so every row keeps a legible height.
                 PaceChartView(data: state.chart, style: dense ? .compact : .detailed)
                     .frame(maxHeight: .infinity)
-                Text(pacerResetCaption(
+                pacerWidgetResetCaption(
                     resetsAt: state.resetsAt,
                     durationSeconds: state.chart.durationSeconds,
                     compact: dense
-                ))
+                )
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -721,9 +727,11 @@ struct PaceChartWidgetView: View {
         .frame(maxHeight: .infinity)
     }
 
-    /// "38% / 45%" — used vs theoretical pace endpoint, color-banded.
+    /// "38% / 45%" — used vs theoretical pace endpoint, color-banded. `read`
+    /// ("read 37%") follows an estimate, muted, where the caller has room.
     @ViewBuilder
-    private func paceFraction(used: Double, isEstimate: Bool, pace: Double, compact: Bool) -> some View {
+    private func paceFraction(used: Double, isEstimate: Bool, pace: Double, compact: Bool,
+                              read: String? = nil) -> some View {
         let band = PaceBand(usedPct: used, paceEndPct: pace)
         HStack(alignment: .firstTextBaseline, spacing: 2) {
             // A reading whole, the live meter's estimate with its decimal.
@@ -736,6 +744,14 @@ struct PaceChartWidgetView: View {
                 .font(.system(size: compact ? 11 : 14, weight: .medium, design: .rounded))
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
+            if let read {
+                Text(read)
+                    .font(.caption2)
+                    .monospacedDigit()
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .padding(.leading, 3)
+            }
         }
     }
 }

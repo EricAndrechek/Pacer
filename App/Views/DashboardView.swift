@@ -181,25 +181,28 @@ struct RateLimitSourceChip: View {
 
     @ViewBuilder private func content(latest: Sample?, owner: String?) -> some View {
         if let latest {
-            // OAuth samples ought to arrive every 5 min; statusline samples
-            // are irregular by nature, so the staleness warning is
-            // oauth-only. See #3.
-            let elapsed = Date().timeIntervalSince(latest.sampledAt)
-            let isStaleOAuth = latest.source == RateLimitSource.oauth && elapsed > 15 * 60
-            HStack(spacing: 4) {
-                if isStaleOAuth {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.system(size: 10))
+            // On the shared minute schedule: the age, and whether it has gone
+            // stale, change with every other age on screen.
+            TimelineView(PacerReadAge.Schedule()) { context in
+                // OAuth samples ought to arrive every 5 min; statusline samples
+                // are irregular by nature, so the staleness warning is
+                // oauth-only. See #3.
+                let elapsed = context.date.timeIntervalSince(latest.sampledAt)
+                let isStaleOAuth = latest.source == RateLimitSource.oauth && elapsed > 15 * 60
+                let prefix = owner.map { "\($0) · via \(latest.source) ·" } ?? "via \(latest.source) ·"
+                HStack(spacing: 4) {
+                    if isStaleOAuth {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 10))
+                    }
+                    Text("\(prefix) \(PacerReadAge.text(latest.sampledAt, now: context.date))")
+                        .font(.system(size: 11))
                 }
-                // The reading's age keeps itself current (`PacerReadAge`).
-                PacerReadAge.label(owner.map { "\($0) · via \(latest.source) ·" } ?? "via \(latest.source) ·",
-                                   latest.sampledAt)
-                    .font(.system(size: 11))
+                .foregroundStyle(isStaleOAuth ? Color.yellow : .secondary)
+                .help(isStaleOAuth
+                    ? "No fresh data since \(PacerReadAge.string(latest.sampledAt, now: context.date)). \(stallReason())"
+                    : pacerRelativeExact(latest.sampledAt))
             }
-            .foregroundStyle(isStaleOAuth ? Color.yellow : .secondary)
-            .help(isStaleOAuth
-                ? "No fresh data since \(pacerRelative(latest.sampledAt)). \(stallReason())"
-                : pacerRelativeExact(latest.sampledAt))
         }
     }
 

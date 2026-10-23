@@ -398,15 +398,16 @@ struct MenuBarLabel: View {
     /// hover for the "everything else."
     ///
     /// Every window's number as the chips write it (an estimate with its
-    /// decimal, #318) and the reading under it: "5h: 42.6% (read 42% 3 min.
+    /// decimal, #318) and the reading under it: "5h: 42.6% (read 42% 3m
     /// ago)". The reading is said every time, not only when the estimate
     /// differs, so the hover always answers "what did Anthropic last say".
     ///
     /// `aged: false` leaves the ages out. That version is what `Render`
     /// carries, so the status item re-rasterizes on a number moving, never
     /// on a minute passing; the aged one goes straight to AppKit
-    /// (`onTooltipChange`), on every change and once a minute.
-    private func tooltip(aged: Bool) -> String {
+    /// (`onTooltipChange`), on every change and on each instant of
+    /// `PacerReadAge.Schedule`, with every other age on screen.
+    private func tooltip(aged: Bool, now: Date = PacerClock.now) -> String {
         // Every window's used% (5h / 7d / each scoped), short-labelled. With no
         // scoped windows this reproduces the prior "5h: X% • 7d: Y%" line.
         var parts: [String] = []
@@ -420,7 +421,7 @@ struct MenuBarLabel: View {
             }
             var read = ""
             if let readout = w.readout {
-                read = " (\(aged ? pacerMeterReadText(readout) : readout.readText(age: nil)))"
+                read = " (\(aged ? pacerMeterReadText(readout, now: now) : readout.readText(age: nil)))"
             }
             parts.append("\(label): \(PacerMeterFormat.percent(pct, isEstimate: w.isEstimate))\(read)")
         }
@@ -432,7 +433,7 @@ struct MenuBarLabel: View {
             let cycle = DisplayCycle.resolve(resetsAt: resets, duration: 5 * 3600)
             parts.append(cycle.isAwaiting
                 ? "5h cycle reset, awaiting fresh sample"
-                : (aged ? "resets \(pacerRelative(resets))" : "resets"))
+                : (aged ? "resets \(pacerRelative(resets, now: now))" : "resets"))
         }
         if parts.isEmpty {
             return "Pacer — collecting…"
@@ -529,16 +530,20 @@ struct MenuBarLabel: View {
             .onChange(of: readingTimes) { _, _ in
                 onTooltipChange?(tooltip(aged: true))
             }
-            // The tooltip's "resets in 2 hr" and its awaiting-a-new-cycle
-            // line are judged against the clock, and this body re-runs only
-            // on data: idle, the hover hint kept the last poll's countdown.
-            // Re-pushed each minute straight to AppKit, not through SwiftUI
-            // state, so a hover hint never re-rasterizes the status item.
+            // The tooltip's ages, its "resets in 2 hr" and its
+            // awaiting-a-new-cycle line are judged against the clock, and
+            // this body re-runs only on data: idle, the hover hint kept the
+            // last poll's countdown. Re-pushed on each whole minute, the
+            // instants every age label in the app changes on
+            // (`PacerReadAge.Schedule`), straight to AppKit, not through
+            // SwiftUI state, so a hover hint never re-rasterizes the status
+            // item.
             .task {
                 while !Task.isCancelled {
-                    try? await Task.sleep(for: .seconds(60))
+                    let next = PacerReadAge.nextChange(after: Date())
+                    try? await Task.sleep(for: .seconds(max(0.05, next.timeIntervalSinceNow)))
                     if Task.isCancelled { break }
-                    onTooltipChange?(tooltip(aged: true))
+                    onTooltipChange?(tooltip(aged: true, now: max(next, Date())))
                 }
             }
     }
@@ -618,8 +623,9 @@ private struct MenuBarLabelContent: View, Equatable {
         case let .percent(prefix, pct, isEstimate):
             // Percent text warms to red only at the red band — yellow /
             // orange stay primary (colored text reads poorly in the menu
-            // bar); the icon carries the band coloring. An estimate keeps its
-            // decimal, lighter (`PacerMeterValue`); no animation either way.
+            // bar); the icon carries the band coloring. A decimal marks an
+            // estimate, "5h 51.3%"; a reading is whole (`PacerMeterValue`).
+            // No animation either way.
             if let pct {
                 PacerMeterValue(pct, isEstimate: isEstimate,
                                 color: UsageBand(percentage: pct) == .red ? Color.red : Color.primary,
@@ -1080,11 +1086,16 @@ struct MenuStatusContent: View {
                 // One gauge for both states, dimmed while awaiting. As two
                 // branches it was a new view at every cycle reset, the one
                 // moment its fill animation is worth seeing (#140).
+                //
+                // No number inside: it is printed right beside the ring, and
+                // an estimate's "50.7" did not fit a 22 pt ring. The reading
+                // is drawn solid, the estimated stretch past it as a lighter
+                // tail in the same colour (#318).
                 CircularGauge(
-                    reading: pct,
+                    reading: window.readout?.reading.percent ?? pct,
+                    estimate: window.isEstimate ? pct : nil,
                     lineWidth: 3,
-                    labelFont: .system(size: 8, weight: .bold, design: .rounded),
-                    isEstimate: window.isEstimate
+                    showsLabel: false
                 )
                 .frame(width: 22, height: 22)
                 .opacity(cycle.isAwaiting ? 0.4 : 1)
@@ -1106,20 +1117,34 @@ struct MenuStatusContent: View {
                     let pacePct = cycle.paceFraction * 100
                     let band = PaceBand(usedPct: pct, paceEndPct: pacePct)
 
-                    PacerMeterValue(pct, isEstimate: window.isEstimate)
-                        .font(.system(size: 12, weight: .semibold).monospacedDigit())
-                        // 32pt fits "99%" and not "100%", so at the cap this
-                        // wrapped to "100" over "%" (issue #125). minWidth
-                        // keeps every two-digit row pixel-identical to before
-                        // and lets only the three-digit case (and an
-                        // estimate's decimal) take the room it needs.
-                        .lineLimit(1)
-                        .fixedSize(horizontal: true, vertical: false)
-                        .frame(minWidth: 32, alignment: .trailing)
-                        // "read 42% 3 min. ago", and the estimate's number
-                        // when it is one. The menu re-reads on every open,
-                        // so the age is as of the open.
-                        .pacerToolTip(window.readout.map { pacerMeterHelp($0) } ?? "")
+                    HStack(alignment: .firstTextBaseline, spacing: 3) {
+                        PacerMeterValue(pct, isEstimate: window.isEstimate)
+                            .font(.system(size: 12, weight: .semibold).monospacedDigit())
+                            // 32pt fits "99%" and not "100%", so at the cap
+                            // this wrapped to "100" over "%" (issue #125).
+                            // minWidth keeps every two-digit row
+                            // pixel-identical to before and lets only the
+                            // three-digit case (and an estimate's decimal)
+                            // take the room it needs.
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
+                            .frame(minWidth: 32, alignment: .trailing)
+                            // "read 42% 3m ago", and the estimate's number
+                            // when it is one. The menu re-reads on every
+                            // open, so the age is as of the open.
+                            .pacerToolTip(window.readout.map { pacerMeterHelp($0) } ?? "")
+                        // What Anthropic last read, beside the estimate it is
+                        // built on: "51.3% read 50%" (#318). A reading needs
+                        // no echo.
+                        if let readout = window.readout, readout.isEstimate {
+                            Text(readout.readPercentText)
+                                .font(.system(size: 10))
+                                .monospacedDigit()
+                                .foregroundStyle(.tertiary)
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
+                        }
+                    }
 
                     Text("pace \(Int(pacePct.rounded()))%")
                         .font(.system(size: 11, weight: .medium))
@@ -1147,20 +1172,28 @@ struct MenuStatusContent: View {
                             .font(.system(size: 10, weight: .semibold))
                             .foregroundStyle(.red)
                             .lineLimit(1)
-                    } else if let o = outlook, o.willHitLimitBeforeReset,
-                              let eta = IntelligenceFormatting.relativeCrossingPhrase(o) {
-                        // Only the engine's confirmed claim goes red (#304): a
-                        // single refit's point crossing was claimed here, and
-                        // 87% of claimed 5-hour cycles never reached the cap.
-                        Text("limit \(eta)")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(.red)
-                            .lineLimit(1)
                     } else {
-                        Text("resets \(pacerRelative(resets, style: .short))")
-                            .font(.system(size: 10))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
+                        // On the shared minute schedule: the menu re-reads on
+                        // every open, and while it stays open the countdown
+                        // still moves with every other age in the app.
+                        TimelineView(PacerReadAge.Schedule()) { context in
+                            if let o = outlook, o.willHitLimitBeforeReset,
+                               let eta = ForecastChip.relativeCrossing(o.projectedFullAt, now: context.date) {
+                                // Only the engine's confirmed claim goes red
+                                // (#304): a single refit's point crossing was
+                                // claimed here, and 87% of claimed 5-hour
+                                // cycles never reached the cap.
+                                Text("limit \(eta)")
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .foregroundStyle(.red)
+                                    .lineLimit(1)
+                            } else {
+                                Text("resets \(pacerRelative(resets, style: .short, now: context.date))")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                        }
                     }
                 }
             } else {

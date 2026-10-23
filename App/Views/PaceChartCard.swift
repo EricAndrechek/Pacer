@@ -617,6 +617,10 @@ struct PaceChartCard: View {
         let typicalPollGap: TimeInterval?
         /// Window rollover (nil ⇒ idle / server anchored no cycle).
         let resetsAt: Date?
+        /// Measured burn over the last half hour of readings
+        /// (`RecentBurn.percentPerHour`, the figure `pacer report` prints as
+        /// "now"), for the grey burn-rate chip. Nil below two readings.
+        let recentBurn: Double?
         /// Projection-free actual line — the shared-image-parity base the
         /// column layers its forecast overlay onto.
         let baseChart: PaceChartView.Data?
@@ -741,6 +745,10 @@ struct PaceChartCard: View {
                     readingAt: readout.reading.at, newestAnyAccountAt: newestAny,
                     typicalPollGap: pollGap,
                     resetsAt: row.resetsAt,
+                    recentBurn: RecentBurn.percentPerHour(
+                        readings: entry.scoped.filter { $0.identity == row.identity }
+                            .map { .init(at: $0.sampledAt, percent: $0.percent, resetsAt: $0.resetsAt) },
+                        now: now, duration: duration),
                     baseChart: .cycle(scoped: row, history: entry.scoped,
                                       duration: duration, now: now),
                     isActive: row.isActive, isActiveAccount: isActiveAccount(entry),
@@ -808,6 +816,9 @@ struct PaceChartCard: View {
             readingAt: readout?.reading.at ?? latest?.sampledAt, newestAnyAccountAt: newestAnyAccountAt,
             typicalPollGap: typicalPollGap,
             resetsAt: latest?.resetsAt,
+            recentBurn: RecentBurn.percentPerHour(
+                readings: samples.map { .init(at: $0.sampledAt, percent: $0.usedPercentage, resetsAt: $0.resetsAt) },
+                now: now, duration: duration),
             baseChart: .cycle(fixed: samples, duration: duration, now: now),
             isActive: false, isActiveAccount: isActiveAccount(entry),
             severity: nil, isScoped: false)
@@ -1248,13 +1259,10 @@ struct PaceChartCard: View {
         return accounts.first { $0.id == id }?.shortLabel
     }
 
-    /// Account identity, whether Claude Code is on it, and how fresh its
-    /// numbers are — said once for the whole group.
+    /// Account identity and whether Claude Code is on it, said once for the
+    /// whole group. How fresh its numbers are is under each number.
     @ViewBuilder
     private func accountHeader(_ group: AccountGroup) -> some View {
-        let stale = ReadingFreshness.isStale(
-            readingAt: group.readingAt, newestAnyAccountAt: group.newestAnyAccountAt,
-            typicalGap: group.typicalPollGap)
         HStack(spacing: 8) {
             Text(group.label ?? "Account")
                 .font(.system(size: 11, weight: .semibold))
@@ -1274,12 +1282,8 @@ struct PaceChartCard: View {
                     .foregroundStyle(.secondary)
             }
             if let at = group.readingAt {
-                // Always, not only when stale. "How current is this?" is a
-                // question about every account on screen, and answering it only
-                // for the bad case leaves the good case ambiguous — silence
-                // reads as "no information" rather than "fine".
-                AccountReadingAge(
-                    accountId: group.id, readingAt: at, stale: stale,
+                AccountAuthPause(
+                    accountId: group.id, readingAt: at,
                     lastTurnAt: accountTotals.totals.first { $0.accountId == group.id }?.lastTurnAt)
             }
             Spacer(minLength: 0)
@@ -1340,17 +1344,18 @@ struct PaceChartCard: View {
 /// pace% line, status + burn chips, the shared `PaceChartView`, and the outlook
 /// caption. The view itself is in PacerUI so the widget extension renders the
 /// same chart pixel-for-pixel.
-/// "read 3m ago", or "auth paused" when the account's token expired while it
-/// was idle (#198). Its own view so its own body reads the token pool and the
-/// minute: a pause begins with nothing written to the store.
-private struct AccountReadingAge: View {
+/// "auth paused" when the account's token expired while it was idle (#198),
+/// else nothing: how old the readings are is the caption under each number
+/// (#318), and saying it here as well put the same age on screen three times.
+/// Its own view so its own body reads the token pool and the minute: a pause
+/// begins with nothing written to the store.
+private struct AccountAuthPause: View {
     let accountId: String
     let readingAt: Date
-    let stale: Bool
     let lastTurnAt: Date?
 
     var body: some View {
-        TimelineView(.everyMinute) { context in
+        TimelineView(PacerReadAge.Schedule()) { context in
             if TokenPoolStatus.shared.isAuthPaused(
                 account: accountId, lastReadingAt: readingAt,
                 lastActivityAt: lastTurnAt, now: context.date) {
@@ -1358,16 +1363,6 @@ private struct AccountReadingAge: View {
                     .font(.system(size: 10))
                     .foregroundStyle(.orange)
                     .help(AuthPause.reason)
-            } else {
-                // Keeps itself current (`PacerReadAge`); the minute tick
-                // around it is for the pause decision, which no reading
-                // announces.
-                PacerReadAge.label("read", readingAt)
-                    .font(.system(size: 10))
-                    .foregroundStyle(stale ? .orange : .secondary)
-                    .help(stale
-                          ? "This account is not being polled right now."
-                          : "When Pacer last read this account's limits.")
             }
         }
     }
@@ -1488,7 +1483,10 @@ private struct PaceColumn: View {
         let live = liveChartData(base: base)
         return VStack(alignment: .leading, spacing: 8) {
             header(chartData: base)
-            heroLine
+            VStack(alignment: .leading, spacing: 0) {
+                heroLine
+                readCaption
+            }
             chipRow
             chartSlot(live: live)
             outlookLines
@@ -1515,47 +1513,50 @@ private struct PaceColumn: View {
 
     @ViewBuilder
     private var chipRowContent: some View {
-        // Every chip here is a verdict about the present — "behind", "on pace",
-        // "limit in 40 min". A stale reading cannot support any of them: the
-        // account may have been sitting untouched since, or may have been
-        // hammered by whatever `cswap` switched *to*. The caption says when the
-        // number is from; that is the only honest claim left.
+        // Every chip here is a claim about the present — "+16%/hr", "limit in
+        // 40 min". A stale reading cannot support any of them: the account may
+        // have been sitting untouched since, or may have been hammered by
+        // whatever `cswap` switched *to*. The caption says when the number is
+        // from; that is the only honest claim left.
         if isStale {
             EmptyView()
-        } else if let used = column.usedPct, let cycle, !cycle.isAwaiting {
-            let band = PaceBand(usedPct: used, paceEndPct: cycle.paceFraction * 100)
+        } else if column.usedPct != nil, let cycle, !cycle.isAwaiting {
             HStack(spacing: 6) {
-                paceChip(band: band)
-                burnChipView
+                burnRateChip
+                forecastChipView
             }
         }
     }
 
+    /// How fast the window is moving now, grey, so the forecast chip beside
+    /// it is the one that carries a colour (#318). It replaced the "behind" /
+    /// "on pace" / "danger" badges, which said again what the number's
+    /// colour, the "/ 68%" pace mark and the chart already show.
     @ViewBuilder
-    private func paceChip(band: PaceBand) -> some View {
-        Group {
-            switch band {
-            case .green:
-                Chip(text: "behind", systemImage: "checkmark", tint: .green, size: .compact)
-            case .white:
-                Chip(text: "on pace", tint: .secondary, size: .compact)
-            case .yellow:
-                Chip(text: "ahead", systemImage: "exclamationmark", tint: .yellow, size: .compact)
-            case .red:
-                Chip(text: "danger", systemImage: "exclamationmark.triangle.fill", tint: .red, size: .compact)
-            }
-        }
-        .fixedSize()
-    }
-
-    @ViewBuilder
-    private var burnChipView: some View {
-        if let used = column.usedPct, let outlook,
-           let chip = IntelligenceFormatting.burnChip(outlook: outlook, endEstimate: endEstimate,
-                                                      duration: duration, usedPct: used) {
-            Chip(text: chip.text, systemImage: chip.symbol, tint: chip.tint, size: .compact)
+    private var burnRateChip: some View {
+        if let text = RecentBurn.chipText(column.recentBurn) {
+            let idle = column.recentBurn.map { $0 < RecentBurn.idleBelow } ?? true
+            Chip(text: text, systemImage: idle ? nil : "arrow.up.right", tint: .secondary, size: .compact)
                 .fixedSize()
-                .help(chip.help)
+                .help("Over the last 30 minutes of readings.")
+        }
+    }
+
+    /// Where the window ends up (`ForecastChip`): the colour is that outcome,
+    /// how sure the forecast is goes in the words and the hover. Built on
+    /// the shared minute schedule, so "limit in 40 min" counts down with the
+    /// ages beside it.
+    @ViewBuilder
+    private var forecastChipView: some View {
+        if let used = column.usedPct, let outlook {
+            TimelineView(PacerReadAge.Schedule()) { context in
+                if let chip = ForecastChip.make(outlook: outlook, endEstimate: endEstimate,
+                                                duration: duration, usedPct: used, now: context.date) {
+                    Chip(text: chip.text, tint: IntelligenceFormatting.color(chip.tint), size: .compact)
+                        .fixedSize()
+                        .help(chip.help)
+                }
+            }
         }
     }
 
@@ -1716,17 +1717,12 @@ private struct PaceColumn: View {
 
     @ViewBuilder
     private var caption: some View {
-        if isStale, !groupedUnderAccountHeader, let readingAt = column.readingAt {
-            // Says what Pacer knows and when, instead of implying it is current.
-            // The reset time is deliberately dropped here: it came from the same
+        if isStale {
+            // The reset time is deliberately dropped: it came from the same
             // stale reading, and two facts of different ages side by side is
-            // what made this confusing in the first place.
-            PacerReadAge.label("last read", readingAt)
-                .lineLimit(1)
-                .font(.system(size: 10))
-                .foregroundStyle(.orange)
-                .help("This account is not being polled right now — Pacer can only "
-                      + "read the account that currently owns Claude Code's credentials.")
+            // what made this confusing in the first place. When the reading
+            // was taken is the caption under the number, in orange (#318).
+            EmptyView()
         } else if let cycle, cycle.isAwaiting {
             Text("cycle reset · awaiting")
                 .font(.system(size: 10))
@@ -1762,6 +1758,27 @@ private struct PaceColumn: View {
         }
     }
 
+    /// What Anthropic last read, under the number, always (#318): "estimate
+    /// · Anthropic read 50% 3m ago" under an estimate, "read 3m ago" under a
+    /// reading. Orange once this account has stopped being read. Always a
+    /// line's height, so a reading arriving never moves the card.
+    @ViewBuilder
+    private var readCaption: some View {
+        Group {
+            if let readout = column.readout, cycle?.isAwaiting != true {
+                PacerMeterCaption(readout, help: isStale
+                                  ? "This account is not being polled right now — Pacer can only "
+                                    + "read the account that currently owns Claude Code's credentials."
+                                  : nil)
+                    .foregroundStyle(isStale ? .orange : .secondary)
+            } else {
+                Text(" ")
+            }
+        }
+        .font(.system(size: 10))
+        .lineLimit(1)
+    }
+
     @ViewBuilder
     private var heroLine: some View {
         if let used = column.usedPct, let cycle, !cycle.isAwaiting {
@@ -1769,14 +1786,13 @@ private struct PaceColumn: View {
             let band = PaceBand(usedPct: used, paceEndPct: paceEndPct)
             HStack(alignment: .firstTextBaseline, spacing: 4) {
                 // A reading whole, an estimate with its decimal (#318).
-                // The hover, "read 42% 3 minutes ago · estimate 42.6%", is
-                // about the reading the account header's "read 3 minutes
-                // ago" is about (`Column.readingAt`), in the same words, on
-                // the instants those words change.
-                TimelineView(PacerReadAge.Schedule(column.readout?.reading.at ?? .distantPast)) { _ in
+                // The hover, "read 42% 3m ago · estimate 42.6%", is about
+                // the reading the caption below is about, on the same
+                // schedule, so the two always say the same age.
+                TimelineView(PacerReadAge.Schedule()) { context in
                     PacerMeterValue(used, isEstimate: column.isEstimate, color: band.color)
                         .font(.system(size: 26, weight: .semibold, design: .rounded))
-                        .help(column.readout.map { pacerMeterHelp($0) } ?? "")
+                        .help(column.readout.map { pacerMeterHelp($0, now: context.date) } ?? "")
                 }
                 Text("/")
                     .font(.system(size: 16))
