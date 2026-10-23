@@ -170,6 +170,23 @@ enum PaceRules {
     /// Built 15 s or 60 s before the moment it was scored at, as a snapshot
     /// that old shows it, every 5-minute band's p95 stayed at 0–2.
     ///
+    /// Re-measured with the shipped estimator (`LiveMeter.estimate`: the
+    /// carry, the lag guard, the weak-fit rule; whole points, as the gate
+    /// judges) on a copy of the store through 10-23, every reading Pacer
+    /// holds, against the bare floor on the same copy (p95, then p99):
+    ///
+    ///     burn          5 min      10 min     15 min     floor's p95 (5/10/15)
+    ///     under 20/h    0 (1)      0 (1)      0 (1)      0 / 0 / 1
+    ///     20–40/h       1 (2)      2 (2)      2 (3)      1 / 2 / 2
+    ///     40–60/h       1 (2)      1 (2)      2 (3)      2 / 2 / 2
+    ///     60+/h         1 (1.4)    1 (2)      2 (4.0)    1 / 2 / 3     n 66 / 49 / 104
+    ///
+    /// No band is worse, so the padding stands. The 60+ band's worst p95
+    /// fell from 3 to 2, but it rests on 49–104 moments, its 15-minute p99
+    /// is 4, and 60 s of snapshot age took its 5-minute p95 to 2: it keeps 3.
+    /// The estimate now runs above the reading more often (20+/h: 5.2% of
+    /// 5-minute moments against 2.2% floored), which errs toward pausing.
+    ///
     /// The reading alone, at 5 minutes, was 4 points behind at p95 above
     /// 40/h; the old rule padded 5 points for a 2½-minute-old reading at
     /// 40/h, and stopped there at 95%. This stops at 98%.

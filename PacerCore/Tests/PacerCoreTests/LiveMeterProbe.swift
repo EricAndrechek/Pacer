@@ -55,6 +55,11 @@ struct LiveMeterProbe {
         .flatMap(TimeInterval.init) ?? 0
     /// One reading per this many seconds: a one-login Pacer's poll while
     /// active. `PACER_LIVE_PROBE_THIN=600` replays the idle cadence.
+    /// The estimate scored: the shipped one (`LiveMeter.estimate`: the carry,
+    /// the lag guard, the weak-fit rule), or `floor`, part A's bare floored
+    /// sum from the reading (`PACER_LIVE_PROBE_ESTIMATOR=floor`).
+    static let floorOnly = ProcessInfo.processInfo.environment["PACER_LIVE_PROBE_ESTIMATOR"] == "floor"
+
     static let thin: TimeInterval = ProcessInfo.processInfo.environment["PACER_LIVE_PROBE_THIN"]
         .flatMap(TimeInterval.init) ?? 300
 
@@ -207,7 +212,7 @@ struct LiveMeterProbe {
                 span: span, timeZone: .current) {
                 let dayKey = TokenSample.formatDate(day)
                 rates[dayKey] = LiveMeterRates(modelRates: fit.modelRates, pooledRate: fit.pooledRate,
-                                               fittedDay: dayKey)
+                                               fittedDay: dayKey, r2: fit.r2, totalRise: fit.totalRise)
                 pooled.append(fit.pooledRate)
             }
             day = calendar.date(byAdding: .day, value: 1, to: day)!
@@ -257,9 +262,21 @@ struct LiveMeterProbe {
                 continue
             }
             let asOf = max(k.at, d.at.addingTimeInterval(-lag))
-            let slice = Array(spend[upperBound(spendTimes, k.at)..<upperBound(spendTimes, asOf)])
-            let value = LiveMeter.value(reading: k, duration: duration, rates: dayRates,
+            let value: LiveMeterValue?
+            if floorOnly {
+                let slice = Array(spend[upperBound(spendTimes, k.at)..<upperBound(spendTimes, asOf)])
+                value = LiveMeter.value(reading: k, duration: duration,
+                                        rates: LiveMeterRates(modelRates: dayRates.modelRates,
+                                                              pooledRate: dayRates.pooledRate),
                                         spend: slice, now: asOf)
+            } else {
+                // What the app builds: the kept readings of the hour before,
+                // the carry and the lag guard on them, the weak-fit rule.
+                let history = Array(kept[lowerBound(keptTimes, k.at.addingTimeInterval(-LiveMeter.carryLookback))...j])
+                let slice = Array(spend[upperBound(spendTimes, history[0].at)..<upperBound(spendTimes, asOf)])
+                value = LiveMeter.estimate(history: history, duration: duration, rates: dayRates,
+                                           spend: slice, now: asOf)
+            }
             if value == nil { noValue += 1 }
             let recent = spend[upperBound(spendTimes, d.at.addingTimeInterval(-1800))..<upperBound(spendTimes, d.at)]
             let burn = 2 * recent.reduce(0.0) { $0 + dayRates.rate(for: $1.model).rate * $1.costUSD }
@@ -273,8 +290,9 @@ struct LiveMeterProbe {
         }
 
         let elapsed = Date().timeIntervalSince(started)
-        print(String(format: "\n=== %@ · %@ · account %@ · %d readings since %@, %d kept at one per %.0f min · %d fits, pooled median %.3f pts/$ · %.1f s",
+        print(String(format: "\n=== %@ · %@ · %@ · account %@ · %d readings since %@, %d kept at one per %.0f min · %d fits, pooled median %.3f pts/$ · %.1f s",
                      key, everyReading ? "every reading Pacer holds" : "the harness's readings (reset set)",
+                     floorOnly ? "floor (part A)" : "shipped estimator",
                      String(account.suffix(4)), readings.filter { $0.at >= since }.count,
                      "2026-09-01", kept.filter { $0.at >= since }.count, thin / 60, rates.count,
                      median(pooled), elapsed))
