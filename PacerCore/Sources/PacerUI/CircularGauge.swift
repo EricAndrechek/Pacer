@@ -22,6 +22,10 @@ public struct CircularGauge: View {
     public let reading: Double?
     public var lineWidth: CGFloat
     public var labelFont: Font
+    /// The number is the live meter's estimate (#318): its label is written
+    /// with the decimal, lighter (`PacerMeterValue`), and without the "%",
+    /// which a two-digit ring has no room for beside a decimal.
+    public var isEstimate: Bool
 
     /// The reading, or 0 when there is none — kept for callers that read it.
     public var percentage: Double { reading ?? 0 }
@@ -37,11 +41,13 @@ public struct CircularGauge: View {
     public init(
         reading: Double?,
         lineWidth: CGFloat = 10,
-        labelFont: Font = .system(size: 22, weight: .semibold, design: .rounded)
+        labelFont: Font = .system(size: 22, weight: .semibold, design: .rounded),
+        isEstimate: Bool = false
     ) {
         self.reading = reading
         self.lineWidth = lineWidth
         self.labelFont = labelFont
+        self.isEstimate = isEstimate
     }
 
     private var fraction: CGFloat {
@@ -65,9 +71,8 @@ public struct CircularGauge: View {
                 )
                 .rotationEffect(.degrees(-90))
                 .animation(.easeInOut(duration: 0.4), value: fraction)
-            Text(reading.map { "\(Int($0.rounded()))%" } ?? "—")
+            label
                 .font(labelFont)
-                .foregroundStyle(reading == nil ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
                 .monospacedDigit()
                 // "100%" is one glyph wider than every other reading, and the
                 // callers size this ring for two digits. Without these it
@@ -78,7 +83,16 @@ public struct CircularGauge: View {
                 // anything that already fits is untouched, so the dashboard
                 // and widget gauges render identically to before.
                 .lineLimit(1)
-                .minimumScaleFactor(0.65)
+                .minimumScaleFactor(isEstimate ? 0.55 : 0.65)
+        }
+    }
+
+    @ViewBuilder
+    private var label: some View {
+        if let reading {
+            PacerMeterValue(reading, isEstimate: isEstimate, percentSign: !isEstimate)
+        } else {
+            Text("—").foregroundStyle(.secondary)
         }
     }
 }

@@ -93,21 +93,21 @@ struct ProjectionCompareModal: View {
         return readout.map { data.withLive($0, now: data.points.last?.time ?? now) } ?? data
     }
 
-    /// "62% used · resets Mon 6 AM" — the cycle context the chart is read in.
+    /// "62% used · resets Mon 6 AM" — the cycle context the chart is read in;
+    /// "62.4% used" when the number is the live meter's estimate (#318).
     private var subtitle: String? {
         guard let data = chartData else { return nil }
-        let used = "\(Int((readout?.percent ?? data.usedPct).rounded()))% used"
+        let used = "\(readout?.text ?? PacerMeterFormat.percent(data.usedPct, isEstimate: false)) used"
         let resets = "resets \(data.resetsAt.formatted(.dateTime.weekday(.abbreviated).hour()))"
         return "\(used) · \(resets)"
     }
 
-    /// "Live meter: 45%, read 42% 3 min ago · within 1 point of the next
+    /// "Live meter: 45.2%, read 42% 3 min. ago · within 1 point of the next
     /// reading 90% of the time today". Either half alone when only it applies.
     private var liveLine: String? {
         var parts: [String] = []
-        if let readout, let help = readout.help(now: Date()), let live = readout.live {
-            let read = help.components(separatedBy: " · ").first ?? help
-            parts.append("\(Int(live.percent.rounded()))%, \(read)")
+        if let readout, readout.isEstimate {
+            parts.append("\(readout.text), \(pacerMeterReadText(readout))")
         }
         if let a = liveAgreement {
             parts.append("within 1 point of the next reading \(Int((a.share * 100).rounded()))% of the time today")

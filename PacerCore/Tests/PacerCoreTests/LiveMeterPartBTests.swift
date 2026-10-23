@@ -380,13 +380,13 @@ struct LiveMeterPartBTests {
         let r = LiveMeterReadout(reading: Self.reading(40), live: built, now: Self.t0.addingTimeInterval(500))
         #expect(r.percent == 45)
         #expect(r.reading.percent == 42)
-        #expect(r.help(now: Self.t0.addingTimeInterval(500)) == "read 42% 3 min ago · live 45%")
+        #expect(r.help(age: "3 min. ago") == "read 42% 3 min. ago · estimate 45.0%")
         // A value equal to its reading says nothing extra.
         let same = try #require(LiveMeter.value(reading: Self.reading(42, at: 300), duration: T.fiveHours,
                                                 rates: T.rates, spend: [], now: Self.t0.addingTimeInterval(320)))
         let quiet = LiveMeterReadout(reading: Self.reading(42, at: 300), live: same, now: Self.t0.addingTimeInterval(320))
-        #expect(quiet.help(now: Self.t0.addingTimeInterval(320)) == nil)
-        #expect(!quiet.differsFromReading)
+        #expect(quiet.help(age: "just now") == "read 42% just now")
+        #expect(!quiet.isEstimate)
         // Its window reset since it was built, and it was not restarted: stand down.
         let old = try #require(LiveMeter.value(reading: Self.reading(90, resets: Self.t0.addingTimeInterval(600)),
                                                duration: T.fiveHours, rates: T.rates,
@@ -405,8 +405,14 @@ struct LiveMeterPartBTests {
                                              spend: [Self.spend(60, usd: 6)], now: Self.t0.addingTimeInterval(200)))
         let c = try #require(LiveMeter.value(reading: Self.reading(40), duration: T.fiveHours, rates: T.rates,
                                              spend: [Self.spend(60, usd: 10)], now: Self.t0.addingTimeInterval(200)))
-        #expect(LiveMeterBoard.sameOnScreen(["x": [Self.five: a]], ["x": [Self.five: b]]))
+        // $5 and $6 at 0.2: 41.0 and 41.2, the same whole point. A change a
+        // surface shows, but only in the tenths, which the board holds to
+        // `tenthsInterval`.
+        #expect(!LiveMeterBoard.sameOnScreen(["x": [Self.five: a]], ["x": [Self.five: b]]))
+        #expect(LiveMeterBoard.sameWhole(["x": [Self.five: a]], ["x": [Self.five: b]]))
+        #expect(LiveMeterBoard.sameOnScreen(["x": [Self.five: b]], ["x": [Self.five: b]]))
         #expect(!LiveMeterBoard.sameOnScreen(["x": [Self.five: a]], ["x": [Self.five: c]]))
+        #expect(!LiveMeterBoard.sameWhole(["x": [Self.five: a]], ["x": [Self.five: c]]))
         #expect(!LiveMeterBoard.sameOnScreen(["x": [Self.five: a]], [:]))
     }
 

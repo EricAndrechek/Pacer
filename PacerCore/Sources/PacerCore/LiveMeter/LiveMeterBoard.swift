@@ -105,6 +105,8 @@ public final class LiveMeterBoard {
         writeWatch = nil
         expiry?.cancel()
         expiry = nil
+        deferred?.cancel()
+        deferred = nil
         container = nil
         epoch &+= 1
         pending = false
@@ -157,20 +159,67 @@ public final class LiveMeterBoard {
 
     /// Swap in `built` when anything a surface shows differs, and arm the
     /// expiry for the earliest value.
+    ///
+    /// A change in the tenths alone (`sameWhole`) is published at most every
+    /// `tenthsInterval`. While an account is busy the estimate's decimal
+    /// moves on nearly every scan cycle (every few seconds), and each publish
+    /// redraws every surface reading the board, the pace card's charts among
+    /// them, on a dashboard that stays open. A new reading, a whole point,
+    /// or the number turning into (or out of) an estimate is published at
+    /// once.
     private func publish(_ built: [String: [String: LiveMeterValue]]) {
-        if !Self.sameOnScreen(values, built) { values = built }
         armExpiry(built)
+        deferred?.cancel()
+        deferred = nil
+        guard !Self.sameOnScreen(values, built) else { return }
+        let now = Date()
+        let since = lastPublished.map { now.timeIntervalSince($0) } ?? .infinity
+        guard Self.sameWhole(values, built), since < Self.tenthsInterval else {
+            values = built
+            lastPublished = now
+            return
+        }
+        deferred = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(Self.tenthsInterval - since))
+            guard !Task.isCancelled else { return }
+            LiveMeterBoard.shared.values = built
+            LiveMeterBoard.shared.lastPublished = Date()
+        }
     }
 
-    /// Equal in everything a readout reads: the number, the reading under
-    /// it, and whether it restarted.
+    /// The least time between two publishes that only move a tenth.
+    nonisolated static let tenthsInterval: TimeInterval = 15
+
+    @ObservationIgnored private var lastPublished: Date?
+    @ObservationIgnored private var deferred: Task<Void, Never>?
+
+    /// Equal in everything but the shown tenths: a publish this would allow
+    /// is held to `tenthsInterval`.
+    nonisolated static func sameWhole(_ a: [String: [String: LiveMeterValue]],
+                                      _ b: [String: [String: LiveMeterValue]]) -> Bool {
+        guard a.keys == b.keys else { return false }
+        for (account, x) in a {
+            guard let y = b[account], x.keys == y.keys else { return false }
+            for (key, v) in x {
+                guard let w = y[key], v.percent == w.percent, v.isEstimate == w.isEstimate,
+                      v.reading == w.reading, v.restarted == w.restarted else { return false }
+            }
+        }
+        return true
+    }
+
+    /// Equal in everything a readout reads: the whole and the shown number,
+    /// whether it is an estimate, the reading under it, and whether it
+    /// restarted. The shown tenth moves with each scan cycle's spend, so a
+    /// busy account republishes about that often; an idle one, never.
     nonisolated static func sameOnScreen(_ a: [String: [String: LiveMeterValue]],
                                          _ b: [String: [String: LiveMeterValue]]) -> Bool {
         guard a.keys == b.keys else { return false }
         for (account, x) in a {
             guard let y = b[account], x.keys == y.keys else { return false }
             for (key, v) in x {
-                guard let w = y[key], v.percent == w.percent, v.reading == w.reading,
+                guard let w = y[key], v.percent == w.percent, v.shownPercent == w.shownPercent,
+                      v.isEstimate == w.isEstimate, v.reading == w.reading,
                       v.restarted == w.restarted else { return false }
             }
         }

@@ -80,8 +80,15 @@ public struct LiveMeterValue: Sendable, Equatable {
         case none
     }
 
-    /// The live percentage: whole points above the reading, capped at 100.
+    /// The live percentage in whole points: the reading plus the whole
+    /// points the estimate has certainly added, capped at 100. What judges
+    /// whole points (the `pacer` gate, threshold alerts, the drift log)
+    /// reads this.
     public let percent: Double
+    /// The same estimate before flooring: the reading, plus the carry, plus
+    /// Σ rate × spend, never below the reading and capped at 100 (0 plus
+    /// the spend after a reset). `shownPercent` is this to one decimal.
+    public let exactPercent: Double
     /// The reading it started from.
     public let reading: MeterReading
     /// Points added to the reading: `percent` minus the reading, or minus 0
@@ -102,8 +109,9 @@ public struct LiveMeterValue: Sendable, Equatable {
 
     public init(percent: Double, reading: MeterReading, addedPoints: Double, exactAdded: Double,
                 spendUSD: Double, rateSource: RateSource, restarted: Bool, asOf: Date,
-                carry: Double = 0) {
+                carry: Double = 0, exactPercent: Double? = nil) {
         self.percent = percent
+        self.exactPercent = exactPercent ?? percent
         self.reading = reading
         self.addedPoints = addedPoints
         self.exactAdded = exactAdded
@@ -112,6 +120,26 @@ public struct LiveMeterValue: Sendable, Equatable {
         self.restarted = restarted
         self.asOf = asOf
         self.carry = carry
+    }
+
+    /// Whether the number is an estimate rather than Anthropic's reading:
+    /// spend since the reading moved it, or its window reset since.
+    ///
+    /// Not "the floored number differs from the reading". Spend that has not
+    /// yet added a whole point is still an estimate of where the meter sits,
+    /// and showing it as the bare reading would claim the server said so.
+    /// Not "any spend" either: a model whose own fitted rate is zero adds
+    /// nothing, and nothing moved the number off the reading. With nothing
+    /// counted, the number is the reading, whole, whatever the carry says.
+    public var isEstimate: Bool { restarted || exactAdded > 0 }
+
+    /// The number a surface shows: the reading, whole, when this is not an
+    /// estimate; else `exactPercent` cut (never rounded up) to one decimal,
+    /// so its whole part is always `percent` and a shown "42.9%" is never a
+    /// point the gate has not counted.
+    public var shownPercent: Double {
+        guard isEstimate else { return percent }
+        return min(max(PacerMeterFormat.tenths(exactPercent), percent), percent + 0.9)
     }
 }
 
@@ -305,13 +333,15 @@ public enum LiveMeter {
         // After a reset there is no point for the meter to sit inside.
         let carried = start.restarted ? 0 : min(max(0, carry), 1 - 1e-6)
         let points = (carried + exact + floorTolerance).rounded(.down)
-        let percent: Double
+        let percent: Double, exactPercent: Double
         if start.restarted {
             percent = min(100, max(0, points))
+            exactPercent = min(100, max(0, exact + floorTolerance))
         } else {
             // A reading at or over 100 stays as it is; nothing here may move
             // it down.
             percent = max(start.base, min(100, start.base + max(0, points)))
+            exactPercent = max(start.base, min(100, start.base + carried + max(0, exact) + floorTolerance))
         }
         let source: LiveMeterValue.RateSource
         switch (ownSpend > 0, pooledSpend > 0) {
@@ -323,6 +353,6 @@ public enum LiveMeter {
         return LiveMeterValue(
             percent: percent, reading: reading, addedPoints: percent - start.base,
             exactAdded: exact, spendUSD: spent, rateSource: source,
-            restarted: start.restarted, asOf: now, carry: carried)
+            restarted: start.restarted, asOf: now, carry: carried, exactPercent: exactPercent)
     }
 }

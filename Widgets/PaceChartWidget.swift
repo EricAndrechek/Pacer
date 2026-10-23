@@ -69,6 +69,10 @@ struct PaceChartEntry: TimelineEntry {
         /// the chart carries one (#318), else the reading.
         var usedPct: Double { chart.live?.value ?? chart.usedPct }
 
+        /// `usedPct` is that estimate: written with its decimal. The chart
+        /// carries a live point only for an estimate (`Data.withLive`).
+        var isEstimate: Bool { chart.live != nil }
+
         var band: PaceBand {
             PaceBand(usedPct: usedPct, paceEndPct: paceEndPct)
         }
@@ -502,7 +506,7 @@ struct PaceChartWidgetView: View {
                 dotColor: awaiting ? .secondary : target.state?.band.color
             ) {
                 if let s = target.state, !s.isAwaiting {
-                    paceFraction(used: s.usedPct, pace: s.paceEndPct, compact: true)
+                    paceFraction(used: s.usedPct, isEstimate: s.isEstimate, pace: s.paceEndPct, compact: true)
                 } else if let idle = target.idle {
                     idleNumber(idle)
                 }
@@ -613,7 +617,8 @@ struct PaceChartWidgetView: View {
                 Spacer()
             }
             if let state, !state.isAwaiting {
-                paceFraction(used: state.usedPct, pace: state.paceEndPct, compact: true)
+                paceFraction(used: state.usedPct, isEstimate: state.isEstimate, pace: state.paceEndPct,
+                             compact: true)
                 // Caption goes above the chart so it has the column's
                 // full width (~148pt at medium) instead of being squeezed
                 // by the chart filling vertically below. Compact format
@@ -674,7 +679,8 @@ struct PaceChartWidgetView: View {
                     .lineLimit(1)
                 Spacer()
                 if let state, !state.isAwaiting {
-                    paceFraction(used: state.usedPct, pace: state.paceEndPct, compact: dense)
+                    paceFraction(used: state.usedPct, isEstimate: state.isEstimate, pace: state.paceEndPct,
+                                 compact: dense)
                 } else if let idle {
                     idleNumber(idle, large: !dense)
                 }
@@ -717,13 +723,12 @@ struct PaceChartWidgetView: View {
 
     /// "38% / 45%" — used vs theoretical pace endpoint, color-banded.
     @ViewBuilder
-    private func paceFraction(used: Double, pace: Double, compact: Bool) -> some View {
+    private func paceFraction(used: Double, isEstimate: Bool, pace: Double, compact: Bool) -> some View {
         let band = PaceBand(usedPct: used, paceEndPct: pace)
         HStack(alignment: .firstTextBaseline, spacing: 2) {
-            Text("\(Int(used.rounded()))%")
+            // A reading whole, the live meter's estimate with its decimal.
+            PacerMeterValue(used, isEstimate: isEstimate, color: band.color)
                 .font(.system(size: compact ? 16 : 22, weight: .semibold, design: .rounded))
-                .monospacedDigit()
-                .foregroundStyle(band.color)
             Text("/")
                 .font(.system(size: compact ? 11 : 14))
                 .foregroundStyle(.tertiary)

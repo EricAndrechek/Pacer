@@ -31,6 +31,9 @@ struct PaceGaugesEntry: TimelineEntry {
     struct WindowState {
         let usedPct: Double
         let resetsAt: Date?
+        /// `usedPct` is the live meter's estimate (#318): drawn with its
+        /// decimal.
+        var isEstimate = false
     }
 
     /// One scoped per-model window's gauge: label + used% + reset, plus its
@@ -43,6 +46,7 @@ struct PaceGaugesEntry: TimelineEntry {
         let resetsAt: Date?
         let durationSeconds: TimeInterval
         let isActive: Bool
+        var isEstimate = false
     }
 
     /// A window resolved for a gauge — label, used%/reset state, cycle
@@ -65,7 +69,8 @@ struct PaceGaugesEntry: TimelineEntry {
         default:
             if let g = scoped.first(where: { $0.key == key }) {
                 return Resolved(label: g.label,
-                                state: WindowState(usedPct: g.usedPct, resetsAt: g.resetsAt),
+                                state: WindowState(usedPct: g.usedPct, resetsAt: g.resetsAt,
+                                                   isEstimate: g.isEstimate),
                                 durationSeconds: g.durationSeconds, isActive: g.isActive)
             }
             return Resolved(label: "5-hour", state: fiveHour, durationSeconds: 5 * 3600, isActive: false)
@@ -130,17 +135,18 @@ struct PaceGaugesProvider: AppIntentTimelineProvider {
             // Each gauge at the live meter's value as of this refresh (#318).
             let now = Date()
             let live = account.map { LiveMeterSource(context: context).currentValues(account: $0, now: now) } ?? [:]
-            func shown(_ row: RateLimitSample) -> Double {
-                LiveMeterReadout(reading: MeterReading(at: row.sampledAt, percent: row.usedPercentage,
-                                                       resetsAt: row.resetsAt),
-                                 live: live[row.window], now: now).percent
+            func shown(_ row: RateLimitSample) -> PaceGaugesEntry.WindowState {
+                let r = LiveMeterReadout(reading: MeterReading(at: row.sampledAt, percent: row.usedPercentage,
+                                                               resetsAt: row.resetsAt),
+                                         live: live[row.window], now: now)
+                return .init(usedPct: r.percent, resetsAt: row.resetsAt, isEstimate: r.isEstimate)
             }
             let scoped = Self.scopedGauges(context: context, account: account, live: live, now: now)
             let (primaryKey, secondaryKey) = Self.resolveKeys(primary: primary, secondary: secondary, scoped: scoped)
             return PaceGaugesEntry(
                 date: Date(),
-                fiveHour: five.map { .init(usedPct: shown($0), resetsAt: $0.resetsAt) },
-                sevenDay: seven.map { .init(usedPct: shown($0), resetsAt: $0.resetsAt) },
+                fiveHour: five.map(shown),
+                sevenDay: seven.map(shown),
                 scoped: scoped,
                 primaryKey: primaryKey, secondaryKey: secondaryKey
             )
@@ -165,15 +171,17 @@ struct PaceGaugesProvider: AppIntentTimelineProvider {
                     || ($0.surface?.isEmpty == false)
             }
             .map {
-                PaceGaugesEntry.ScopedGauge(
+                let r = LiveMeterReadout(
+                    reading: MeterReading(at: $0.sampledAt, percent: $0.percent, resetsAt: $0.resetsAt),
+                    live: live[$0.identity], now: now)
+                return PaceGaugesEntry.ScopedGauge(
                     key: $0.identity,
                     label: $0.label,
-                    usedPct: LiveMeterReadout(
-                        reading: MeterReading(at: $0.sampledAt, percent: $0.percent, resetsAt: $0.resetsAt),
-                        live: live[$0.identity], now: now).percent,
+                    usedPct: r.percent,
                     resetsAt: $0.resetsAt,
                     durationSeconds: WindowSpec.scopedDuration(group: $0.group),
-                    isActive: $0.isActive)
+                    isActive: $0.isActive,
+                    isEstimate: r.isEstimate)
             }
     }
 }
@@ -205,21 +213,24 @@ struct PaceGaugesWidgetView: View {
         let resetsAt: Date?
         let durationSeconds: TimeInterval
         let isActive: Bool
+        var isEstimate = false
     }
 
     /// Ordered gauge cells for the large grid, capped so the rings stay legible.
     private var largeCells: [GaugeCell] {
         var cells: [GaugeCell] = [
             GaugeCell(id: "five_hour", label: "5-hour", usedPct: entry.fiveHour?.usedPct,
-                      resetsAt: entry.fiveHour?.resetsAt, durationSeconds: 5 * 3600, isActive: false),
+                      resetsAt: entry.fiveHour?.resetsAt, durationSeconds: 5 * 3600, isActive: false,
+                      isEstimate: entry.fiveHour?.isEstimate ?? false),
             GaugeCell(id: "seven_day", label: "7-day", usedPct: entry.sevenDay?.usedPct,
-                      resetsAt: entry.sevenDay?.resetsAt, durationSeconds: 7 * 86_400, isActive: false),
+                      resetsAt: entry.sevenDay?.resetsAt, durationSeconds: 7 * 86_400, isActive: false,
+                      isEstimate: entry.sevenDay?.isEstimate ?? false),
         ]
         // Up to four scoped gauges → six total, a clean 3×2 grid at most.
         for s in entry.scoped.prefix(4) {
             cells.append(GaugeCell(id: s.label, label: s.label, usedPct: s.usedPct,
                                    resetsAt: s.resetsAt, durationSeconds: s.durationSeconds,
-                                   isActive: s.isActive))
+                                   isActive: s.isActive, isEstimate: s.isEstimate))
         }
         return cells
     }
@@ -271,7 +282,7 @@ struct PaceGaugesWidgetView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
-            ringGauge(for: cell.usedPct.map { .init(usedPct: $0, resetsAt: cell.resetsAt) },
+            ringGauge(for: cell.usedPct.map { .init(usedPct: $0, resetsAt: cell.resetsAt, isEstimate: cell.isEstimate) },
                       lineWidth: ring > 80 ? 10 : 8, labelSize: ring > 80 ? 24 : 20)
                 .frame(width: ring, height: ring)
             resetCaption(cell.resetsAt, durationSeconds: cell.durationSeconds,
@@ -370,7 +381,8 @@ struct PaceGaugesWidgetView: View {
         // uses, identical geometry/coloring per UsageBand. No widget-
         // local copy. No reading draws its "—" state, not a dimmed 0%: an
         // account seen before its first reading has not used nothing (#241).
-        CircularGauge(reading: state?.usedPct, lineWidth: lineWidth, labelFont: labelFont)
+        CircularGauge(reading: state?.usedPct, lineWidth: lineWidth, labelFont: labelFont,
+                      isEstimate: state?.isEstimate ?? false)
     }
 
     private func dotColor(for state: PaceGaugesEntry.WindowState?) -> Color? {

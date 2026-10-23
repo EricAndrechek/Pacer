@@ -32,10 +32,16 @@ and `feedback` prints a pre-filled GitHub issue link; nothing is sent.
 
 ```
 $ ~/.claude/skills/pacer/pacer report
-5h           15% used · +33%/h now (+0 avg) · resets in 4h 48m  (Thu 6:39 PM)
+5h         15.6% est · read 15% 1m ago · +33%/h now (+0 avg) · resets in 4h 48m  (Thu 6:39 PM)
 7d           81% used · +7%/h now (+2 avg) · resets in 3d 16h  (Mon 5:59 AM)
 Fable        99% used · +8%/h now (+2 avg) · full in 6h 24m · resets in 3d 16h
 ```
+
+**A whole number is Anthropic's reading; a decimal is Pacer's estimate.**
+Readings are whole points. Between them Pacer estimates the meter from the
+spend since the last one (the live meter), and writes that with one decimal
+and `est`, followed by the reading it started from and its age. A window
+nothing has been spent on since its reading shows the reading, `used`.
 
 **Two rates, and the difference is the point.** `now` is measured over the last
 half hour, straight from the readings. `avg` is the engine's fitted slope over
@@ -363,9 +369,11 @@ Write nothing else there: no notes, plans, scripts, logs or directories.
   old) it judges the reading: 100% minus the window's recent burn × (the
   reading's age + one worst-case 5-minute poll). Always at least 1 point.
   Heavy use stops near 97% with a live value and near 90% without; light use
-  near 99%. `report` shows the live value with the reading beside it, `json`
-  gives `usedPercent` (the reading), `livePercent` and the `safeLimit` it was
-  judged against, and `pacer safecap` prints the limit
+  near 99%. The gate judges the estimate's whole points (`15.6% est` is 15).
+  `report` shows the estimate with the reading beside it, `json` gives
+  `usedPercent` (the reading), `livePercent` (one decimal when
+  `liveIsEstimate`), `liveWholePercent` (what the gate judged) and the
+  `safeLimit` it was judged against, and `pacer safecap` prints the limit
   `gate` would apply to each binding window, one per line, for scripts.
   **Pass `--cap` only when the user, or the task, decides to keep part of a
   window in reserve.** How much to spend is their call, not a default's.

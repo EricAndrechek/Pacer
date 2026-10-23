@@ -19,13 +19,18 @@ public struct MenuBarWindowItem: Equatable, Sendable, Identifiable {
     public let key: String
     /// Human label — "5-hour", "7-day", or the scoped row's model/surface label.
     public let displayName: String
-    /// Current utilization 0–100: the live meter's value when there is one
-    /// (`readout`), else the latest reading; `nil` when no sample has landed
-    /// yet (the genuine cold start — the row renders "collecting…").
+    /// Current utilization 0–100: the live meter's estimate (one decimal)
+    /// when there is one (`readout`), else the latest reading; `nil` when no
+    /// sample has landed yet (the genuine cold start — the row renders
+    /// "collecting…").
     public let usedPercentage: Double?
     /// The reading and live value behind `usedPercentage`, for its hover
     /// text. Nil with no reading.
     public let readout: LiveMeterReadout?
+
+    /// Whether `usedPercentage` is an estimate: written with its decimal
+    /// (`PacerMeterFormat`).
+    public var isEstimate: Bool { readout?.isEstimate ?? false }
     /// Window rollover; `nil` when idle / the server anchored no cycle.
     public let resetsAt: Date?
     /// Window length in seconds — feeds the dropdown row's pace/cycle math.

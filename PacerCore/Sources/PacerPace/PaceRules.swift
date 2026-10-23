@@ -24,6 +24,12 @@ struct PaceRow: Equatable, Sendable {
     var reading: Double? = nil
     /// How old the live value was when served, in seconds, as Pacer wrote it.
     var liveAge: String? = nil
+    /// The live value as Pacer shows it (#318), when it is an estimate: to
+    /// one decimal, whole part `percent`. Nil when it is the reading.
+    var estimate: Double? = nil
+
+    /// The number is Pacer's estimate, not Anthropic's reading.
+    var isEstimate: Bool { estimate != nil }
 
     /// `percent` is the live value, not the reading.
     var isLive: Bool { reading != nil }

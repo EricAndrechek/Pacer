@@ -47,32 +47,42 @@ public struct LiveMeterReadout: Sendable, Equatable {
         self.live = live
     }
 
-    /// The number to show.
-    public var percent: Double { live?.percent ?? reading.percent }
+    /// Whether the number shown is the live meter's estimate rather than
+    /// Anthropic's reading (`LiveMeterValue.isEstimate`).
+    public var isEstimate: Bool { live?.isEstimate ?? false }
 
-    /// Whether the number is something other than the reading.
-    public var differsFromReading: Bool {
-        guard let live else { return false }
-        return live.restarted || live.percent != reading.percent
+    /// The number to show: the estimate to one decimal, else the reading
+    /// (`PacerMeterFormat`).
+    public var percent: Double {
+        guard let live, live.isEstimate else { return reading.percent }
+        return live.shownPercent
     }
 
-    /// The hover text on the number: "read 42% 3 min ago · live 45%". Nil
-    /// when the number is the reading.
-    public func help(now: Date) -> String? {
-        guard let live, differsFromReading else { return nil }
-        let read = "read \(Self.whole(reading.percent))% \(Self.ago(reading.at, now: now))"
-        let reset = live.restarted ? ", reset since" : ""
-        return "\(read)\(reset) · live \(Self.whole(live.percent))%"
+    /// Whole points, for what judges them (threshold alerts): the estimate's
+    /// floored value, else the reading.
+    public var wholePercent: Double { live?.percent ?? reading.percent }
+
+    /// "42%" for a reading, "42.6%" for an estimate.
+    public var text: String { PacerMeterFormat.percent(percent, isEstimate: isEstimate) }
+
+    /// "read 42% 3 min. ago", always about `reading`; ", reset since" when
+    /// the estimate restarted past that reading's reset. `age` nil leaves the
+    /// age out ("read 42%"), for text compared rather than shown.
+    ///
+    /// `age` is the reading's age as the surface writes it everywhere else
+    /// (`pacerRelative` in the app), so a hover and the "read 3 min. ago"
+    /// label beside it can never disagree: one reading, one clock, one
+    /// formatter.
+    public func readText(age: String?) -> String {
+        let read = "read \(PacerMeterFormat.percent(reading.percent, isEstimate: false))"
+        let reset = (live?.isEstimate == true && live?.restarted == true) ? ", reset since" : ""
+        return (age.map { "\(read) \($0)" } ?? read) + reset
     }
 
-    static func whole(_ v: Double) -> String { String(Int(v.rounded())) }
-
-    /// "just now", "1 min ago", "42 min ago", "1 hr ago". A reading behind a
-    /// live value is at most an hour old.
-    static func ago(_ at: Date, now: Date) -> String {
-        let minutes = Int(max(0, now.timeIntervalSince(at)) / 60)
-        if minutes < 1 { return "just now" }
-        if minutes < 60 { return "\(minutes) min ago" }
-        return "\(minutes / 60) hr ago"
+    /// The hover on the number: `readText`, and for an estimate the number
+    /// it is: "read 42% 3 min. ago · estimate 42.6%".
+    public func help(age: String) -> String {
+        guard isEstimate else { return readText(age: age) }
+        return "\(readText(age: age)) · estimate \(text)"
     }
 }

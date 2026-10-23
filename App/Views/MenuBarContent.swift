@@ -188,12 +188,12 @@ struct MenuBarLabel: View {
 
     /// Called with the tooltip text whenever it changes, and once on appear.
     ///
-    /// The status item mirrors this onto `NSStatusItem.button.toolTip`.
-    /// `.help()` below is kept because it is the right expression of intent
-    /// and costs nothing, but it cannot be relied on alone: on macOS 26+ a
-    /// `.help()` inside SwiftUI content hosted in a menu-bar surface produces
-    /// no tooltip at all. AppKit's `NSView.toolTip` still does, on every OS
-    /// Pacer supports.
+    /// The status item mirrors this onto `NSStatusItem.button.toolTip`, the
+    /// only tooltip the item has: on macOS 26+ a `.help()` inside SwiftUI
+    /// content hosted in a menu-bar surface produces no tooltip at all, and
+    /// on macOS 15, where it does, it sat over the button's and showed text
+    /// frozen at the last redraw. AppKit's `NSView.toolTip` works on every OS
+    /// Pacer supports, and this keeps its ages current (#318).
     private let onTooltipChange: ((String) -> Void)?
 
     init(onTooltipChange: ((String) -> Void)? = nil) {
@@ -396,7 +396,17 @@ struct MenuBarLabel: View {
     /// items all surface a one-line summary on hover; ours had nothing.
     /// We dump whatever the chips don't already show so the user can
     /// hover for the "everything else."
-    private var tooltip: String {
+    ///
+    /// Every window's number as the chips write it (an estimate with its
+    /// decimal, #318) and the reading under it: "5h: 42.6% (read 42% 3 min.
+    /// ago)". The reading is said every time, not only when the estimate
+    /// differs, so the hover always answers "what did Anthropic last say".
+    ///
+    /// `aged: false` leaves the ages out. That version is what `Render`
+    /// carries, so the status item re-rasterizes on a number moving, never
+    /// on a minute passing; the aged one goes straight to AppKit
+    /// (`onTooltipChange`), on every change and once a minute.
+    private func tooltip(aged: Bool) -> String {
         // Every window's used% (5h / 7d / each scoped), short-labelled. With no
         // scoped windows this reproduces the prior "5h: X% • 7d: Y%" line.
         var parts: [String] = []
@@ -408,12 +418,11 @@ struct MenuBarLabel: View {
             case RateLimitWindowName.sevenDay: label = "7d"
             default: label = w.displayName
             }
-            // The live number, with the reading under it when they differ.
-            // No age here: this text is pushed to AppKit once a minute, and
-            // the reading's age belongs on surfaces that redraw with it.
-            let read = (w.readout?.differsFromReading ?? false)
-                ? " (read \(Int((w.readout?.reading.percent ?? pct).rounded()))%)" : ""
-            parts.append("\(label): \(Int(pct.rounded()))%\(read)")
+            var read = ""
+            if let readout = w.readout {
+                read = " (\(aged ? pacerMeterReadText(readout) : readout.readText(age: nil)))"
+            }
+            parts.append("\(label): \(PacerMeterFormat.percent(pct, isEstimate: w.isEstimate))\(read)")
         }
         // Tooltip's reset hint reads from the 5-hour sample. When that
         // sample's cycle has already ended (Pacer hasn't ingested a fresh
@@ -423,7 +432,7 @@ struct MenuBarLabel: View {
             let cycle = DisplayCycle.resolve(resetsAt: resets, duration: 5 * 3600)
             parts.append(cycle.isAwaiting
                 ? "5h cycle reset, awaiting fresh sample"
-                : "resets \(pacerRelative(resets))")
+                : (aged ? "resets \(pacerRelative(resets))" : "resets"))
         }
         if parts.isEmpty {
             return "Pacer — collecting…"
@@ -447,7 +456,7 @@ struct MenuBarLabel: View {
         // `compactMap`: a scoped chip whose window isn't in the latest poll
         // resolves to nil and is dropped (dormant) — never drawn as a blank
         // or a phantom 0%.
-        Render(items: chipItems.compactMap(resolve), tooltip: tooltip)
+        Render(items: chipItems.compactMap(resolve), tooltip: tooltip(aged: false))
     }
 
     /// Resolve one chip item to its render payload, or `nil` when it should be
@@ -467,11 +476,12 @@ struct MenuBarLabel: View {
             // track, not as a 0% ring in the green band (#241).
             return .rings(rings.map(\.usedPercentage))
         case .fixed(.fiveHourPct):
+            let w = windows.first { $0.key == RateLimitWindowName.fiveHour }
             return .percent(prefix: fiveHourNeedsPrefix ? "5h " : nil,
-                            pct: windows.first { $0.key == RateLimitWindowName.fiveHour }?.usedPercentage)
+                            pct: w?.usedPercentage, isEstimate: w?.isEstimate ?? false)
         case .fixed(.sevenDayPct):
-            return .percent(prefix: "7d ",
-                            pct: windows.first { $0.key == RateLimitWindowName.sevenDay }?.usedPercentage)
+            let w = windows.first { $0.key == RateLimitWindowName.sevenDay }
+            return .percent(prefix: "7d ", pct: w?.usedPercentage, isEstimate: w?.isEstimate ?? false)
         case .fixed(.todayCost):
             return .text(pacerCost(todayCost))
         case .fixed(.todayTokens):
@@ -485,7 +495,7 @@ struct MenuBarLabel: View {
             guard let window = pinnedWindows(accountId)?.first(where: { $0.key == key }),
                   let pct = window.usedPercentage else { return nil }
             let label = accountLabels[accountId] ?? window.displayName
-            return .percent(prefix: "\(label) ", pct: pct)
+            return .percent(prefix: "\(label) ", pct: pct, isEstimate: window.isEstimate)
         case .scoped(let identity):
             // Read the scoped window's live % from the same dynamic window set
             // the dropdown / icon-driver use (active account's latest batch).
@@ -494,7 +504,7 @@ struct MenuBarLabel: View {
                   let pct = window.usedPercentage else { return nil }
             // Same "<name> <pct>%" shape + band coloring as the fixed % chips,
             // e.g. "Fable 49%".
-            return .percent(prefix: "\(window.displayName) ", pct: pct)
+            return .percent(prefix: "\(window.displayName) ", pct: pct, isEstimate: window.isEstimate)
         }
     }
 
@@ -506,8 +516,8 @@ struct MenuBarLabel: View {
             .task(id: reloadKey) { reloadWindows() }
             // `initial: true` so the button gets a tooltip on first draw, not
             // only after the first value change.
-            .onChange(of: rendered.tooltip, initial: true) { _, text in
-                onTooltipChange?(text)
+            .onChange(of: rendered.tooltip, initial: true) { _, _ in
+                onTooltipChange?(tooltip(aged: true))
             }
             // The tooltip's "resets in 2 hr" and its awaiting-a-new-cycle
             // line are judged against the clock, and this body re-runs only
@@ -518,7 +528,7 @@ struct MenuBarLabel: View {
                 while !Task.isCancelled {
                     try? await Task.sleep(for: .seconds(60))
                     if Task.isCancelled { break }
-                    onTooltipChange?(tooltip)
+                    onTooltipChange?(tooltip(aged: true))
                 }
             }
     }
@@ -536,8 +546,9 @@ struct MenuBarLabel: View {
             /// with no reading yet.
             case rings([Double?])
             /// Window utilization chip; nil pct renders "—". `prefix` is the
-            /// "5h " / "7d " disambiguator.
-            case percent(prefix: String?, pct: Double?)
+            /// "5h " / "7d " disambiguator. `isEstimate`: the live meter's
+            /// estimate, drawn with its decimal (#318).
+            case percent(prefix: String?, pct: Double?, isEstimate: Bool)
             /// Plain text chip (cost / tokens / model).
             case text(String)
         }
@@ -567,7 +578,6 @@ private struct MenuBarLabelContent: View, Equatable {
                 itemView(item)
             }
         }
-        .help(rendered.tooltip)
     }
 
     @ViewBuilder
@@ -592,14 +602,15 @@ private struct MenuBarLabelContent: View, Equatable {
             })
             .frame(width: percents.count >= 3 ? 17 : 14,
                    height: percents.count >= 3 ? 17 : 14)
-        case let .percent(prefix, pct):
+        case let .percent(prefix, pct, isEstimate):
             // Percent text warms to red only at the red band — yellow /
             // orange stay primary (colored text reads poorly in the menu
-            // bar); the icon carries the band coloring.
+            // bar); the icon carries the band coloring. An estimate keeps its
+            // decimal, lighter (`PacerMeterValue`); no animation either way.
             if let pct {
-                Text((prefix ?? "") + "\(Int(pct.rounded()))%")
-                    .monospacedDigit()
-                    .foregroundStyle(UsageBand(percentage: pct) == .red ? Color.red : Color.primary)
+                PacerMeterValue(pct, isEstimate: isEstimate,
+                                color: UsageBand(percentage: pct) == .red ? Color.red : Color.primary,
+                                prefix: prefix ?? "")
             } else {
                 Text((prefix ?? "") + "—")
                     .monospacedDigit()
@@ -1057,9 +1068,10 @@ struct MenuStatusContent: View {
                 // branches it was a new view at every cycle reset, the one
                 // moment its fill animation is worth seeing (#140).
                 CircularGauge(
-                    percentage: pct,
+                    reading: pct,
                     lineWidth: 3,
-                    labelFont: .system(size: 8, weight: .bold, design: .rounded)
+                    labelFont: .system(size: 8, weight: .bold, design: .rounded),
+                    isEstimate: window.isEstimate
                 )
                 .frame(width: 22, height: 22)
                 .opacity(cycle.isAwaiting ? 0.4 : 1)
@@ -1081,19 +1093,20 @@ struct MenuStatusContent: View {
                     let pacePct = cycle.paceFraction * 100
                     let band = PaceBand(usedPct: pct, paceEndPct: pacePct)
 
-                    Text("\(Int(pct.rounded()))%")
+                    PacerMeterValue(pct, isEstimate: window.isEstimate)
                         .font(.system(size: 12, weight: .semibold).monospacedDigit())
                         // 32pt fits "99%" and not "100%", so at the cap this
                         // wrapped to "100" over "%" (issue #125). minWidth
                         // keeps every two-digit row pixel-identical to before
-                        // and lets only the three-digit case take the ~6pt it
-                        // needs.
+                        // and lets only the three-digit case (and an
+                        // estimate's decimal) take the room it needs.
                         .lineLimit(1)
                         .fixedSize(horizontal: true, vertical: false)
                         .frame(minWidth: 32, alignment: .trailing)
-                        // The live value's reading. The menu re-reads on
-                        // every open, so "3 min ago" is as of the open.
-                        .pacerToolTip(window.readout?.help(now: Date()) ?? "")
+                        // "read 42% 3 min. ago", and the estimate's number
+                        // when it is one. The menu re-reads on every open,
+                        // so the age is as of the open.
+                        .pacerToolTip(window.readout.map(pacerMeterHelp) ?? "")
 
                     Text("pace \(Int(pacePct.rounded()))%")
                         .font(.system(size: 11, weight: .medium))
@@ -1110,7 +1123,9 @@ struct MenuStatusContent: View {
                     // The trailing caption escalates to the projected cap hit
                     // when the engine sees one coming — same answer the
                     // dashboard tiles and the notification share.
-                    if pct.rounded() >= 100 {
+                    // Whole points: an estimate of 99.6% has not reached
+                    // the limit.
+                    if (window.readout?.wholePercent ?? pct).rounded() >= 100 {
                         // Already at the cap (as displayed): say so, never a
                         // future crossing. The outlook's last-refit snapshot can
                         // lag a point behind the live reading and would

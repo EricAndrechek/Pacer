@@ -193,14 +193,18 @@ struct PaceCommandTests {
     // MARK: - The live value (#318)
 
     /// 5h read at 90% 150 s ago, climbing 45 points an hour, and Pacer's live
-    /// value from the spend since: `live` percent, 4 s old.
-    static func liveMetrics(live: Double, sampleAge: Int = 150, burn: Double = 45) -> String {
+    /// value from the spend since: `live` percent (an estimate, to a tenth),
+    /// its whole points, 4 s old.
+    static func liveMetrics(live: Double, sampleAge: Int = 150, burn: Double = 45,
+                            estimate: Bool = true) -> String {
         """
         pacer_rate_limit_used_ratio{account="org",window="five_hour"} 0.9
         pacer_rate_limit_reset_seconds{account="org",window="five_hour"} 3600
         pacer_rate_limit_recent_burn_percent_per_hour{account="org",window="five_hour"} \(PaceFormat.awkNumber(burn))
         pacer_rate_limit_sample_age_seconds{account="org",window="five_hour"} \(sampleAge)
         pacer_rate_limit_live_used_ratio{account="org",window="five_hour"} \(String(live / 100))
+        pacer_rate_limit_live_whole_ratio{account="org",window="five_hour"} \(String(live.rounded(.down) / 100))
+        pacer_rate_limit_live_estimate{account="org",window="five_hour"} \(estimate ? 1 : 0)
         pacer_rate_limit_live_age_seconds{account="org",window="five_hour"} 4
         pacer_account_info{account="org",name="o",active="true"} 1
         """
@@ -222,6 +226,15 @@ struct PaceCommandTests {
         #expect(pause.status == 10)
         #expect(pause.out.contains("5h at 98% >= safe limit 98%"))
         #expect(over.stateText.contains("\"usedPercent\": 98"))
+    }
+
+    /// The gate judges an estimate's whole points: 97.9% shown is 97 counted,
+    /// under the 98 limit, as the padding was measured on whole points.
+    @Test func aDecimalEstimateIsJudgedOnItsWholePoints() throws {
+        let box = try PaceSandbox(metrics: Self.liveMetrics(live: 97.9))
+        let go = runPace(box, ["gate"], extra: ["CLAUDE_CODE_SESSION_ID": ""])
+        #expect(go.status == 0)
+        #expect(go.out.contains("5h 97%"))
     }
 
     /// The same reading with no live value: the old rule, as ever.
@@ -251,12 +264,25 @@ struct PaceCommandTests {
     }
 
     @Test func jsonKeepsTheReadingAndAddsTheLiveValue() throws {
-        let box = try PaceSandbox(metrics: Self.liveMetrics(live: 93))
+        let box = try PaceSandbox(metrics: Self.liveMetrics(live: 93.4))
         let json = runPace(box, ["json"], extra: ["CLAUDE_CODE_SESSION_ID": ""])
-        #expect(json.out.contains("\"usedPercent\": 90, \"livePercent\": 93, \"liveAgeSeconds\": 4,"))
+        #expect(json.out.contains("\"usedPercent\": 90, \"livePercent\": 93.4, \"liveWholePercent\": 93, "
+                                  + "\"liveIsEstimate\": true, \"liveAgeSeconds\": 4,"))
         #expect(json.out.contains("\"safeLimit\": 98"))
+        // An estimate as every surface writes it: its decimal, marked, and
+        // the reading it started from with that reading's age.
         let report = runPace(box, ["report"], extra: ["CLAUDE_CODE_SESSION_ID": ""])
-        #expect(report.out.contains("93% used (reading 90%)"))
+        #expect(report.out.contains("5h         93.4% est · read 90% 2m ago · "))
+    }
+
+    /// Nothing spent since the reading: the live value is the reading, whole,
+    /// and reads as one.
+    @Test func aLiveValueThatIsTheReadingReadsAsTheReading() throws {
+        let box = try PaceSandbox(metrics: Self.liveMetrics(live: 90, estimate: false))
+        let report = runPace(box, ["report"], extra: ["CLAUDE_CODE_SESSION_ID": ""])
+        #expect(report.out.contains("5h           90% used · "))
+        let json = runPace(box, ["json"], extra: ["CLAUDE_CODE_SESSION_ID": ""])
+        #expect(json.out.contains("\"livePercent\": 90, \"liveWholePercent\": 90, \"liveIsEstimate\": false"))
     }
 
     @Test func theLivePaddingFollowsTheBurnBands() {

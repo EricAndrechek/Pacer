@@ -594,6 +594,8 @@ struct PaceChartCard: View {
         /// The reading behind `usedPct` and the live value on it (#318), for
         /// the hover text, the dotted segment and the forecast's start.
         let readout: LiveMeterReadout?
+        /// `usedPct` is the live meter's estimate: written with its decimal.
+        var isEstimate: Bool { readout?.isEstimate ?? false }
         /// When that reading was taken.
         ///
         /// Needed because Pacer can only poll the account that currently owns
@@ -987,8 +989,11 @@ struct PaceChartCard: View {
         // changes (a scoped window appears / disappears, or an account joins).
         let windowKey = cols.map(\.id).joined(separator: ",")
         let hasScoped = cols.contains { $0.isScoped }
-        // The live numbers on screen: when one moves, the forecasts are
-        // re-asked from it (debounced with the engine's own refits).
+        // The live numbers on screen: when one moves a whole point, the
+        // forecasts are re-asked from it (debounced with the engine's own
+        // refits). Not on each tenth: that moves every scan cycle while
+        // busy, and the chart already re-anchors the drawn forecast on the
+        // tip, so a tenth changes nothing the asks would.
         let liveKey = cols.compactMap { c in c.readout?.live.map { "\(c.id)=\(Int($0.percent))" } }
             .joined(separator: ",")
 
@@ -1757,14 +1762,12 @@ private struct PaceColumn: View {
             let paceEndPct = cycle.paceFraction * 100
             let band = PaceBand(usedPct: used, paceEndPct: paceEndPct)
             HStack(alignment: .firstTextBaseline, spacing: 4) {
-                Text("\(Int(used.rounded()))%")
+                // A reading whole, an estimate with its decimal (#318).
+                PacerMeterValue(used, isEstimate: column.isEstimate, color: band.color)
                     .font(.system(size: 26, weight: .semibold, design: .rounded))
-                    .monospacedDigit()
-                    .foregroundStyle(band.color)
-                    // "read 42% 3 min ago · live 45%"; nothing when the
-                    // number is the reading. The card's minute tick redraws
-                    // the age.
-                    .help(column.readout?.help(now: Date()) ?? "")
+                    // "read 42% 3 min. ago", and "· estimate 42.6%" when it
+                    // is one.
+                    .help(column.readout.map(pacerMeterHelp) ?? "")
                 Text("/")
                     .font(.system(size: 16))
                     .foregroundStyle(.tertiary)
@@ -1776,10 +1779,8 @@ private struct PaceColumn: View {
         } else if let idle = idleUsedPct {
             // Idle window: show the real reading on its own — no pace target to
             // divide against (no cycle), so no "/ NN%".
-            Text("\(Int(idle.rounded()))%")
+            PacerMeterValue(idle, isEstimate: column.isEstimate, color: .secondary)
                 .font(.system(size: 26, weight: .semibold, design: .rounded))
-                .monospacedDigit()
-                .foregroundStyle(.secondary)
         } else {
             Text("--")
                 .font(.system(size: 26, weight: .semibold, design: .rounded))

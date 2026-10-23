@@ -100,7 +100,7 @@ public extension PaceChartView.Data {
     /// the live value is the reading (nothing to draw), restarted past a
     /// reset (this chart is the old window's), or from another cycle.
     func withLive(_ readout: LiveMeterReadout, now: Date) -> PaceChartView.Data {
-        guard let live = readout.live, readout.differsFromReading, !live.restarted,
+        guard let live = readout.live, readout.isEstimate, !live.restarted,
               readout.reading.at >= cycleStart, now > readout.reading.at, now <= resetsAt
         else { return self }
         let readings = points.filter { $0.time <= readout.reading.at }
@@ -110,7 +110,7 @@ public extension PaceChartView.Data {
             points: readings, usedPct: usedPct,
             projection: projection, projectionCrossesFullAt: projectionCrossesFullAt,
             projectionClaimed: projectionClaimed,
-            live: Point(time: now, value: live.percent))
+            live: Point(time: now, value: readout.percent))
     }
 
     /// Clip to the cycle, sort ascending, and pin a tail at "now" so the line

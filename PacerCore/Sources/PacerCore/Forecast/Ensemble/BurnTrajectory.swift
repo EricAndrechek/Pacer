@@ -81,7 +81,10 @@ public enum BurnTrajectory {
                   live.reading.at >= (samples.last?.at ?? .distantPast).addingTimeInterval(-1)
             else { return self }
             var out = self
-            out.liveUsed = live.percent
+            // The number the surfaces show (one decimal when an estimate), so
+            // the forecast starts where the hero number and the chart's tip
+            // are.
+            out.liveUsed = live.shownPercent
             return out
         }
     }
