@@ -99,6 +99,8 @@ final class AppBackgroundService {
     /// Deliberately infrequent (weekly) with a generous 30-day retention
     /// — the data is small, so this is housekeeping, not management.
     private var historyPruneTask: Task<Void, Never>?
+    /// The once-a-day spend → meter fit (#317). See `startSpendMeterFitTask`.
+    private var spendMeterFitTask: Task<Void, Never>?
     /// Opt-in local HTTP server (JSON snapshot + Prometheus + SSE) for
     /// third-party integrations. Created here, owned for the process lifetime;
     /// `applyAPIServerConfig()` starts/stops it per the user's preference.
@@ -183,6 +185,7 @@ final class AppBackgroundService {
         widgetRefreshCoordinator.start()
         startPricingRefreshTask()
         startHistoryPruneTask()
+        startSpendMeterFitTask()
         installAPISettingsObserver()
         installAPIScopeObserver()
         refreshClaudeSkillIfInstalled()
@@ -217,6 +220,8 @@ final class AppBackgroundService {
         pricingRefreshTask = nil
         historyPruneTask?.cancel()
         historyPruneTask = nil
+        spendMeterFitTask?.cancel()
+        spendMeterFitTask = nil
         httpServer.stop()
         if let observer = apiSettingsObserver {
             NotificationCenter.default.removeObserver(observer)
@@ -419,6 +424,52 @@ final class AppBackgroundService {
                 } catch {
                     return
                 }
+            }
+        }
+    }
+
+    // MARK: - Spend → meter fit
+
+    /// After launch, long enough for the first scan cycle to land the hours
+    /// Pacer missed while it was not running.
+    private static let spendMeterFitLaunchDelay: Duration = .seconds(120)
+    /// How often to look for a new local day. Short sleeps rather than one
+    /// until midnight, so a Mac that slept through midnight fits within a
+    /// quarter hour of waking instead of whenever a long sleep ends.
+    private static let spendMeterFitCheckInterval: Duration = .seconds(900)
+
+    /// Fit meter points per API dollar once per local day (#317), and at
+    /// launch when today's fit is missing. The fit reads 14 days of readings
+    /// and hourly spend and runs in about a second, so it is a daily job
+    /// rather than part of any scan cycle; the live meter (#318) reads the
+    /// stored rows.
+    ///
+    /// Skipped while the scan is rebuilding history: the hourly rollup it
+    /// reads is half-rebuilt then, and a fit made from it would stand for the
+    /// whole day. The next check after the rebuild picks it up.
+    private func startSpendMeterFitTask() {
+        guard spendMeterFitTask == nil else { return }
+        let container = self.container
+        spendMeterFitTask = Task { @MainActor in
+            do { try await Task.sleep(for: Self.spendMeterFitLaunchDelay) } catch { return }
+            var fittedDay: String?
+            while !Task.isCancelled {
+                let today = TokenSample.formatDate(Date())
+                if today != fittedDay, HistoryRebuildStatus.shared.step == nil {
+                    // Built and run off the main actor: a model actor
+                    // created on the main thread executes there.
+                    let done = await Task.detached(priority: .utility) { () -> Bool in
+                        do {
+                            _ = try await SpendMeterFitWorker(modelContainer: container).runIfDue()
+                            return true
+                        } catch {
+                            Log.write("SpendMeterFit", "failed: \(error)")
+                            return false
+                        }
+                    }.value
+                    if done { fittedDay = today }
+                }
+                do { try await Task.sleep(for: Self.spendMeterFitCheckInterval) } catch { return }
             }
         }
     }
