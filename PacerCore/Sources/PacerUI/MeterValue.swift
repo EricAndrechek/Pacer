@@ -50,16 +50,16 @@ public struct PacerMeterValue: View {
     }
 }
 
-/// The hover on a window's number: "read 42% 3 min. ago", and for an
-/// estimate "read 42% 3 min. ago · estimate 42.6%". Aged by `pacerRelative`
-/// against `PacerClock.now`, like the "read 3 min. ago" label, so a label and
-/// a hover drawn on the same minute tick say the same thing.
-public func pacerMeterHelp(_ readout: LiveMeterReadout) -> String {
-    readout.help(age: pacerRelative(readout.reading.at))
+/// The hover on a window's number: "read 42% 3 minutes ago", and for an
+/// estimate "read 42% 3 minutes ago · estimate 42.6%". Aged by
+/// `PacerReadAge`, the formatter every "read … ago" label uses; draw it on
+/// `PacerReadAge.Schedule` beside such a label and the two change together.
+public func pacerMeterHelp(_ readout: LiveMeterReadout, now: Date = PacerClock.now) -> String {
+    readout.help(age: PacerReadAge.string(readout.reading.at, now: now))
 }
 
-/// "read 42% 3 min. ago": the reading under a window's number, aged the same
-/// way (`pacerMeterHelp`).
-public func pacerMeterReadText(_ readout: LiveMeterReadout) -> String {
-    readout.readText(age: pacerRelative(readout.reading.at))
+/// "read 42% 3 minutes ago": the reading under a window's number, aged the
+/// same way (`pacerMeterHelp`).
+public func pacerMeterReadText(_ readout: LiveMeterReadout, now: Date = PacerClock.now) -> String {
+    readout.readText(age: PacerReadAge.string(readout.reading.at, now: now))
 }

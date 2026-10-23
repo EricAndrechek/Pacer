@@ -440,6 +440,9 @@ struct MenuBarLabel: View {
         return parts.joined(separator: " • ")
     }
 
+    /// When each window's reading behind the tooltip was taken.
+    private var readingTimes: [Date] { windows.compactMap { $0.readout?.reading.at } }
+
     // MARK: - Layout
 
     /// The fully-resolved render payload — exactly what the status item
@@ -517,6 +520,13 @@ struct MenuBarLabel: View {
             // `initial: true` so the button gets a tooltip on first draw, not
             // only after the first value change.
             .onChange(of: rendered.tooltip, initial: true) { _, _ in
+                onTooltipChange?(tooltip(aged: true))
+            }
+            // A new reading of the same value leaves the ageless text as it
+            // was, and its "read … ago" would otherwise wait for the minute
+            // push to say "now". Kept out of `Render`, so it re-rasterizes
+            // nothing.
+            .onChange(of: readingTimes) { _, _ in
                 onTooltipChange?(tooltip(aged: true))
             }
             // The tooltip's "resets in 2 hr" and its awaiting-a-new-cycle
@@ -1106,7 +1116,7 @@ struct MenuStatusContent: View {
                         // "read 42% 3 min. ago", and the estimate's number
                         // when it is one. The menu re-reads on every open,
                         // so the age is as of the open.
-                        .pacerToolTip(window.readout.map(pacerMeterHelp) ?? "")
+                        .pacerToolTip(window.readout.map { pacerMeterHelp($0) } ?? "")
 
                     Text("pace \(Int(pacePct.rounded()))%")
                         .font(.system(size: 11, weight: .medium))

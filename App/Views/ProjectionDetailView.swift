@@ -102,19 +102,6 @@ struct ProjectionCompareModal: View {
         return "\(used) · \(resets)"
     }
 
-    /// "Live meter: 45.2%, read 42% 3 min. ago · within 1 point of the next
-    /// reading 90% of the time today". Either half alone when only it applies.
-    private var liveLine: String? {
-        var parts: [String] = []
-        if let readout, readout.isEstimate {
-            parts.append("\(readout.text), \(pacerMeterReadText(readout))")
-        }
-        if let a = liveAgreement {
-            parts.append("within 1 point of the next reading \(Int((a.share * 100).rounded()))% of the time today")
-        }
-        return parts.isEmpty ? nil : "Live meter: " + parts.joined(separator: " · ")
-    }
-
     var body: some View {
         // Filled in after the modal is on screen and read inside
         // `PacerModalContent`'s stored closure, so read here too (#140;
@@ -149,7 +136,8 @@ struct ProjectionCompareModal: View {
                     live: data.live,
                     trajectories: overlays,
                     accuracy: accuracy,
-                    liveLine: liveLine
+                    liveReadout: readout?.isEstimate == true ? readout : nil,
+                    liveAgreement: liveAgreement
                 )
             } else if loaded && actualsLoaded {
                 Text("Not enough data to compare models yet.")
@@ -252,9 +240,11 @@ struct ProjectionDetailView: View {
     /// miss) — powers the selected model's earned-record footer. Nil until
     /// the engine has scored a cycle.
     let accuracy: EngineSelfEval.Accuracy?
-    /// "Live meter: 45%, read 42% 3 min ago · within 1 point of the next
-    /// reading 90% of the time today" (#318). Nil: no line.
-    var liveLine: String? = nil
+    /// The live meter's estimate and the reading under it (#318), for the
+    /// line under the chart; nil when the number is the reading.
+    var liveReadout: LiveMeterReadout? = nil
+    /// How close the live meter has been today; nil without enough readings.
+    var liveAgreement: LiveMeterDrift.Agreement? = nil
 
     /// Stable per-model colors for the lines and the legend swatches.
     private static let palette: [String: Color] = [
@@ -420,11 +410,27 @@ struct ProjectionDetailView: View {
 
     // MARK: - Body
 
+    /// "Live meter: 45.2%, read 42% 3 minutes ago · within 1 point of the
+    /// next reading 90% of the time today". Either half alone when only it
+    /// applies. The reading's age keeps itself current (`PacerReadAge`).
+    private var liveLine: Text? {
+        let agreement = liveAgreement.map {
+            "within 1 point of the next reading \(Int(($0.share * 100).rounded()))% of the time today"
+        }
+        if let r = liveReadout {
+            let whole = PacerMeterFormat.percent(r.reading.percent, isEstimate: false)
+            let reset = r.live?.restarted == true ? Text(", reset since") : Text("")
+            let read = Text("\(PacerReadAge.label("Live meter: \(r.text), read \(whole)", r.reading.at))\(reset)")
+            return agreement.map { Text("\(read) · \($0)") } ?? read
+        }
+        return agreement.map { Text("Live meter: \($0)") }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             chart.frame(height: 240)
             if let liveLine {
-                Text(liveLine)
+                liveLine
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             }

@@ -191,8 +191,9 @@ struct RateLimitSourceChip: View {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .font(.system(size: 10))
                 }
-                Text(owner.map { "\($0) · via \(latest.source) · \(pacerRelative(latest.sampledAt))" }
-                     ?? "via \(latest.source) · \(pacerRelative(latest.sampledAt))")
+                // The reading's age keeps itself current (`PacerReadAge`).
+                PacerReadAge.label(owner.map { "\($0) · via \(latest.source) ·" } ?? "via \(latest.source) ·",
+                                   latest.sampledAt)
                     .font(.system(size: 11))
             }
             .foregroundStyle(isStaleOAuth ? Color.yellow : .secondary)

@@ -735,7 +735,10 @@ struct PaceChartCard: View {
                     duration: duration,
                     usedPct: readout.percent,
                     readout: readout,
-                    readingAt: row.sampledAt, newestAnyAccountAt: newestAny,
+                    // The readout's reading: the newer of this card's and the
+                    // live meter's, so the "read … ago" label, the number and
+                    // its hover are about one reading (#318).
+                    readingAt: readout.reading.at, newestAnyAccountAt: newestAny,
                     typicalPollGap: pollGap,
                     resetsAt: row.resetsAt,
                     baseChart: .cycle(scoped: row, history: entry.scoped,
@@ -802,7 +805,7 @@ struct PaceChartCard: View {
             title: Self.decorate(title, with: entry.label), duration: duration,
             usedPct: readout?.percent ?? latest?.usedPercentage,
             readout: readout,
-            readingAt: latest?.sampledAt, newestAnyAccountAt: newestAnyAccountAt,
+            readingAt: readout?.reading.at ?? latest?.sampledAt, newestAnyAccountAt: newestAnyAccountAt,
             typicalPollGap: typicalPollGap,
             resetsAt: latest?.resetsAt,
             baseChart: .cycle(fixed: samples, duration: duration, now: now),
@@ -1356,7 +1359,10 @@ private struct AccountReadingAge: View {
                     .foregroundStyle(.orange)
                     .help(AuthPause.reason)
             } else {
-                Text("read \(pacerRelative(readingAt))")
+                // Keeps itself current (`PacerReadAge`); the minute tick
+                // around it is for the pause decision, which no reading
+                // announces.
+                PacerReadAge.label("read", readingAt)
                     .font(.system(size: 10))
                     .foregroundStyle(stale ? .orange : .secondary)
                     .help(stale
@@ -1715,7 +1721,7 @@ private struct PaceColumn: View {
             // The reset time is deliberately dropped here: it came from the same
             // stale reading, and two facts of different ages side by side is
             // what made this confusing in the first place.
-            Text("last read \(pacerRelative(readingAt))")
+            PacerReadAge.label("last read", readingAt)
                 .lineLimit(1)
                 .font(.system(size: 10))
                 .foregroundStyle(.orange)
@@ -1763,11 +1769,15 @@ private struct PaceColumn: View {
             let band = PaceBand(usedPct: used, paceEndPct: paceEndPct)
             HStack(alignment: .firstTextBaseline, spacing: 4) {
                 // A reading whole, an estimate with its decimal (#318).
-                PacerMeterValue(used, isEstimate: column.isEstimate, color: band.color)
-                    .font(.system(size: 26, weight: .semibold, design: .rounded))
-                    // "read 42% 3 min. ago", and "· estimate 42.6%" when it
-                    // is one.
-                    .help(column.readout.map(pacerMeterHelp) ?? "")
+                // The hover, "read 42% 3 minutes ago · estimate 42.6%", is
+                // about the reading the account header's "read 3 minutes
+                // ago" is about (`Column.readingAt`), in the same words, on
+                // the instants those words change.
+                TimelineView(PacerReadAge.Schedule(column.readout?.reading.at ?? .distantPast)) { _ in
+                    PacerMeterValue(used, isEstimate: column.isEstimate, color: band.color)
+                        .font(.system(size: 26, weight: .semibold, design: .rounded))
+                        .help(column.readout.map { pacerMeterHelp($0) } ?? "")
+                }
                 Text("/")
                     .font(.system(size: 16))
                     .foregroundStyle(.tertiary)
