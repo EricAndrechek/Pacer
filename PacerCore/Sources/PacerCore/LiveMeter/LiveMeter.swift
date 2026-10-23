@@ -85,6 +85,15 @@ public struct LiveMeterValue: Sendable, Equatable {
     /// whole points (the `pacer` gate, threshold alerts, the drift log)
     /// reads this.
     public let percent: Double
+    /// The reading the estimate was built from: `reading`, unless that one
+    /// held still while the spend since the reading before it that moved
+    /// implied 2 points or more (`LiveMeter.heldTick`). Then it is that
+    /// earlier reading, the last the server is known to have recalculated
+    /// at, and `heldImplied` says how far the spend since implied.
+    public let anchor: MeterReading
+    /// Points the spend since `anchor` implied while `reading` held at its
+    /// value; nil when `anchor` is `reading`.
+    public let heldImplied: Double?
     /// The same estimate before flooring: the reading, plus the carry, plus
     /// Σ rate × spend, never below the reading and capped at 100 (0 plus
     /// the spend after a reset). `shownPercent` is this to one decimal.
@@ -109,8 +118,11 @@ public struct LiveMeterValue: Sendable, Equatable {
 
     public init(percent: Double, reading: MeterReading, addedPoints: Double, exactAdded: Double,
                 spendUSD: Double, rateSource: RateSource, restarted: Bool, asOf: Date,
-                carry: Double = 0, exactPercent: Double? = nil) {
+                carry: Double = 0, exactPercent: Double? = nil,
+                anchor: MeterReading? = nil, heldImplied: Double? = nil) {
         self.percent = percent
+        self.anchor = anchor ?? reading
+        self.heldImplied = heldImplied
         self.exactPercent = exactPercent ?? percent
         self.reading = reading
         self.addedPoints = addedPoints
@@ -211,6 +223,76 @@ public enum LiveMeter {
     public static let carryPosition = 0.25
     public static let carryMovedWeight = 0.5
 
+    /// Spend since the reading that last moved implying this many points,
+    /// while the readings since hold its value, means the server has not
+    /// recalculated: those readings are stale (`heldTick`).
+    ///
+    /// On the owner's busiest account (64,190 readings, median gap 25 s), 95%
+    /// of changes were +1 point, and while a reading held the spend converted
+    /// at the fitted rates came to a median 0.52 points, p90 1.00, p99 1.41,
+    /// never 2 or more. Anthropic recalculates within about a minute today;
+    /// this is the guard for the day it does not.
+    public static let staleHeldPoints = 2.0
+
+    /// How long a held reading may be treated as stale: past this since the
+    /// reading that last moved, it is believed again, whatever the spend
+    /// says. A server that recalculates every few minutes is inside it; a
+    /// reading that has held for longer while spend implied two points is
+    /// more likely right than late (turns counted to the wrong account, a
+    /// fit that has drifted), and `LiveMeterRunaway` judges what follows.
+    public static let maxServerLag: TimeInterval = 10 * 60
+
+    /// When the last of `readings` held still at the value of the reading
+    /// that last moved (the tick), while the spend since the tick implies at
+    /// least `staleHeldPoints`: that tick, and the points implied. Nil when
+    /// the latest reading is to be believed.
+    ///
+    /// The run of equal readings is taken within one window and with no gap
+    /// over an hour; a run reaching back to the first of `readings` starts
+    /// at it. Never at 100% (nothing to climb to), never with no fit, and
+    /// never more than `maxServerLag` after the tick. The spend counts at
+    /// full weight: this asks what the rates say, not where the carry sits.
+    public static func heldTick(readings: [MeterReading], duration: TimeInterval, rates: LiveMeterRates?,
+                                spend: [LiveSpend], counts: (@Sendable (String) -> Bool)? = nil)
+        -> (tick: MeterReading, implied: Double)? {
+        guard let rates, let last = readings.last, last.percent < 100 else { return nil }
+        var tick = readings.count - 1
+        while tick > 0 {
+            let prev = readings[tick - 1], r = readings[tick]
+            guard prev.percent == last.percent, sameCycle(prev, r, duration: duration),
+                  r.at.timeIntervalSince(prev.at) <= SpendMeterFitter.maxPairGap else { break }
+            tick -= 1
+        }
+        let start = readings[tick]
+        guard tick < readings.count - 1, last.at.timeIntervalSince(start.at) <= maxServerLag else { return nil }
+        var implied = 0.0
+        for s in spend where s.at > start.at && s.at <= last.at && s.costUSD > 0 {
+            guard s.model != syntheticModel, counts?(s.model) ?? true else { continue }
+            implied += rates.rate(for: s.model).rate * s.costUSD
+        }
+        return implied + floorTolerance >= staleHeldPoints ? (start, implied) : nil
+    }
+
+    /// The live value at `now` from a window's readings, as every path
+    /// builds it (the source, the drift log, today's agreement, the
+    /// comparison chart): `history` ascending, the latest reading last, the
+    /// carry's lookback before it; `spend` covering it.
+    ///
+    /// A stale reading (`heldTick`) does not restart the estimate down at
+    /// itself: the value is built on the tick, with the carry as it stood
+    /// there and all the spend since, and never below the reading.
+    public static func estimate(history: [MeterReading], duration: TimeInterval, rates: LiveMeterRates?,
+                                spend: [LiveSpend], counts: (@Sendable (String) -> Bool)? = nil,
+                                now: Date) -> LiveMeterValue? {
+        guard let latest = history.last, let rates else { return nil }
+        let held = heldTick(readings: history, duration: duration, rates: rates, spend: spend, counts: counts)
+        let anchor = held?.tick ?? latest
+        let carry = carry(readings: history.filter { $0.at <= anchor.at }, duration: duration,
+                          rates: rates, spend: spend, counts: counts)
+        return value(reading: latest, anchor: anchor, heldImplied: held?.implied, duration: duration,
+                     rates: rates, spend: spend, counts: counts, carry: carry, now: now)
+    }
+
     /// The instant spend starts counting from, and the level it adds to:
     /// the reading, or 0 at its cycle's reset. Nil when more than one cycle
     /// has passed. The source fetches from the earliest of these.
@@ -308,15 +390,20 @@ public enum LiveMeter {
     /// `counts` is `SpendMeterFitter.capCounts` for a per-model cap, nil for
     /// an account-wide window. `carry` is `carry(readings:…)` for this
     /// reading; 0 floors from the bottom of the reading's point.
+    /// `anchor` (default `reading`) is the reading to build on: a held,
+    /// stale `reading`'s tick (`estimate`). The value still carries
+    /// `reading`, which is what every surface holds.
     public static func value(
-        reading: MeterReading, duration: TimeInterval, rates: LiveMeterRates?,
+        reading: MeterReading, anchor: MeterReading? = nil, heldImplied: Double? = nil,
+        duration: TimeInterval, rates: LiveMeterRates?,
         spend: [LiveSpend], counts: (@Sendable (String) -> Bool)? = nil,
         carry: Double = 0,
         now: Date, maxReadingAge: TimeInterval = maxReadingAge
     ) -> LiveMeterValue? {
         guard let rates, rates.isStrong else { return nil }
-        guard now.timeIntervalSince(reading.at) <= maxReadingAge else { return nil }
-        guard let start = start(reading: reading, duration: duration, now: now) else { return nil }
+        let anchor = anchor ?? reading
+        guard now.timeIntervalSince(anchor.at) <= maxReadingAge else { return nil }
+        guard let start = start(reading: anchor, duration: duration, now: now) else { return nil }
 
         var exact = 0.0
         var spent = 0.0
@@ -353,6 +440,7 @@ public enum LiveMeter {
         return LiveMeterValue(
             percent: percent, reading: reading, addedPoints: percent - start.base,
             exactAdded: exact, spendUSD: spent, rateSource: source,
-            restarted: start.restarted, asOf: now, carry: carried, exactPercent: exactPercent)
+            restarted: start.restarted, asOf: now, carry: carried, exactPercent: exactPercent,
+            anchor: anchor, heldImplied: anchor == reading ? nil : heldImplied)
     }
 }

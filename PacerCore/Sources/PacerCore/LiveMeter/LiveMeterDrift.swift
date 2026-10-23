@@ -13,31 +13,61 @@ import SwiftData
 public enum LiveMeterDrift {
 
     /// `readings` are the new poll's: window key and percent. Reads only, on
-    /// its own context, so call it off the main actor after the poll's save.
+    /// its own context, so call it off the main actor after the poll's save
+    /// (the runaway guard's suspension, rare, is its one write).
+    ///
+    /// Per window it also says when the new reading is stale (the lag
+    /// guard, `LiveMeter.heldTick`), and judges the estimate against it for
+    /// the runaway guard (`LiveMeterRunaway`), which keeps judging a
+    /// suspended window so the drift lines go on saying how it would have
+    /// done.
     public static func log(container: ModelContainer, account: String, at: Date,
-                           readings: [(key: String, percent: Double)]) {
+                           readings: [(key: String, percent: Double)],
+                           runaway: LiveMeterRunaway = .shared) {
         let context = ModelContext(container)
-        let source = LiveMeterSource(context: context)
+        var source = LiveMeterSource(context: context)
+        source.ignoresRunaway = true
         let windows = readings.compactMap { source.latestReading(account: account, window: $0.key, before: at) }
         guard !windows.isEmpty else { return }
         let values = source.values(account: account, windows: windows, now: at)
+        let acct = String(account.suffix(4))
         for (key, percent) in readings {
+            let held = source.held(account: account, window: key, through: at)
+            if let held {
+                Log.write("LiveMeter", String(format: "%@ %@: reading held at %@%% while spend implied +%.1f",
+                                              acct, key, fmt(percent), held.implied))
+            }
             guard let v = values[key] else { continue }
+            let fittedDay = source.latestRates(account: account, window: key)?.fittedDay ?? ""
+            let verdict = runaway.judge(context: context, account: account, window: key, fittedDay: fittedDay,
+                                        shown: v.percent, reading: percent, readingIsStale: held != nil)
+            if verdict == .suspendedNow {
+                Log.write("LiveMeter", "\(acct) \(key): live value \(Int(LiveMeterRunaway.highBy))+ points over "
+                          + "\(LiveMeterRunaway.consecutive) readings in a row; showing readings until the next daily fit")
+                // The board rebuilt on this poll's write, before the
+                // suspension existed: drop the value now, not at the next
+                // scan cycle.
+                Task { @MainActor in LiveMeterBoard.shared.refresh() }
+            }
             // Only when there is something to compare: the meter moved, or
             // the live value disagreed with it. A busy account is read every
             // ~30 s, and a line for every poll that merely saw some spend was
             // hundreds an hour that each said "they agree".
             if !v.restarted, v.reading.percent == percent, v.percent == percent { continue }
-            Log.write("LiveMeter", line(account: account, window: key, read: percent, live: v))
+            let suspended = verdict == .suspended || verdict == .suspendedNow ? " · suspended" : ""
+            Log.write("LiveMeter", line(account: account, window: key, read: percent, live: v) + suspended)
         }
     }
 
     /// `8c95 five_hour: read 42% · live showed 41% (38% 4m ago +3, carry 0.40, $17.20 per-model) · -1`
     static func line(account: String, window: String, read: Double, live v: LiveMeterValue) -> String {
-        let ago = Int(v.asOf.timeIntervalSince(v.reading.at).rounded())
+        // Built on the anchor: the reading itself, or the tick a stale one
+        // held at (`LiveMeter.estimate`).
+        let ago = Int(v.asOf.timeIntervalSince(v.anchor.at).rounded())
         let from = v.restarted
             ? "0% after the reset"
-            : "\(fmt(v.reading.percent))% \(ago >= 60 ? "\(ago / 60)m" : "\(ago)s") ago"
+            : "\(fmt(v.anchor.percent))% \(ago >= 60 ? "\(ago / 60)m" : "\(ago)s") ago"
+                + (v.heldImplied != nil ? " held" : "")
         return String(format: "%@ %@: read %@%% · live showed %@%% (%@ +%@, carry %.2f, $%.2f %@) · %+.0f",
                       String(account.suffix(4)), window, fmt(read), fmt(v.percent),
                       from, fmt(v.addedPoints), v.carry, v.spendUSD, v.rateSource.rawValue, v.percent - read)
@@ -99,10 +129,8 @@ public extension LiveMeterDrift {
             let first = lowerBound(times, prev.at.addingTimeInterval(-LiveMeter.carryLookback))
             let history = Array(readings[first...(i - 1)])
             let slice = Array(spend[upperBound(spendTimes, history[0].at)..<upperBound(spendTimes, next.at)])
-            let carry = LiveMeter.carry(readings: history, duration: latest.duration, rates: rates,
-                                        spend: slice, counts: counts)
-            guard let v = LiveMeter.value(reading: prev, duration: latest.duration, rates: rates,
-                                          spend: slice, counts: counts, carry: carry, now: next.at),
+            guard let v = LiveMeter.estimate(history: history, duration: latest.duration, rates: rates,
+                                             spend: slice, counts: counts, now: next.at),
                   v.spendUSD > 0 || next.percent != prev.percent else { continue }
             pairs += 1
             if abs(v.percent - next.percent) <= 1 { within += 1 }

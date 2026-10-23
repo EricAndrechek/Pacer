@@ -63,6 +63,9 @@ public struct LiveMeterSource {
     private let context: ModelContext
     private let mode: CostMode
     private let pricingOverride: PricingTable.Snapshot?
+    /// Build a value even for a suspended window: the drift log, which keeps
+    /// judging the estimate while it is not shown.
+    var ignoresRunaway = false
 
     /// `mode` defaults to the user's setting, the one the scan priced the
     /// rollups with. `pricing` defaults to the store's ledger: the process's
@@ -81,11 +84,15 @@ public struct LiveMeterSource {
     /// keyed by `Window.key`.
     public func values(account: String, windows: [Window], now: Date) -> [String: LiveMeterValue] {
         guard hasTables else { return [:] }
+        let suspended = ignoresRunaway ? [:] : LiveMeterRunaway.suspendedDays(context: context, account: account)
         var plans: [(window: Window, rates: LiveMeterRates, history: [MeterReading], from: Date)] = []
         for w in windows {
             guard now.timeIntervalSince(w.reading.at) <= LiveMeter.maxReadingAge,
                   let start = LiveMeter.start(reading: w.reading, duration: w.duration, now: now),
-                  let rates = latestRates(account: account, window: w.key), rates.isStrong
+                  let rates = latestRates(account: account, window: w.key), rates.isStrong,
+                  // Suspended until the next daily fit after running high
+                  // three readings in a row (`LiveMeterRunaway`).
+                  suspended[w.key] != rates.fittedDay
             else { continue }
             let history = Self.carryHistory(w.history ?? readings(account: account, window: w.key,
                                                                     through: w.reading.at),
@@ -101,11 +108,9 @@ public struct LiveMeterSource {
         for plan in plans {
             let counts = SpendMeterFitter.capCounts(modelId: plan.window.capModelId,
                                                     displayName: plan.window.capModelName)
-            let carry = LiveMeter.carry(readings: plan.history, duration: plan.window.duration,
-                                        rates: plan.rates, spend: spend, counts: counts)
-            out[plan.window.key] = LiveMeter.value(
-                reading: plan.window.reading, duration: plan.window.duration,
-                rates: plan.rates, spend: spend, counts: counts, carry: carry, now: now)
+            out[plan.window.key] = LiveMeter.estimate(
+                history: plan.history, duration: plan.window.duration,
+                rates: plan.rates, spend: spend, counts: counts, now: now)
         }
         return out
     }
@@ -141,6 +146,21 @@ public struct LiveMeterSource {
     public func currentValues(account: String, now: Date) -> [String: LiveMeterValue] {
         let windows = currentWindows(account: account, now: now)
         return windows.isEmpty ? [:] : values(account: account, windows: windows, now: now)
+    }
+
+    /// Whether one window's latest reading at or before `through` is a stale
+    /// one (`LiveMeter.heldTick`): the tick it held at and the points the
+    /// spend since implied. Nil without a strong fit or when it is believed.
+    public func held(account: String, window key: String, through: Date) -> (tick: MeterReading, implied: Double)? {
+        guard hasTables, let latest = latestReading(account: account, window: key, before: through.addingTimeInterval(0.001)),
+              let rates = latestRates(account: account, window: key), rates.isStrong else { return nil }
+        let history = Self.carryHistory(readings(account: account, window: key, through: latest.reading.at),
+                                        ending: latest.reading)
+        guard history.count >= 2, let first = history.first,
+              let spend = spend(account: account, after: first.at, through: latest.reading.at) else { return nil }
+        return LiveMeter.heldTick(
+            readings: history, duration: latest.duration, rates: rates, spend: spend,
+            counts: SpendMeterFitter.capCounts(modelId: latest.capModelId, displayName: latest.capModelName))
     }
 
     /// One window's value, reading its latest reading too: a fixed window

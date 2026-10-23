@@ -230,7 +230,9 @@ public final class LiveMeterBoard {
     /// reading turning `LiveMeter.maxReadingAge` old, or its window resetting.
     nonisolated static func nextExpiry(_ values: [String: [String: LiveMeterValue]], after now: Date) -> Date? {
         values.values.flatMap(\.values).flatMap { v -> [Date] in
-            var out = [v.reading.at.addingTimeInterval(LiveMeter.maxReadingAge)]
+            // The anchor is the reading itself, or the earlier tick a stale
+            // reading held at: the value lasts an hour from that.
+            var out = [v.anchor.at.addingTimeInterval(LiveMeter.maxReadingAge)]
             if let reset = v.reading.resetsAt, !v.restarted { out.append(reset) }
             return out
         }
