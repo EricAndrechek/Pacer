@@ -58,4 +58,31 @@ public enum BurnRate {
     ) -> Bool {
         projection.willHitLimitBeforeReset && usedPct >= floor
     }
+
+    /// Below this fraction of the steady pace that would land at exactly 100%
+    /// at the reset, a window is idle: its recent readings have not moved.
+    public static let idleFractionOfCapPace = 0.05
+
+    /// What an idle window's outlook chip says.
+    public enum IdleVerdict: Equatable, Sendable {
+        /// The forecast keeps the meter where it is.
+        case holds
+        /// The forecast still expects it to climb, to this at the reset.
+        case atReset(Int)
+    }
+
+    /// The chip for an idle window. A forecast that only repeats the reading
+    /// the card already shows in large type says "holds until reset" instead
+    /// of the number again. One that still expects a climb (a daily rhythm
+    /// that knows the usual hours are coming) keeps its number, because that
+    /// is new. A window at 0% has nothing to hold, so no chip.
+    ///
+    /// Idle windows used to get no chip at all. Under account rotation that
+    /// is most of them, and the forecast went missing from most cards.
+    public static func idleVerdict(usedPct: Double, atReset: Double?) -> IdleVerdict? {
+        let used = usedPct.rounded()
+        guard used > 0 else { return nil }
+        if let end = atReset?.rounded(), end > used { return .atReset(Int(end)) }
+        return .holds
+    }
 }

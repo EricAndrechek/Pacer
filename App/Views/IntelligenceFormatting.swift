@@ -266,13 +266,26 @@ enum IntelligenceFormatting {
         endEstimate: Estimate?,
         duration: TimeInterval,
         usedPct: Double
-    ) -> (text: String, tint: Color, help: String)? {
+    ) -> (text: String, tint: Color, help: String, symbol: String)? {
         if usedPct.rounded() >= 100 {
             return ("at the limit", .red,
-                    "You're at the top of this window — usage can't climb further until it resets.")
+                    "You're at the top of this window — usage can't climb further until it resets.", "flame.fill")
         }
         let ratio = capPaceRatio(slopePercentPerHour: outlook.slopePercentPerHour, windowSeconds: duration)
-        guard ratio >= 0.05 else { return nil }          // effectively idle — say nothing
+        let atReset = endEstimate.flatMap { $0.isInsufficient ? nil : $0.value }
+        guard ratio >= BurnRate.idleFractionOfCapPace else {
+            let quiet = WindowSpec.isWeeklyScale(duration: duration) ? "day" : "90 minutes"
+            switch BurnRate.idleVerdict(usedPct: usedPct, atReset: atReset) {
+            case .holds?:
+                return ("holds until reset", .secondary,
+                        "No movement in the last \(quiet), so the forecast keeps it here until it resets.", "pause.fill")
+            case .atReset(let end)?:
+                return ("≈\(end)% at reset", .green,
+                        "Quiet for the last \(quiet), but your usual rhythm picks up again before the reset.", "flame.fill")
+            case nil:
+                return nil
+            }
+        }
         var help = capPaceHelp(slopePercentPerHour: outlook.slopePercentPerHour, windowSeconds: duration)
         if outlook.willHitLimitBeforeReset, let eta = relativeCrossingPhrase(outlook) {
             if let phrase = crossingPhrase(outlook) {
@@ -281,14 +294,14 @@ enum IntelligenceFormatting {
                     .replacingOccurrences(of: "→ limit ", with: "")
                 help += " Crossing projected \(when), at your typical rhythm."
             }
-            return ("limit \(eta)", .red, help)
+            return ("limit \(eta)", .red, help, "flame.fill")
         }
         // The line crosses before the reset but the claim is withheld: say the
         // crossing, hedged. Falling through printed the at-reset value, which
         // that same crossing clamps to "≈100% at reset".
         if let withheld = outlook.hitWithheld, let eta = relativeCrossingPhrase(outlook) {
             help += " The forecast line reaches 100% \(eta). " + withheldReason(withheld)
-            return ("may hit limit \(eta)", .orange, help)
+            return ("may hit limit \(eta)", .orange, help, "flame.fill")
         }
         let tint: Color = ratio < 0.9 ? .green : ratio < 1.15 ? .secondary : .orange
         if let e = endEstimate, !e.isInsufficient {
@@ -296,9 +309,9 @@ enum IntelligenceFormatting {
                 help += String(format: " Calibrated range at reset: %.0f–%.0f%%.",
                                band.lowerBound, band.upperBound)
             }
-            return ("≈\(Int(e.value.rounded()))% at reset", tint, help)
+            return ("≈\(Int(e.value.rounded()))% at reset", tint, help, "flame.fill")
         }
-        return (String(format: "%+.1f%%/hr", outlook.slopePercentPerHour), tint, help)
+        return (String(format: "%+.1f%%/hr", outlook.slopePercentPerHour), tint, help, "flame.fill")
     }
 
     static func withheldReason(_ w: UsageIntelligenceEngine.BurnOutlook.HitWithheld) -> String {

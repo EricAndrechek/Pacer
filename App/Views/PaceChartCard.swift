@@ -1501,7 +1501,7 @@ private struct PaceColumn: View {
         if let used = column.usedPct, let outlook,
            let chip = IntelligenceFormatting.burnChip(outlook: outlook, endEstimate: endEstimate,
                                                       duration: duration, usedPct: used) {
-            Chip(text: chip.text, systemImage: "flame.fill", tint: chip.tint, size: .compact)
+            Chip(text: chip.text, systemImage: chip.symbol, tint: chip.tint, size: .compact)
                 .fixedSize()
                 .help(chip.help)
         }
