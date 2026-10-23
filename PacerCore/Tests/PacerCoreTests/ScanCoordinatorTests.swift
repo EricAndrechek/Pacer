@@ -19,6 +19,7 @@ private func makeInMemoryContainer() throws -> ModelContainer {
         ProjectBudget.self,
         ProjectMeta.self,
         ProjectCollection.self,
+        SpendMeterFit.self,
         configurations: config
     )
 }
