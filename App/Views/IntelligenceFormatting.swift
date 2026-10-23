@@ -267,7 +267,9 @@ enum IntelligenceFormatting {
         duration: TimeInterval,
         usedPct: Double
     ) -> (text: String, tint: Color, help: String, symbol: String)? {
-        if usedPct.rounded() >= 100 {
+        // Whole points: readings are whole, and an estimate of 99.6% has
+        // not reached the limit (#318).
+        if usedPct.rounded(.down) >= 100 {
             return ("at the limit", .red,
                     "You're at the top of this window — usage can't climb further until it resets.", "flame.fill")
         }
@@ -280,7 +282,7 @@ enum IntelligenceFormatting {
                 return ("holds until reset", .secondary,
                         "No movement in the last \(quiet), so the forecast keeps it here until it resets.", "pause.fill")
             case .atReset(let end)?:
-                return ("≈\(end)% at reset", .green,
+                return ("≈\(end)% at reset", Self.atResetTint(Double(end)),
                         "Quiet for the last \(quiet), but your usual rhythm picks up again before the reset.", "flame.fill")
             case nil:
                 return nil
@@ -309,9 +311,20 @@ enum IntelligenceFormatting {
                 help += String(format: " Calibrated range at reset: %.0f–%.0f%%.",
                                band.lowerBound, band.upperBound)
             }
-            return ("≈\(Int(e.value.rounded()))% at reset", tint, help, "flame.fill")
+            let end = e.value.rounded()
+            return ("≈\(Int(end))% at reset", Self.atResetTint(end), help, "flame.fill")
         }
         return (String(format: "%+.1f%%/hr", outlook.slopePercentPerHour), tint, help, "flame.fill")
+    }
+
+    /// An at-reset value is tinted by where the window ends up, through the
+    /// canonical `UsageBand` mapping: "≈100% at reset" is red however slowly
+    /// it gets there. Tinting it by the climb's speed (`capPaceRatio`) showed
+    /// a weekly window at 97% with 15 hours left as "≈100% at reset" in
+    /// green. The bare slope chip below it keeps the speed tint: speed is
+    /// all it says.
+    static func atResetTint(_ end: Double) -> Color {
+        UsageBand(percentage: end).color
     }
 
     static func withheldReason(_ w: UsageIntelligenceEngine.BurnOutlook.HitWithheld) -> String {
