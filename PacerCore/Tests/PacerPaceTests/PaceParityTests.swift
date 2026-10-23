@@ -46,6 +46,13 @@ import Testing
 ///   `--resume-headroom` below the paused window's limit (#313), which the
 ///   state file records for a later `wait`; `withoutAddedKeys` drops it.
 ///   `wait` is not compared (above).
+/// - With Pacer's live value (#318, `pacer_rate_limit_live_used_ratio`) on a
+///   reading under 15 minutes old, a window is judged on the live value and
+///   padded by its measured error rather than by the burn over the reading's
+///   age; `json` adds `livePercent` and `liveAgeSeconds`, and `report` shows
+///   the reading beside it. The script never saw such a series, and no
+///   fixture here carries one, so every case below still takes the reading
+///   rule. `PaceCommandTests` covers the live one.
 @Suite("pace: parity with pace.sh")
 struct PaceParityTests {
 

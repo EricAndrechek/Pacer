@@ -18,6 +18,17 @@ struct PaceRow: Equatable, Sendable {
     let willHit: String
     let recentBurn: String?
     let sampleAge: String?
+    /// The last reading, when `percent` is Pacer's live value instead
+    /// (#318): the reading plus the points the API spend since it adds.
+    /// Nil when `percent` is the reading itself.
+    var reading: Double? = nil
+    /// How old the live value was when served, in seconds, as Pacer wrote it.
+    var liveAge: String? = nil
+
+    /// `percent` is the live value, not the reading.
+    var isLive: Bool { reading != nil }
+    /// The last reading, live or not.
+    var readingPercent: Double { reading ?? percent }
 
     /// The percentage as awk printed it: `95`, `41.5`, `33.3333`.
     var percentText: String { PaceFormat.awkNumber(percent) }
@@ -96,16 +107,70 @@ enum PaceRules {
         return nil
     }
 
-    /// The safe limit for one window: 100% minus how far usage can climb before
-    /// a fresher reading arrives — the recent burn times (the reading's age
-    /// plus one worst-case poll), at least 1 point. 98 with no burn measured.
+    /// The safe limit for one window. 98 with no burn measured.
+    ///
+    /// On a reading: 100% minus how far usage can climb before a fresher
+    /// reading arrives — the recent burn times (the reading's age plus one
+    /// worst-case poll), at least 1 point.
+    ///
+    /// On a live value (#318): 100% minus how far the live value can sit
+    /// under the real meter — its own error at this burn (`livePadding`),
+    /// plus the burn over however much older than `liveAgeCovered` the live
+    /// value is, at least 1 point. The live value already counts the climb
+    /// since the reading, so padding for that too would count it twice.
     static func safeLimit(_ row: PaceRow) -> Int {
         guard let b = burnRate(row) else { return 98 }
-        let age = row.sampleAge.flatMap { $0.isEmpty ? nil : PaceFormat.number($0) } ?? pollWorst
-        var m = max(0, b) * (age + pollWorst) / 3600
+        var m: Double
+        if row.isLive {
+            let age = row.liveAge.flatMap { $0.isEmpty ? nil : PaceFormat.number($0) } ?? 0
+            m = Double(livePadding(burn: b)) + max(0, b) * max(0, age - liveAgeCovered) / 3600
+        } else {
+            let age = row.sampleAge.flatMap { $0.isEmpty ? nil : PaceFormat.number($0) } ?? pollWorst
+            m = max(0, b) * (age + pollWorst) / 3600
+        }
         if m < 1 { m = 1 }
         let points = m == m.rounded(.towardZero) ? Int(m) : Int(m) + 1
         return 100 - points
+    }
+
+    /// The oldest reading a live value is judged on. Past it the gate goes
+    /// back to the reading and the old padding: the replay below measured the
+    /// live value's error on readings up to 15 minutes apart (one login polls
+    /// every 5 minutes while active, 10 idle), and at 30 minutes apart its
+    /// p95 had doubled. A reading that old means the poller is failing, and
+    /// the old rule pads for exactly that.
+    static let liveMaxReadingAge = 900.0
+
+    /// How old a live value the padding already allows for. The API rebuilds
+    /// it on every scan cycle and at least every 15 s; replayed with the live
+    /// value built 15 s and 60 s before the moment it was scored at, every
+    /// band's p95 stayed inside its padding. A snapshot older than that (a
+    /// stalled refresher, #191) pads for the climb beyond it.
+    static let liveAgeCovered = 60.0
+
+    /// Points the live value may sit under the real meter, by burn: the p95
+    /// of (real reading − live value) in a one-login replay of the owner's
+    /// store (`LiveMeterProbe`, 09-18 → 10-23, 5-hour window, readings
+    /// thinned to one per 5, 10 and 15 minutes and scored against the ones
+    /// thinned away), taking each band's worst cadence. Burn is what the
+    /// gate sees: the half-hour climb of the kept readings.
+    ///
+    ///     burn          5 min   10 min   15 min   → padding
+    ///     under 20/h      1       0        1          1
+    ///     20–40/h         1       2        2          2
+    ///     40–60/h         2       2        2          2
+    ///     60+/h           2       2        3          3
+    ///
+    /// Built 15 s or 60 s before the moment it was scored at, as a snapshot
+    /// that old shows it, every 5-minute band's p95 stayed at 0–2.
+    ///
+    /// The reading alone, at 5 minutes, was 4 points behind at p95 above
+    /// 40/h; the old rule padded 5 points for a 2½-minute-old reading at
+    /// 40/h, and stopped there at 95%. This stops at 98%.
+    static func livePadding(burn: Double) -> Int {
+        if burn >= 60 { return 3 }
+        if burn >= 20 { return 2 }
+        return 1
     }
 
     enum Cap: Equatable, Sendable {
