@@ -28,8 +28,8 @@ import json
 from dataclasses import replace
 
 from pacer_replay import (
-    CaseScore, Params, load_activity_grid, load_rate_samples, locate_store,
-    open_copy, replay_window, summarize,
+    WINDOW_SECONDS, CaseScore, Params, grid_loader, headline_key, is_weekly_scale,
+    locate_store, open_copy, rate_samples_by_account, replay_accounts, summarize,
 )
 
 FOLDS = 4
@@ -39,6 +39,16 @@ DEFAULT_GRID = {
     "recency_half_life_fraction": [0.10, 0.15, 0.25],
     "conformal_min_residuals": [5, 8, 12],
 }
+# Rate-limit selection knobs (#305), swept on their own: `sweep.py --selection`.
+# Harness-only until one passes the adoption rule; then it lands in Swift
+# (EngineSelfEval.bestMethod + EngineParams) in the same commit. On 2026-10-20,
+# on full history, phase selection with a 5% relative tie passed on 5h (3.82 ->
+# 3.57 pp, fold-robust) and was adopted; recency did not pass.
+SELECTION_GRID = {
+    "rl_select_by_phase": [False, True],
+    "rl_selection_recency": [0, 30, 15],
+    "rl_tie_relative": [0.0, 0.05, 0.10, 0.25],
+}
 FULL_GRID = {
     "linear_recent_lookback_fraction": [0.15, 0.2, 0.3, 0.4, 0.5],
     "recency_half_life_fraction": [0.08, 0.10, 0.15, 0.20, 0.25, 0.35],
@@ -47,8 +57,9 @@ FULL_GRID = {
 }
 
 
-def fold_medians(scores: list[CaseScore]) -> list[float | None]:
-    """Median |error| per contiguous time fold (by cycle index)."""
+def fold_errors(scores: list[CaseScore], weekly: bool = False) -> list[float | None]:
+    """|error| per contiguous time fold (by cycle index): the median, or the
+    mean on weekly-scale windows, matching `headline_key`."""
     if not scores:
         return [None] * FOLDS
     max_idx = max(s.cycle_index for s in scores) + 1
@@ -57,7 +68,12 @@ def fold_medians(scores: list[CaseScore]) -> list[float | None]:
         lo, hi = max_idx * f / FOLDS, max_idx * (f + 1) / FOLDS
         errs = sorted(s.abs_error for s in scores if lo <= s.cycle_index < hi)
         n = len(errs)
-        out.append(None if n == 0 else (errs[n // 2] if n % 2 else (errs[n // 2 - 1] + errs[n // 2]) / 2))
+        if n == 0:
+            out.append(None)
+        elif weekly:
+            out.append(sum(errs) / n)
+        else:
+            out.append(errs[n // 2] if n % 2 else (errs[n // 2 - 1] + errs[n // 2]) / 2)
     return out
 
 
@@ -73,42 +89,59 @@ def robust_improvement(base_folds, cand_folds, base_med, cand_med, cand_cov) -> 
     return cand_cov is not None and 0.70 <= cand_cov <= 0.92
 
 
+def label(p: Params) -> str:
+    """The version tag, plus any knob outside canonical() that differs from
+    the default — those share the baseline's tag, so the tag alone can't name
+    a --selection row."""
+    base = Params()
+    extra = [f"{f}={getattr(p, f)}" for f in ("rl_select_by_phase", "rl_selection_recency", "rl_tie_relative")
+             if getattr(p, f) != getattr(base, f)]
+    return p.version_tag() + (f" [{', '.join(extra)}]" if extra else "")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--store")
     ap.add_argument("--window", choices=["five_hour", "seven_day"])
     ap.add_argument("--full", action="store_true", help="the larger grid (~360 configs)")
+    ap.add_argument("--selection", action="store_true",
+                    help="the rate-limit selection knobs instead (#305; 24 configs)")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
 
     conn = open_copy(locate_store(args.store))
-    grid_prior = load_activity_grid(conn)
+    grid_prior = grid_loader(conn)
     windows = [args.window] if args.window else ["five_hour", "seven_day"]
-    samples = {w: load_rate_samples(conn, w) for w in windows}
+    samples = {w: rate_samples_by_account(conn, w) for w in windows}
 
-    grid = FULL_GRID if args.full else DEFAULT_GRID
+    grid = SELECTION_GRID if args.selection else FULL_GRID if args.full else DEFAULT_GRID
     keys = sorted(grid)
     configs = [Params(), *(
         replace(Params(), **dict(zip(keys, values)))
         for values in itertools.product(*(grid[k] for k in keys))
     )]
-    # De-dup (the baseline usually appears in the grid too).
+    # De-dup (the baseline usually appears in the grid too) on every field, not
+    # canonical(): the selection knobs stay out of canonical() until adopted,
+    # so keying on it collapsed the whole --selection grid into the baseline.
     seen, unique = set(), []
     for p in configs:
-        if p.canonical() not in seen:
-            seen.add(p.canonical())
+        if repr(p) not in seen:
+            seen.add(repr(p))
             unique.append(p)
 
     report: dict = {"baseline": Params().version_tag(), "windows": {}}
     for window in windows:
         rows = []
+        metric = headline_key(WINDOW_SECONDS[window])
+        weekly = is_weekly_scale(WINDOW_SECONDS[window])
         for i, p in enumerate(unique):
-            scores = replay_window(window, samples[window], grid_prior, p)
+            scores = replay_accounts(window, samples[window], grid_prior, p)
             s = summarize(scores)
+            # "median" is the window's headline error: the mean on weekly windows.
             rows.append({
-                "tag": p.version_tag(), "canonical": p.canonical(),
-                "median": s.get("medianAbsErrorPP"), "coverage80": s.get("coverage80"),
-                "brier": s.get("brier"), "folds": fold_medians(scores),
+                "tag": label(p), "canonical": p.canonical(), "metric": metric,
+                "median": s.get(metric), "coverage80": s.get("coverage80"),
+                "brier": s.get("brier"), "folds": fold_errors(scores, weekly),
                 "isBaseline": i == 0,
             })
             print(f"\r[{window}] {i + 1}/{len(unique)}", end="", flush=True)
@@ -118,6 +151,7 @@ def main() -> None:
             base["folds"], r["folds"], base["median"], r["median"], r["coverage80"])]
         recommendable.sort(key=lambda r: r["median"])
         report["windows"][window] = {
+            "metric": metric,
             "baseline": {k: base[k] for k in ("tag", "median", "coverage80", "brier")},
             "recommend": recommendable[0] if recommendable else None,
             "top5": sorted(rows, key=lambda r: (r["median"] is None, r["median"]))[:5],
@@ -128,14 +162,14 @@ def main() -> None:
         return
     for window, r in report["windows"].items():
         b = r["baseline"]
-        print(f"\n[{window}] baseline {b['tag']}: median {b['median']}pp, coverage {b['coverage80']}, brier {b['brier']}")
+        print(f"\n[{window}] baseline {b['tag']}: {r['metric']} {b['median']}pp, coverage {b['coverage80']}, brier {b['brier']}")
         if r["recommend"]:
             c = r["recommend"]
-            print(f"  RECOMMEND {c['tag']}: median {c['median']}pp, coverage {c['coverage80']} (fold-robust)")
+            print(f"  RECOMMEND {c['tag']}: {r['metric']} {c['median']}pp, coverage {c['coverage80']} (fold-robust)")
             print(f"    {c['canonical']}")
         else:
             print("  no fold-robust improvement — keep the baseline (this is the hysteresis working)")
-        print("  top 5 by median error:")
+        print(f"  top 5 by {r['metric']}:")
         for row in r["top5"]:
             mark = "*" if row["isBaseline"] else " "
             print(f"   {mark} {row['tag']}  median={row['median']}  cov={row['coverage80']}  brier={row['brier']}")

@@ -179,7 +179,7 @@ struct PaceChartProvider: AppIntentTimelineProvider {
             // The engine's exported outlook (the app writes it after every
             // refit): the same dashed trajectory + crossing the dashboard
             // draws, so the widget matches instead of showing a bare line.
-            let snapshot = Self.engineSnapshot(context: context)
+            let snapshot = Self.engineSnapshot(context: context, account: account)
             let five = Self.window(rows: rows, key: "five_hour", duration: K.fiveHourSeconds,
                                    outlook: snapshot?.fiveHour)
             let seven = Self.window(rows: rows, key: "seven_day", duration: K.sevenDaySeconds,
@@ -256,10 +256,14 @@ struct PaceChartProvider: AppIntentTimelineProvider {
         return latest.resetsAt == nil ? latest.usedPercentage : nil
     }
 
-    /// Read + decode the engine's outlook export. `nil` when absent or stale
-    /// (the app may not be running; an old projection is worse than none).
-    private static func engineSnapshot(context: ModelContext) -> EngineSnapshot? {
-        let key = EngineSnapshot.metaKey
+    /// Read + decode the engine's outlook export for the account being
+    /// charted. `nil` when absent or stale (the app may not be running; an old
+    /// projection is worse than none). The unqualified all-accounts export used
+    /// to be read whatever the widget charted, so picking an account that isn't
+    /// the active login drew no forecast at all: the export's reset never
+    /// matched (#303).
+    private static func engineSnapshot(context: ModelContext, account: String?) -> EngineSnapshot? {
+        let key = EngineSnapshot.metaKey(for: account.map(EngineScope.account) ?? .allAccounts)
         let descriptor = FetchDescriptor<ClaudeCodeMeta>(
             predicate: #Predicate<ClaudeCodeMeta> { $0.key == key })
         guard let json = try? context.fetch(descriptor).first?.value,
@@ -292,6 +296,7 @@ struct PaceChartProvider: AppIntentTimelineProvider {
         // a nonsense overlay — and clip it to the chart's domain.
         var projection: [PaceChartView.Data.Point]?
         var crossing: Date?
+        var claimed = false
         if let outlook, abs(outlook.resetsUnix - resetsAt.timeIntervalSince1970) < 120 {
             let pts = outlook.trajectory
                 .map { PaceChartView.Data.Point(time: Date(timeIntervalSince1970: $0.t), value: $0.v) }
@@ -309,10 +314,11 @@ struct PaceChartProvider: AppIntentTimelineProvider {
                 if rebased.count >= 2 {
                     projection = rebased
                     crossing = r.crossesFullAt
+                    claimed = outlook.hitClaimed ?? false
                 }
             }
         }
-        let chart = projection.map { base.withProjection($0, crossesFullAt: crossing) } ?? base
+        let chart = projection.map { base.withProjection($0, crossesFullAt: crossing, claimed: claimed) } ?? base
         return PaceChartEntry.WindowState(chart: chart, resetsAt: resetsAt)
     }
 
@@ -335,6 +341,7 @@ struct PaceChartProvider: AppIntentTimelineProvider {
         let tailTime = min(now, resetsAt)
         var projection: [PaceChartView.Data.Point]?
         var crossing: Date?
+        var claimed = false
         if let o = outlook?.outlook, abs(o.resetsUnix - resetsAt.timeIntervalSince1970) < 120 {
             let pts = o.trajectory
                 .map { PaceChartView.Data.Point(time: Date(timeIntervalSince1970: $0.t), value: $0.v) }
@@ -344,10 +351,10 @@ struct PaceChartProvider: AppIntentTimelineProvider {
                     points: pts.map { ($0.time, $0.value) },
                     toTime: tailTime, value: row.percent)
                 let rebased = r.points.map { PaceChartView.Data.Point(time: $0.at, value: $0.value) }
-                if rebased.count >= 2 { projection = rebased; crossing = r.crossesFullAt }
+                if rebased.count >= 2 { projection = rebased; crossing = r.crossesFullAt; claimed = o.hitClaimed ?? false }
             }
         }
-        let chart = projection.map { base.withProjection($0, crossesFullAt: crossing) } ?? base
+        let chart = projection.map { base.withProjection($0, crossesFullAt: crossing, claimed: claimed) } ?? base
         return PaceChartEntry.ScopedState(
             key: row.identity,
             label: row.label,

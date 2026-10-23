@@ -1,8 +1,8 @@
 """Replay Pacer's rate-limit prediction pipeline over the real store, walk-forward.
 
 Faithful Python ports of the Swift engine's pieces (BurnTrajectory models,
-DiurnalBurnModel, stratified additive conformal, method selection with shadow
-floors), driven by the same raw RateLimitSample rows the app reads. Every
+DiurnalBurnModel, stratified additive conformal, record-driven method
+selection), driven by the same raw RateLimitSample rows the app reads. Every
 prediction is made using only data that existed at prediction time, then
 scored against the realized cycle:
 
@@ -23,10 +23,12 @@ is never touched.
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
 import math
 import shutil
 import sqlite3
+import subprocess
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime
@@ -58,8 +60,14 @@ class Params:
     pool_recency_window: int = 30
     linear_recent_lookback_fraction: float = 0.3
     recency_half_life_fraction: float = 0.15
-    shadow_promotion_min_periods: int = 15
     conformal_block_min_cycles: int = 40
+    # Rate-limit selection knobs (#305). Phase selection and the relative tie
+    # were adopted 2026-10-20 (EngineParams.rlSelectByPhase / rlTieRelative)
+    # and are in `canonical()`. Recency is still harness-only, kept out of
+    # `canonical()` until a value is adopted.
+    rl_select_by_phase: bool = True          # select early (<50%) and late cuts separately
+    rl_selection_recency: int = 0            # rank on the last N scored periods; 0 = all-time
+    rl_tie_relative: float = 0.05            # tie band relative to the best; 0 = absolute 1.5 pp
 
     def canonical(self) -> str:
         def g(v: float) -> str:
@@ -73,8 +81,9 @@ class Params:
             f"poolRecencyWindow={self.pool_recency_window}",
             f"linearRecentLookbackFraction={g(self.linear_recent_lookback_fraction)}",
             f"recencyHalfLifeFraction={g(self.recency_half_life_fraction)}",
-            f"shadowPromotionMinPeriods={self.shadow_promotion_min_periods}",
             f"conformalBlockMinCycles={self.conformal_block_min_cycles}",
+            f"rlSelectByPhase={int(self.rl_select_by_phase)}",
+            f"rlTieRelative={g(self.rl_tie_relative)}",
         ])
 
     def version_tag(self) -> str:
@@ -99,13 +108,29 @@ def locate_store(explicit: str | None) -> Path:
 
 
 def open_copy(store: Path) -> sqlite3.Connection:
+    """Read-only connection to a private copy of the store, removed at exit.
+
+    The copy is a full store (~1 GB on a real one) and every replay, sweep and
+    weekly check makes one, so it must not outlive the process: before this
+    cleanup each run left one in $TMPDIR until macOS's temp cleaner got to it
+    days later (#274). On APFS `cp -c` clones instead of copying — no extra
+    disk, and each file is captured at one instant while the app keeps
+    writing; anything else falls back to a byte copy."""
     tmp = Path(tempfile.mkdtemp(prefix="pacer-harness-"))
     for suffix in ("", "-wal", "-shm"):
         src = Path(str(store) + suffix)
         if src.exists():
-            shutil.copy2(src, tmp / src.name)
+            if subprocess.run(["cp", "-c", str(src), str(tmp / src.name)],
+                              capture_output=True).returncode != 0:
+                shutil.copy2(src, tmp / src.name)
     conn = sqlite3.connect(f"file:{tmp / store.name}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
+
+    def cleanup() -> None:
+        conn.close()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    atexit.register(cleanup)
     return conn
 
 
@@ -129,6 +154,59 @@ def load_rate_samples(conn: sqlite3.Connection, window: str) -> list[tuple[float
         (window,),
     ).fetchall()
     return [(r[0] + CORE_DATA_EPOCH, float(r[1]), r[2] + CORE_DATA_EPOCH) for r in rows]
+
+
+def _archived(conn: sqlite3.Connection, kind: str, key_col: str, key: str):
+    """Rows of `kind` from AccountUsageArchive, the permanent record. The live
+    tables are a 35-day cache (OAuthPoller.liveWindowDays): every hour older
+    rows are moved into the archive, never deleted. Reading only the live table
+    silently replayed the last 35 days, not the history."""
+    if "ZACCOUNTUSAGEARCHIVE" not in _tables(conn):
+        return []
+    return conn.execute(
+        f"SELECT ZSAMPLEDAT, ZUSEDPERCENTAGE, ZRESETSAT, ZACCOUNTID FROM ZACCOUNTUSAGEARCHIVE "
+        f"WHERE ZKIND = ? AND {key_col} = ? AND ZRESETSAT IS NOT NULL AND ZUSEDPERCENTAGE IS NOT NULL",
+        (kind, key),
+    ).fetchall()
+
+
+def _merge_by_account(*row_sets) -> dict[str, list[tuple[float, float, float]]]:
+    """Union of live and archived rows per account, de-duplicated on the
+    sample instant (a row caught between its archive insert and its live
+    delete must not count twice), time-ordered."""
+    out: dict[str, dict[float, tuple[float, float, float]]] = {}
+    for rows in row_sets:
+        for at, used, reset, acct in rows:
+            t = at + CORE_DATA_EPOCH
+            out.setdefault(acct or "", {})[round(t, 3)] = (t, float(used), reset + CORE_DATA_EPOCH)
+    return {a: sorted(v.values()) for a, v in out.items()}
+
+
+def rate_samples_by_account(conn: sqlite3.Connection, window: str) -> dict[str, list[tuple[float, float, float]]]:
+    """`load_rate_samples`, one series per account ("" for rows with none).
+    A rate-limit window belongs to one account, and since #303 the app fits
+    and records each account's on its own: the harness used to pool every
+    account's cycles into one record, which is what the app's all-accounts
+    engine did and no longer does."""
+    rows = conn.execute(
+        "SELECT ZSAMPLEDAT, ZUSEDPERCENTAGE, ZRESETSAT, ZACCOUNTID FROM ZRATELIMITSAMPLE "
+        "WHERE ZWINDOW = ? AND ZRESETSAT IS NOT NULL ORDER BY ZSAMPLEDAT",
+        (window,),
+    ).fetchall()
+    return _merge_by_account(rows, _archived(conn, "rate_limit", "ZWINDOW", window))
+
+
+def usagelimit_samples_by_account(conn: sqlite3.Connection, identity: str) -> dict[str, list[tuple[float, float, float]]]:
+    """`load_usagelimit_samples`, one series per account: two accounts can
+    hold a weekly window under the same identity string."""
+    if "ZUSAGELIMITSAMPLE" not in _tables(conn) or "ZACCOUNTID" not in _cols(conn, "ZUSAGELIMITSAMPLE"):
+        return {"": load_usagelimit_samples(conn, identity)}
+    rows = conn.execute(
+        "SELECT ZSAMPLEDAT, ZPERCENT, ZRESETSAT, ZACCOUNTID FROM ZUSAGELIMITSAMPLE "
+        "WHERE ZIDENTITY = ? AND ZRESETSAT IS NOT NULL ORDER BY ZSAMPLEDAT",
+        (identity,),
+    ).fetchall()
+    return _merge_by_account(rows, _archived(conn, "usage_limit", "ZIDENTITY", identity))
 
 
 def load_usagelimit_samples(conn: sqlite3.Connection, identity: str) -> list[tuple[float, float, float]]:
@@ -187,14 +265,21 @@ def scoped_identities(conn: sqlite3.Connection) -> list[tuple[str, str, float]]:
     return sorted(out)
 
 
-def load_activity_grid(conn: sqlite3.Connection) -> list[list[float]]:
+def load_activity_grid(conn: sqlite3.Connection, account: str | None = None) -> list[list[float]]:
     """P(active)[weekday 0=Sun..6=Sat][hour] from hourly aggregates — the
     diurnal prior. Idle days count in the denominator (gaps are real zeros).
+    With `account`, that account's own hourly rollup, as its engine reads.
     A missing/renamed table degrades to a uniform (absent) prior."""
     try:
-        rows = conn.execute(
-            "SELECT ZDATE, ZHOUR, SUM(ZTOTALCOSTUSD) FROM ZHOURLYAGGREGATE GROUP BY ZDATE, ZHOUR"
-        ).fetchall()
+        if account:
+            rows = conn.execute(
+                "SELECT ZDATE, ZHOUR, SUM(ZTOTALCOSTUSD) FROM ZACCOUNTHOURLYAGGREGATE "
+                "WHERE ZACCOUNTID = ? GROUP BY ZDATE, ZHOUR", (account,)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT ZDATE, ZHOUR, SUM(ZTOTALCOSTUSD) FROM ZHOURLYAGGREGATE GROUP BY ZDATE, ZHOUR"
+            ).fetchall()
     except sqlite3.OperationalError:
         return [[0.0] * 24 for _ in range(7)]
     active: dict[str, set[int]] = {}
@@ -276,6 +361,12 @@ class Partial:
     cycle_start: float
     resets_at: float
 
+    def __post_init__(self) -> None:
+        # Port of PartialCycle.init: a window opens at 0%, a reading, not a
+        # guess, so it is counted when the first real reading comes later.
+        if self.samples and self.samples[0][0] > self.cycle_start + 1:
+            self.samples = [(self.cycle_start, 0.0)] + list(self.samples)
+
     def hours(self, at: float) -> float:
         return (at - self.cycle_start) / 3600.0
 
@@ -286,6 +377,27 @@ class Partial:
     @property
     def used_now(self) -> float:
         return self.samples[-1][1] if self.samples else 0.0
+
+
+def displayed_at_reset(proj, c: Partial) -> float:
+    """The end-at-reset value the app shows for a projection — port of
+    BurnTrajectory.displayedAtReset. Anchored to the live value (shift up only:
+    smoothed fits can sit under a spiking last sample) and clamped to
+    [usedNow, 100]. Everything that grades a projection — the record selection
+    reads, the conformal residuals, the scored point — goes through this, so a
+    model is judged on what the user is shown, not on how far past 100% its raw
+    line runs (#300)."""
+    anchor = max(0.0, c.used_now - proj(c.now))
+    return min(100.0, max(c.used_now, proj(c.resets_at) + anchor))
+
+
+# Version suffix of the rate-limit record's bucket keys (`cut=0.20|v2`). v1 rows
+# scored the raw extrapolation; readers take only the current version.
+RL_BUCKET_VERSION = "v2"
+
+
+def rl_bucket(cut_fraction: float) -> str:
+    return f"cut={cut_fraction:.2f}|{RL_BUCKET_VERSION}"
 
 
 def _ls_line(pts: list[tuple[float, float]]):
@@ -311,6 +423,25 @@ def linear_recent(c: Partial, params: Params):
         return None
     slope, intercept = line
     return lambda t: slope * ((t - c.cycle_start) / 3600.0) + intercept
+
+
+def recent_rate(c: Partial, params: Params):
+    """Port of BurnTrajectory.RecentRate (#272): the meter's rise over the last
+    hour (a day on weekly-scale windows), extrapolated from the latest reading."""
+    if len(c.samples) < 2:
+        return None
+    frm = c.now - (24 * 3600.0 if is_weekly_scale(c.resets_at - c.cycle_start) else 3600.0)
+    start = None
+    if frm > c.cycle_start:
+        prior = [s for s in c.samples if s[0] <= frm]
+        start = prior[-1] if prior else None
+    t0, u0 = start if start else (c.cycle_start, 0.0)
+    last_t, last_u = c.samples[-1]
+    span = last_t - t0
+    if span < 300:
+        return None
+    rate = max(0.0, (last_u - u0) / span)
+    return lambda t: last_u + rate * (t - last_t)
 
 
 def _trend_fit(c: Partial, params: Params, *, min_samples: int, damping_tau_s: float,
@@ -503,13 +634,12 @@ def diurnal_fit(table: list[list[float]]):
 
 MODEL_COMPLEXITY = {
     "linear-recent": 1, "recency-weighted": 2, "saturating": 3,
-    "damped-acceleration": 4, "kalman-trend": 5, "diurnal-rate": 3,
+    "damped-acceleration": 4, "kalman-trend": 5, "diurnal-rate": 3, "recent-rate": 1,
 }
-SHADOW_IDS = {"five_hour": {"kalman-trend", "diurnal-rate"}, "seven_day": {"kalman-trend"}}
 
 # Mirror of Swift's WindowSpec.isWeeklyScale (24h threshold). Windows at least a
-# day long are weekly-cadence: diurnal is an established candidate (not a shadow)
-# and cold-start selection defaults to it; shorter ones are session-cadence.
+# day long are weekly-cadence: cold-start selection defaults to the diurnal
+# model and selection ranks on the mean error; shorter ones are session-cadence.
 # The fixed 5h/7d windows sit on either side, so their behaviour is unchanged.
 WEEKLY_SCALE_THRESHOLD = 24 * 3600.0
 
@@ -518,10 +648,14 @@ def is_weekly_scale(duration: float) -> bool:
     return duration >= WEEKLY_SCALE_THRESHOLD
 
 
-def shadow_ids(duration: float) -> set[str]:
-    """Kalman is a shadow everywhere; diurnal is a shadow on session-cadence
-    windows only (mirror of UsageIntelligenceEngine.rlShadowFloors(duration:))."""
-    return {"kalman-trend"} if is_weekly_scale(duration) else {"kalman-trend", "diurnal-rate"}
+def headline_key(duration: float) -> str:
+    """The `summarize` error a window is judged by (drift alarm, adoption rule).
+    Most weekly-cadence cycles end at the cap (57% of 7-day cycles on the
+    owner's store), where the clamped point is exactly right, so their MEDIAN
+    error is 0.0 for every model and says nothing. The mean keeps the misses
+    that matter, such as an early cut undershooting a capped cycle.
+    Session-cadence windows keep the median."""
+    return "meanAbsErrorPP" if is_weekly_scale(duration) else "medianAbsErrorPP"
 
 
 def scoped_duration(group: str, reset_spacings: list[float] | None = None) -> float:
@@ -542,6 +676,7 @@ def model_roster(diurnal_table):
         "damped-acceleration": damped_acceleration,
         "saturating": saturating,
         "kalman-trend": kalman_trend,
+        "recent-rate": recent_rate,
         "diurnal-rate": diurnal_fit(diurnal_table),
     }
 
@@ -632,7 +767,7 @@ def collect_residuals(model_fit, params: Params, history: list[Cycle],
             proj = model_fit(partial, params)
             if proj is None:
                 continue
-            residual = true_final - proj(cyc.resets_at)
+            residual = true_final - displayed_at_reset(proj, partial)
             raw["pooled"].append((ci, residual))
             raw.setdefault(mode_stratum(mode, cf, cyc.cycle_start), []).append((ci, residual))
 
@@ -658,23 +793,89 @@ def collect_residuals(model_fit, params: Params, history: list[Cycle],
             if k == "pooled" or kish_n(v) >= params.rl_stratum_min_scores}
 
 
-def best_method(record: dict[str, dict[str, list[float]]], shadow_set: set[str], params: Params) -> str | None:
-    """Port of EngineSelfEval.bestMethod: lowest median |err|, ties within
-    1.5pp to the simpler model, shadow floors applied."""
+def resolve_model(roster, chosen: str, partial: Partial, record: dict[str, dict[str, list[tuple[float, float]]]],
+                  params: Params, weekly: bool = False, phase: str | None = None):
+    """Port of UsageIntelligenceEngine.resolveModel (#301): the chosen model if
+    it fits this moment, else the best-recorded model that does — the lowest
+    typical error, then the simpler one. Returns (model id, projection), or (None, None) if nothing
+    fits. The app used to show nothing when its selection declined (and the
+    harness skipped those cases), while the chart drew a stand-in."""
+    proj = roster[chosen](partial, params) if chosen in roster else None
+    if proj is not None:
+        return chosen, proj
+
+    def rank(mid: str):
+        per = record.get(mid, {})
+        err = typical(method_errors(per, params, phase), weekly)
+        return (err, MODEL_COMPLEXITY.get(mid, 3))
+
+    best = None
+    for mid, fit in roster.items():          # roster order breaks full ties, as in Swift
+        p = fit(partial, params)
+        if p is not None and (best is None or rank(mid) < best[0]):
+            best = (rank(mid), mid, p)
+    return (best[1], best[2]) if best else (None, None)
+
+
+def phase_of(cut_fraction: float) -> str:
+    return "early" if cut_fraction < 0.5 else "late"
+
+
+def method_errors(per_period: dict[str, list[tuple[float, float]]], params: Params,
+                  phase: str | None) -> list[float]:
+    """A method's displayed-value errors for selection (#305): only `phase`'s
+    cuts when selecting by phase, only the last `rl_selection_recency` scored
+    periods when set (period keys are reset instants, so they sort in time)."""
+    periods = sorted(per_period, key=float)
+    if params.rl_selection_recency:
+        periods = periods[-params.rl_selection_recency:]
+    return [e for p in periods for cf, e in per_period[p]
+            if phase is None or not params.rl_select_by_phase or phase_of(cf) == phase]
+
+
+def typical(errs: list[float], weekly: bool) -> float:
+    if not errs:
+        return math.inf
+    errs = sorted(errs)
+    n = len(errs)
+    if weekly:
+        return sum(errs) / n
+    return errs[n // 2] if n % 2 else (errs[n // 2 - 1] + errs[n // 2]) / 2
+
+
+CLAIM_USED_FLOOR = 50.0   # BurnRate.warningUsedFloor
+
+
+def hit_claimable(raw_at_reset: float, used_now: float, q10: float | None) -> bool:
+    """Port of BurnOutlook.hitClaimable (#304): the latest-plausible crossing
+    (the anchored, unclamped curve shifted by its calibrated q10 still reaches
+    100 by the reset; the point crossing when no band is stated) at or above
+    the level floor. The app also requires the claim on two consecutive refits,
+    which a replay at 10% cuts cannot reproduce."""
+    if used_now >= 100.0 or used_now < CLAIM_USED_FLOOR:
+        return False
+    return raw_at_reset + min(q10, 0.0) >= 100.0 if q10 is not None else raw_at_reset >= 100.0
+
+
+def best_method(record: dict[str, dict[str, list[tuple[float, float]]]], params: Params,
+                weekly: bool = False, phase: str | None = None) -> str | None:
+    """Port of EngineSelfEval.bestMethod: lowest typical |err| (the median, the
+    mean on weekly-scale windows — EngineSelfEval.typicalError / headline_key),
+    over `method_errors` (phase and recency, #305); ties within the band (1.5 pp,
+    or `rl_tie_relative` of the best) to the simpler model; one floor for every model."""
     scored = []
     for mid, per_period in record.items():
-        floor = params.shadow_promotion_min_periods if mid in shadow_set else 2
-        if len(per_period) < floor:
+        if len(per_period) < 2:
             continue
-        errs = [e for es in per_period.values() for e in es]
-        errs.sort()
-        n = len(errs)
-        med = errs[n // 2] if n % 2 else (errs[n // 2 - 1] + errs[n // 2]) / 2
-        scored.append((mid, med, MODEL_COMPLEXITY.get(mid, 3)))
+        errs = method_errors(per_period, params, phase)
+        if not errs:
+            continue
+        scored.append((mid, typical(errs, weekly), MODEL_COMPLEXITY.get(mid, 3)))
     if not scored:
         return None
     best = min(scored, key=lambda x: x[1])
-    near = [x for x in scored if x[1] <= best[1] + 1.5]
+    band = best[1] * params.rl_tie_relative if params.rl_tie_relative else 1.5
+    near = [x for x in scored if x[1] <= best[1] + band]
     return min(near, key=lambda x: (x[2], x[1]))[0]
 
 
@@ -699,6 +900,8 @@ class CaseScore:
     brier: float
     truth_hit: bool
     band_stated: bool
+    cycle_start: float = 0.0      # for ordering cases across accounts (replay_accounts)
+    claimed: bool = False         # the red "limit in …" evidence at this cut (hit_claimable)
 
 
 def replay_window(window: str, samples, activity_grid, params: Params,
@@ -707,7 +910,6 @@ def replay_window(window: str, samples, activity_grid, params: Params,
     if duration is None:
         duration = WINDOW_SECONDS[window]
     weekly = is_weekly_scale(duration)
-    shadow_set = shadow_ids(duration)
     cycles = segment(samples, duration)
     completed = cycles[:-1] if cycles else []   # last group = current/live
     scores: list[CaseScore] = []
@@ -725,9 +927,12 @@ def replay_window(window: str, samples, activity_grid, params: Params,
 
         # Selection and the calibrator depend only on the record/history, not
         # the cut — resolve once per cycle (the walk over cuts is the hot loop).
-        chosen = best_method(record, shadow_set, params) or (
-            "diurnal-rate" if weekly else "recency-weighted")
-        residuals = collect_residuals(roster[chosen], params, history, mode=conformal_mode)
+        default = "diurnal-rate" if weekly else "recency-weighted"
+        chosen_by_phase = {ph: best_method(record, params, weekly, ph) or default
+                           for ph in ("early", "late")}
+        chosen = chosen_by_phase["early"]
+        # Calibrators for whichever model resolves at a cut, built on demand.
+        residual_cache = {chosen: collect_residuals(roster[chosen], params, history, mode=conformal_mode)}
 
         for cf in RL_CUT_FRACTIONS:
             cut_now = cyc.cycle_start + cyc.duration * cf
@@ -735,31 +940,44 @@ def replay_window(window: str, samples, activity_grid, params: Params,
             if len(seen) < 3:
                 continue
             partial = Partial(seen, cut_now, cyc.cycle_start, cyc.resets_at)
-            proj = roster[chosen](partial, params)
+            ph = phase_of(cf)
+            shown, proj = resolve_model(roster, chosen_by_phase[ph], partial, record, params, weekly, ph)
             if proj is None:
                 continue
-            anchor = max(0.0, partial.used_now - proj(cut_now))
-            raw = proj(cyc.resets_at) + anchor
-            point = min(100.0, max(partial.used_now, raw))
+            if shown not in residual_cache:
+                residual_cache[shown] = collect_residuals(roster[shown], params, history, mode=conformal_mode)
+            residuals = residual_cache[shown]
+            # The displayed value is both the point and the band's centre: the
+            # residuals it's calibrated on are measured from it too.
+            point = displayed_at_reset(proj, partial)
 
             strat = residuals.get(mode_stratum(conformal_mode, cf, cyc.cycle_start),
                                   residuals.get("pooled", []))
             lo = gated_quantile(strat, 0.1, params.conformal_min_residuals)
             hi = gated_quantile(strat, 0.9, params.conformal_min_residuals)
             band_stated = lo is not None and hi is not None
-            covered = (min(raw + lo, raw + hi) <= truth <= max(raw + lo, raw + hi)) if band_stated else None
-            pb10 = pinball(truth, raw + lo, 0.1) if band_stated else None
-            pb90 = pinball(truth, raw + hi, 0.9) if band_stated else None
+            # Scored as displayed (UsageIntelligenceEngine.clampPct with the
+            # meter as the floor, #273): the band can't start below the usage
+            # already recorded or end above 100. Unclamped, the same bands
+            # scored 2.2x worse on pinball for mass outside the possible range.
+            if band_stated:
+                b_lo = min(100.0, max(partial.used_now, point + lo))
+                b_hi = max(b_lo, min(100.0, max(partial.used_now, point + hi)))
+            covered = (b_lo <= truth <= b_hi) if band_stated else None
+            pb10 = pinball(truth, b_lo, 0.1) if band_stated else None
+            pb90 = pinball(truth, b_hi, 0.9) if band_stated else None
             # Hit probability: weighted share of residual-shifted outcomes ≥100
             # (conformal predictive), falling back to the deterministic call.
             if kish_n(strat) >= params.conformal_min_residuals:
                 total_w = sum(w for w, _ in strat)
-                p_hit = sum(w for w, r in strat if raw + r >= 100.0) / total_w
+                p_hit = sum(w for w, r in strat if point + r >= 100.0) / total_w
             else:
                 p_hit = 1.0 if point >= 100.0 else 0.0
-            scores.append(CaseScore(i, cf, chosen, abs(point - truth), covered,
+            raw_at_reset = proj(cyc.resets_at) + max(0.0, partial.used_now - proj(cut_now))
+            claimed = hit_claimable(raw_at_reset, partial.used_now, lo)
+            scores.append(CaseScore(i, cf, shown, abs(point - truth), covered,
                                     pb10, pb90, (p_hit - (1.0 if truth_hit else 0.0)) ** 2,
-                                    truth_hit, band_stated))
+                                    truth_hit, band_stated, cyc.cycle_start, claimed))
 
         # After the cycle completes, extend every model's record (walk-forward).
         period_key = str(round(cyc.resets_at / 60) * 60)
@@ -769,12 +987,41 @@ def replay_window(window: str, samples, activity_grid, params: Params,
                 seen = [s for s in cyc.samples if s[0] <= cut_now]
                 if len(seen) < 3:
                     continue
-                proj = fit(Partial(seen, cut_now, cyc.cycle_start, cyc.resets_at), params)
+                partial = Partial(seen, cut_now, cyc.cycle_start, cyc.resets_at)
+                proj = fit(partial, params)
                 if proj is None:
                     continue
                 record.setdefault(mid, {}).setdefault(period_key, []).append(
-                    abs(proj(cyc.resets_at) - truth))
+                    (cf, abs(displayed_at_reset(proj, partial) - truth)))
     return scores
+
+
+def grid_loader(conn: sqlite3.Connection):
+    """`grid_for(account)` for replay_accounts: each account's own activity
+    prior, read once ("" falls back to the all-accounts rollup)."""
+    cache: dict[str, list[list[float]]] = {}
+
+    def grid_for(acct: str) -> list[list[float]]:
+        if acct not in cache:
+            cache[acct] = load_activity_grid(conn, acct or None)
+        return cache[acct]
+    return grid_for
+
+
+def replay_accounts(window: str, by_account: dict[str, list], grid_for, params: Params,
+                    conformal_mode: str = "auto", duration: float | None = None) -> list[CaseScore]:
+    """Replay each account on its own record and activity prior, as the app
+    fits them (#303), and merge. `cycle_index` is renumbered in time order
+    across accounts so the contiguous-fold split (sweep.fold_errors) stays
+    chronological rather than interleaving accounts."""
+    tagged = []
+    for acct, samples in sorted(by_account.items()):
+        for sc in replay_window(window, samples, grid_for(acct), params, conformal_mode, duration):
+            tagged.append((acct, sc))
+    order = {key: n for n, key in enumerate(sorted({(sc.cycle_start, acct, sc.cycle_index) for acct, sc in tagged}))}
+    for acct, sc in tagged:
+        sc.cycle_index = order[(sc.cycle_start, acct, sc.cycle_index)]
+    return [sc for _, sc in tagged]
 
 
 def summarize(scores: list[CaseScore]) -> dict:
@@ -792,6 +1039,12 @@ def summarize(scores: list[CaseScore]) -> dict:
         "meanPinball": round(sum((s.pinball_q10 + s.pinball_q90) / 2 for s in banded) / len(banded), 3) if banded else None,
         "brier": round(sum(s.brier for s in scores) / n, 4),
         "capHitBaseRate": round(sum(1 for s in scores if s.truth_hit) / n, 3),
+        # The red claim's evidence per cut (#304): how often a claim was right,
+        # and how many cap hits were claimed.
+        "claimPrecision": round(sum(1 for s in scores if s.claimed and s.truth_hit)
+                                / max(1, sum(1 for s in scores if s.claimed)), 3),
+        "claimRecall": round(sum(1 for s in scores if s.claimed and s.truth_hit)
+                             / max(1, sum(1 for s in scores if s.truth_hit)), 3),
         "methodShare": {},
     }
     for s in scores:
@@ -801,8 +1054,58 @@ def summarize(scores: list[CaseScore]) -> dict:
     return out
 
 
+PARITY_MODELS = ["linear-recent", "recency-weighted", "damped-acceleration", "saturating", "kalman-trend",
+                 "recent-rate"]
+
+
+def parity_fixture() -> dict:
+    """Deterministic synthetic 5-hour cycles and the record rows this harness
+    scores for them — what `EngineSelfEval.newOutcomesRL` must reproduce
+    (RLDisplayedParityTests). The cycles exercise the three cases the display
+    function exists for: a plain ramp, a late spike the smoothed fits sit
+    under (anchor > 0), and a ramp whose raw line runs past 100 (clamp)."""
+    duration = WINDOW_SECONDS["five_hour"]
+    step = 300.0
+    base = 1_752_000_000.0
+    shapes = [
+        lambda f: 60.0 * f,                                   # plain ramp
+        lambda f: 10.0 * f if f < 0.45 else 4.5 + 70.0 * (f - 0.45),  # late spike
+        lambda f: min(100.0, 180.0 * f),                      # runs past the cap
+        lambda f: 30.0 * f ** 0.5,                            # sparse polls from 4 min in: the 0% anchor
+    ]
+    cycles, rows = [], []
+    for ci, shape in enumerate(shapes):
+        start = base + ci * duration
+        reset = start + duration
+        if ci == 3:   # read every 6 minutes, first at +4 min (a background account)
+            times = [start + 240 + k * 360 for k in range(int((duration - 240) / 360) + 1)]
+        else:
+            times = [start + k * step for k in range(int(duration / step) + 1)]
+        samples = [(t, round(shape((t - start) / duration), 4)) for t in times]
+        cyc = Cycle(samples, start, reset)
+        cycles.append({"cycleStart": start, "resetsAt": reset, "samples": samples})
+        roster = model_roster(None)
+        for cf in RL_CUT_FRACTIONS:
+            now = start + duration * cf
+            seen = [s for s in samples if s[0] <= now]
+            if len(seen) < 3:
+                continue
+            partial = Partial(seen, now, start, reset)
+            for mid in PARITY_MODELS:
+                proj = roster[mid](partial, Params())
+                if proj is None:
+                    continue
+                rows.append({"cycle": ci, "bucket": rl_bucket(cf), "method": mid,
+                             "predicted": displayed_at_reset(proj, partial), "truth": cyc.final})
+    return {"_comment": "Generated by `uv run pacer_replay.py --emit-parity-fixture`. "
+                        "Regenerate when the record's scoring changes; the Swift test pins it.",
+            "bucketVersion": RL_BUCKET_VERSION, "cycles": cycles, "rows": rows}
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--emit-parity-fixture", metavar="PATH",
+                    help="write the Swift parity fixture (synthetic cycles; no store needed) and exit")
     ap.add_argument("--store", help="path to pacer.sqlite (default: app group)")
     ap.add_argument("--window", choices=["five_hour", "seven_day"], help="one window only")
     ap.add_argument("--source", default="rate", choices=["rate", "usagelimit"],
@@ -815,8 +1118,12 @@ def main() -> None:
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     args = ap.parse_args()
 
+    if args.emit_parity_fixture:
+        Path(args.emit_parity_fixture).write_text(json.dumps(parity_fixture(), indent=1) + "\n")
+        return
+
     conn = open_copy(locate_store(args.store))
-    grid = load_activity_grid(conn)
+    grid_for = grid_loader(conn)
     params = Params()
     report = {"paramsVersion": params.version_tag(), "params": params.canonical(),
               "conformalMode": args.conformal_mode, "source": args.source, "windows": {}}
@@ -833,8 +1140,7 @@ def main() -> None:
             print(json.dumps({**report, "note": msg}, indent=2) if args.json else msg)
             return
         for identity, label, dur in idents:
-            samples = load_usagelimit_samples(conn, identity)
-            scores = replay_window(identity, samples, grid, params,
+            scores = replay_accounts(identity, usagelimit_samples_by_account(conn, identity), grid_for, params,
                                    conformal_mode=args.conformal_mode, duration=dur)
             report["windows"][f"{label} [{identity}]"] = summarize(scores)
         if args.json:
@@ -849,8 +1155,8 @@ def main() -> None:
         return
 
     for window in ([args.window] if args.window else ["five_hour", "seven_day"]):
-        samples = load_rate_samples(conn, window)
-        scores = replay_window(window, samples, grid, params, conformal_mode=args.conformal_mode)
+        scores = replay_accounts(window, rate_samples_by_account(conn, window), grid_for, params,
+                                 conformal_mode=args.conformal_mode)
         report["windows"][window] = summarize(scores)
     if args.json:
         print(json.dumps(report, indent=2))

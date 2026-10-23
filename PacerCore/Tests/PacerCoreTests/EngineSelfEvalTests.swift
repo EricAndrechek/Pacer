@@ -172,11 +172,18 @@ struct EngineSelfEvalTests {
 
     @Test func burnOutlookFlagsAPreResetCrossingOnASteepCycle() {
         let f = steepFiveHourFeatures()
-        let fit = UsageIntelligenceEngine.makeFit(f)
-        let outlook = UsageIntelligenceEngine.burnOutlook(f, fit, windowKey: "five_hour")
+        let first = UsageIntelligenceEngine.makeFit(f)
+        let once = UsageIntelligenceEngine.burnOutlook(f, first, windowKey: "five_hour")
+        #expect(once?.hitClaimable == true)                   // the evidence is there…
+        #expect(once?.willHitLimitBeforeReset == false)       // …but one refit doesn't claim it (#304)
+        // Two consecutive refits of the same cycle do.
+        let second = UsageIntelligenceEngine.carryClaimStreaks(
+            f, into: UsageIntelligenceEngine.makeFit(f),
+            from: UsageIntelligenceEngine.carryClaimStreaks(f, into: first, from: .init()))
+        let outlook = UsageIntelligenceEngine.burnOutlook(f, second, windowKey: "five_hour")
         #expect(outlook != nil)
         #expect(outlook!.slopePercentPerHour > 10)            // climbing hard
-        #expect(outlook!.willHitLimitBeforeReset)             // crossing flagged
+        #expect(outlook!.willHitLimitBeforeReset)             // crossing claimed
         #expect(outlook!.projectedFullAt! > f.now)
         #expect(outlook!.projectedFullAt! < outlook!.resetsAt) // strictly before reset
         #expect(outlook!.usedPct > 60)

@@ -732,6 +732,11 @@ struct MenuStatusContent: View {
         // would show one account's cost above every account's projection.
         guard let host = engines else { return }
         let engine = host.engine(forAccount: UsageScope.storedAccountId)
+        // Rate limits are per account: under "all accounts" the captions are
+        // the active login's, from its own engine, the one the dashboard's
+        // column for that account reads (#303).
+        let limitsEngine = UsageScope.storedAccountId.map { host.engine(forAccount: $0) }
+            ?? host.rateLimitEngine
         let groupEngines = groups.map {
             (account: $0.account, scoped: $0.scoped, engine: host.engine(forAccount: $0.account))
         }
@@ -747,7 +752,7 @@ struct MenuStatusContent: View {
             for group in groupEngines {
                 perGroup[group.account] = await Self.outlooks(from: group.engine, scoped: group.scoped)
             }
-            return (await Self.outlooks(from: engine, scoped: ids),
+            return (await Self.outlooks(from: limitsEngine, scoped: ids),
                     perGroup,
                     await engine.ask(.projectedCost(.today)),
                     await engine.ask(.pace))
@@ -1062,7 +1067,11 @@ struct MenuStatusContent: View {
                             .font(.system(size: 10, weight: .semibold))
                             .foregroundStyle(.red)
                             .lineLimit(1)
-                    } else if let o = outlook, let eta = IntelligenceFormatting.relativeCrossingPhrase(o) {
+                    } else if let o = outlook, o.willHitLimitBeforeReset,
+                              let eta = IntelligenceFormatting.relativeCrossingPhrase(o) {
+                        // Only the engine's confirmed claim goes red (#304): a
+                        // single refit's point crossing was claimed here, and
+                        // 87% of claimed 5-hour cycles never reached the cap.
                         Text("limit \(eta)")
                             .font(.system(size: 10, weight: .semibold))
                             .foregroundStyle(.red)

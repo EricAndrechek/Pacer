@@ -37,6 +37,10 @@ public struct PaceChartView: View {
         /// First instant the projection reaches 100% within the window, if
         /// any — marked on the chart as the forecast limit-hit.
         public let projectionCrossesFullAt: Date?
+        /// Whether that crossing is claimed (the red "limit in …"). A crossing
+        /// the claim withholds is drawn orange, like its "may hit limit in …"
+        /// chip: a red line under an orange chip said two things at once.
+        public let projectionClaimed: Bool
 
         public struct Point: Equatable, Identifiable, Sendable {
             public let time: Date
@@ -56,7 +60,8 @@ public struct PaceChartView: View {
             points: [Point],
             usedPct: Double,
             projection: [Point]? = nil,
-            projectionCrossesFullAt: Date? = nil
+            projectionCrossesFullAt: Date? = nil,
+            projectionClaimed: Bool = false
         ) {
             self.cycleStart = cycleStart
             self.resetsAt = resetsAt
@@ -65,6 +70,7 @@ public struct PaceChartView: View {
             self.usedPct = usedPct
             self.projection = projection
             self.projectionCrossesFullAt = projectionCrossesFullAt
+            self.projectionClaimed = projectionClaimed
         }
     }
 
@@ -194,23 +200,25 @@ public struct PaceChartView: View {
             // Forecast trajectory: a faint dashed continuation from "now" to
             // the reset. Drawn under the tail dot, distinct from the gray
             // pace line, so it reads as "where this is heading" without
-            // pretending to be observed data. Red-tinted when it's projected
-            // to hit the cap before the window resets.
+            // pretending to be observed data. Tinted when it reaches the cap
+            // before the reset: red when that is the engine's claim, orange
+            // when the claim is withheld, matching the chip above it.
             if let projection = data.projection, projection.count >= 2 {
-                let crosses = data.projectionCrossesFullAt != nil
+                let crossTint: Color? = data.projectionCrossesFullAt == nil ? nil
+                    : (data.projectionClaimed ? .red : .orange)
                 ForEach(projection) { pt in
                     LineMark(
                         x: .value("time", pt.time),
                         y: .value("pct", pt.value),
                         series: .value("series", "projection")
                     )
-                    .foregroundStyle((crosses ? Color.red : Color.primary).opacity(0.4))
+                    .foregroundStyle((crossTint ?? Color.primary).opacity(0.4))
                     .lineStyle(StrokeStyle(lineWidth: style.lineWidth * 0.85, dash: [5, 4]))
                     .interpolationMethod(.monotone)
                 }
                 if let crossAt = data.projectionCrossesFullAt {
                     PointMark(x: .value("time", crossAt), y: .value("pct", 100.0))
-                        .foregroundStyle(Color.red.opacity(0.6))
+                        .foregroundStyle((crossTint ?? .red).opacity(0.6))
                         .symbolSize(style.tailSymbolSize * 0.7)
                         .symbol(.circle)
                 }

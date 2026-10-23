@@ -79,9 +79,8 @@ final class AppBackgroundService {
     private var engineRefitCount = 0
     private var engineRefitTotalMs = 0
     private var lastEngineRecomputeAt: Date?
-    /// Consecutive engine refits that projected a pre-reset cap hit, per
-    /// window — the burn warning's debounce counter.
-    private var burnHitStreak: [String: Int] = [:]
+    /// The once-per-launch full-history record pass; see `startRecordBackfill`.
+    private var recordBackfillTask: Task<Void, Never>?
     /// Bridges `pacerScanCycleDidComplete` notifications to per-kind
     /// `WidgetCenter.reloadTimelines` calls so the WidgetKit extension
     /// — which can't observe SwiftData — refreshes when new data
@@ -621,6 +620,23 @@ final class AppBackgroundService {
     /// - Returns: whether a refit actually ran, so callers whose work is only
     ///   meaningful against a fresh fit can skip themselves when it didn't.
     @discardableResult
+    /// After the first fit is on screen, give each engine its full-history
+    /// record pass (`UsageIntelligenceEngine.backfillRateLimitRecordIfNeeded`):
+    /// at background priority, never awaited by a refit, one engine after
+    /// another, a few cycles at a time. An engine whose record already covers
+    /// its history skips it on a single meta read, which after the first launch
+    /// of a build is every engine. When a pass did add outcomes, one more refit
+    /// puts them to use (bands, cycle facts, selection) without waiting for
+    /// the next poll.
+    private func startRecordBackfill(_ engines: [UsageIntelligenceEngine]) {
+        guard recordBackfillTask == nil else { return }
+        recordBackfillTask = Task.detached(priority: .background) { [weak self] in
+            var added = 0
+            for engine in engines { added += await engine.backfillRateLimitRecordIfNeeded() }
+            if added > 0 { _ = await self?.recomputeEngineIfDue(force: true) }
+        }
+    }
+
     private func recomputeEngineIfDue(force: Bool = false,
                                       rateLimitsChanged: Bool = true) async -> Bool {
         let now = Date()
@@ -640,9 +656,10 @@ final class AppBackgroundService {
         // for in the last fifteen minutes used to be refitted, so an account
         // nobody was looking at kept a stale forecast. See `EngineHost`.
         var accountIds = FetchDescriptor<Account>()
-        accountIds.propertiesToFetch = [\.id]
-        await engines.keepFitted(
-            accounts: ((try? container.mainContext.fetch(accountIds)) ?? []).map(\.id))
+        accountIds.propertiesToFetch = [\.id, \.isActive]
+        let accounts = (try? container.mainContext.fetch(accountIds)) ?? []
+        await engines.keepFitted(accounts: accounts.map(\.id),
+                                 active: accounts.first(where: \.isActive)?.id)
         let started = Date()
         //
         // Still concurrent, and deliberately so after trying the alternative.
@@ -670,6 +687,7 @@ final class AppBackgroundService {
         let refitMs = Int(Date().timeIntervalSince(started) * 1000)
         await exportEngineSnapshots(live)
         NotificationCenter.default.post(name: .pacerEngineDidRecompute, object: nil)
+        startRecordBackfill(live.map { $0.engine })
 
         // The refit is the most expensive recurring thing Pacer does and it
         // had never been timed — which is how it went unnoticed that it runs
@@ -800,24 +818,19 @@ final class AppBackgroundService {
     /// the per-cycle dedup, and the opt-in gate.
     private func checkBurnRateWarning() async {
         let context = ModelContext(container)
+        // The active login's engine: a burn alert is about the account Claude
+        // Code is spending, and the all-accounts engine fits no rate limits of
+        // its own (#303). Captured once, so a switch mid-check can't mix two.
+        let engine = engines.rateLimitEngine
         for window in RateLimitWindowKind.allCases {
-            guard let outlook = await engine.burnOutlook(window: window) else {
-                burnHitStreak[window.rawValue] = 0
-                continue
-            }
-            // Debounce (industry-converged forecast-alert pattern: lead-time
-            // AND level gate AND k-consecutive confirmation): require the
-            // pre-reset crossing to hold across two consecutive engine refits
-            // before the coordinator may fire, so one transient burst between
-            // OAuth polls can't page the user. The level gate (≥50% used)
-            // stays in BurnRate.warrantsWarning; the per-cycle dedup stays in
-            // the coordinator.
-            if outlook.willHitLimitBeforeReset {
-                burnHitStreak[window.rawValue, default: 0] += 1
-            } else {
-                burnHitStreak[window.rawValue] = 0
-            }
-            guard (burnHitStreak[window.rawValue] ?? 0) >= 2 else { continue }
+            // The engine's claim: the latest-plausible crossing, at or above
+            // the level floor, confirmed across two consecutive refits (#304),
+            // the same claim the chip and the menu bar make. The two-refit
+            // debounce used to live here alone, so the chip went red on a
+            // single refit's point crossing. The per-cycle dedup stays in the
+            // coordinator.
+            guard let outlook = await engine.burnOutlook(window: window),
+                  outlook.willHitLimitBeforeReset else { continue }
             let projection = BurnRate.Projection(
                 slopePercentPerHour: outlook.slopePercentPerHour,
                 projectedFullAt: outlook.projectedFullAt,
@@ -841,7 +854,7 @@ final class AppBackgroundService {
     /// cap, etc.), driven by the SAME engine projection surface as the fixed
     /// 5h/7d path — `engine.scopedWindows()` for the live account-scoped windows
     /// and `engine.burnOutlook(windowKey:)` for each one's crossing. It reuses
-    /// the fixed path's k-consecutive-refit debounce (`burnHitStreak`, namespaced
+    /// the engine's confirmed claim (`BurnOutlook.willHitLimitBeforeReset`, namespaced
     /// by identity) and fires the identical banner via `handleBurnRateWarning`,
     /// labelled with the window's `displayName`.
     ///
@@ -859,25 +872,16 @@ final class AppBackgroundService {
     /// present in the latest poll, so a vanished window is never evaluated (its
     /// alert rules are kept, untouched) and resumes when it reappears.
     private func checkScopedBurnRateWarnings(context: ModelContext) async {
+        let engine = engines.rateLimitEngine   // see checkBurnRateWarning
         let scopedSpecs = await engine.scopedWindows()
         guard !scopedSpecs.isEmpty else { return }
         let rules = (try? context.fetch(FetchDescriptor<AlertRule>())) ?? []
 
         for spec in scopedSpecs {
             let identity = spec.key
-            guard let outlook = await engine.burnOutlook(windowKey: identity) else {
-                burnHitStreak[identity] = 0
-                continue
-            }
-            // Debounce on the raw pre-reset crossing, identical to the fixed
-            // path: require two consecutive refits before the coordinator may
-            // fire, so one transient burst between polls can't page the user.
-            if outlook.willHitLimitBeforeReset {
-                burnHitStreak[identity, default: 0] += 1
-            } else {
-                burnHitStreak[identity] = 0
-            }
-            guard (burnHitStreak[identity] ?? 0) >= 2 else { continue }
+            // The engine's confirmed claim, as on the fixed path (#304).
+            guard let outlook = await engine.burnOutlook(windowKey: identity),
+                  outlook.willHitLimitBeforeReset else { continue }
             // Opt-in + cold-start + used-floor gate (pure, unit-tested). A window
             // with no configured scoped alert, too few completed cycles, or below
             // the floor is not warned.

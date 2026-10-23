@@ -46,14 +46,6 @@ public struct EngineParams: Sendable, Equatable, Codable {
     /// fraction of the cycle duration.
     public var recencyHalfLifeFraction: Double = 0.15
 
-    // MARK: Shadow-candidate promotion
-
-    /// Completed periods a SHADOW candidate's record needs before
-    /// `EngineSelfEval.bestMethod` may select it for display (it still must
-    /// win on realized error once there). Shadows score from day one; this
-    /// only stops a lucky thin record from reaching the screen.
-    public var shadowPromotionMinPeriods: Int = 15
-
     // MARK: Conformal residual grouping
 
     /// Below this many completed cycles, the rate-limit calibrator collapses
@@ -66,6 +58,17 @@ public struct EngineParams: Sendable, Equatable, Codable {
     /// (5h holds 0.785 with per-cut residuals), so past the threshold the
     /// grouping switches back. Validated in research/harness (2026-07-06).
     public var conformalBlockMinCycles: Int = 40
+
+    // MARK: Rate-limit model selection (#305)
+
+    /// Select each window's model separately for the first and second half of
+    /// the window, from the record's cuts in that half. Adopted 2026-10-20 with
+    /// `rlTieRelative` on full history (live cache plus archive): 5h median
+    /// 3.82 → 3.57 pp, fold-robust, coverage 0.779; 7d mean 8.57 → 8.18.
+    public var rlSelectByPhase: Bool = true
+    /// The selection near-tie band as a fraction of the best model's typical
+    /// error. 0 restores the absolute 1.5 pp band.
+    public var rlTieRelative: Double = 0.05
 
     public init() {}
 
@@ -90,8 +93,9 @@ public struct EngineParams: Sendable, Equatable, Codable {
             "poolRecencyWindow=\(poolRecencyWindow)",
             "linearRecentLookbackFraction=\(g(linearRecentLookbackFraction))",
             "recencyHalfLifeFraction=\(g(recencyHalfLifeFraction))",
-            "shadowPromotionMinPeriods=\(shadowPromotionMinPeriods)",
             "conformalBlockMinCycles=\(conformalBlockMinCycles)",
+            "rlSelectByPhase=\(rlSelectByPhase ? 1 : 0)",
+            "rlTieRelative=\(g(rlTieRelative))",
         ].joined(separator: ";")
     }
 

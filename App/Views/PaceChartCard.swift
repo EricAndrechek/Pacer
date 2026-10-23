@@ -601,10 +601,13 @@ struct PaceChartCard: View {
         let readingAt: Date?
         /// Newest reading Pacer holds for *any* account, so a column can tell
         /// "nothing has been polled lately" (everyone is quiet) from "this
-        /// account stopped being polled" (the switched-away one). Self
-        /// calibrating: it needs no assumption about the poll cadence, which
-        /// varies between the active lane and the rest.
+        /// account stopped being polled" (the switched-away one).
         let newestAnyAccountAt: Date?
+        /// This account's usual poll gap (`ReadingFreshness.typicalGap`). How far
+        /// behind `newestAnyAccountAt` it may fall before it counts as stale is
+        /// measured in its own gaps: the active lane is read about every minute,
+        /// background accounts every ~6 (#302).
+        let typicalPollGap: TimeInterval?
         /// Window rollover (nil ⇒ idle / server anchored no cycle).
         let resetsAt: Date?
         /// Projection-free actual line — the shared-image-parity base the
@@ -698,13 +701,14 @@ struct PaceChartCard: View {
         var out: [Column] = []
         for entry in series {
             let b = bucketed(entry)
+            let pollGap = ReadingFreshness.typicalGap(readingTimes: entry.fixed.map(\.sampledAt))
             var tagged: [(side: Side, col: Column)] = [
                 (.fiveHour, fixedColumn(entry, title: "5-hour", key: RateLimitWindowName.fiveHour,
                                         duration: Self.fiveHourDuration, samples: b.fiveHour, now: now,
-                                        newestAnyAccountAt: newestAny)),
+                                        newestAnyAccountAt: newestAny, typicalPollGap: pollGap)),
                 (.sevenDay, fixedColumn(entry, title: "7-day", key: RateLimitWindowName.sevenDay,
                                         duration: Self.sevenDayDuration, samples: b.sevenDay, now: now,
-                                        newestAnyAccountAt: newestAny)),
+                                        newestAnyAccountAt: newestAny, typicalPollGap: pollGap)),
             ]
             for row in scopedRows(entry) {
                 let duration = WindowSpec.scopedDuration(group: row.group)
@@ -721,6 +725,7 @@ struct PaceChartCard: View {
                     duration: duration,
                     usedPct: row.percent,
                     readingAt: row.sampledAt, newestAnyAccountAt: newestAny,
+                    typicalPollGap: pollGap,
                     resetsAt: row.resetsAt,
                     baseChart: .cycle(scoped: row, history: entry.scoped,
                                       duration: duration, now: now),
@@ -765,7 +770,7 @@ struct PaceChartCard: View {
     private func fixedColumn(_ entry: AccountSeries, title: String, key: String,
                              duration: TimeInterval,
                              samples: [LimitSamplePoint], now: Date,
-                             newestAnyAccountAt: Date?) -> Column {
+                             newestAnyAccountAt: Date?, typicalPollGap: TimeInterval?) -> Column {
         let latest = samples.first
         return Column(
             id: Self.columnID(entry.accountId, key),
@@ -773,6 +778,7 @@ struct PaceChartCard: View {
             title: Self.decorate(title, with: entry.label), duration: duration,
             usedPct: latest?.usedPercentage,
             readingAt: latest?.sampledAt, newestAnyAccountAt: newestAnyAccountAt,
+            typicalPollGap: typicalPollGap,
             resetsAt: latest?.resetsAt,
             baseChart: .cycle(fixed: samples, duration: duration, now: now),
             isActive: false, isActiveAccount: isActiveAccount(entry),
@@ -846,6 +852,7 @@ struct PaceChartCard: View {
         var nextSelected: [String: WindowProjection] = [:]
         var nextOutlooks: [String: UsageIntelligenceEngine.BurnOutlook] = [:]
         var nextEnds: [String: Estimate] = [:]
+        var noLine: [String: String] = [:]
 
         for entry in plan {
             let engine = engines.engine(forAccount: entry.accountId)
@@ -854,17 +861,27 @@ struct PaceChartCard: View {
             let computed = await askEngine {
                 () -> ([String: WindowProjection],
                        [String: UsageIntelligenceEngine.BurnOutlook],
-                       [String: Estimate]) in
+                       [String: Estimate],
+                       [String: String]) in
                 var sel: [String: WindowProjection] = [:]
                 var out: [String: UsageIntelligenceEngine.BurnOutlook] = [:]
                 var ends: [String: Estimate] = [:]
+                var why: [String: String] = [:]
+                let fittedAt = await engine.fittedAt()
                 func absorb(key: String, outlook: UsageIntelligenceEngine.BurnOutlook?,
                             end: Estimate, list: [BurnTrajectory.ScoredTrajectory]) {
                     let id = Self.columnID(account, key)
                     if let outlook { out[id] = outlook }
                     ends[id] = end
-                    if let chosen = list.first(where: { $0.isSelected }) ?? list.first {
+                    if let chosen = list.first(where: { $0.isSelected }) ?? list.first(where: \.canProject) {
                         sel[id] = WindowProjection(trajectory: chosen.trajectory)
+                    } else {
+                        // Why this column has no line (#308): the engine hasn't
+                        // fitted yet, there is no live cycle to fit, or every
+                        // model declined it.
+                        why[id] = fittedAt == nil ? "engine not fitted yet"
+                            : list.isEmpty ? "no live cycle to fit"
+                            : "no model can project (\(list.first?.unavailableReason ?? "?"))"
                     }
                 }
                 for window in RateLimitWindowKind.allCases {
@@ -879,11 +896,13 @@ struct PaceChartCard: View {
                            end: await engine.ask(.scopedOutlook(id)),
                            list: await engine.rateLimitTrajectories(windowKey: id))
                 }
-                return (sel, out, ends)
+                if let fittedAt { why["fit|\(account ?? "")"] = "\(Int(Date().timeIntervalSince(fittedAt)))s" }
+                return (sel, out, ends, why)
             }
             nextSelected.merge(computed.0) { _, new in new }
             nextOutlooks.merge(computed.1) { _, new in new }
             nextEnds.merge(computed.2) { _, new in new }
+            noLine.merge(computed.3) { _, new in new }
         }
 
         projections = nextSelected
@@ -892,6 +911,26 @@ struct PaceChartCard: View {
         Log.write("PaceChartCard",
                   "projections for \(nextEnds.count) window(s) across \(plan.count) account(s) in "
                     + "\(Int(Date().timeIntervalSince(started) * 1000))ms")
+        // Attribute every column drawn without a forecast line (#308): the
+        // engine's reason, or a projection the column withholds because its
+        // reading is stale (`ReadingFreshness`, the rule PaceColumn applies).
+        // The fit ages say how old the answers are.
+        let now = Date()
+        var missing: [String] = []
+        for col in columns(now: now) {
+            let tag = "\(col.windowKey.prefix(12))·\(col.accountId.map { String($0.suffix(4)) } ?? "-")"
+            if nextSelected[col.id] == nil {
+                missing.append("\(tag): \(noLine[col.id] ?? "no projection")")
+            } else if ReadingFreshness.isStale(readingAt: col.readingAt, newestAnyAccountAt: col.newestAnyAccountAt,
+                                               typicalGap: col.typicalPollGap) {
+                missing.append("\(tag): reading stale, line withheld")
+            }
+        }
+        if !missing.isEmpty {
+            let ages = noLine.filter { $0.key.hasPrefix("fit|") }
+                .map { "\($0.key.dropFirst(4).suffix(4)):\($0.value)" }.sorted().joined(separator: ",")
+            Log.write("PaceChartCard", "no line: " + missing.joined(separator: " | ") + " [fit age \(ages)]")
+        }
     }
 
     // MARK: - Body
@@ -1100,6 +1139,7 @@ struct PaceChartCard: View {
         let isActiveAccount: Bool
         let readingAt: Date?
         let newestAnyAccountAt: Date?
+        let typicalPollGap: TimeInterval?
         var columns: [Column]
     }
 
@@ -1119,6 +1159,7 @@ struct PaceChartCard: View {
                     isActiveAccount: col.isActiveAccount,
                     readingAt: col.readingAt,
                     newestAnyAccountAt: col.newestAnyAccountAt,
+                    typicalPollGap: col.typicalPollGap,
                     columns: [col]))
             }
         }
@@ -1165,11 +1206,9 @@ struct PaceChartCard: View {
     /// numbers are — said once for the whole group.
     @ViewBuilder
     private func accountHeader(_ group: AccountGroup) -> some View {
-        let stale: Bool = {
-            guard let at = group.readingAt, let newest = group.newestAnyAccountAt
-            else { return false }
-            return newest.timeIntervalSince(at) > PaceChartCard.staleBehind
-        }()
+        let stale = ReadingFreshness.isStale(
+            readingAt: group.readingAt, newestAnyAccountAt: group.newestAnyAccountAt,
+            typicalGap: group.typicalPollGap)
         HStack(spacing: 8) {
             Text(group.label ?? "Account")
                 .font(.system(size: 11, weight: .semibold))
@@ -1200,10 +1239,6 @@ struct PaceChartCard: View {
             Spacer(minLength: 0)
         }
     }
-
-    /// How far behind the freshest reading an account may fall before its
-    /// numbers stop being presented as current. See `PaceColumn.isStale`.
-    static let staleBehind: TimeInterval = 3 * 60
 
     private func column(_ col: Column, grouped: Bool = false) -> PaceColumn {
         PaceColumn(
@@ -1325,27 +1360,20 @@ private struct PaceColumn: View {
     @State private var hovering = false
     @State private var sharing = false
 
-    /// How far behind the freshest reading this column may fall before it is
-    /// reported as stale rather than current.
-    ///
-    /// Relative, not absolute, on purpose. The poll cadence differs between the
-    /// active credential and the rest and changes with activity, so any fixed
-    /// "older than N minutes" threshold is wrong half the time. Falling three
-    /// minutes behind *the newest thing Pacer has* means something specific:
-    /// other accounts are being read and this one is not.
-    private static let staleBehind: TimeInterval = 3 * 60
-
     /// True when this account has stopped being read while others carry on.
     ///
     /// The number stays on screen — it is the last thing Pacer actually knew,
     /// and hiding it would be worse — but everything that asserts something
     /// about *now* is withdrawn: the pace verdict, the projection, and the
     /// "on pace / behind" reading of the chart.
+    ///
+    /// Measured against the freshest reading of any account, in this account's
+    /// own poll gaps (`ReadingFreshness`): relative, because the cadence
+    /// differs between the active lane and the rest and changes with activity.
     private var isStale: Bool {
-        guard let readingAt = column.readingAt,
-              let newest = column.newestAnyAccountAt
-        else { return false }
-        return newest.timeIntervalSince(readingAt) > Self.staleBehind
+        ReadingFreshness.isStale(readingAt: column.readingAt,
+                                 newestAnyAccountAt: column.newestAnyAccountAt,
+                                 typicalGap: column.typicalPollGap)
     }
 
     private var windowKey: String { column.windowKey }
@@ -1392,7 +1420,8 @@ private struct PaceColumn: View {
         // At/over the cap the trajectory collapses to its origin — fall back to
         // the projection-free chart.
         guard pts.count >= 2 else { return base }
-        return base.withProjection(pts, crossesFullAt: rebased.crossesFullAt)
+        return base.withProjection(pts, crossesFullAt: rebased.crossesFullAt,
+                                   claimed: outlook?.willHitLimitBeforeReset ?? false)
     }
 
     var body: some View {

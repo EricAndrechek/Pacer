@@ -83,7 +83,35 @@ public actor UsageIntelligenceEngine {
     public func adopt(scope: EngineScope) {
         self.scope = scope
         evalRowsCache = nil
+        recordBackfill = .idle
     }
+
+    /// Whether an engine of this scope fits rate-limit windows itself (#303).
+    ///
+    /// A rate-limit window belongs to one account: two 5-hour windows do not
+    /// sum. So the all-accounts engine, which reads the active login's limits,
+    /// fitted the very series the active account's own engine fits, and saved
+    /// its record under scope-less surfaces, folding every account cswap
+    /// rotated through into one scoreboard (the global 5-hour record's last 53
+    /// cycles came from four accounts). Its answers then disagreed with the
+    /// dashboard's per-account columns. With an active account it now fits
+    /// none: rate-limit asks for "all accounts" go to that account's engine
+    /// (`EngineHost.rateLimitEngine`). With none (a fresh install, a fixture)
+    /// there is no account engine to ask, and it fits them as before.
+    static func fitsRateLimits(scope: EngineScope, activeAccountId: String?) -> Bool {
+        scope != .allAccounts || activeAccountId == nil
+    }
+
+    /// Where this engine is with the full-history record pass
+    /// (`backfillRateLimitRecordIfNeeded`) this launch: in memory, so asking
+    /// again after every refit costs nothing once it has run or been skipped.
+    private enum RecordBackfill { case idle, running, done }
+    private var recordBackfill = RecordBackfill.idle
+    /// When this engine's current fit was made, nil before the first refit.
+    private var lastRefitAt: Date?
+    /// When this engine's current fit was made, nil before the first refit:
+    /// the age a surface states when it attributes a missing line (#308).
+    public func fittedAt() -> Date? { lastRefitAt }
 
     /// One scoreboard row, as the refit slices them.
     typealias EvalRow = (key: String, surface: String, record: EngineSelfEval.Record)
@@ -138,7 +166,18 @@ public actor UsageIntelligenceEngine {
 
     struct RateLimitFit {
         var roster: [any BurnTrajectory.Model]
+        /// The record's pick (or the cold backtest's).
         var selectedId: String?
+        /// The model this refit SHOWS: `selectedId` when it fits the live
+        /// cycle, else the stand-in `resolveModel` picks. Every surface reads
+        /// this one: the outlook, the estimate, the trajectories, the band, the
+        /// trail. `nil` only when no model fits.
+        var resolvedId: String?
+        /// The selected model a stand-in replaced, for the trail.
+        var replacedId: String? { resolvedId != selectedId ? selectedId : nil }
+        /// Consecutive refits of this cycle whose hit claim held
+        /// (`carryClaimStreaks`).
+        var claimStreak: (period: String, count: Int)?
         /// Stratified additive conformal calibrators keyed
         /// `"early|weekday"`-style, plus the `"pooled"` fallback. Strata
         /// thinner than 10 scores aren't built — lookups fall back to pooled,
@@ -173,12 +212,24 @@ public actor UsageIntelligenceEngine {
             return out
         }
         let recomputeStarted = Date()
+        // Wall time alone can't tell a slow refit from one the process slept or
+        // starved through: the 321–396 s refits in the scan log overlapped a
+        // 172 s main-thread stall that used 343 ms of CPU (#308). Awake time
+        // (stops while the machine sleeps) and process CPU go beside it.
+        let awakeStarted = SuspendingClock.now
+        let cpuStarted = clock_gettime_nsec_np(CLOCK_PROCESS_CPUTIME_ID)
 
         let daily = timed("daily") { fetchDaily() }
         let hourly = timed("hourly") { fetchHourly() }
-        let rate = timed("rate") { fetchRate(now: now) }
+        // The all-accounts engine leaves rate limits to the active account's
+        // engine whenever there is one (`fitsRateLimits`, #303): it would fit
+        // exactly the same series while scoring every account it had rotated
+        // through into one unscoped record. Decided before the reads, so it
+        // doesn't fetch ~30k rows it would not use.
+        let fitsRateLimits = Self.fitsRateLimits(scope: scope, activeAccountId: Account.activeId(in: modelContext))
+        let rate = fitsRateLimits ? timed("rate") { fetchRate(now: now) } : []
         let arrival = timed("arrival") { fetchLastArrival() }
-        let scopedLimits = timed("scopedLimits") { fetchScopedLimits(now: now) }
+        let scopedLimits = fitsRateLimits ? timed("scopedLimits") { fetchScopedLimits(now: now) } : []
         let f = timed("features") {
             EngineFeatures.build(
                 now: now, calendar: calendar,
@@ -201,12 +252,13 @@ public actor UsageIntelligenceEngine {
         let existing = Set(allRows.map { $0.key })
         let newEOD = EngineSelfEval.newOutcomesEOD(periods: f.dailyPeriods, calendar: calendar, existingKeys: existing)
         persist(newEOD, now: now)
-        let newRL = newRLOutcomes(features: f, calendar: calendar, now: now, existingKeys: existing)
+        // Cycles that completed inside the 32 days just read. Everything older
+        // is `backfillRateLimitRecordIfNeeded`'s, which runs on its own.
+        let newRL = fitsRateLimits
+            ? newRLOutcomes(features: f, calendar: calendar, now: now, existingKeys: existing)
+            : []
         persist(newRL, now: now)
-        allRows.append(contentsOf: (newEOD + newRL).map {
-            (key: EngineEvalOutcome.makeKey(surface: $0.surface, method: $0.method, bucket: $0.bucket, periodKey: $0.periodKey),
-             surface: $0.surface, record: EngineSelfEval.Record(method: $0.method, bucket: $0.bucket, periodKey: $0.periodKey, predicted: $0.predicted, truth: $0.truth))
-        })
+        allRows.append(contentsOf: (newEOD + newRL).map(Self.evalRow))
         evalRowsCache = allRows
         let bySurface = Dictionary(grouping: allRows, by: { $0.surface })
         func records(_ surface: String) -> [EngineSelfEval.Record] {
@@ -244,22 +296,46 @@ public actor UsageIntelligenceEngine {
         // per-model windows — each keyed by its own surface, so scoped windows
         // can never pollute the fixed windows' selection.
         var rlSelection: [String: String] = [:]
-        for window in f.windows {
+        let params = EngineParams.current
+        for window in f.windows where fitsRateLimits {
             let surface = EngineSelfEval.rlSurface(window.key)
-            let recs = records(surface)
-            accuracyBySurface[surface] = EngineSelfEval.accuracy(surface: surface, from: recs)
+            // Current-version rows only: v1 graded the raw line, not the value shown.
+            let recs = records(surface).filter { EngineSelfEval.isCurrentRLBucket($0.bucket) }
+            let weekly = WindowSpec.isWeeklyScale(duration: window.duration)
+            // Which half of its window the live cycle is in (#305): the pick,
+            // the stand-in ranking and the accuracy shown all read that half's
+            // record. No live cycle, no phase: every cut, as before.
+            let phase = params.rlSelectByPhase ? Self.livePhase(f, window: window) : nil
+            accuracyBySurface[surface] = EngineSelfEval.accuracy(surface: surface, from: recs, weekly: weekly,
+                                                                 phase: phase)
             if let pick = EngineSelfEval.bestMethod(from: recs, complexity: Self.rlComplexities(),
-                                                    provisionalMinPeriods: Self.rlShadowFloors(duration: window.duration)) {
+                                                    weekly: weekly, phase: phase,
+                                                    tieRelative: params.rlTieRelative > 0 ? params.rlTieRelative : nil) {
                 rlSelection[window.key] = pick
             }
         }
 
-        self.fit = timed("makeFit") { Self.makeFit(f, eodPools: pools, rlSelection: rlSelection) }
+        let rlAccuracy = Dictionary(f.windows.compactMap { w in
+            accuracyBySurface[EngineSelfEval.rlSurface(w.key)].map { (w.key, $0) }
+        }, uniquingKeysWith: { first, _ in first })
+        // Each window's current-version record: the band and the cycle facts
+        // read every cycle it has scored, not only the 32 days fetched (#306).
+        let rlRecords = Dictionary(f.windows.map { w in
+            (w.key, records(EngineSelfEval.rlSurface(w.key)).filter { EngineSelfEval.isCurrentRLBucket($0.bucket) })
+        }, uniquingKeysWith: { first, _ in first })
+        let previousFit = self.fit
+        self.fit = timed("makeFit") {
+            Self.carryClaimStreaks(
+                f, into: Self.makeFit(f, eodPools: pools, rlSelection: rlSelection, rlAccuracy: rlAccuracy,
+                                      rateLimits: fitsRateLimits, rlRecords: rlRecords),
+                from: previousFit)
+        }
 
         // Prediction trail: record what this refit would tell the user —
         // the live answers with their bands, residual evidence, and version
         // tags — behind the change/heartbeat policy.
         timed("snapshots") { recordPredictionSnapshots(f, now: now) }
+        lastRefitAt = Date()
 
         let total = Int(Date().timeIntervalSince(recomputeStarted) * 1000)
         // Only when it is worth reading about. A warm refit on a small store
@@ -273,7 +349,13 @@ public actor UsageIntelligenceEngine {
             // the active login's, so this is how you see two engines doing the
             // same expensive work in one cycle.
             let acct = "limitAcct:" + (limitAccountId.map { String($0.suffix(4)) } ?? "nil")
-            Log.write("Engine", "recompute \(scopeLabel) \(total)ms {\(detail)} \(acct)")
+            let awake = awakeStarted.duration(to: .now)
+            let awakeMs = Int(awake.components.seconds * 1000 + awake.components.attoseconds / 1_000_000_000_000_000)
+            // Process-wide: concurrent scope refits share it, so it bounds this
+            // refit's CPU from above.
+            let cpuMs = Int((clock_gettime_nsec_np(CLOCK_PROCESS_CPUTIME_ID) - cpuStarted) / 1_000_000)
+            Log.write("Engine", "recompute \(scopeLabel) \(total)ms awake:\(awakeMs)ms cpuProc:\(cpuMs)ms "
+                      + "{\(detail)} \(acct)")
         }
     }
 
@@ -351,27 +433,107 @@ public actor UsageIntelligenceEngine {
         return c
     }
 
-    /// The SHADOW candidates for a window and the promotion floor each must
-    /// clear (completed periods in its scored record) before `bestMethod` may
-    /// select it for display. Kalman is new everywhere; the diurnal model is
-    /// established on weekly-cadence windows but a shadow on session-cadence
-    /// ones — the 2026-06 backtest measured a null on the 5h block (session
-    /// cycles rarely straddle a day/night boundary), and the shadow record
-    /// re-tests that assumption instead of trusting it forever. Keyed off the
-    /// window's *duration* (via `WindowSpec.isWeeklyScale`), so scoped per-model
-    /// windows get the same rule with no new code — a scoped weekly cap treats
-    /// diurnal as established, a scoped session cap as a shadow.
-    public static func rlShadowFloors(duration: TimeInterval) -> [String: Int] {
-        let floor = EngineParams.current.shadowPromotionMinPeriods
-        var floors = ["kalman-trend": floor]
-        if !WindowSpec.isWeeklyScale(duration: duration) { floors["diurnal-rate"] = floor }
-        return floors
+    // MARK: - Full-history record pass
+
+    /// What the full-history pass covers. Live refits score each cycle as it
+    /// completes, so a full pass can only add something when the record could
+    /// not have scored history yet: the first launch of a build with this pass
+    /// (`backfillVersion`, bumped when what it reads changes; 1 = archive
+    /// included), a scoring change (`EngineSelfEval.rlBucketVersion`), or a
+    /// model the record has never seen. A tuning change (`EngineParams`) is
+    /// deliberately not here: the pass only fills keys that are missing, and
+    /// never re-scores ones that exist.
+    static var recordBackfillFingerprint: String {
+        let models = (BurnTrajectory.defaultModels.map(\.id) + ["diurnal-rate"]).sorted()
+        return "v1|\(EngineSelfEval.rlBucketVersion)|" + models.joined(separator: ",")
     }
 
-    /// Enum-typed adapter for the fixed windows — preserved for the widget/UI/
-    /// tests that ask by `RateLimitWindowKind`.
-    public static func rlShadowFloors(_ window: RateLimitWindowKind) -> [String: Int] {
-        rlShadowFloors(duration: WindowSpec.fixed(window).duration)
+    /// Score every completed rate-limit cycle the store holds (the live
+    /// 35-day cache and `AccountUsageArchive`) for every model, unless
+    /// `recordBackfillFingerprint` says this account's record already covers
+    /// it. Returns the outcomes added.
+    ///
+    /// Not part of `recompute`. On a real store the first run scored ~300
+    /// cycles inside one 14.5 s refit, and every engine ask (the pace card's
+    /// projections, the compare sheet) queued behind it, while later launches
+    /// re-read ~260,000 rows to add nothing. Now it is skipped unless
+    /// something changed, and when it runs it scores `batch` cycles at a time
+    /// with a `pause` between batches. The pause is a suspension point, so
+    /// refits and asks run in between instead of behind it. Each batch reads
+    /// `evalRowsCache` afresh, so a cycle a refit scored in the gap is not
+    /// scored twice. The caller runs it at background priority
+    /// (`AppBackgroundService`).
+    @discardableResult
+    public func backfillRateLimitRecordIfNeeded(
+        now: Date = Date(), calendar: Calendar = .current,
+        batch: Int = 8, pause: Duration = .milliseconds(150)
+    ) async -> Int {
+        guard recordBackfill == .idle else { return 0 }
+        guard Self.fitsRateLimits(scope: scope, activeAccountId: Account.activeId(in: modelContext)) else {
+            recordBackfill = .done
+            return 0
+        }
+        let markerKey = "rl_record_backfill|\(limitAccountId ?? "all")"
+        let fingerprint = Self.recordBackfillFingerprint
+        let marker = try? modelContext.fetch(FetchDescriptor<ClaudeCodeMeta>(
+            predicate: #Predicate { $0.key == markerKey })).first
+        if marker?.value == fingerprint {
+            recordBackfill = .done
+            return 0
+        }
+        recordBackfill = .running
+        let started = SuspendingClock.now
+
+        let archived = fetchArchivedLimits()
+        let f = EngineFeatures.build(
+            now: now, calendar: calendar,
+            daily: fetchDaily(), hourly: fetchHourly(),
+            rate: Self.merged(fetchRate(now: now, since: .distantPast), archived.rate,
+                              key: { "\($0.window)|\($0.at.timeIntervalSince1970)" }, at: \.at),
+            lastArrivalAt: nil,
+            scoped: Self.merged(fetchScopedLimits(now: now, since: .distantPast), archived.scoped,
+                                key: { "\($0.identity)|\($0.at.timeIntervalSince1970)" }, at: \.at))
+        try? await Task.sleep(for: pause)
+
+        var added = 0, cycles = 0, batches = 0
+        for window in f.windows {
+            guard let samples = f.rateLimit[window.key], !samples.isEmpty else { continue }
+            let (_, history) = BurnTrajectory.segment(samples: samples, duration: window.duration, now: now)
+            let completed = history.filter { $0.resetsAt <= now }.sorted { $0.cycleStart < $1.cycleStart }
+            cycles += completed.count
+            var start = 0
+            while start < completed.count {
+                let range = start..<min(start + batch, completed.count)
+                var rows = evalRowsCache ?? fetchEvalRows()
+                let news = EngineSelfEval.newOutcomesRL(
+                    window: window.key, cycles: completed, activityGrid: f.activityGrid, calendar: calendar,
+                    existingKeys: Set(rows.map(\.key)), includeDiurnal: true, indices: range)
+                persist(news, now: now)
+                rows.append(contentsOf: news.map(Self.evalRow))
+                evalRowsCache = rows
+                added += news.count
+                batches += 1
+                start = range.upperBound
+                try? await Task.sleep(for: pause)
+            }
+        }
+
+        if let marker { marker.value = fingerprint } else {
+            modelContext.insert(ClaudeCodeMeta(key: markerKey, value: fingerprint))
+        }
+        try? modelContext.save()
+        recordBackfill = .done
+        let took = SuspendingClock.now - started
+        Log.write("Engine", "record backfill \(String((limitAccountId ?? "all").suffix(4))): "
+                  + "+\(added) outcome(s) over \(cycles) cycle(s) in \(batches) batch(es), \(took) awake")
+        return added
+    }
+
+    private static func evalRow(_ n: EngineSelfEval.NewOutcome) -> EvalRow {
+        (key: EngineEvalOutcome.makeKey(surface: n.surface, method: n.method, bucket: n.bucket, periodKey: n.periodKey),
+         surface: n.surface,
+         record: EngineSelfEval.Record(method: n.method, bucket: n.bucket, periodKey: n.periodKey,
+                                       predicted: n.predicted, truth: n.truth))
     }
 
     // MARK: - Ask (the typed question → Estimate contract)
@@ -467,22 +629,24 @@ public actor UsageIntelligenceEngine {
         guard let current = currentOpt else {
             return .insufficient(method: "rate-limit", note: "no live cycle")
         }
-        let model = rf.roster.first { $0.id == rf.selectedId } ?? rf.roster.first
+        let model = rf.roster.first { $0.id == rf.resolvedId }
         guard let model, let projection = model.fit(current) else {
             return .insufficient(method: "rate-limit", note: "too early in the cycle to project", support: rf.historyCount)
         }
-        // Live-value anchoring, matching burnOutlook/trajectories (shift up
-        // only — smoothed fits can sit under a spiking last sample).
-        let anchor = max(0, current.usedNow - projection(f.now))
-        let raw = projection(current.resetsAt) + anchor
-        let point = min(100, max(current.usedNow, raw))
+        // The displayed value: anchored to the live value and clamped, the
+        // same function the record and the residuals are scored with.
+        let point = BurnTrajectory.displayedAtReset(projection, partial: current)
         // Band from the stratum matching where we are in this cycle (early/
         // late × weekday/weekend), pooled fallback when the stratum was thin.
+        // Centred on the displayed value, because that is what its residuals
+        // are measured from.
         let cutFraction = current.durationHours > 0 ? current.nowHours / current.durationHours : 1
         let calibrator = Self.rlCalibrator(rf, cutFraction: cutFraction, cycleStart: current.cycleStart, calendar: f.calendar)
         let minResiduals = EngineParams.current.conformalMinResiduals
-        let band80 = calibrator?.interval(around: raw, level: 0.8, minResiduals: minResiduals).map { clampPct($0) }
-        let band50 = calibrator?.interval(around: raw, level: 0.5, minResiduals: minResiduals).map { clampPct($0) }
+        let band80 = calibrator?.interval(around: point, level: 0.8, minResiduals: minResiduals)
+            .map { clampPct($0, floor: current.usedNow) }
+        let band50 = calibrator?.interval(around: point, level: 0.5, minResiduals: minResiduals)
+            .map { clampPct($0, floor: current.usedNow) }
 
         let confidence: Estimate.Confidence
         if rf.historyCount < 3 { confidence = .low }
@@ -492,7 +656,7 @@ public actor UsageIntelligenceEngine {
         // P(hitting 100%) is unlearnable for this user (one cap-hit in ~80 5h
         // cycles): never assert a hit, just flag it as rare when the projection
         // and history both sit low.
-        let note = (point < 60 && raw < 90) ? "hitting the cap is rare for you" : nil
+        let note = point < 60 ? "hitting the cap is rare for you" : nil
         return Estimate(value: point, interval80: band80, interval50: band50,
                         method: "rl-\(model.id)", confidence: confidence,
                         support: rf.historyCount, note: note)
@@ -537,7 +701,45 @@ public actor UsageIntelligenceEngine {
         public let cyclesObserved: Int
         public let cyclesPeakOver90: Int
         public let cyclesHit100: Int
-        public var willHitLimitBeforeReset: Bool { projectedFullAt != nil }
+        /// Whether this refit's evidence supports CLAIMING a hit before the
+        /// reset (#304): the latest-plausible crossing exists (the curve
+        /// shifted by its own calibrated q10 still reaches 100 before the
+        /// reset; the point crossing when no band is stated), and the window
+        /// is at least `BurnRate.warningUsedFloor` used. A point crossing alone
+        /// was claimed in red, and 130 of 149 such 5-hour cycles never reached
+        /// 99%: most were an early burst extrapolated over hours.
+        public let hitClaimable: Bool
+        /// The claim also held on the previous refit of the same cycle, the
+        /// confirmation the burn alerts always required, now shared by the
+        /// chip and the menu-bar caption.
+        public let claimConfirmed: Bool
+        /// The red "limit in …" claim: claimable and confirmed. Every surface
+        /// that says it (chip, menu bar, alert) reads this one.
+        public var willHitLimitBeforeReset: Bool { hitClaimable && claimConfirmed }
+
+        /// Why a crossing the line shows is said as "may hit limit" rather
+        /// than claimed. Without it the chip fell through to the at-reset
+        /// value, which the line's own crossing clamps to 100: a window at
+        /// 46% read "≈100% at reset", the limit stated as the reset's problem.
+        public enum HitWithheld: Sendable, Equatable {
+            /// Under `BurnRate.warningUsedFloor` used. An early burst
+            /// extrapolated over hours is what most unconfirmed claims were.
+            case earlyInWindow
+            /// The slow end of the calibrated range (the line shifted by its
+            /// own q10) still resets first.
+            case slowEndResetsFirst
+            /// Claimable on this refit, not yet on the one before.
+            case unconfirmed
+        }
+
+        /// Nil when nothing crosses before the reset, or when the crossing is
+        /// claimed outright.
+        public var hitWithheld: HitWithheld? {
+            guard projectedFullAt != nil, !willHitLimitBeforeReset else { return nil }
+            if usedPct < BurnRate.warningUsedFloor { return .earlyInWindow }
+            if !hitClaimable { return .slowEndResetsFirst }
+            return .unconfirmed
+        }
     }
 
     public func burnOutlook(window: RateLimitWindowKind) -> BurnOutlook? {
@@ -571,14 +773,15 @@ public actor UsageIntelligenceEngine {
                 / (last.at.timeIntervalSince(first.at) / 3600)
         }
 
-        let model = rf.roster.first { $0.id == rf.selectedId } ?? rf.roster.first
+        let model = rf.roster.first { $0.id == rf.resolvedId }
         guard let model, let projection = model.fit(current) else {
             return BurnOutlook(slopePercentPerHour: slope, projectedFullAt: nil, etaSeconds: nil,
                                projectedFullAtEarliest: nil, projectedFullAtLatest: nil,
                                usedPct: current.usedNow, resetsAt: current.resetsAt,
                                anchorShift: 0, method: "none",
                                cyclesObserved: rf.cyclesObserved,
-                               cyclesPeakOver90: rf.cyclesPeakOver90, cyclesHit100: rf.cyclesHit100)
+                               cyclesPeakOver90: rf.cyclesPeakOver90, cyclesHit100: rf.cyclesHit100,
+                               hitClaimable: false, claimConfirmed: false)
         }
         // Anchor the curve to the live value: the smoothed fits (recency-
         // weighted, saturating) deliberately sit under a spiking last sample,
@@ -594,6 +797,7 @@ public actor UsageIntelligenceEngine {
         // P(U(t) ≥ 100), so the band's crossings ARE the hit-time range).
         // Already-at-100% suppresses the ETA: the tile shows the state directly.
         var crossing: Date?, earliest: Date?, latest: Date?
+        var loShift: Double?
         if current.usedNow < 100 {
             let cutFraction = current.durationHours > 0 ? current.nowHours / current.durationHours : 1
             let calibrator = Self.rlCalibrator(rf, cutFraction: cutFraction, cycleStart: current.cycleStart, calendar: f.calendar)
@@ -604,7 +808,7 @@ public actor UsageIntelligenceEngine {
             // the surfaces show the point crossing alone.
             let minResiduals = EngineParams.current.conformalMinResiduals
             let hiShift = calibrator?.gatedQuantile(0.9, minResiduals: minResiduals)   // upper band → earliest plausible
-            let loShift = calibrator?.gatedQuantile(0.1, minResiduals: minResiduals)   // lower band → latest plausible
+            loShift = calibrator?.gatedQuantile(0.1, minResiduals: minResiduals)   // lower band → latest plausible
             var t = f.now.addingTimeInterval(5 * 60)
             while t <= current.resetsAt {
                 let p = projection(t) + anchor
@@ -615,6 +819,14 @@ public actor UsageIntelligenceEngine {
                 t = t.addingTimeInterval(5 * 60)
             }
         }
+        // The claim gate (#304). Measured on the owner's store at refit-like
+        // spacing: per 5-hour cycle, claim precision 17% → 32% with every cycle
+        // that reached the cap still claimed.
+        let hitClaimable = current.usedNow >= BurnRate.warningUsedFloor
+            && (loShift != nil ? latest != nil : crossing != nil)
+        let streak = rf.claimStreak
+        let claimConfirmed = streak?.period == EngineSelfEval.periodKeyRL(current.resetsAt)
+            && (streak?.count ?? 0) >= Self.claimConfirmRefits
         return BurnOutlook(
             slopePercentPerHour: slope,
             projectedFullAt: crossing,
@@ -627,7 +839,29 @@ public actor UsageIntelligenceEngine {
             method: model.id,
             cyclesObserved: rf.cyclesObserved,
             cyclesPeakOver90: rf.cyclesPeakOver90,
-            cyclesHit100: rf.cyclesHit100)
+            cyclesHit100: rf.cyclesHit100,
+            hitClaimable: hitClaimable, claimConfirmed: claimConfirmed)
+    }
+
+    /// Consecutive refits a hit claim must hold before it is said (#304), the
+    /// same k the burn alerts used on their own.
+    static let claimConfirmRefits = 2
+
+    /// Carry each window's claim streak from the previous refit into the new
+    /// fit: +1 while the claim holds in the same cycle, restarting on a new
+    /// cycle, cleared when it lapses.
+    static func carryClaimStreaks(_ f: EngineFeatures, into newFit: Fit, from previous: Fit) -> Fit {
+        var out = newFit
+        for key in newFit.rl.keys {
+            guard let o = burnOutlook(f, newFit, windowKey: key), o.hitClaimable else {
+                out.rl[key]?.claimStreak = nil
+                continue
+            }
+            let period = EngineSelfEval.periodKeyRL(o.resetsAt)
+            let prior = previous.rl[key]?.claimStreak
+            out.rl[key]?.claimStreak = (period, prior?.period == period ? prior!.count + 1 : 1)
+        }
+        return out
     }
 
     /// The calibrator for a cycle position: its stratum's, else pooled.
@@ -655,7 +889,8 @@ public actor UsageIntelligenceEngine {
                 trajectory: (selected?.trajectory.points ?? []).map {
                     .init(t: $0.at.timeIntervalSince1970, v: $0.usedPercentage)
                 },
-                burnPctPerHour: o.slopePercentPerHour)
+                burnPctPerHour: o.slopePercentPerHour,
+                hitClaimed: o.willHitLimitBeforeReset)
         }
         // Scoped per-model windows: one outlook per discovered scoped spec that
         // still has a live cycle, keyed by identity so a widget can match it to
@@ -751,35 +986,59 @@ public actor UsageIntelligenceEngine {
                     points.append(.init(at: crossing, usedPercentage: 100))
                     break
                 }
-                points.append(.init(at: date, usedPercentage: min(100, max(0, projection(date) + anchor))))
+                // Floored at the live reading, as the shown value is
+                // (`BurnTrajectory.displayedAtReset`): a meter does not fall
+                // inside a window, and a fit whose slope turned negative (the
+                // Kalman filter after a jump then a flat stretch, #312) drew a
+                // line falling to 22% under a 60% reading. Now every line ends
+                // at the value that model would show.
+                points.append(.init(at: date, usedPercentage: min(100, max(current.usedNow, projection(date) + anchor))))
             }
             let stat = statFor(model.id)
             return BurnTrajectory.ScoredTrajectory(
                 modelId: model.id, complexity: model.complexity,
                 trajectory: .init(modelId: model.id, points: points, crossesFullAt: crossing),
-                medianAbsError: stat?.medianAbsError ?? .infinity,
+                typicalAbsError: stat?.typicalAbsError ?? .infinity,
                 coverage: stat == nil ? 0 : 1,
-                isSelected: model.id == rf.selectedId)
+                isSelected: model.id == rf.resolvedId)
         }
 
-        // The scoreboard can name a model that is not in the roster: selection
-        // reads the accumulated record, while the roster is what will actually
-        // *fit this cycle*, and a model may decline (the diurnal model early in
-        // a cycle, every model at 0%). When that happened nothing was marked
-        // selected, and the chart drew `first` — roster order, which is
-        // arbitrary. On a 7-day window three hours past its reset that meant an
-        // unvetted curve presented as the forecast.
+        // `isSelected` is the model `makeFit` resolved for this cycle, the
+        // same one the outlook, the estimate, the band and the trail use
+        // (`resolveModel`, #301). The chart used to run its own fallback here
+        // when the selected model declined, so it drew a line no chip
+        // described.
         //
-        // Fall back explicitly: best realized accuracy among the models that
-        // did fit, ties to the simpler one — the same rule the scoreboard uses.
-        guard !scored.contains(where: \.isSelected), let best = scored.min(by: {
-            $0.medianAbsError != $1.medianAbsError
-                ? $0.medianAbsError < $1.medianAbsError
-                : $0.complexity < $1.complexity
-        }) else { return scored }
-        return scored.map {
-            $0.modelId == best.modelId ? $0.selecting() : $0
+        // Every model the window knows follows, the roster and any method its
+        // record holds, each that has no line this cycle flagged with why
+        // (#307). The sheet listed only the models that fit, so its rows came
+        // and went with the cycle.
+        let fitted = Set(scored.map(\.modelId))
+        let recorded = Set(accuracy?.methods.map(\.method) ?? [])
+        let known = (BurnTrajectory.defaultModels.map(\.id) + ["diurnal-rate"])
+            .filter { id in rf.roster.contains { $0.id == id } || recorded.contains(id) }
+        let complexities = Self.rlComplexities()
+        let unavailable = known.filter { !fitted.contains($0) }.map { id -> BurnTrajectory.ScoredTrajectory in
+            let stat = statFor(id)
+            return BurnTrajectory.ScoredTrajectory(
+                modelId: id, complexity: complexities[id] ?? 3,
+                trajectory: .init(modelId: id, points: [], crossesFullAt: nil),
+                typicalAbsError: stat?.typicalAbsError ?? .infinity,
+                coverage: stat == nil ? 0 : 1, isSelected: false,
+                unavailableReason: Self.unavailableReason(inRoster: rf.roster.contains { $0.id == id },
+                                                          current: current))
         }
+        return scored + unavailable
+    }
+
+    /// Why a known model has no line this cycle: the conditions its `fit`
+    /// declines on, in the cycle's terms. The models don't say which guard
+    /// they tripped, so this reads the cycle; the wording is the fact, terse.
+    static func unavailableReason(inRoster: Bool, current: BurnTrajectory.PartialCycle) -> String {
+        if !inRoster { return "needs a completed cycle" }        // diurnal, with none in the window
+        if current.samples.count < 3 { return "fewer than 3 readings yet" }
+        if current.usedNow <= 0 { return "nothing used yet this cycle" }
+        return "too early in the cycle"
     }
 
     // MARK: - Pace vs norm
@@ -879,7 +1138,9 @@ public actor UsageIntelligenceEngine {
     /// Build the per-user fit. `eodPools` are the per-cut trimmed pools
     /// resolved by `recompute` from the persisted self-eval scoreboard
     /// (empty = median-of-all-candidates, the safe cold-start prior).
-    static func makeFit(_ f: EngineFeatures, eodPools: [Int: [String]] = [:], rlSelection: [String: String] = [:]) -> Fit {
+    static func makeFit(_ f: EngineFeatures, eodPools: [Int: [String]] = [:], rlSelection: [String: String] = [:],
+                        rlAccuracy: [String: EngineSelfEval.Accuracy] = [:], rateLimits: Bool = true,
+                        rlRecords: [String: [EngineSelfEval.Record]] = [:]) -> Fit {
         var fit = Fit()
         fit.eodPools = eodPools
         fit.eodRemainder = eodRemainderCalibrator(periods: f.dailyPeriods, calendar: f.calendar, pools: eodPools)
@@ -893,17 +1154,15 @@ public actor UsageIntelligenceEngine {
         // Rate-limit fits per window — the generic window SET (fixed 5h/7d plus
         // any scoped per-model windows). Each spec carries its own `(key,
         // duration)`; the pure math below is identical across windows.
-        for window in f.windows {
+        for window in f.windows where rateLimits {
             let key = window.key
             let duration = window.duration
             guard let samples = f.rateLimit[key], !samples.isEmpty else { continue }
-            let (_, history) = BurnTrajectory.segment(samples: samples, duration: duration, now: f.now)
+            let (current, history) = BurnTrajectory.segment(samples: samples, duration: duration, now: f.now)
 
-            // The diurnal model competes on every window: established on
-            // weekly-cadence windows (where the idle structure lives), a
-            // promotion-gated SHADOW on session-cadence ones — the 2026-06
-            // "measured null" on the 5h block gets re-tested by the accumulating
-            // record instead of trusted forever.
+            // The diurnal model competes on every window, the 5h block too:
+            // the 2026-06 "measured null" there gets re-tested by the record
+            // instead of trusted forever.
             var roster = BurnTrajectory.defaultModels
             // ...but only once there is a completed cycle to learn a shape
             // from. With none, `rateTable` is the activity prior alone, and on
@@ -936,34 +1195,70 @@ public actor UsageIntelligenceEngine {
             if let learned = rlSelection[key] {
                 selectedId = learned
             } else {
-                // Cold start never displays a shadow candidate — the whole
-                // point of the promotion floor is that new models earn
-                // display from the persisted record, not a cold backtest.
-                let shadowIds = Set(Self.rlShadowFloors(duration: duration).keys)
-                let scores = BurnTrajectory.score(models: roster.filter { !shadowIds.contains($0.id) },
-                                                  cycles: history)
+                let scores = BurnTrajectory.score(models: roster, cycles: history)
                 selectedId = ForecastSelector.select(
                     scores: scores, policy: .init(minScoredCases: 6, minCoverage: 0.5)).id
                     ?? (WindowSpec.isWeeklyScale(duration: duration) ? "diurnal-rate" : "recency-weighted")
             }
-            let model = roster.first { $0.id == selectedId } ?? roster.first
+            // Resolve what this refit SHOWS, once: every surface reads it, and
+            // the band is calibrated on the model actually drawn.
+            let resolvedId = Self.resolveModel(
+                roster: roster, selectedId: selectedId, current: current,
+                accuracy: rlAccuracy[key])
+            let model = roster.first { $0.id == resolvedId }
 
             // Cap-hit frequency facts over completed cycles (for honest
-            // natural-frequency risk phrasing in the UI).
-            var over90 = 0, hit100 = 0
+            // natural-frequency risk phrasing in the UI): every cycle the
+            // record has scored, not only the 32 days this refit read (#306).
+            var finals: [String: Double] = [:]
+            for r in rlRecords[key] ?? [] { finals[r.periodKey] = r.truth }
             for c in history {
-                let peak = c.samples.map { $0.usedPercentage }.max() ?? 0
-                if peak >= 90 { over90 += 1 }
-                if peak >= 100 { hit100 += 1 }
+                finals[EngineSelfEval.periodKeyRL(c.resetsAt)] = c.samples.map { $0.usedPercentage }.max() ?? 0
             }
+            let over90 = finals.values.filter { $0 >= 90 }.count
+            let hit100 = finals.values.filter { $0 >= 100 }.count
 
             fit.rl[key] = RateLimitFit(
-                roster: roster, selectedId: selectedId,
-                calibrators: model.map { stratifiedRLCalibrators(model: $0, history: history, duration: duration, calendar: f.calendar) } ?? [:],
-                duration: duration, historyCount: history.count,
-                cyclesObserved: history.count, cyclesPeakOver90: over90, cyclesHit100: hit100)
+                roster: roster, selectedId: selectedId, resolvedId: resolvedId,
+                calibrators: model.map {
+                    stratifiedRLCalibrators(model: $0, history: history, duration: duration, calendar: f.calendar,
+                                            records: rlRecords[key] ?? [])
+                } ?? [:],
+                duration: duration, historyCount: finals.count,
+                cyclesObserved: finals.count, cyclesPeakOver90: over90, cyclesHit100: hit100)
         }
         return fit
+    }
+
+    /// The half of its window the live cycle is in, nil when there is none.
+    static func livePhase(_ f: EngineFeatures, window: WindowSpec) -> EngineSelfEval.SelectionPhase? {
+        guard let samples = f.rateLimit[window.key] else { return nil }
+        let (current, _) = BurnTrajectory.segment(samples: samples, duration: window.duration, now: f.now)
+        guard let current, current.durationHours > 0 else { return nil }
+        return .init(cut: current.nowHours / current.durationHours)
+    }
+
+    /// The model a window shows this refit (#301): the selected one when it
+    /// can fit the live cycle, else the best-recorded model that can: the
+    /// lowest typical error, then the simpler model, the scoreboard's tie rule.
+    ///
+    /// The selected model declines routinely: diurnal-rate before 5% of the
+    /// expected activity has happened, saturating at 0%. Only the chart used to
+    /// fall back, so the at-reset value, ETA, band and chip were missing for
+    /// 24.7% of one account's live 5-hour minutes while a dashed line was drawn.
+    /// With no live cycle there is nothing to fit, so the selection stands.
+    static func resolveModel(roster: [any BurnTrajectory.Model], selectedId: String,
+                             current: BurnTrajectory.PartialCycle?,
+                             accuracy: EngineSelfEval.Accuracy?) -> String? {
+        guard let current else { return roster.contains { $0.id == selectedId } ? selectedId : roster.first?.id }
+        if let selected = roster.first(where: { $0.id == selectedId }), selected.fit(current) != nil {
+            return selectedId
+        }
+        func rank(_ m: any BurnTrajectory.Model) -> (Double, Int) {
+            let stat = accuracy?.methods.first { $0.method == m.id }
+            return (stat?.typicalAbsError ?? .infinity, m.complexity)
+        }
+        return roster.filter { $0.fit(current) != nil }.min { rank($0) < rank($1) }?.id
     }
 
     /// Remainder-ratio conformal calibration: walk-forward of the SAME pooled
@@ -1109,19 +1404,30 @@ public actor UsageIntelligenceEngine {
     /// honest); with plentiful cycles the within-cycle spread is real tail
     /// information and per-cut counting resumes (5h holds 0.785 coverage).
     /// Validated fold-robust in research/harness (2026-07-06).
+    ///
+    /// **From the record as well as the refit's history (#306).** A refit
+    /// reads 32 days, so a weekly window's calibrator could never hold more
+    /// than ~4 cycles, short of the 8-residual gate forever: the 7-day window
+    /// stated a band in 0.17% of snapshots, per-model weekly windows in none.
+    /// Since #300 a v2 record row's `predicted` IS the displayed value, so
+    /// `truth − predicted` is exactly this residual: the record's rows for
+    /// `model` add every cycle it has scored. Where both cover a cycle they
+    /// agree by construction; the record's row is used.
     static func stratifiedRLCalibrators(
         model: any BurnTrajectory.Model,
         history: [BurnTrajectory.Cycle],
         duration: TimeInterval,
         calendar: Calendar,
+        records: [EngineSelfEval.Record] = [],
         cutFractions: [Double] = [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
     ) -> [String: ConformalCalibrator] {
-        // (cycle index, residual) pairs per bucket, then grouped per the rule.
-        var byStratum: [String: [(cycle: Int, residual: Double)]] = [:]
-        var pooled: [(cycle: Int, residual: Double)] = []
-        for (ci, cycle) in history.enumerated() {
+        // (period, cut) → (cycle start, residual), from the history walk, then
+        // overridden and extended by the record.
+        var cases: [String: [Double: (cycleStart: Date, residual: Double)]] = [:]
+        for cycle in history {
             let trueFinal = cycle.samples.map { $0.usedPercentage }.max() ?? 0
             guard trueFinal > 0 else { continue }
+            let period = EngineSelfEval.periodKeyRL(cycle.resetsAt)
             for cf in cutFractions {
                 let cutNow = cycle.cycleStart.addingTimeInterval(duration * cf)
                 let seen = cycle.samples.filter { $0.at <= cutNow }
@@ -1129,12 +1435,29 @@ public actor UsageIntelligenceEngine {
                 let partial = BurnTrajectory.PartialCycle(
                     samples: seen, now: cutNow, cycleStart: cycle.cycleStart, resetsAt: cycle.resetsAt)
                 guard let projection = model.fit(partial) else { continue }
-                let residual = trueFinal - projection(cycle.resetsAt)
-                pooled.append((ci, residual))
-                byStratum[rlStratum(cutFraction: cf, cycleStart: cycle.cycleStart, calendar: calendar), default: []].append((ci, residual))
+                // Measured from the displayed value, which is what the band is
+                // centred on (#300).
+                let residual = trueFinal - BurnTrajectory.displayedAtReset(projection, partial: partial)
+                cases[period, default: [:]][cf] = (cycle.cycleStart, residual)
             }
         }
-        let blocks = history.count < EngineParams.current.conformalBlockMinCycles
+        for r in records where r.method == model.id && r.truth > 0 && EngineSelfEval.isCurrentRLBucket(r.bucket) {
+            guard let cf = EngineSelfEval.rlCutFraction(r.bucket),
+                  let reset = EngineSelfEval.periodDateRL(r.periodKey) else { continue }
+            cases[r.periodKey, default: [:]][cf] = (reset.addingTimeInterval(-duration), r.truth - r.predicted)
+        }
+        // Cycles in time order: the block rule groups by cycle.
+        let periods = cases.keys.sorted()
+        var byStratum: [String: [(cycle: Int, residual: Double)]] = [:]
+        var pooled: [(cycle: Int, residual: Double)] = []
+        for (ci, period) in periods.enumerated() {
+            for (cf, c) in cases[period]!.sorted(by: { $0.key < $1.key }) {
+                pooled.append((ci, c.residual))
+                byStratum[rlStratum(cutFraction: cf, cycleStart: c.cycleStart, calendar: calendar), default: []]
+                    .append((ci, c.residual))
+            }
+        }
+        let blocks = periods.count < EngineParams.current.conformalBlockMinCycles
         func residuals(_ pairs: [(cycle: Int, residual: Double)]) -> [Double] {
             guard blocks else { return pairs.map { $0.residual } }
             let byCycle = Dictionary(grouping: pairs, by: { $0.cycle })
@@ -1150,9 +1473,17 @@ public actor UsageIntelligenceEngine {
         return out
     }
 
-    static func clampPct(_ r: ClosedRange<Double>) -> ClosedRange<Double> {
-        let lo = min(100, max(0, r.lowerBound))
-        let hi = min(100, max(0, r.upperBound))
+    /// A rate-limit band, clamped to what the value at reset can actually be:
+    /// never above 100, and never below `floor`, the usage the meter already
+    /// shows. The additive calibrator's low quantile is usually negative, so
+    /// clamping at 0 alone left 76% of 5-hour 80% bands starting below the
+    /// meter ("range 25–55%" at 30% used, #273). Coverage is unchanged by
+    /// construction, since the outcome is always ≥ the meter: the same
+    /// guarantee `RemainderConformal` gives the end-of-day band.
+    static func clampPct(_ r: ClosedRange<Double>, floor: Double = 0) -> ClosedRange<Double> {
+        let floor = min(100, max(0, floor))
+        let lo = min(100, max(floor, r.lowerBound))
+        let hi = min(100, max(floor, r.upperBound))
         return lo...max(lo, hi)
     }
 
@@ -1180,6 +1511,8 @@ public actor UsageIntelligenceEngine {
         var bandStratum: String?
         var residualCount: Int?
         var spendSoFar: Double?
+        var replacedMethod: String?
+        var hitClaimed: Bool?
 
         /// The row's identity at DISPLAY precision: a new row is worth writing
         /// exactly when the user-visible facts would change (utilisation to
@@ -1196,7 +1529,8 @@ public actor UsageIntelligenceEngine {
             func t(_ d: Date?) -> String { d.map { String(Int($0.timeIntervalSince1970 / 900)) } ?? "-" }
             let isCost = surface == EngineSelfEval.surfaceEOD || surface == "month"
             let v = isCost ? sig2 : pp
-            return [surface, method, confidence, periodKey,
+            return [surface, method, replacedMethod ?? "-", hitClaimed.map { $0 ? "claim" : "-" } ?? "-",
+                    confidence, periodKey,
                     v(value), v(lo80), v(hi80),
                     t(crossingAt), t(crossingEarliest), t(crossingLatest)].joined(separator: "|")
         }
@@ -1236,7 +1570,9 @@ public actor UsageIntelligenceEngine {
                 crossingLatest: o.projectedFullAtLatest,
                 usedPct: o.usedPct, anchorShift: o.anchorShift,
                 slopePercentPerHour: o.slopePercentPerHour,
-                bandStratum: stratum, residualCount: residuals))
+                bandStratum: stratum, residualCount: residuals,
+                replacedMethod: fit.rl[key]?.replacedId,
+                hitClaimed: o.willHitLimitBeforeReset))
         }
 
         let todayKey = TokenSample.formatDate(f.now, timeZone: f.calendar.timeZone)
@@ -1284,7 +1620,7 @@ public actor UsageIntelligenceEngine {
                 crossingLatest: d.crossingLatest, usedPct: d.usedPct,
                 anchorShift: d.anchorShift, slopePercentPerHour: d.slopePercentPerHour,
                 bandStratum: d.bandStratum, residualCount: d.residualCount,
-                spendSoFar: d.spendSoFar))
+                spendSoFar: d.spendSoFar, replacedMethod: d.replacedMethod, hitClaimed: d.hitClaimed))
             lastSnapshotSig[d.surface] = (now, sig)
             dirty = true
         }
@@ -1357,9 +1693,10 @@ public actor UsageIntelligenceEngine {
     }
 
     /// ~32 days of rate-limit samples — enough to hold several complete 7-day
-    /// cycles for the backtest while staying a small read.
-    private func fetchRate(now: Date) -> [EngineFeatures.RateRow] {
-        let cutoff = now.addingTimeInterval(-32 * 24 * 3600)
+    /// cycles for the backtest while staying a small read. `since` widens it,
+    /// for the once-per-launch record backfill.
+    private func fetchRate(now: Date, since: Date? = nil) -> [EngineFeatures.RateRow] {
+        let cutoff = since ?? now.addingTimeInterval(-32 * 24 * 3600)
         // Raw SQLite first — see `RawLimitReader`. Thirty-two days is ~30,000
         // rows and SwiftData spends ~1.3 s materialising them; the same read
         // through sqlite3 is a small fraction of that. `nil` means the reader
@@ -1390,6 +1727,60 @@ public actor UsageIntelligenceEngine {
         return rows.map { .init(window: $0.window, at: $0.sampledAt, usedPercentage: $0.usedPercentage, resetsAt: $0.resetsAt) }
     }
 
+    /// This scope's readings that have left the live tables. Those tables are a
+    /// 35-day cache (`OAuthPoller.liveWindowDays`): every hour, older rows are
+    /// moved (never deleted) into `AccountUsageArchive`, the permanent record.
+    /// The record backfill reads both, or its "full history" is the last 35
+    /// days. On a real store that hid 307 five-hour and 20 weekly cycles
+    /// (four months), and with them every weekly band.
+    private func fetchArchivedLimits() -> (rate: [EngineFeatures.RateRow], scoped: [EngineFeatures.ScopedRow]) {
+        guard let account = limitAccountId else { return ([], []) }
+        // Raw SQLite first, as `fetchRate` does: the archive is the biggest
+        // read the engine makes, and SwiftData materialising it was most of a
+        // 5.6 s pass. Either half failing falls back to the query below.
+        if let url = rawStoreURL,
+           let rate = RawLimitReader.archivedRateRows(storeURL: url, account: account),
+           let scoped = RawLimitReader.archivedScopedRows(storeURL: url, account: account) {
+            return (rate, scoped)
+        }
+        let rateKind = AccountUsageArchive.kindRateLimit, scopedKind = AccountUsageArchive.kindUsageLimit
+        let rows = (try? modelContext.fetch(FetchDescriptor<AccountUsageArchive>(
+            predicate: #Predicate { $0.accountId == account && ($0.kind == rateKind || $0.kind == scopedKind) },
+            sortBy: [SortDescriptor(\.sampledAt)]))) ?? []
+        return Self.archivedLimits(rows)
+    }
+
+    /// The archive rows as the engine's rows. One mapping for the SwiftData
+    /// fallback and for `RawLimitReaderParityTests`, which holds the raw
+    /// reader to it.
+    static func archivedLimits(_ rows: [AccountUsageArchive])
+        -> (rate: [EngineFeatures.RateRow], scoped: [EngineFeatures.ScopedRow]) {
+        var rate: [EngineFeatures.RateRow] = [], scoped: [EngineFeatures.ScopedRow] = []
+        for r in rows {
+            guard let pct = r.usedPercentage else { continue }
+            if r.kind == AccountUsageArchive.kindRateLimit, let window = r.window {
+                rate.append(.init(window: window, at: r.sampledAt, usedPercentage: pct, resetsAt: r.resetsAt))
+            } else if r.kind == AccountUsageArchive.kindUsageLimit, let identity = r.identity {
+                scoped.append(.init(identity: identity, group: r.group ?? "", label: r.label ?? identity,
+                                    modelId: r.modelId, modelDisplayName: r.modelDisplayName, surface: r.surface,
+                                    at: r.sampledAt, usedPercentage: pct, resetsAt: r.resetsAt,
+                                    inLatestBatch: false, isActive: r.isActive ?? false))
+            }
+        }
+        return (rate, scoped)
+    }
+
+    /// Live and archived rows as one time-ordered series, de-duplicated on
+    /// (series, instant): a row caught between its archive insert and its live
+    /// delete must not count twice. The live copy wins.
+    static func merged<Row>(_ live: [Row], _ archived: [Row], key: (Row) -> String, at: KeyPath<Row, Date>) -> [Row] {
+        guard !archived.isEmpty else { return live }
+        var seen = Set(live.map(key))
+        var out = live
+        for r in archived where seen.insert(key(r)).inserted { out.append(r) }
+        return out.sorted { $0[keyPath: at] < $1[keyPath: at] }
+    }
+
     /// ~32 days of scoped `limits[]` samples (`UsageLimitSample`) mapped to the
     /// engine's `ScopedRow` — the per-model weekly windows the driver forecasts
     /// alongside the fixed 5h/7d blocks. Mirrors `fetchRate`, including its
@@ -1399,8 +1790,8 @@ public actor UsageIntelligenceEngine {
     /// resulting sawtooth.
     /// `inLatestBatch` marks the most-recent poll's rows (the staleness guard:
     /// a limit that vanished from the latest response goes quiet).
-    private func fetchScopedLimits(now: Date) -> [EngineFeatures.ScopedRow] {
-        let cutoff = now.addingTimeInterval(-32 * 24 * 3600)
+    private func fetchScopedLimits(now: Date, since: Date? = nil) -> [EngineFeatures.ScopedRow] {
+        let cutoff = since ?? now.addingTimeInterval(-32 * 24 * 3600)
         // Same as `fetchRate`, and the bigger half: ~45,000 rows and ~3.4 s
         // through SwiftData. `inLatestBatch` is stamped here rather than in the
         // reader because it depends on the newest row in the returned set.

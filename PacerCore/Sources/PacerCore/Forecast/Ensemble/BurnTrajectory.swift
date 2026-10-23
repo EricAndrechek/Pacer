@@ -34,7 +34,19 @@ public enum BurnTrajectory {
         public let cycleStart: Date
         public let resetsAt: Date
         public init(samples: [Sample], now: Date, cycleStart: Date, resetsAt: Date) {
-            self.samples = samples.filter { $0.at <= now }.sorted { $0.at < $1.at }
+            var seen = samples.filter { $0.at <= now }.sorted { $0.at < $1.at }
+            // A window opens at 0%: that is a reading, not a guess. Counting
+            // it lets a model draw a line from the window's first poll. An
+            // account read every 5–10 minutes otherwise had no forecast for
+            // the first 10–20 minutes of every window: a line needs two
+            // readings, and only 45% of 5-hour windows had them by minute 6.
+            // Measured on the owner's store, the anchored line beats both a
+            // flat meter and the account's typical final from minute 6, and
+            // costs ≤ 0.5 pp from minute 15 on.
+            if let first = seen.first, first.at > cycleStart.addingTimeInterval(1) {
+                seen.insert(Sample(at: cycleStart, usedPercentage: 0), at: 0)
+            }
+            self.samples = seen
             self.now = now
             self.cycleStart = cycleStart
             self.resetsAt = resetsAt
@@ -65,6 +77,19 @@ public enum BurnTrajectory {
         func fit(_ cycle: PartialCycle) -> (@Sendable (Date) -> Double)?
     }
 
+    /// The end-at-reset value the app shows for a projection: anchored to the
+    /// live value (shift up only: smoothed fits sit under a spiking last
+    /// sample) and clamped to [usedNow, 100]. The outlook's point, the
+    /// self-eval record and the conformal residuals all go through this, so a
+    /// model is graded on what the user is shown. Scoring the raw line instead
+    /// rewarded how far past 100% it ran: 45–288 pp of "error" on 7-day early
+    /// cuts whose displayed value was off by 0–8 pp (#300). The harness's
+    /// `displayed_at_reset` is its port, pinned by `RLDisplayedParityTests`.
+    public static func displayedAtReset(_ projection: (Date) -> Double, partial: PartialCycle) -> Double {
+        let anchor = max(0, partial.usedNow - projection(partial.now))
+        return min(100, max(partial.usedNow, projection(partial.resetsAt) + anchor))
+    }
+
     /// The selected fit's forward trajectory, sampled for plotting.
     public struct Trajectory: Sendable, Equatable {
         public let modelId: String
@@ -76,9 +101,6 @@ public enum BurnTrajectory {
 
     /// Default roster. Quadratic is deliberately excluded — it reliably
     /// explodes on real cycles and was the worst fit in every backtest.
-    /// `KalmanTrend` rides along as a shadow candidate: it accumulates a
-    /// scored record like the others but can't be displayed until it clears
-    /// the promotion floor (`EngineParams.shadowPromotionMinPeriods`).
     public static var defaultModels: [any Model] {
         [
             LinearRecent(),
@@ -86,6 +108,7 @@ public enum BurnTrajectory {
             DampedAcceleration(),
             Saturating(),
             KalmanTrend(),
+            RecentRate(),
         ]
     }
 
@@ -211,11 +234,20 @@ public enum BurnTrajectory {
         public let modelId: String
         public let complexity: Int
         public let trajectory: Trajectory
-        /// Median absolute error (percentage points) against the realized
-        /// final of completed cycles. `.infinity` when there's no record yet.
-        public let medianAbsError: Double
+        /// Typical absolute error (percentage points) of the displayed value
+        /// against the realized final of completed cycles — the statistic
+        /// selection ranks by (`EngineSelfEval.typicalError`). `.infinity`
+        /// when there's no record yet.
+        public let typicalAbsError: Double
         public let coverage: Double
         public let isSelected: Bool
+        /// Why this model has no line this cycle ("nothing used yet this
+        /// cycle"), or nil when it projects. The compare sheet lists every
+        /// model the window knows, with its record, rather than only those
+        /// that fit (#307): at 0% a weekly window showed 3–4 rows of six.
+        public var unavailableReason: String? = nil
+        /// Whether this model has a line this cycle.
+        public var canProject: Bool { unavailableReason == nil }
         public var id: String { modelId }
 
         /// The same trajectory, marked as the one on display. Used when the
@@ -223,21 +255,87 @@ public enum BurnTrajectory {
         /// to stand in — see `rateLimitTrajectories`.
         public func selecting() -> ScoredTrajectory {
             ScoredTrajectory(modelId: modelId, complexity: complexity, trajectory: trajectory,
-                             medianAbsError: medianAbsError, coverage: coverage, isSelected: true)
+                             typicalAbsError: typicalAbsError, coverage: coverage, isSelected: true,
+                             unavailableReason: unavailableReason)
         }
     }
 
-    /// Friendly display name for a model id.
+    /// Friendly display name for a model id: what the line does, in words.
     public static func displayName(_ modelId: String) -> String {
         switch modelId {
-        case "linear-recent": return "Linear (recent)"
-        case "recency-weighted": return "Recency-weighted"
-        case "damped-acceleration": return "Damped acceleration"
-        case "saturating": return "Saturating"
-        case "kalman-trend": return "Smoothed trend"
+        case "linear-recent": return "Straight line, recent stretch"
+        case "recency-weighted": return "Trend, weighted to recent"
+        case "damped-acceleration": return "Trend with a fading speed-up"
+        case "saturating": return "Slowing toward a ceiling"
+        case "kalman-trend": return "Smoothed trend (Kalman filter)"
+        case "recent-rate": return "Latest pace, held"
         case "diurnal-rate": return "Your daily rhythm"
         default: return modelId
         }
+    }
+
+    /// One line on what a model does, for the compare sheet's hover.
+    public static func summary(_ modelId: String) -> String? {
+        switch modelId {
+        case "linear-recent": return "A straight line through the most recent readings, extended to the reset."
+        case "recency-weighted": return "One straight line through the whole window, recent readings weighted most."
+        case "damped-acceleration": return "The weighted trend, plus a speed-up term that fades before the reset."
+        case "saturating": return "A curve that rises and flattens toward a ceiling it fits."
+        case "kalman-trend": return "A filter that tracks your level and pace through noisy readings."
+        case "recent-rate": return "Your most recent rise, held at the same pace until the reset."
+        case "diurnal-rate": return "Your usual pace at each hour of each weekday, added up to the reset."
+        default: return nil
+        }
+    }
+
+    /// How a model works, with the numbers it runs on for a window of this
+    /// length — the compare sheet's info popover. Read from the same
+    /// constants the models fit with (`EngineParams`, `RecentRate.lookback`),
+    /// so the text can't drift from the code.
+    public static func howItWorks(_ modelId: String, windowDuration: TimeInterval) -> String? {
+        let p = EngineParams.current
+        switch modelId {
+        case "linear-recent":
+            let span = approxSpan(windowDuration * p.linearRecentLookbackFraction)
+            return "Fits a least-squares line through the readings of the last \(span) and extends it to the reset. "
+                + "It follows a change of pace quickly; early in a window it has only a few readings to go on."
+        case "recency-weighted":
+            let halfLife = approxSpan(windowDuration * p.recencyHalfLifeFraction)
+            return "Fits one straight line through every reading in the window, weighting each by how recent it is: "
+                + "a reading's weight halves every \(halfLife). One busy stretch early on doesn't steer it."
+        case "damped-acceleration":
+            return "Fits the weighted trend with an extra term for speeding up or slowing down, so the line can bend "
+                + "when your pace is changing. The speed-up fades over the time left, so it can't run away."
+        case "saturating":
+            return "Fits L·(1 − e^(−k·t)), a curve that climbs fast and flattens toward a ceiling L, trying ceilings "
+                + "and keeping the one closest to this window's readings. It suits usage that tapers off."
+        case "kalman-trend":
+            return "A Kalman filter estimates your current level and pace, weighing each new reading against how "
+                + "noisy readings usually are, and carries the smoothed pace forward to the reset."
+        case "recent-rate":
+            let span = approxSpan(RecentRate.lookback(cycleDuration: windowDuration))
+            return "Takes how far the meter rose over the last \(span) and assumes that pace holds from the latest "
+                + "reading until the reset. No curve is fitted, so a few odd readings can't bend it."
+        case "diurnal-rate":
+            return "Learns how fast your usage usually climbs at each hour of each weekday, then adds up the hours "
+                + "left until the reset, so quiet nights and weekends add little. One scale factor matches it to "
+                + "this window's pace so far."
+        default:
+            return nil
+        }
+    }
+
+    /// "45 minutes" / "90 minutes" / "25 hours" / "2 days".
+    static func approxSpan(_ seconds: TimeInterval) -> String {
+        if seconds < 2 * 3600 {
+            let m = max(5, Int((seconds / 300).rounded()) * 5)
+            return m == 60 ? "hour" : "\(m) minutes"
+        }
+        if seconds < 36 * 3600 {
+            let h = Int((seconds / 3600).rounded())
+            return h == 24 ? "day" : "\(h) hours"
+        }
+        return "\(Int((seconds / 86400).rounded())) days"
     }
 
     static func median(_ xs: [Double]) -> Double {
@@ -313,6 +411,7 @@ public extension BurnTrajectory.ScoredTrajectory {
         BurnTrajectory.ScoredTrajectory(
             modelId: modelId, complexity: complexity,
             trajectory: trajectory.reanchored(toTime: tailTime, value: tailValue, cap: cap),
-            medianAbsError: medianAbsError, coverage: coverage, isSelected: isSelected)
+            typicalAbsError: typicalAbsError, coverage: coverage, isSelected: isSelected,
+            unavailableReason: unavailableReason)
     }
 }

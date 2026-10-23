@@ -244,10 +244,12 @@ struct ScopedWindowForecastTests {
                                      rate: [], lastArrivalAt: nil, scoped: rows)
         // The scoped window is discovered and forecast through the generic path.
         #expect(f.windows.contains { $0.isScoped && $0.key == id })
-        let fit = UsageIntelligenceEngine.makeFit(f)
+        // Two consecutive refits: a claim needs confirmation (#304).
+        let once = UsageIntelligenceEngine.carryClaimStreaks(f, into: UsageIntelligenceEngine.makeFit(f), from: .init())
+        let fit = UsageIntelligenceEngine.carryClaimStreaks(f, into: UsageIntelligenceEngine.makeFit(f), from: once)
         let outlook = UsageIntelligenceEngine.burnOutlook(f, fit, windowKey: id)
         #expect(outlook != nil)
-        // The engine projects a pre-reset crossing off the steep live cycle…
+        // The engine claims a pre-reset crossing off the steep live cycle…
         #expect(outlook!.willHitLimitBeforeReset)
         #expect(outlook!.projectedFullAt! < outlook!.resetsAt)
         #expect(outlook!.usedPct >= BurnRate.warningUsedFloor)

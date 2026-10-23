@@ -58,12 +58,16 @@ recency-slope      median 28.3%
 
 So the tournament reproduces the right choice with no human in the loop.
 
-## Next steps (not done)
+## Next steps (status, 2026-10)
 
-1. **Monthly roster** — add a day-of-week-weights candidate; reuse the same
-   framework with a month-length period.
-2. **Wire it in (gated)** — have the cards read "the selected forecaster for
-   this surface" instead of a hardcoded method. Run the selector *offline /
+1. **Monthly roster — done.** The day-of-week candidate joined a monthly
+   roster (e0de667, #54), and the daily-sum projector fixed its demotion
+   (7932540, #64).
+2. **Wire it in (gated) — done by the engine.** The usage-intelligence engine
+   (887ec2f, #65) selects per surface from its persisted record (53d9511, #66),
+   and the cards ask it (`docs/intelligence-engine.md`). Originally: have the
+   cards read "the selected forecaster for this surface" instead of a
+   hardcoded method. Run the selector *offline /
    logging-only* first to confirm its live picks beat the hardcoded ones,
    then swap (displayed change → before/after + sign-off, as always). Since
    the selector currently picks the already-shipped method, the first wire-in
@@ -80,5 +84,7 @@ So the tournament reproduces the right choice with no human in the loop.
    only help, never regress. It'll be selected automatically if it starts
    winning (more history, or better features — stacking the simple
    forecasters' outputs as features is the obvious next lever).
-4. **Uncertainty** — the spread of candidate predictions is a cheap interval
-   ("$10.5k–$12k"), more honest than a single point.
+4. **Uncertainty — tracked in #203.** The spread of candidate predictions
+   as a cheap interval ("$10.5k–$12k"). It is uncalibrated and conflicts with
+   the "points, not ranges" UI rule; the proposal there is not to build it.
+   Calibrated bands are the engine's conformal ones.

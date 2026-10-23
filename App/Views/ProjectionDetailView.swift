@@ -114,8 +114,7 @@ struct ProjectionCompareModal: View {
                     durationSeconds: duration,
                     actual: data.points,
                     trajectories: overlays,
-                    accuracy: accuracy,
-                    shadowFloors: UsageIntelligenceEngine.rlShadowFloors(duration: duration)
+                    accuracy: accuracy
                 )
             } else if loaded && actualsLoaded {
                 Text("Not enough data to compare models yet.")
@@ -201,12 +200,9 @@ struct ProjectionDetailView: View {
     let actual: [PaceChartView.Data.Point]
     let trajectories: [BurnTrajectory.ScoredTrajectory]
     /// Per-method scored record for this window (completed cycles + median
-    /// miss) — powers the shadow-progress captions and the selected model's
-    /// earned-record footer. Nil until the engine has scored a cycle.
+    /// miss) — powers the selected model's earned-record footer. Nil until
+    /// the engine has scored a cycle.
     let accuracy: EngineSelfEval.Accuracy?
-    /// Shadow candidates for this window → the completed-cycle floor each
-    /// must clear before the engine may pick it for display.
-    let shadowFloors: [String: Int]
 
     /// Stable per-model colors for the lines and the legend swatches.
     private static let palette: [String: Color] = [
@@ -216,14 +212,19 @@ struct ProjectionDetailView: View {
         "saturating": .orange,
         "kalman-trend": .pink,
         "diurnal-rate": .teal,
+        "recent-rate": .indigo,
     ]
     private func color(_ id: String) -> Color { Self.palette[id] ?? .gray }
+
+    /// The models with a line this cycle. The chart, its domain and spread are
+    /// built from these; the table lists every model (#307).
+    private var projecting: [BurnTrajectory.ScoredTrajectory] { trajectories.filter(\.canProject) }
 
     // MARK: - Zoom domain
 
     /// The instant all trajectories branch from (their shared first point).
     private var trajectoryNow: Date? {
-        trajectories.first?.trajectory.points.first?.at
+        projecting.first?.trajectory.points.first?.at
     }
 
     /// Chart x-axis right edge: the latest `at` across all trajectories' last
@@ -231,7 +232,7 @@ struct ProjectionDetailView: View {
     /// resetsAt. Falls back to resetsAt when trajectories are empty.
     private var xEnd: Date {
         guard let now = trajectoryNow,
-              let rawEnd = trajectories.compactMap({ $0.trajectory.points.last?.at }).max()
+              let rawEnd = projecting.compactMap({ $0.trajectory.points.last?.at }).max()
         else { return resetsAt }
         let span = rawEnd.timeIntervalSince(now)
         // Degenerate at the cap: every trajectory has collapsed to its origin
@@ -270,7 +271,7 @@ struct ProjectionDetailView: View {
     /// Highest value across filtered actuals + all trajectories.
     private var dataMax: Double {
         let actMax = filteredActuals.map(\.value).max() ?? 0
-        let trajMax = trajectories.flatMap { $0.trajectory.points.map(\.usedPercentage) }.max() ?? 0
+        let trajMax = projecting.flatMap { $0.trajectory.points.map(\.usedPercentage) }.max() ?? 0
         return max(actMax, trajMax)
     }
 
@@ -288,7 +289,7 @@ struct ProjectionDetailView: View {
     /// the plot empty under the lines.
     private var yMin: Double {
         let actMin = filteredActuals.map(\.value).min() ?? 0
-        let trajMin = trajectories.flatMap { $0.trajectory.points.map(\.usedPercentage) }.min() ?? 0
+        let trajMin = projecting.flatMap { $0.trajectory.points.map(\.usedPercentage) }.min() ?? 0
         let minVisible = min(actMin, trajMin)
         guard minVisible > 30 else { return 0 }
         let pad = max(2, (dataMax - minVisible) * 0.1)
@@ -309,7 +310,7 @@ struct ProjectionDetailView: View {
     /// Values past a trajectory's last point extend at that last value, so
     /// stepping to xEnd (which may be before resetsAt) is correct.
     private var envelopeSteps: [EnvelopeStep] {
-        guard let now = trajectoryNow, !trajectories.isEmpty else { return [] }
+        guard let now = trajectoryNow, !projecting.isEmpty else { return [] }
         let span = xEnd.timeIntervalSince(now)
         guard span > 0 else { return [] }
         let steps = 24
@@ -317,7 +318,7 @@ struct ProjectionDetailView: View {
             let frac = Double(i) / Double(steps)
             let t = now.addingTimeInterval(span * frac)
             var vals: [Double] = []
-            for st in trajectories {
+            for st in projecting {
                 vals.append(interpolatedValue(st.trajectory.points, at: t))
             }
             guard !vals.isEmpty else { return nil }
@@ -350,7 +351,8 @@ struct ProjectionDetailView: View {
     /// point is 100 are sorted earliest-cap-first among ties. The selected
     /// model keeps its highlight but does not jump the order.
     private var ranked: [BurnTrajectory.ScoredTrajectory] {
-        trajectories.sorted { a, b in
+        // Models without a line go last, keeping the engine's order.
+        projecting.sorted { a, b in
             let aVal = a.trajectory.points.last?.usedPercentage ?? 0
             let bVal = b.trajectory.points.last?.usedPercentage ?? 0
             if aVal != bVal { return aVal > bVal }
@@ -361,7 +363,7 @@ struct ProjectionDetailView: View {
             case (.none, .some):     return false
             default:                 return false
             }
-        }
+        } + trajectories.filter { !$0.canProject }
     }
 
     // MARK: - Body
@@ -382,7 +384,7 @@ struct ProjectionDetailView: View {
     /// "why isn't the best one picked?".
     private var legendText: String {
         var s = "Solid — actual · dashed — projections from now · shaded — the models' spread · the highlighted model drives the dashboard."
-        let best = trajectories.filter { $0.medianAbsError.isFinite }.min { $0.medianAbsError < $1.medianAbsError }
+        let best = projecting.filter { $0.typicalAbsError.isFinite }.min { $0.typicalAbsError < $1.typicalAbsError }
         if let best, let selected = trajectories.first(where: { $0.isSelected }),
            selected.modelId != best.modelId {
             s += " Models within ±1.5 points are treated as tied — the simplest of the tied models is used."
@@ -526,7 +528,7 @@ struct ProjectionDetailView: View {
         let dash: [CGFloat]
     }
     private var styledLines: [StyledLine] {
-        trajectories.map { st in
+        projecting.map { st in
             StyledLine(
                 id: st.modelId,
                 points: st.trajectory.points,
@@ -550,24 +552,6 @@ struct ProjectionDetailView: View {
 
     // MARK: - Accuracy table
 
-    /// Completed scored cycles for one method, from the persisted record.
-    private func scoredPeriods(_ modelId: String) -> Int {
-        accuracy?.methods.first(where: { $0.method == modelId })?.periods ?? 0
-    }
-
-    /// Shadow candidates are promotion-gated: they accumulate a scored record
-    /// like everyone else but can't drive the dashboard until they've banked
-    /// enough completed cycles AND win on realized error. Say so quietly, so
-    /// a new model visibly earns its place instead of appearing from nowhere.
-    /// Past the floor the caption collapses to "eligible" (and disappears on
-    /// a selected row — "on the dashboard" already says it graduated).
-    private func shadowCaption(_ st: BurnTrajectory.ScoredTrajectory) -> String? {
-        guard let floor = shadowFloors[st.modelId] else { return nil }
-        let periods = scoredPeriods(st.modelId)
-        guard periods < floor else { return st.isSelected ? nil : "eligible" }
-        return "earning trust — \(periods) of \(floor) cycles"
-    }
-
     /// The selected model's earned record — how many completed cycles back
     /// it. The miss itself already sits in the row's "within ±N%" column
     /// (no number twice); the footer adds the depth of evidence behind the
@@ -590,7 +574,7 @@ struct ProjectionDetailView: View {
                 Text("MODEL")
                 Spacer()
                 Text("TYPICAL ACCURACY, PAST CYCLES")
-                    .help("Median |projected final − actual final| across your completed cycles, in percentage points — lower is better")
+                    .help("Typical |shown final − actual final| at this half of the window (first or second) across your completed cycles (median; mean on weekly windows), in percentage points — lower is better")
             }
             .font(.system(size: 9, weight: .semibold, design: .rounded))
             .foregroundStyle(.tertiary)
@@ -601,15 +585,22 @@ struct ProjectionDetailView: View {
             ForEach(Array(ranked.enumerated()), id: \.element.id) { idx, st in
                 HStack(spacing: 10) {
                     RoundedRectangle(cornerRadius: 2)
-                        .fill(color(st.modelId))
+                        .fill(color(st.modelId).opacity(st.canProject ? 1 : 0.35))
                         .frame(width: 14, height: 4)
                     VStack(alignment: .leading, spacing: 1) {
                         Text(BurnTrajectory.displayName(st.modelId))
                             .font(.system(size: 13, weight: st.isSelected ? .semibold : .regular))
-                        if let caption = shadowCaption(st) {
-                            Text("\(Image(systemName: "flask")) \(caption)")
+                        if let reason = st.unavailableReason {
+                            Text("can't project yet · \(reason)")
                                 .font(.system(size: 10))
                                 .foregroundStyle(.tertiary)
+                        }
+                    }
+                    if let summary = BurnTrajectory.summary(st.modelId) {
+                        PacerInfoButton(help: summary) {
+                            ModelInfoContent(
+                                modelId: st.modelId, windowDuration: durationSeconds,
+                                stat: accuracy?.methods.first { $0.method == st.modelId })
                         }
                     }
                     if st.isSelected {
@@ -624,8 +615,8 @@ struct ProjectionDetailView: View {
                             .help(pacerRelativeExact(crossAt))
                             .font(.system(size: 11)).foregroundStyle(.red.opacity(0.85))
                     }
-                    Text(st.medianAbsError.isFinite
-                         ? String(format: "within ±%.0f%%", st.medianAbsError)
+                    Text(st.typicalAbsError.isFinite
+                         ? String(format: "within ±%.0f%%", st.typicalAbsError)
                          : "—")
                         .font(.system(size: 12).monospacedDigit())
                         .foregroundStyle(.secondary)
@@ -650,6 +641,89 @@ struct ProjectionDetailView: View {
                     .padding(.horizontal, 10)
                     .padding(.top, 8)
             }
+        }
+    }
+}
+
+/// Every model's info popover for one window, side by side — `make
+/// render-live`'s `modelInfo` page, because a popover cannot be rendered
+/// off-screen. Reads the scope's engine the way the sheet does.
+struct ModelInfoGallery: View {
+    let windowKey: String
+    let duration: TimeInterval
+    let limitAccountId: String?
+    @Environment(\.usageEngines) private var engines
+    @State private var accuracy: EngineSelfEval.Accuracy?
+
+    var body: some View {
+        let ids = BurnTrajectory.defaultModels.map(\.id) + ["diurnal-rate"]
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 300, maximum: 330), alignment: .top)],
+                  alignment: .leading, spacing: 12) {
+            ForEach(ids, id: \.self) { id in
+                ModelInfoContent(modelId: id, windowDuration: duration,
+                                 stat: accuracy?.methods.first { $0.method == id })
+                    .padding(14)
+                    .frame(width: 300, alignment: .leading)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(.background.secondary))
+            }
+        }
+        .padding(16)
+        .task {
+            guard let engine = engines?.engine(forAccount: limitAccountId) else { return }
+            let surface = EngineSelfEval.rlSurface(windowKey)
+            accuracy = await askEngine { await engine.selfEvalAccuracy(surface: surface) }
+        }
+    }
+}
+
+/// The compare sheet's info popover for one model: how it works, then its
+/// record on this window split by how far through the window the call was
+/// made. Late calls are always closer, so the split shows where a model earns
+/// or loses its overall number.
+private struct ModelInfoContent: View {
+    let modelId: String
+    let windowDuration: TimeInterval
+    let stat: EngineSelfEval.Accuracy.MethodStat?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(BurnTrajectory.displayName(modelId))
+                .font(.system(size: 13, weight: .semibold))
+            if let how = BurnTrajectory.howItWorks(modelId, windowDuration: windowDuration) {
+                Text(how)
+                    .font(.system(size: 12))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let stat, !stat.byStage.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("TYPICAL ACCURACY, \(stat.periods) PAST CYCLES")
+                        .font(.system(size: 9, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.tertiary)
+                        .tracking(0.5)
+                    ForEach(stat.byStage, id: \.stage) { s in
+                        HStack {
+                            Text(Self.label(s.stage))
+                            Spacer()
+                            Text(String(format: "within ±%.0f%%", s.typicalAbsError))
+                                .monospacedDigit()
+                                .foregroundStyle(.secondary)
+                        }
+                        .font(.system(size: 12))
+                    }
+                }
+            } else {
+                Text("No completed cycles scored yet.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    static func label(_ stage: EngineSelfEval.Accuracy.Stage) -> String {
+        switch stage {
+        case .early: return "Early, 20–40% through"
+        case .middle: return "Middle, 50–70% through"
+        case .late: return "Late, 80–90% through"
         }
     }
 }

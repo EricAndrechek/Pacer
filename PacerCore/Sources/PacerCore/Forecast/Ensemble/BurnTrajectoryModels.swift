@@ -39,6 +39,42 @@ extension BurnTrajectory {
         }
     }
 
+    /// The meter's rise over the last hour (a day on weekly-scale windows),
+    /// extrapolated from the latest reading (#272). An endpoint difference, not
+    /// a fit: `LinearRecent` fits a line through the last 30% of the window's
+    /// length (90 minutes on a 5-hour window), which early in a cycle is every
+    /// reading since the reset. Measured
+    /// as a no-model control on the owner's store it beat the shipping 5-hour
+    /// pipeline (median 3.00 vs 3.59 pp, 4/4 folds), and raising the lookback
+    /// fraction did not reproduce it. It competes through the record like
+    /// every other model.
+    public struct RecentRate: Model {
+        public let id = "recent-rate"
+        public let complexity = 1
+        public init() {}
+
+        /// An hour on session-cadence windows, a day on weekly ones: the same
+        /// scaling `burnOutlook`'s descriptive slope uses.
+        static func lookback(cycleDuration: TimeInterval) -> TimeInterval {
+            WindowSpec.isWeeklyScale(duration: cycleDuration) ? 24 * 3600 : 3600
+        }
+
+        public func fit(_ cycle: PartialCycle) -> (@Sendable (Date) -> Double)? {
+            guard cycle.samples.count >= 2, let last = cycle.samples.last else { return nil }
+            let from = cycle.now.addingTimeInterval(
+                -Self.lookback(cycleDuration: cycle.resetsAt.timeIntervalSince(cycle.cycleStart)))
+            // The meter at the start of the lookback: the last reading at or
+            // before it, else the cycle's start, which a reset leaves at 0%.
+            let start = from > cycle.cycleStart ? cycle.samples.last { $0.at <= from } : nil
+            let t0 = start?.at ?? cycle.cycleStart, u0 = start?.usedPercentage ?? 0
+            let span = last.at.timeIntervalSince(t0)
+            guard span >= 5 * 60 else { return nil }
+            let rate = max(0, (last.usedPercentage - u0) / span)      // pp per second
+            let base = last.usedPercentage, origin = last.at
+            return { date in base + rate * date.timeIntervalSince(origin) }
+        }
+    }
+
     /// Recency-weighted linear via `TrendEstimator` (acceleration off). Smooths
     /// out a single busy hour; the 5-hour window's best fit on real data.
     public struct RecencyWeighted: Model {
@@ -81,11 +117,7 @@ extension BurnTrajectory {
         }
     }
 
-    /// Local-level + trend Kalman filter — a SHADOW candidate: scored into
-    /// the per-user record from day one like every roster member, but
-    /// display-promotion requires the shadow floor
-    /// (`EngineParams.shadowPromotionMinPeriods`) — see
-    /// `EngineSelfEval.bestMethod`. Tests whether optimal recursive smoothing
+    /// Local-level + trend Kalman filter. Tests whether optimal recursive smoothing
     /// beats the recency-weighted regression at tracking the live burn slope;
     /// projection is the filtered level carried forward at the filtered slope.
     public struct KalmanTrend: Model {

@@ -13,17 +13,20 @@ uv run pacer_replay.py --source usagelimit      # scoped per-model windows (ZUSA
 uv run pacer_replay.py --source usagelimit --identity "weekly_scoped|Fable|"
 uv run sweep.py                   # grid-sweep the EngineParams knobs
 uv run sweep.py --full --json     # bigger grid, machine-readable
-uv run weekly_check.py            # the standing check (drift/promotions/sweep)
+uv run sweep.py --selection        # rate-limit selection knobs (#305), harness-only until adopted
+uv run selection_strategies.py    # rules vs a rule-picker vs combining models (~25 s)
+uv run weekly_check.py            # the standing check (drift/sweep)
 uv run weekly_check.py --install-agent   # LaunchAgent: Mondays 09:23
 ```
 
-`weekly_check.py` is the loop's heartbeat: replay vs `baselines.json`,
-shadow-promotion progress from the app's own record, and the default sweep —
+`weekly_check.py` is the loop's heartbeat: replay vs `baselines.json` and the
+default sweep —
 one line appended to `reports/log.jsonl` every run, a macOS notification only
 when something is actionable. Deterministic, no LLM in the loop.
 
-The store (`pacer.sqlite` in the app group) is copied to a temp dir and opened
-read-only — the live app is never touched. A full-history replay takes ~1s,
+The store (`pacer.sqlite` in the app group) is cloned (APFS `cp -c`, else
+copied) to a temp dir, opened read-only, and the copy is removed when the run
+exits — the live app is never touched. A full-history replay takes ~1s,
 which is why the sweep is a plain deterministic grid: no need for random
 search, and every run is reproducible.
 
@@ -57,9 +60,10 @@ parity — if either side drifts, CI fails.
 
 ## What it does / doesn't replay
 
-Replayed: cycle segmentation, all six burn-trajectory models (including the
-shadow Kalman + diurnal), record-driven selection with shadow promotion
-floors, live-value anchoring, stratified additive conformal bands with the
+Replayed **per account**, each on its own record and activity prior, the way the
+app fits them since #303 (a rate-limit window belongs to one account; pooling
+them was the all-accounts engine's bug): cycle segmentation, all seven burn-trajectory models, record-driven
+selection (one floor for every model), live-value anchoring, stratified additive conformal bands with the
 gated quantiles. Not replayed (yet): the EOD/month cost surfaces and their
 pool selection — extend `Params` + `replay_window` when those knobs need
 sweeping.
