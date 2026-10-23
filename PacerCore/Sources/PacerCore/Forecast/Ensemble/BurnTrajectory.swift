@@ -54,7 +54,36 @@ public enum BurnTrajectory {
         public var durationHours: Double { resetsAt.timeIntervalSince(cycleStart) / 3600 }
         public var nowHours: Double { now.timeIntervalSince(cycleStart) / 3600 }
         func hours(_ date: Date) -> Double { date.timeIntervalSince(cycleStart) / 3600 }
-        public var usedNow: Double { samples.last?.usedPercentage ?? 0 }
+
+        /// The live meter's value (#318), when the asker has one: what the
+        /// meter reads now, estimated from the spend since its last reading.
+        ///
+        /// Its own input, beside the readings and never among them: a sample
+        /// appended to `samples` would be fitted as if the server had said
+        /// it, and the fit, the self-evaluation record and the residuals all
+        /// learn from readings only. Only the asking path sets it
+        /// (`UsageIntelligenceEngine`'s `live:` parameters); refits, scoring
+        /// and snapshots never do, so with no live value every answer is
+        /// byte-identical to one without this.
+        public var liveUsed: Double?
+
+        /// Where the forecast starts: the live value when there is one, else
+        /// the last reading.
+        public var usedNow: Double { liveUsed ?? samples.last?.usedPercentage ?? 0 }
+
+        /// This cycle with `live` as "used now", when it describes this
+        /// cycle: built on this cycle's latest reading or a newer one, in
+        /// the same window (`RateLimitCycle.contains`, never `resetsAt ==`),
+        /// and not restarted past its reset. Otherwise unchanged.
+        public func withLive(_ live: LiveMeterValue?, duration: TimeInterval) -> PartialCycle {
+            guard let live, !live.restarted,
+                  RateLimitCycle.contains(sampleReset: live.reading.resetsAt, resets: resetsAt, duration: duration),
+                  live.reading.at >= (samples.last?.at ?? .distantPast).addingTimeInterval(-1)
+            else { return self }
+            var out = self
+            out.liveUsed = live.percent
+            return out
+        }
     }
 
     /// A complete past cycle, used for backtesting.
