@@ -575,8 +575,11 @@ struct MenuBarLabel: View {
 private struct MenuBarLabelContent: View, Equatable {
     let rendered: MenuBarLabel.Render
 
+    /// The items only: the tooltip is AppKit's (`onTooltipChange`) and this
+    /// view does not draw it, so its text moving (an estimate's tenth, a new
+    /// reading) must not re-rasterize the status item.
     nonisolated static func == (lhs: MenuBarLabelContent, rhs: MenuBarLabelContent) -> Bool {
-        lhs.rendered == rhs.rendered
+        lhs.rendered.items == rhs.rendered.items
     }
 
     var body: some View {
