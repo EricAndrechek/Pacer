@@ -15,6 +15,20 @@ struct BurnRateTests {
         )
     }
 
+    /// An idle window says its forecast without repeating the big number.
+    @Test func anIdleWindowHoldsUnlessItsForecastStillClimbs() {
+        // At 90% and forecast to stay there: no number, just "holds".
+        #expect(BurnRate.idleVerdict(usedPct: 90, atReset: 90) == .holds)
+        #expect(BurnRate.idleVerdict(usedPct: 90, atReset: 90.4) == .holds)
+        // No forecast at all still holds: nothing is moving.
+        #expect(BurnRate.idleVerdict(usedPct: 2, atReset: nil) == .holds)
+        // A forecast that expects the usual hours to come keeps its number.
+        #expect(BurnRate.idleVerdict(usedPct: 40, atReset: 57.6) == .atReset(58))
+        // Nothing to hold at 0%.
+        #expect(BurnRate.idleVerdict(usedPct: 0, atReset: 0) == nil)
+        #expect(BurnRate.idleVerdict(usedPct: 0.4, atReset: 12) == nil)
+    }
+
     @Test func warnsOnlyWhenHitProjectedAndPastFloor() {
         // Projected hit + past the floor → warn.
         #expect(BurnRate.warrantsWarning(projection(hit: true), usedPct: 65))
