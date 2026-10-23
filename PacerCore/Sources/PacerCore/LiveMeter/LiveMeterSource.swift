@@ -5,13 +5,15 @@ import SwiftData
 /// `LiveMeter.value` (#318).
 ///
 /// **Reads, all bounded.** Per window, the latest `SpendMeterFit` row
-/// (`fetchLimit` 1 on the `(accountId, window, fittedDay)` index). Then one
-/// read of the account's `TokenSample`s since the earliest reading among its
-/// windows, on the `(accountId, sampledAt)` index with a `fetchLimit`
-/// backstop. A reading is at most `LiveMeter.maxReadingAge` old, so that is
-/// at most an hour of one account's turns, and in steady state the five
-/// minutes since the last poll. No 14-day read: the fit is #317's daily job.
-/// A window with no fit costs one probe and no sample read.
+/// (`fetchLimit` 1 on the `(accountId, window, fittedDay)` index), and the
+/// window's readings in the hour before its latest one, for the carry
+/// (`LiveMeter.carry`), on the `(accountId, window|identity, sampledAt)`
+/// index. Then one read of the account's `TokenSample`s since the earliest of
+/// those readings, on the `(accountId, sampledAt)` index with a `fetchLimit`
+/// backstop. A reading is at most `LiveMeter.maxReadingAge` old, so that is at
+/// most two hours of one account's turns, and in steady state the hour and a
+/// few minutes since. No 14-day read: the fit is #317's daily job. A window
+/// with no fit, or a weak one, costs one probe and nothing else.
 ///
 /// **Priced the way the fit was.** The fit's spend is
 /// `AccountHourlyAggregate.totalCostUSD`, which `HourlyAggregateRecomputer`
@@ -37,14 +39,19 @@ public struct LiveMeterSource {
         public let reading: MeterReading
         public var capModelId: String?
         public var capModelName: String?
+        /// The window's readings in the `LiveMeter.carryLookback` before
+        /// `reading`, ascending, `reading` last. Nil: the source reads them.
+        public var history: [MeterReading]?
 
         public init(key: String, duration: TimeInterval, reading: MeterReading,
-                    capModelId: String? = nil, capModelName: String? = nil) {
+                    capModelId: String? = nil, capModelName: String? = nil,
+                    history: [MeterReading]? = nil) {
             self.key = key
             self.duration = duration
             self.reading = reading
             self.capModelId = capModelId
             self.capModelName = capModelName
+            self.history = history
         }
     }
 
@@ -74,14 +81,19 @@ public struct LiveMeterSource {
     /// keyed by `Window.key`.
     public func values(account: String, windows: [Window], now: Date) -> [String: LiveMeterValue] {
         guard hasTables else { return [:] }
-        var plans: [(window: Window, rates: LiveMeterRates, from: Date)] = []
+        var plans: [(window: Window, rates: LiveMeterRates, history: [MeterReading], from: Date)] = []
         for w in windows {
             guard now.timeIntervalSince(w.reading.at) <= LiveMeter.maxReadingAge,
                   let start = LiveMeter.start(reading: w.reading, duration: w.duration, now: now),
-                  let rates = latestRates(account: account, window: w.key)
+                  let rates = latestRates(account: account, window: w.key), rates.isStrong
             else { continue }
-            plans.append((w, rates, start.from))
+            let history = Self.carryHistory(w.history ?? readings(account: account, window: w.key,
+                                                                    through: w.reading.at),
+                                            ending: w.reading)
+            plans.append((w, rates, history, min(start.from, history.first?.at ?? start.from)))
         }
+        // Exclusive below, so the turn at the first reading's own instant
+        // is out, as it is for the carry's first pair.
         guard let from = plans.map(\.from).min(), let spend = spend(account: account, after: from, through: now)
         else { return [:] }
 
@@ -89,11 +101,46 @@ public struct LiveMeterSource {
         for plan in plans {
             let counts = SpendMeterFitter.capCounts(modelId: plan.window.capModelId,
                                                     displayName: plan.window.capModelName)
+            let carry = LiveMeter.carry(readings: plan.history, duration: plan.window.duration,
+                                        rates: plan.rates, spend: spend, counts: counts)
             out[plan.window.key] = LiveMeter.value(
                 reading: plan.window.reading, duration: plan.window.duration,
-                rates: plan.rates, spend: spend, counts: counts, now: now)
+                rates: plan.rates, spend: spend, counts: counts, carry: carry, now: now)
         }
         return out
+    }
+
+    /// Every window of `account` as its latest poll left it: the fixed 5-hour
+    /// and 7-day readings and the latest batch of per-model caps, each cap
+    /// with the model it names. Empty when its newest reading is over
+    /// `LiveMeter.maxReadingAge` old, which has no value to give.
+    public func currentWindows(account: String, now: Date) -> [Window] {
+        guard hasTables else { return [] }
+        let fixed = [RateLimitWindowName.fiveHour, RateLimitWindowName.sevenDay]
+            .compactMap { latestReading(account: account, window: $0) }
+        guard let newest = fixed.map(\.reading.at).max(),
+              now.timeIntervalSince(newest) <= LiveMeter.maxReadingAge else { return [] }
+        let samples = (try? context.fetch(LimitScope.modelScopedLimits(account: account, limit: 64))) ?? []
+        let scoped = samples.map(\.scopedWindowRow).latestBatch().map { row -> Window in
+            // Newest first, so the first naming is the newest.
+            let named = samples.filter { $0.identity == row.identity }
+            return Window(
+                key: row.identity, duration: WindowSpec.scopedDuration(group: row.group),
+                reading: MeterReading(at: row.sampledAt, percent: row.percent, resetsAt: row.resetsAt),
+                capModelId: named.lazy.compactMap { $0.modelId?.isEmpty == false ? $0.modelId : nil }.first,
+                capModelName: named.lazy.compactMap {
+                    $0.modelDisplayName?.isEmpty == false ? $0.modelDisplayName : nil
+                }.first)
+        }
+        return fixed + scoped
+    }
+
+    /// Every live value `account` has at `now`, from its latest poll: what
+    /// `LiveMeterBoard` holds in the app, and what a widget reads at its
+    /// timeline refresh.
+    public func currentValues(account: String, now: Date) -> [String: LiveMeterValue] {
+        let windows = currentWindows(account: account, now: now)
+        return windows.isEmpty ? [:] : values(account: account, windows: windows, now: now)
     }
 
     /// One window's value, reading its latest reading too: a fixed window
@@ -148,6 +195,53 @@ public struct LiveMeterSource {
             LiveSpend(at: $0.sampledAt, model: $0.model,
                       costUSD: CostCalculator.cost($0, mode: mode, snapshot: pricing))
         }
+    }
+
+    /// `readings` cut to the carry's lookback and ending with `reading`,
+    /// ascending: a caller's history may hold older rows, or not yet the
+    /// reading itself.
+    static func carryHistory(_ readings: [MeterReading], ending reading: MeterReading) -> [MeterReading] {
+        let from = reading.at.addingTimeInterval(-LiveMeter.carryLookback)
+        var out = readings.filter { $0.at >= from && $0.at < reading.at }.sorted { $0.at < $1.at }
+        out.append(reading)
+        return out
+    }
+
+    /// The most readings the history read returns, newest kept: a backstop.
+    /// An account read every ~30 s across nine logins writes about 120 an
+    /// hour per window, and past the cap the oldest are the ones the carry
+    /// needs least.
+    static let historyFetchLimit = 2_000
+
+    /// One window's readings in the carry's lookback up to `through`,
+    /// ascending.
+    func readings(account: String, window key: String, through: Date) -> [MeterReading] {
+        readings(account: account, window: key, from: through.addingTimeInterval(-LiveMeter.carryLookback),
+                 through: through)
+    }
+
+    /// One window's readings in `[from, through]`, ascending, the newest
+    /// `limit` of them.
+    func readings(account: String, window key: String, from: Date, through: Date,
+                  limit: Int = historyFetchLimit) -> [MeterReading] {
+        if PaceMath.windowDuration(for: key) != nil {
+            var d = FetchDescriptor<RateLimitSample>(
+                predicate: #Predicate {
+                    $0.accountId == account && $0.window == key && $0.sampledAt >= from && $0.sampledAt <= through
+                },
+                sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
+            d.fetchLimit = limit
+            return ((try? context.fetch(d)) ?? []).reversed()
+                .map { MeterReading(at: $0.sampledAt, percent: $0.usedPercentage, resetsAt: $0.resetsAt) }
+        }
+        var d = FetchDescriptor<UsageLimitSample>(
+            predicate: #Predicate {
+                $0.accountId == account && $0.identity == key && $0.sampledAt >= from && $0.sampledAt <= through
+            },
+            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
+        d.fetchLimit = limit
+        return ((try? context.fetch(d)) ?? []).reversed()
+            .map { MeterReading(at: $0.sampledAt, percent: $0.percent, resetsAt: $0.resetsAt) }
     }
 
     /// The latest reading of one window, with the model a scoped cap names;
