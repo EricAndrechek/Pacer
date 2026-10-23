@@ -24,6 +24,7 @@ private func makeInMemoryContainer() throws -> ModelContainer {
         ProjectPathAlias.self,
         ProjectCollection.self,
         ProjectMeta.self,
+        SpendMeterFit.self,
         configurations: config
     )
 }
@@ -251,4 +252,29 @@ private func makeInMemoryContainer() throws -> ModelContainer {
     // TZ flakiness, just that it's well-shaped YYYY-MM-DD.
     #expect(sample.date.count == 10)
     #expect(sample.date.contains("-"))
+}
+
+@MainActor
+@Test func spendMeterFitRoundTrip() throws {
+    let container = try makeInMemoryContainer()
+    let context = ModelContext(container)
+    let start = Date(timeIntervalSince1970: 1_790_812_800)
+    let result = SpendMeterFitResult(
+        accountId: "acct", window: "weekly_scoped|Fable|",
+        spanStart: start, spanEnd: start.addingTimeInterval(14 * 86_400),
+        modelRates: ["claude-opus-5-5": 0.16, "claude-fable-5-1": 0.45],
+        interceptPerHour: 0.02, pooledRate: 0.18, r2: 0.95, rmse: 1.9, pooledR2: 0.93,
+        hours: 336, activeHours: 80, totalSpendUSD: 3400, totalRise: 620,
+        unfittedSpendUSD: 12, interceptShare: 0.011, noSpendRiseShare: 0.001,
+        method: "nnls-hourly-v1")
+    context.insert(SpendMeterFit(result: result, fittedDay: "2026-10-15", fittedAt: start))
+    try context.save()
+
+    let fetched = try context.fetch(FetchDescriptor<SpendMeterFit>())
+    #expect(fetched.count == 1)
+    #expect(fetched[0].fitKey == "acct|weekly_scoped|Fable||2026-10-15")
+    #expect(fetched[0].modelRates == result.modelRates)
+    // Sorted keys, so the same rates always store as the same text.
+    #expect(fetched[0].modelRatesJSON == #"{"claude-fable-5-1":0.45,"claude-opus-5-5":0.16}"#)
+    #expect(fetched[0].noSpendRiseShare == 0.001)
 }
