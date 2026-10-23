@@ -35,7 +35,10 @@ struct ProjectionCompareModal: View {
     @State private var loaded = false
     /// How close the live meter has been today (#318), recomputed with the
     /// actuals; nil without a live fit or enough readings.
-    @State private var liveAgreement: LiveMeterDrift.Agreement?
+    /// The readings against the live estimate just before each, and today's
+    /// agreement (#318), recomputed with the actuals off the main actor;
+    /// nil without a live fit or enough readings. Nothing is stored.
+    @State private var liveReview: LiveMeterDrift.Review?
 
     /// The account whose actuals to plot, inherited from the card that opened
     /// the modal — a drill-down that changed scope on the way in would be
@@ -106,7 +109,7 @@ struct ProjectionCompareModal: View {
         // Filled in after the modal is on screen and read inside
         // `PacerModalContent`'s stored closure, so read here too (#140;
         // AGENTS.md, "SwiftUI state and data flow").
-        let _ = (trajectories, accuracy, loaded, actualsLoaded, liveAgreement)
+        let _ = (trajectories, accuracy, loaded, actualsLoaded, liveReview)
         // Read here, by value, so a poll written by any context reloads the
         // actuals (`RateLimitWriteSignal`).
         let writes = RateLimitWriteSignal.shared.generation
@@ -137,7 +140,7 @@ struct ProjectionCompareModal: View {
                     trajectories: overlays,
                     accuracy: accuracy,
                     liveReadout: readout?.isEstimate == true ? readout : nil,
-                    liveAgreement: liveAgreement
+                    liveReview: liveReview
                 )
             } else if loaded && actualsLoaded {
                 Text("Not enough data to compare models yet.")
@@ -193,13 +196,18 @@ struct ProjectionCompareModal: View {
         scopedPoints = loaded.scoped
         scopedLatest = loaded.latest
         actualsLoaded = true
-        // Recomputed from today's readings and turns at each new reading;
-        // nothing about it is stored.
+        // Recomputed from the readings and turns at each new reading;
+        // nothing about it is stored. The chart covers this window's cycle,
+        // at most its last day; the agreement line, today.
         guard let account else { return }
-        liveAgreement = await Task.detached(priority: .utility) {
+        let resets = fixed ? loaded.points.last?.resetsAt : loaded.latest?.resetsAt
+        let window = duration
+        liveReview = await Task.detached(priority: .utility) {
             let now = Date()
-            return LiveMeterDrift.agreement(context: ModelContext(container), account: account, window: key,
-                                            since: Calendar.current.startOfDay(for: now), now: now)
+            let cycleStart = resets.map { $0.addingTimeInterval(-window) } ?? now.addingTimeInterval(-window)
+            return LiveMeterDrift.review(context: ModelContext(container), account: account, window: key,
+                                         chartFrom: max(cycleStart, now.addingTimeInterval(-86_400)),
+                                         agreementSince: Calendar.current.startOfDay(for: now), now: now)
         }.value
     }
 
@@ -243,8 +251,9 @@ struct ProjectionDetailView: View {
     /// The live meter's estimate and the reading under it (#318), for the
     /// line under the chart; nil when the number is the reading.
     var liveReadout: LiveMeterReadout? = nil
-    /// How close the live meter has been today; nil without enough readings.
-    var liveAgreement: LiveMeterDrift.Agreement? = nil
+    /// The readings against the live estimate just before each, and how close
+    /// it has been today; nil without a live fit.
+    var liveReview: LiveMeterDrift.Review? = nil
 
     /// Stable per-model colors for the lines and the legend swatches.
     private static let palette: [String: Color] = [
@@ -410,11 +419,44 @@ struct ProjectionDetailView: View {
 
     // MARK: - Body
 
+    /// Anthropic's readings against the live estimate just before each, over
+    /// this window's cycle (at most its last day), ending at the estimate
+    /// now (#318). Small, under the forecast chart; absent without a fit.
+    @ViewBuilder
+    private var liveComparison: some View {
+        if let review = liveReview, review.readings.count >= 2, let first = review.readings.first {
+            let readings = review.readings.map { PaceChartView.Data.Point(time: $0.at, value: $0.percent) }
+            let estimates = comparisonEstimates(review)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Readings and the live estimate")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                LiveMeterComparisonChart(readings: readings, estimates: estimates, start: first.at,
+                                         end: estimates.last.map { max($0.time, readings.last?.time ?? $0.time) }
+                                            ?? readings.last?.time ?? first.at)
+                    .frame(height: 90)
+                Text("Solid: Anthropic's readings. Dotted: the estimate just before each.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+            }
+        }
+    }
+
+    /// The estimate just before each reading, then the estimate now when the
+    /// number on screen is one, so the dotted line ends where the hero is.
+    private func comparisonEstimates(_ review: LiveMeterDrift.Review) -> [PaceChartView.Data.Point] {
+        var out = review.estimates.map { PaceChartView.Data.Point(time: $0.at, value: $0.shown) }
+        if let r = liveReadout, let asOf = r.live?.asOf, asOf > (out.last?.time ?? .distantPast) {
+            out.append(.init(time: asOf, value: r.percent))
+        }
+        return out
+    }
+
     /// "Live meter: 45.2%, read 42% 3 minutes ago · within 1 point of the
     /// next reading 90% of the time today". Either half alone when only it
     /// applies. The reading's age keeps itself current (`PacerReadAge`).
     private var liveLine: Text? {
-        let agreement = liveAgreement.map {
+        let agreement = liveReview?.agreement.map {
             "within 1 point of the next reading \(Int(($0.share * 100).rounded()))% of the time today"
         }
         if let r = liveReadout {
@@ -429,6 +471,7 @@ struct ProjectionDetailView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             chart.frame(height: 240)
+            liveComparison
             if let liveLine {
                 liveLine
                     .font(.system(size: 11))

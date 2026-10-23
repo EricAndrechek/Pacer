@@ -144,3 +144,57 @@ struct LiveMeterGuardsTests {
         #expect(LiveMeterRunaway.suspendedDays(context: context, account: "b").isEmpty)
     }
 }
+
+/// The comparison sheet's chart (#318): readings against the estimate just
+/// before each, rebuilt from the store the way the drift log builds each
+/// line, from the same pass as today's agreement.
+@Suite("Live meter: the comparison chart")
+struct LiveMeterReviewTests {
+
+    typealias T = LiveMeterTests
+    typealias B = LiveMeterPartBTests
+
+    @Test func theReviewPairsEachReadingWithTheEstimateBeforeIt() throws {
+        let container = try T.makeContainer()
+        let context = ModelContext(container)
+        B.fit(context)
+        let resets = B.t0.addingTimeInterval(4 * 3600)
+        // As `todaysAgreementCountsReadingsWithinAPoint`: a point per $5,
+        // and another device adds four more before the last reading.
+        var pct = 10.0
+        for i in 0...8 {
+            B.rateRow(context, pct, at: Double(i * 300), resets: resets)
+            T.turn(context, account: "acct", at: Double(i * 300 + 100), usd: 5)
+            pct += i == 7 ? 5 : 1
+        }
+        try context.save()
+        let now = B.t0.addingTimeInterval(9 * 300)
+        let review = try #require(LiveMeterDrift.review(
+            context: context, account: "acct", window: B.five,
+            chartFrom: B.t0.addingTimeInterval(300), agreementSince: B.t0, now: now))
+        #expect(review.readings.count == 8)                 // from the chart's start
+        #expect(review.readings.first?.percent == 11)
+        #expect(review.estimates.count == 8)                // one per reading, built on the one before
+        #expect(review.estimates.first?.at == B.t0.addingTimeInterval(300))
+        // Each estimate is the reading before plus its point (and the carry),
+        // shown with its decimal; the last one sat four points under.
+        #expect(review.estimates.dropLast().allSatisfy { e in
+            review.readings.contains { $0.at == e.at && abs($0.percent - e.shown) < 1 }
+        })
+        #expect((review.readings.last?.percent ?? 0) - (review.estimates.last?.shown ?? 0) > 3)
+        // The same pass gives today's agreement, as its own call does.
+        #expect(review.agreement == LiveMeterDrift.agreement(context: context, account: "acct", window: B.five,
+                                                             since: B.t0, now: now))
+        #expect(review.agreement?.pairs == 8)
+        #expect(try context.fetchCount(FetchDescriptor<RateLimitSample>()) == 9)   // nothing written
+    }
+
+    @Test func aLongDayIsThinnedKeepingItsEnds() {
+        let items = Array(0..<3000)
+        let thin = LiveMeterDrift.thinned(items, cap: 720)
+        #expect(thin.count == 720)
+        #expect(thin.first == 0)
+        #expect(thin.last == 2999)
+        #expect(LiveMeterDrift.thinned(Array(0..<10), cap: 720) == Array(0..<10))
+    }
+}

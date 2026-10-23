@@ -102,12 +102,61 @@ public extension LiveMeterDrift {
     /// turns with the current fit, exactly as each drift line was built:
     /// every reading scored against the live value built on the one before
     /// it. Nothing is stored. Nil without a usable fit or enough readings.
-    ///
-    /// Bounded: one window's readings since `since` (the day's start) plus
-    /// the carry's hour before it, and the account's turns over the same
-    /// span; a busy account polled on nine logins is ~2,600 readings a day.
     static func agreement(context: ModelContext, account: String, window key: String,
                           since: Date, now: Date) -> Agreement? {
+        scored(context: context, account: account, window: key, from: since, now: now)
+            .flatMap { agreement($0, since: since) }
+    }
+
+    /// The comparison sheet's chart and line, from one pass (#318).
+    struct Review: Sendable, Equatable {
+        /// Anthropic's readings since the chart's start.
+        public let readings: [MeterReading]
+        /// The live value just before each of those readings, built on the
+        /// one before it: what the drift log prints, as a line. Its time is
+        /// the reading's; `shown` the number a surface showed.
+        public let estimates: [(at: Date, shown: Double)]
+        public let agreement: Agreement?
+
+        public static func == (a: Review, b: Review) -> Bool {
+            a.readings == b.readings && a.agreement == b.agreement
+                && a.estimates.map(\.at) == b.estimates.map(\.at)
+                && a.estimates.map(\.shown) == b.estimates.map(\.shown)
+        }
+    }
+
+    /// Most points per line the chart is handed: a weekly window's day of
+    /// readings on a busy account is ~2,900.
+    static let reviewPointCap = 720
+
+    /// The readings since `chartFrom` against the live estimate just before
+    /// each, and today's agreement, recomputed on demand from the store with
+    /// the current fit, in one pass. Nothing is stored. Nil without a strong
+    /// fit or two readings.
+    ///
+    /// Bounded like `agreement`: one window's readings from the earlier of
+    /// the two starts plus the carry's hour before it, and the account's
+    /// turns over that span. Call it off the main actor.
+    static func review(context: ModelContext, account: String, window key: String,
+                       chartFrom: Date, agreementSince: Date, now: Date) -> Review? {
+        guard let s = scored(context: context, account: account, window: key,
+                             from: min(chartFrom, agreementSince), now: now) else { return nil }
+        let readings = s.readings.filter { $0.at >= chartFrom }
+        let estimates = s.pairs.filter { $0.next.at >= chartFrom }.map { ($0.next.at, $0.value.shownPercent) }
+        return Review(readings: thinned(readings, cap: reviewPointCap),
+                      estimates: thinned(estimates, cap: reviewPointCap),
+                      agreement: agreement(s, since: agreementSince))
+    }
+
+    /// Every reading since `from`, each paired with the live value built on
+    /// the one before it at its instant, as the drift log built it.
+    private struct Scored {
+        let readings: [MeterReading]
+        let pairs: [(prev: MeterReading, next: MeterReading, value: LiveMeterValue)]
+    }
+
+    private static func scored(context: ModelContext, account: String, window key: String,
+                               from since: Date, now: Date) -> Scored? {
         let source = LiveMeterSource(context: context)
         guard let latest = source.latestReading(account: account, window: key),
               let rates = source.latestRates(account: account, window: key), rates.isStrong
@@ -121,7 +170,7 @@ public extension LiveMeterDrift {
         let counts = SpendMeterFitter.capCounts(modelId: latest.capModelId, displayName: latest.capModelName)
         let times = readings.map(\.at)
         let spendTimes = spend.map(\.at)
-        var pairs = 0, within = 0
+        var pairs: [(prev: MeterReading, next: MeterReading, value: LiveMeterValue)] = []
         for i in 1..<readings.count where readings[i].at >= since {
             let prev = readings[i - 1], next = readings[i]
             guard LiveMeter.sameCycle(prev, next, duration: latest.duration),
@@ -130,13 +179,30 @@ public extension LiveMeterDrift {
             let history = Array(readings[first...(i - 1)])
             let slice = Array(spend[upperBound(spendTimes, history[0].at)..<upperBound(spendTimes, next.at)])
             guard let v = LiveMeter.estimate(history: history, duration: latest.duration, rates: rates,
-                                             spend: slice, counts: counts, now: next.at),
-                  v.spendUSD > 0 || next.percent != prev.percent else { continue }
+                                             spend: slice, counts: counts, now: next.at) else { continue }
+            pairs.append((prev, next, v))
+        }
+        return Scored(readings: readings.filter { $0.at >= since }, pairs: pairs)
+    }
+
+    /// Scored only where the drift log has something to say: the meter moved
+    /// since the reading before, or there was spend to add.
+    private static func agreement(_ s: Scored, since: Date) -> Agreement? {
+        var pairs = 0, within = 0
+        for p in s.pairs where p.next.at >= since
+            && (p.value.spendUSD > 0 || p.next.percent != p.prev.percent) {
             pairs += 1
-            if abs(v.percent - next.percent) <= 1 { within += 1 }
+            if abs(p.value.percent - p.next.percent) <= 1 { within += 1 }
         }
         guard pairs >= minAgreementPairs else { return nil }
         return Agreement(pairs: pairs, withinOne: within)
+    }
+
+    /// At most `cap` of `items`, evenly through them, the last always kept.
+    static func thinned<T>(_ items: [T], cap: Int) -> [T] {
+        guard items.count > cap, cap > 1 else { return items }
+        let step = Double(items.count - 1) / Double(cap - 1)
+        return (0..<cap).map { items[Int((Double($0) * step).rounded())] }
     }
 
     /// First index with time ≥ `t`.
