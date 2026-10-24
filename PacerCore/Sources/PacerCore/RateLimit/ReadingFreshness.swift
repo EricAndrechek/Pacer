@@ -27,9 +27,9 @@ public enum ReadingFreshness {
     public static let recentGaps = 12
 
     /// Readings closer together than this are one poll (#308). An account
-    /// read through several lanes at once — every Claude Desktop install
-    /// carries the same token, so each one's lane polls it — lands a burst of
-    /// readings seconds apart and then nothing for minutes. Taken one by one,
+    /// with several tokens is polled through one lane per token, and when
+    /// those lanes come due together (#350) it lands a burst of readings
+    /// seconds apart and then nothing for minutes. Taken one by one,
     /// six of every seven gaps were 4–7 s, the "usual gap" read as seconds,
     /// and every ordinary pause between rounds tripped the 3-minute floor: on
     /// a real store that withheld the active account's weekly lines for
