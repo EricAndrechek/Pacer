@@ -19,6 +19,11 @@ public extension PaceBand {
         case .red:    return .red
         }
     }
+
+    /// The same bands as a bar's fill (the dropdown's fuel bars). On pace is
+    /// grey rather than `.primary`: a white fill would swallow the white pace
+    /// tick drawn on it.
+    var barColor: Color { self == .white ? .secondary : color }
 }
 
 public extension UsageBand {

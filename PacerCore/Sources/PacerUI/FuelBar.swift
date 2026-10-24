@@ -5,8 +5,10 @@ import PacerCore
 /// "fuel bars"): how full it is, where even pace would be by now, and how
 /// much of the number is Pacer's estimate.
 ///
-/// - **The fill** is the reading, coloured by the canonical `UsageBand` of
-///   the number shown.
+/// - **The fill** is the reading, coloured by the window's `PaceBand`: the
+///   same green / yellow / red as the dashboard card's big number, so the two
+///   never disagree about the same window. A window with no clock (no pace)
+///   falls back to the `UsageBand` of the number shown.
 /// - **An estimate's extra part** is a lighter tail of the same colour past
 ///   the reading, the way `CircularGauge` draws its ring and the chart its
 ///   dotted stretch. An estimate below its reading has restarted past that
@@ -57,7 +59,8 @@ public struct PacerFuelBar: View {
     }
 
     public var body: some View {
-        let color = UsageBand(percentage: shown ?? 0).color
+        let color = pace.map { PaceBand(usedPct: shown ?? 0, paceEndPct: $0 * 100).barColor }
+            ?? UsageBand(percentage: shown ?? 0).color
         let (solid, tail) = stretches
         GeometryReader { geo in
             let width = geo.size.width

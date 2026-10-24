@@ -1155,7 +1155,9 @@ struct MenuStatusContent: View {
                 .font(.system(size: 12))
                 .foregroundStyle(.tertiary)
         case let .percent(pct, isEstimate):
-            PacerMeterValue(pct, isEstimate: isEstimate, color: UsageBand(percentage: pct).valueTextColor)
+            // Plain: the bar beside it carries the colour (one encoding), and
+            // a red number next to a yellow bar would be two answers.
+            PacerMeterValue(pct, isEstimate: isEstimate, color: .primary)
                 .font(.system(size: 12, weight: .semibold).monospacedDigit())
                 .lineLimit(1)
                 .fixedSize(horizontal: true, vertical: false)
