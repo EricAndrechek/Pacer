@@ -1019,48 +1019,37 @@ struct PaceChartCard: View {
                 loadingState
             } else if !hasAnyReading {
                 emptyState
-            } else if cols.count <= 2 {
-                // Exactly the fixed pair — reproduce the original two-column
-                // layout byte-for-byte so 5h/7d are unchanged when they're the
-                // only windows.
-                HStack(alignment: .top, spacing: 24) {
-                    column(cols[0])
-                    Divider().frame(height: 110)
-                    column(cols[1])
+            } else {
+                // One container for every count (#161). Exactly the fixed
+                // pair stays the original two columns with a rule between;
+                // more than two windows go into the balanced, width-aware
+                // grid (4→2+2, 5→3+2, 6→3+3, dropping columns as the pane
+                // narrows); several accounts get one header each, then that
+                // account's windows.
+                //
+                // Not `if`/`else` between an `HStack`, a grid and a `VStack`
+                // of grids, as it was: each branch was a different identity,
+                // so a scoped window appearing or a second account's first
+                // reading rebuilt every column, dropping its hover and closing
+                // an open share popover. `PaceCardColumns` keys each column by
+                // its id in one `ForEach` and changes only the arrangement.
+                //
+                // The header says everything account-level once. It said
+                // itself three times before: the name in every eyebrow,
+                // "signed in" on every column, "last read 8m ago" on every
+                // column. Those are facts about the *login*, not the window,
+                // and repeating them per column is what made the card read as
+                // noise. The window keeps only what differs: its name, and
+                // when it resets.
+                let groups = accountGroups(cols)
+                PaceCardColumns(accounts: groups.map { (id: $0.id, columns: $0.columns) }) { account in
+                    if let group = groups.first(where: { $0.id == account }) {
+                        accountHeader(group)
+                    }
+                } cell: { col, arrangement in
+                    column(col, grouped: arrangement == .grouped)
                 }
                 .modifier(RememberedHeight(scope: scope.accountId))
-            } else {
-                // N windows (> 2) — a balanced, width-aware grid. The column
-                // count is computed from the measured content width so rows
-                // stay even (4→2+2, 5→3+2, 6→3+3) and drop to fewer columns as
-                // the pane narrows (6→2+2+2) instead of crushing 4+ windows
-                // into a too-narrow row. The last row is left-aligned.
-                if accountGroups(cols).count > 1 {
-                    // One header per account, then that account's windows.
-                    //
-                    // Everything account-level said itself three times before:
-                    // the name in every eyebrow, "signed in" on every column,
-                    // "last read 8m ago" on every column. Those are facts about
-                    // the *login*, not the window, and repeating them per column
-                    // is what made the card read as noise. The window keeps only
-                    // what differs — its name, and when it resets.
-                    VStack(alignment: .leading, spacing: 18) {
-                        ForEach(accountGroups(cols), id: \.id) { group in
-                            VStack(alignment: .leading, spacing: 10) {
-                                accountHeader(group)
-                                PaceColumnGrid() {
-                                    ForEach(group.columns) { column($0, grouped: true) }
-                                }
-                            }
-                        }
-                    }
-                    .modifier(RememberedHeight(scope: scope.accountId))
-                } else {
-                    PaceColumnGrid() {
-                        ForEach(cols) { column($0) }
-                    }
-                    .modifier(RememberedHeight(scope: scope.accountId))
-                }
             }
         } footer: {
             VStack(alignment: .leading, spacing: 4) {
