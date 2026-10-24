@@ -277,44 +277,42 @@ if [ "${PACER_DEV_SKIP_NOTARIZE:-0}" = "1" ]; then
     echo "    note: TCC App-Management prompt may fire on launch"
 else
 
+# Notarize straight from the App Store Connect API key in keys/ when it is
+# there, the way CI does with its NOTARY_* secrets. The keychain profile is a
+# login-Keychain item readable only while the Mac is unlocked: an install
+# from a session while the screen was locked failed with "No Keychain
+# password item found", which reads exactly like a deleted profile. The key
+# needs no keychain. keys/ lives only in the main checkout (worktrees never
+# get a copy, see .worktreeinclude), so it is looked for there too. KEY_ID
+# and ISSUER_ID are read out of keys/.env rather than sourcing it, so the
+# file's other secrets (CERTIFICATE_PASSWORD) never enter this environment.
+MAIN_ROOT="$(cd "$(git -C "${REPO_ROOT}" rev-parse --path-format=absolute --git-common-dir)/.." && pwd)"
+NOTARY_AUTH=()
+for KEYS_DIR in "${REPO_ROOT}/keys" "${MAIN_ROOT}/keys"; do
+    # `|| true`: with no match `ls` fails, and under `set -euo pipefail` that
+    # would end the install with no message.
+    KEYS_P8="$(ls "${KEYS_DIR}"/AuthKey_*.p8 2>/dev/null | head -1 || true)"
+    [ -f "${KEYS_DIR}/.env" ] && [ -n "${KEYS_P8}" ] || continue
+    KEY_ID="$(sed -n 's/^KEY_ID=//p' "${KEYS_DIR}/.env" | head -1 | tr -d "\"'")"
+    ISSUER_ID="$(sed -n 's/^ISSUER_ID=//p' "${KEYS_DIR}/.env" | head -1 | tr -d "\"'")"
+    if [ -n "${KEY_ID}" ] && [ -n "${ISSUER_ID}" ]; then
+        NOTARY_AUTH=(--key "${KEYS_P8}" --key-id "${KEY_ID}" --issuer "${ISSUER_ID}")
+        NOTARY_VIA="the API key in ${KEYS_DIR/#${HOME}/~}"
+        break
+    fi
+done
+if [ ${#NOTARY_AUTH[@]} -eq 0 ]; then
+    NOTARY_AUTH=(--keychain-profile "${NOTARY_PROFILE}")
+    NOTARY_VIA="keychain profile ${NOTARY_PROFILE}"
+fi
+
 echo
-echo "==> Notarizing with Apple (profile: ${NOTARY_PROFILE})"
+echo "==> Notarizing with Apple (${NOTARY_VIA})"
 
 # Keep what notarytool says. A 403 "required agreement is missing or has
 # expired" (Apple wants a new developer agreement accepted) used to be
 # swallowed here and then reported, if at all, as "profile not found".
-if ! NOTARY_CHECK="$(xcrun notarytool history --keychain-profile "${NOTARY_PROFILE}" 2>&1)"; then
-    echo "    notarytool: $(printf '%s\n' "${NOTARY_CHECK}" | grep -m1 -iE 'error|status' || echo 'credential check failed')"
-    # Self-heal. The notarization profile is a login-Keychain item, NOT a
-    # file in keys/ — so it goes missing on a fresh machine or after a
-    # Keychain reset even when keys/ already holds every credential (the
-    # exact "I thought I had everything in keys/" trap). If the raw creds
-    # are present locally, recreate the profile non-interactively instead
-    # of erroring out. keys/ is gitignored; nothing here is committed.
-    KEYS_DIR="${REPO_ROOT}/keys"
-    # `|| true`: with no match `ls` fails, and under `set -euo pipefail` that
-    # ended the whole install with no message at all. A worktree has no keys/
-    # (it is gitignored), so this happened on every failed check there.
-    KEYS_P8="$(ls "${KEYS_DIR}"/AuthKey_*.p8 2>/dev/null | head -1 || true)"
-    if [ -f "${KEYS_DIR}/.env" ] && [ -n "${KEYS_P8}" ]; then
-        echo "    profile '${NOTARY_PROFILE}' not in Keychain — recreating from keys/ …"
-        # Subshell so the sourced secrets (incl. CERTIFICATE_PASSWORD) stay
-        # out of this script's environment. KEY_ID/ISSUER_ID come from
-        # keys/.env, the same file refresh-secrets.sh reads.
-        (
-            # shellcheck disable=SC1091
-            . "${KEYS_DIR}/.env"
-            xcrun notarytool store-credentials "${NOTARY_PROFILE}" \
-                --key "${KEYS_P8}" \
-                --key-id "${KEY_ID:?KEY_ID missing in keys/.env}" \
-                --issuer "${ISSUER_ID:?ISSUER_ID missing in keys/.env}"
-        ) || echo "    auto-setup failed — see manual steps below"
-    fi
-fi
-
-# Re-check: covers both the just-healed case and a genuinely-absent
-# profile (keys/ not present, or auto-setup failed above).
-if ! NOTARY_CHECK="$(xcrun notarytool history --keychain-profile "${NOTARY_PROFILE}" 2>&1)"; then
+if ! NOTARY_CHECK="$(xcrun notarytool history "${NOTARY_AUTH[@]}" 2>&1)"; then
     if printf '%s' "${NOTARY_CHECK}" | grep -q "403"; then
         echo "ERROR: Apple refused notarization (HTTP 403):"
         printf '%s\n' "${NOTARY_CHECK}" | grep -m1 -iE 'error' | sed 's/^/    /'
@@ -323,15 +321,20 @@ if ! NOTARY_CHECK="$(xcrun notarytool history --keychain-profile "${NOTARY_PROFI
         echo "installs locally (with the App Management prompt on launch)."
         exit 1
     fi
-    echo "ERROR: notarytool credential profile '${NOTARY_PROFILE}' not found."
-    echo "Set it up once with:"
-    echo "  xcrun notarytool store-credentials ${NOTARY_PROFILE} \\"
-    echo "      --key /path/to/AuthKey_<KEY_ID>.p8 \\"
-    echo "      --key-id <KEY_ID> --issuer <ISSUER_UUID>"
-    echo "Get the .p8 + Key ID + Issuer ID from App Store Connect →"
-    echo "Users and Access → Integrations → Team Keys."
-    echo "(With keys/.env + keys/AuthKey_*.p8 present, this install"
-    echo " recreates the profile automatically — check those files.)"
+    echo "ERROR: notarization credentials not usable ($(printf '%s\n' "${NOTARY_CHECK}" | grep -m1 -iE 'error|status' || echo 'credential check failed'))."
+    if [ "${NOTARY_AUTH[0]}" = "--keychain-profile" ]; then
+        echo "No keys/.env + keys/AuthKey_*.p8 here or in the main checkout, so the"
+        echo "keychain profile '${NOTARY_PROFILE}' was used. It is readable only while"
+        echo "the Mac is unlocked; if it is, set it up once with:"
+        echo "  xcrun notarytool store-credentials ${NOTARY_PROFILE} \\"
+        echo "      --key /path/to/AuthKey_<KEY_ID>.p8 \\"
+        echo "      --key-id <KEY_ID> --issuer <ISSUER_UUID>"
+        echo "Get the .p8 + Key ID + Issuer ID from App Store Connect →"
+        echo "Users and Access → Integrations → Team Keys."
+    else
+        echo "Check KEY_ID, ISSUER_ID and the .p8 in keys/ against App Store Connect →"
+        echo "Users and Access → Integrations → Team Keys."
+    fi
     echo
     echo "For rapid local-only iteration without notarization:"
     echo "  PACER_DEV_SKIP_NOTARIZE=1 make install"
@@ -341,7 +344,7 @@ fi
 ditto -c -k --keepParent "${BUILD_OUTPUT}" "${NOTARY_ZIP}"
 
 NOTARY_OUTPUT="$(xcrun notarytool submit "${NOTARY_ZIP}" \
-    --keychain-profile "${NOTARY_PROFILE}" \
+    "${NOTARY_AUTH[@]}" \
     --wait 2>&1)"
 NOTARY_EXIT=$?
 
