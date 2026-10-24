@@ -894,6 +894,10 @@ struct RateLimitAlertsCard: View {
     @AppStorage(PacerSettings.Key.notificationsEnabled, store: PacerSettings.store)
     private var enabled: Bool = false
 
+    /// What the thresholds judge (#318): `RateLimitAlertSource`.
+    @AppStorage(PacerSettings.Key.alertSource, store: PacerSettings.store)
+    private var alertSource: String = RateLimitAlertSource.readings.rawValue
+
     /// Two rows on a switcher machine — cheap, and it decides whether the
     /// per-account note below is worth saying at all.
     @Query private var alertAccounts: [Account]
@@ -957,6 +961,11 @@ struct RateLimitAlertsCard: View {
                             }
                         }
                     }
+                Picker("Alert from", selection: $alertSource) {
+                    Text("Anthropic's readings").tag(RateLimitAlertSource.readings.rawValue)
+                    Text("Readings and live estimates").tag(RateLimitAlertSource.readingsAndEstimates.rawValue)
+                }
+                .disabled(!enabled)
                 Divider().opacity(0.4)
                 ThresholdSubsection(title: "5-hour window", window: "five_hour", enabled: enabled)
                 Divider().opacity(0.4)
@@ -991,6 +1000,7 @@ struct RateLimitAlertsCard: View {
         }, footer: {
             VStack(alignment: .leading, spacing: 8) {
                 Text("Pacer fires a banner each time usage crosses a threshold upward (e.g. 50%, 75%, 90% in one 5-hour cycle). Each banner fires at most once per cycle. The first banner triggers the system permission prompt.")
+                Text("With live estimates, a banner can come up to one reading earlier and says it is an estimate. Reset banners always wait for a reading.")
                 Text("Per-model windows (e.g. a weekly Fable cap) appear automatically when your account reports them, and start with no alert. A window that stops being reported keeps its alerts but pauses until it returns.")
                 // Only with more than one account: on a single-account machine
                 // this is a distinction without a difference, and the card is

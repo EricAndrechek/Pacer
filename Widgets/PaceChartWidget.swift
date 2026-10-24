@@ -65,8 +65,22 @@ struct PaceChartEntry: TimelineEntry {
 
         var paceEndPct: Double { cycle.paceFraction * 100 }
 
+        /// The number shown: the live meter's value as of this refresh when
+        /// the chart carries one (#318), else the reading.
+        var usedPct: Double { chart.live?.value ?? chart.usedPct }
+
+        /// `usedPct` is that estimate: written with its decimal. The chart
+        /// carries a live point only for an estimate (`Data.withLive`).
+        var isEstimate: Bool { chart.live != nil }
+
+        /// What Anthropic last read: "read 50%" beside an estimate where the
+        /// canvas has room (#318). Nil for a reading, which needs no echo.
+        var readText: String? {
+            isEstimate ? "read \(PacerMeterFormat.percent(chart.usedPct, isEstimate: false))" : nil
+        }
+
         var band: PaceBand {
-            PaceBand(usedPct: chart.usedPct, paceEndPct: paceEndPct)
+            PaceBand(usedPct: usedPct, paceEndPct: paceEndPct)
         }
     }
 
@@ -121,7 +135,7 @@ struct PaceChartProvider: AppIntentTimelineProvider {
 
     func placeholder(in context: Context) -> PaceChartEntry {
         PaceChartEntry(
-            date: Date(),
+            date: PacerClock.now,
             fiveHour: Self.demoState(duration: K.fiveHourSeconds, usedPct: 38, sampleCount: 8),
             sevenDay: Self.demoState(duration: K.sevenDaySeconds, usedPct: 62, sampleCount: 12),
             primaryKey: "five_hour", secondaryKey: "seven_day"
@@ -129,12 +143,14 @@ struct PaceChartProvider: AppIntentTimelineProvider {
     }
 
     func snapshot(for configuration: PaceChartConfigurationIntent, in context: Context) async -> PaceChartEntry {
-        currentEntry(primary: configuration.primaryWindow, secondary: configuration.secondaryWindow)
+        WidgetRefreshRecord.snapshot(WidgetKinds.paceChart, context)
+        return currentEntry(primary: configuration.primaryWindow, secondary: configuration.secondaryWindow)
     }
 
     func timeline(for configuration: PaceChartConfigurationIntent, in context: Context) async -> Timeline<PaceChartEntry> {
         let entry = currentEntry(primary: configuration.primaryWindow, secondary: configuration.secondaryWindow)
-        let next = Date().addingTimeInterval(K.refreshSeconds)
+        let next = PacerClock.now.addingTimeInterval(K.refreshSeconds)
+        WidgetRefreshRecord.timeline(WidgetKinds.paceChart, context, next: next)
         return Timeline(entries: [entry], policy: .after(next))
     }
 
@@ -163,7 +179,7 @@ struct PaceChartProvider: AppIntentTimelineProvider {
             // ~12 samples/hr × 2 windows ≈ 4600) but caps any future
             // burst: a stuck poller or a backfill event won't blow up
             // widget refresh memory.
-            let cutoff = Date().addingTimeInterval(-8 * 86400)
+            let cutoff = PacerClock.now.addingTimeInterval(-8 * 86400)
             // The window's scope, else the active login — read from App Group
             // defaults, which is why the scope lives there: this is a separate
             // process and cannot see the app's standard defaults. A widget
@@ -180,21 +196,24 @@ struct PaceChartProvider: AppIntentTimelineProvider {
             // refit): the same dashed trajectory + crossing the dashboard
             // draws, so the widget matches instead of showing a bare line.
             let snapshot = Self.engineSnapshot(context: context, account: account)
+            // The live meter as of this refresh (#318), the same arithmetic
+            // the app's surfaces read through `LiveMeterBoard`.
+            let live = account.map { LiveMeterSource(context: context).currentValues(account: $0, now: PacerClock.now) } ?? [:]
             let five = Self.window(rows: rows, key: "five_hour", duration: K.fiveHourSeconds,
-                                   outlook: snapshot?.fiveHour)
+                                   outlook: snapshot?.fiveHour, live: live["five_hour"])
             let seven = Self.window(rows: rows, key: "seven_day", duration: K.sevenDaySeconds,
-                                    outlook: snapshot?.sevenDay)
-            let scoped = Self.scopedStates(context: context, snapshot: snapshot, account: account)
+                                    outlook: snapshot?.sevenDay, live: live["seven_day"])
+            let scoped = Self.scopedStates(context: context, snapshot: snapshot, account: account, live: live)
             let (primaryKey, secondaryKey) = Self.resolveKeys(primary: primary, secondary: secondary, scoped: scoped)
             return PaceChartEntry(
-                date: Date(), fiveHour: five, sevenDay: seven,
+                date: PacerClock.now, fiveHour: five, sevenDay: seven,
                 fiveHourIdle: five == nil ? Self.idleUsedPct(rows: rows, key: "five_hour") : nil,
                 sevenDayIdle: seven == nil ? Self.idleUsedPct(rows: rows, key: "seven_day") : nil,
                 scoped: scoped,
                 primaryKey: primaryKey, secondaryKey: secondaryKey)
         } catch {
             let (primaryKey, secondaryKey) = Self.resolveKeys(primary: primary, secondary: secondary, scoped: [])
-            return PaceChartEntry(date: Date(), fiveHour: nil, sevenDay: nil,
+            return PaceChartEntry(date: PacerClock.now, fiveHour: nil, sevenDay: nil,
                                   primaryKey: primaryKey, secondaryKey: secondaryKey)
         }
     }
@@ -205,7 +224,8 @@ struct PaceChartProvider: AppIntentTimelineProvider {
     /// ones (Decision C), and layers the engine's exported per-identity
     /// projection. Empty (⇒ every layout unchanged) when the account has none.
     private static func scopedStates(context: ModelContext, snapshot: EngineSnapshot?,
-                                     account: String?) -> [PaceChartEntry.ScopedState] {
+                                     account: String?,
+                                     live: [String: LiveMeterValue]) -> [PaceChartEntry.ScopedState] {
         // The latest poll's rows decide the column set — a small cap is all
         // that's needed, since `latestBatch` only reads one poll's worth. It
         // has to be one account's cap, though: two logins can report a weekly
@@ -229,7 +249,7 @@ struct PaceChartProvider: AppIntentTimelineProvider {
         return batch.compactMap { row in
             Self.scopedWindow(
                 history: Self.scopedHistory(context: context, row: row, account: account),
-                row: row, outlook: outlookByIdentity[row.identity])
+                row: row, outlook: outlookByIdentity[row.identity], live: live[row.identity])
         }
     }
 
@@ -279,18 +299,23 @@ struct PaceChartProvider: AppIntentTimelineProvider {
         rows: [RateLimitSample],
         key: String,
         duration: TimeInterval,
-        outlook: EngineSnapshot.WindowOutlook? = nil
+        outlook: EngineSnapshot.WindowOutlook? = nil,
+        live: LiveMeterValue? = nil
     ) -> PaceChartEntry.WindowState? {
         let windowRows = rows.filter { $0.window == key }
         guard let latest = windowRows.first, let resetsAt = latest.resetsAt else { return nil }
         let cycleStart = resetsAt.addingTimeInterval(-duration)
-        let now = Date()
-        guard let base = PaceChartView.Data.cycle(
-            fixed: windowRows, duration: duration, now: now) else { return nil }
+        let now = PacerClock.now
         // The synthesized tail is clamped to the cycle: once `now > resetsAt`
         // (cycle ended, no fresh sample yet), a tail at `now` falls outside
         // `chartXScale`'s domain.
         let tailTime = min(now, resetsAt)
+        let readout = LiveMeterReadout(
+            reading: MeterReading(at: latest.sampledAt, percent: latest.usedPercentage, resetsAt: resetsAt),
+            live: live, now: now)
+        guard let base = PaceChartView.Data.cycle(
+            fixed: windowRows, duration: duration, now: now)?.withLive(readout, now: tailTime) else { return nil }
+        let tip = base.tip?.value ?? latest.usedPercentage
         // Attach the engine's trajectory only when it belongs to THIS cycle
         // (same reset, ±2 min) — a snapshot from a previous cycle would draw
         // a nonsense overlay — and clip it to the chart's domain.
@@ -309,7 +334,7 @@ struct PaceChartProvider: AppIntentTimelineProvider {
                 // even larger than in-app.
                 let r = BurnTrajectory.reanchor(
                     points: pts.map { ($0.time, $0.value) },
-                    toTime: tailTime, value: latest.usedPercentage)
+                    toTime: tailTime, value: tip)
                 let rebased = r.points.map { PaceChartView.Data.Point(time: $0.at, value: $0.value) }
                 if rebased.count >= 2 {
                     projection = rebased
@@ -330,15 +355,21 @@ struct PaceChartProvider: AppIntentTimelineProvider {
     private static func scopedWindow(
         history: [UsageLimitSample],
         row: UsageLimitSample,
-        outlook: EngineSnapshot.ScopedWindowOutlook?
+        outlook: EngineSnapshot.ScopedWindowOutlook?,
+        live: LiveMeterValue? = nil
     ) -> PaceChartEntry.ScopedState? {
         guard let resetsAt = row.resetsAt else { return nil }
         let duration = WindowSpec.scopedDuration(group: row.group)
         let cycleStart = resetsAt.addingTimeInterval(-duration)
-        let now = Date()
-        guard let base = PaceChartView.Data.cycle(
-            scoped: row, history: history, duration: duration, now: now) else { return nil }
+        let now = PacerClock.now
         let tailTime = min(now, resetsAt)
+        let readout = LiveMeterReadout(
+            reading: MeterReading(at: row.sampledAt, percent: row.percent, resetsAt: resetsAt),
+            live: live, now: now)
+        guard let base = PaceChartView.Data.cycle(
+            scoped: row, history: history, duration: duration, now: now)?
+            .withLive(readout, now: tailTime) else { return nil }
+        let tip = base.tip?.value ?? row.percent
         var projection: [PaceChartView.Data.Point]?
         var crossing: Date?
         var claimed = false
@@ -349,7 +380,7 @@ struct PaceChartProvider: AppIntentTimelineProvider {
             if pts.count >= 2 {
                 let r = BurnTrajectory.reanchor(
                     points: pts.map { ($0.time, $0.value) },
-                    toTime: tailTime, value: row.percent)
+                    toTime: tailTime, value: tip)
                 let rebased = r.points.map { PaceChartView.Data.Point(time: $0.at, value: $0.value) }
                 if rebased.count >= 2 { projection = rebased; crossing = r.crossesFullAt; claimed = o.hitClaimed ?? false }
             }
@@ -370,7 +401,7 @@ struct PaceChartProvider: AppIntentTimelineProvider {
         usedPct: Double,
         sampleCount: Int
     ) -> PaceChartEntry.WindowState {
-        let now = Date()
+        let now = PacerClock.now
         let resets = now.addingTimeInterval(duration * 0.55)
         let cycleStart = resets.addingTimeInterval(-duration)
         let elapsed = now.timeIntervalSince(cycleStart)
@@ -483,7 +514,7 @@ struct PaceChartWidgetView: View {
                 dotColor: awaiting ? .secondary : target.state?.band.color
             ) {
                 if let s = target.state, !s.isAwaiting {
-                    paceFraction(used: s.chart.usedPct, pace: s.paceEndPct, compact: true)
+                    paceFraction(used: s.usedPct, isEstimate: s.isEstimate, pace: s.paceEndPct, compact: true)
                 } else if let idle = target.idle {
                     idleNumber(idle)
                 }
@@ -495,11 +526,11 @@ struct PaceChartWidgetView: View {
                 // `compact: true` shortens "in 2 hr. · 10:23 AM" to
                 // "in 2h · 10p" so the 7-day form (~22 chars) clears the
                 // single-line budget on a 158pt small canvas.
-                Text(pacerResetCaption(
+                pacerWidgetResetCaption(
                     resetsAt: s.resetsAt,
                     durationSeconds: s.chart.durationSeconds,
                     compact: true
-                ))
+                )
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
                     .lineLimit(2)
@@ -594,17 +625,18 @@ struct PaceChartWidgetView: View {
                 Spacer()
             }
             if let state, !state.isAwaiting {
-                paceFraction(used: state.chart.usedPct, pace: state.paceEndPct, compact: true)
+                paceFraction(used: state.usedPct, isEstimate: state.isEstimate, pace: state.paceEndPct,
+                             compact: true, read: state.readText)
                 // Caption goes above the chart so it has the column's
                 // full width (~148pt at medium) instead of being squeezed
                 // by the chart filling vertically below. Compact format
                 // keeps the 7-day form ("resets in 4d · Mon 3p", ~22
                 // chars) inside the column width budget.
-                Text(pacerResetCaption(
+                pacerWidgetResetCaption(
                     resetsAt: state.resetsAt,
                     durationSeconds: state.chart.durationSeconds,
                     compact: true
-                ))
+                )
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
                     .lineLimit(2)
@@ -655,7 +687,8 @@ struct PaceChartWidgetView: View {
                     .lineLimit(1)
                 Spacer()
                 if let state, !state.isAwaiting {
-                    paceFraction(used: state.chart.usedPct, pace: state.paceEndPct, compact: dense)
+                    paceFraction(used: state.usedPct, isEstimate: state.isEstimate, pace: state.paceEndPct,
+                                 compact: dense, read: state.readText)
                 } else if let idle {
                     idleNumber(idle, large: !dense)
                 }
@@ -667,11 +700,11 @@ struct PaceChartWidgetView: View {
                 // `.compact` so every row keeps a legible height.
                 PaceChartView(data: state.chart, style: dense ? .compact : .detailed)
                     .frame(maxHeight: .infinity)
-                Text(pacerResetCaption(
+                pacerWidgetResetCaption(
                     resetsAt: state.resetsAt,
                     durationSeconds: state.chart.durationSeconds,
                     compact: dense
-                ))
+                )
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -696,15 +729,16 @@ struct PaceChartWidgetView: View {
         .frame(maxHeight: .infinity)
     }
 
-    /// "38% / 45%" — used vs theoretical pace endpoint, color-banded.
+    /// "38% / 45%" — used vs theoretical pace endpoint, color-banded. `read`
+    /// ("read 37%") follows an estimate, muted, where the caller has room.
     @ViewBuilder
-    private func paceFraction(used: Double, pace: Double, compact: Bool) -> some View {
+    private func paceFraction(used: Double, isEstimate: Bool, pace: Double, compact: Bool,
+                              read: String? = nil) -> some View {
         let band = PaceBand(usedPct: used, paceEndPct: pace)
         HStack(alignment: .firstTextBaseline, spacing: 2) {
-            Text("\(Int(used.rounded()))%")
+            // A reading whole, the live meter's estimate with its decimal.
+            PacerMeterValue(used, isEstimate: isEstimate, color: band.color)
                 .font(.system(size: compact ? 16 : 22, weight: .semibold, design: .rounded))
-                .monospacedDigit()
-                .foregroundStyle(band.color)
             Text("/")
                 .font(.system(size: compact ? 11 : 14))
                 .foregroundStyle(.tertiary)
@@ -712,6 +746,14 @@ struct PaceChartWidgetView: View {
                 .font(.system(size: compact ? 11 : 14, weight: .medium, design: .rounded))
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
+            if let read {
+                Text(read)
+                    .font(.caption2)
+                    .monospacedDigit()
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .padding(.leading, 3)
+            }
         }
     }
 }

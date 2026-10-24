@@ -321,7 +321,7 @@ struct ProjectQuery: EntityQuery {
         )
         let aggregates = try context.fetch(descriptor)
         let cutoff = TokenSample.formatDate(
-            Calendar.current.date(byAdding: .day, value: -90, to: Date()) ?? Date()
+            Calendar.current.date(byAdding: .day, value: -90, to: PacerClock.now) ?? PacerClock.now
         )
         let recent = aggregates.filter { $0.date >= cutoff }
         var totals: [String: Double] = [:]

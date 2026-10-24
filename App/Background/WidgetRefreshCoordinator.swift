@@ -38,6 +38,13 @@ import PacerCore
 ///
 /// Per-kind intervals reflect how "live" each widget actually needs
 /// to feel — see `Throttler.minimumInterval`.
+///
+/// **What is asked against what is granted (#318).** Every reload this sends
+/// is logged (`[Widgets] reload requested: PaceGauges`), and the extension
+/// records every timeline macOS actually asks it for in the App Group's
+/// `widget-refreshes.log` (`WidgetRefreshLog`). Once an hour the two meet in
+/// one line: `[Widgets] last hour: requested 41, granted 6 (PaceGauges 3 ·
+/// PaceChart 2 · LiveSession 1); last 24 h granted 74`.
 @MainActor
 final class WidgetRefreshCoordinator {
 
@@ -50,18 +57,29 @@ final class WidgetRefreshCoordinator {
     /// One throttler per kind. Keyed by the widget's `kind` string so
     /// lookup is a single dictionary access on the hot path.
     private var throttlers: [String: Throttler] = [:]
+    /// When each reload in the last hour was sent, for the hourly summary.
+    private var recentRequests: [Date] = []
+    private var summaryTask: Task<Void, Never>?
 
     init() {
         for kind in WidgetKinds.all {
             throttlers[kind] = Throttler(
                 kind: kind,
-                minimumInterval: Self.minimumInterval(for: kind)
+                minimumInterval: Self.minimumInterval(for: kind),
+                onFire: { [weak self] kind in self?.didRequest(kind) }
             )
         }
     }
 
     func start() {
         guard observer == nil else { return }
+        summaryTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(3600))
+                guard !Task.isCancelled, let self else { return }
+                await self.logSummary()
+            }
+        }
         accountWatch = Task { @MainActor [weak self] in
             var detector = PacerAccountChange.Detector(last: UsageScope.shared.activeAccountId)
             while !Task.isCancelled {
@@ -98,6 +116,8 @@ final class WidgetRefreshCoordinator {
         // Parked on an observation; exits at the next change, without acting.
         accountWatch?.cancel()
         accountWatch = nil
+        summaryTask?.cancel()
+        summaryTask = nil
         if let observer {
             NotificationCenter.default.removeObserver(observer)
             self.observer = nil
@@ -143,6 +163,29 @@ final class WidgetRefreshCoordinator {
 
     private func request(kind: String) {
         throttlers[kind]?.request()
+    }
+
+    // MARK: - Requested against granted
+
+    /// A reload actually sent to WidgetKit (the throttle let it through).
+    private func didRequest(_ kind: String) {
+        let now = Date()
+        recentRequests.removeAll { now.timeIntervalSince($0) >= 3600 }
+        recentRequests.append(now)
+        Log.write("Widgets", "reload requested: \(WidgetRefreshLog.shortName(kind))")
+    }
+
+    /// The hourly line: reloads sent in the last hour, against the timelines
+    /// the extension built (`WidgetRefreshLog`). The file is read off the
+    /// main actor; it is at most `WidgetRefreshLog.byteCap`.
+    private func logSummary() async {
+        let now = Date()
+        recentRequests.removeAll { now.timeIntervalSince($0) >= 3600 }
+        let requested = recentRequests.count
+        let summary = await Task.detached(priority: .utility) {
+            WidgetRefreshLog.summary(entries: WidgetRefreshLog.entries(), requested: requested, now: now)
+        }.value
+        Log.write("Widgets", summary.text)
     }
 
     /// Per-kind throttle interval. The minimum gap between consecutive
@@ -191,13 +234,16 @@ final class WidgetRefreshCoordinator {
 private final class Throttler {
     let kind: String
     let minimumInterval: TimeInterval
+    /// Told of each reload actually sent, for the log and the hourly count.
+    private let onFire: @MainActor (String) -> Void
 
     private var lastFiredAt: Date = .distantPast
     private var pendingTrailingTask: Task<Void, Never>?
 
-    init(kind: String, minimumInterval: TimeInterval) {
+    init(kind: String, minimumInterval: TimeInterval, onFire: @escaping @MainActor (String) -> Void) {
         self.kind = kind
         self.minimumInterval = minimumInterval
+        self.onFire = onFire
     }
 
     func request() {
@@ -233,5 +279,6 @@ private final class Throttler {
     private func fire() {
         WidgetCenter.shared.reloadTimelines(ofKind: kind)
         lastFiredAt = Date()
+        onFire(kind)
     }
 }

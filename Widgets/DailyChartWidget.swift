@@ -37,7 +37,7 @@ struct DailyChartProvider: AppIntentTimelineProvider {
     typealias Entry = DailyChartEntry
 
     func placeholder(in context: Context) -> DailyChartEntry {
-        let now = Date()
+        let now = PacerClock.now
         let cal = Calendar.current
         let days: [DailyChartEntry.DayCost] = (0..<14).reversed().map { i in
             let d = cal.date(byAdding: .day, value: -i, to: now) ?? now
@@ -59,12 +59,14 @@ struct DailyChartProvider: AppIntentTimelineProvider {
     }
 
     func snapshot(for configuration: DailyChartConfigurationIntent, in context: Context) async -> DailyChartEntry {
-        currentEntry(range: configuration.range)
+        WidgetRefreshRecord.snapshot(WidgetKinds.dailyChart, context)
+        return currentEntry(range: configuration.range)
     }
 
     func timeline(for configuration: DailyChartConfigurationIntent, in context: Context) async -> Timeline<DailyChartEntry> {
         let entry = currentEntry(range: configuration.range)
-        let nextRefresh = Date().addingTimeInterval(900)  // 15 min
+        let nextRefresh = WidgetRefresh.after(900)  // 15 min, or midnight
+        WidgetRefreshRecord.timeline(WidgetKinds.dailyChart, context, next: nextRefresh)
         return Timeline(entries: [entry], policy: .after(nextRefresh))
     }
 
@@ -79,7 +81,7 @@ struct DailyChartProvider: AppIntentTimelineProvider {
             // group-by then runs over at most range.days × N_models
             // rows.
             let cutoffString = TokenSample.formatDate(
-                Calendar.current.date(byAdding: .day, value: -(range.days - 1), to: Date()) ?? Date()
+                Calendar.current.date(byAdding: .day, value: -(range.days - 1), to: PacerClock.now) ?? PacerClock.now
             )
             let aggregates = ScopedReads.daily(
                 context,
@@ -99,9 +101,9 @@ struct DailyChartProvider: AppIntentTimelineProvider {
                 )
             }
             let total = days.reduce(0) { $0 + $1.cost }
-            let today = TokenSample.formatDate(Date())
+            let today = TokenSample.formatDate(PacerClock.now)
             return DailyChartEntry(
-                date: Date(),
+                date: PacerClock.now,
                 days: days,
                 totalCostUSD: total,
                 avgCostUSD: total / Double(max(1, days.count)),
@@ -111,7 +113,7 @@ struct DailyChartProvider: AppIntentTimelineProvider {
             )
         } catch {
             return DailyChartEntry(
-                date: Date(),
+                date: PacerClock.now,
                 days: [],
                 totalCostUSD: 0,
                 avgCostUSD: 0,

@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 import PacerCore
 
 /// Locale-aware time formatting helpers used by chart axes and reset
@@ -84,11 +85,14 @@ public func pacerWeekdayShort(_ date: Date) -> String {
 /// re-evaluated this per row per scroll frame it was a measurable
 /// scroll-lag contributor. Cached per `UnitsStyle` so the hot calls
 /// reuse the same instance.
+///
+/// `now` is the instant shown: a label drawn on `PacerReadAge.Schedule`
+/// passes the schedule's date, so a countdown moves with every age beside it.
 public func pacerRelative(
     _ date: Date,
-    style: RelativeDateTimeFormatter.UnitsStyle = .abbreviated
+    style: RelativeDateTimeFormatter.UnitsStyle = .abbreviated,
+    now: Date = PacerClock.now
 ) -> String {
-    let now = PacerClock.now
     let interval = date.timeIntervalSince(now)
     if abs(interval) < 5 {
         return interval >= 0 ? "now" : "just now"
@@ -133,16 +137,46 @@ public func pacerRelativeExact(_ date: Date) -> String {
 public func pacerResetCaption(
     resetsAt: Date,
     durationSeconds: TimeInterval,
-    compact: Bool = false
+    compact: Bool = false,
+    now: Date = PacerClock.now
 ) -> String {
-    let rel = pacerRelative(resetsAt, style: compact ? .abbreviated : .short)
-    let clock: String
+    let rel = pacerRelative(resetsAt, style: compact ? .abbreviated : .short, now: now)
+    return "resets \(rel) · \(pacerResetClock(resetsAt, durationSeconds: durationSeconds, compact: compact))"
+}
+
+/// The clock half of a reset caption: "9:14 PM" / "Mon 3 PM", or "9p" /
+/// "Mon 3p" compact.
+public func pacerResetClock(_ resetsAt: Date, durationSeconds: TimeInterval, compact: Bool) -> String {
     if durationSeconds <= 6 * 3600 {
-        clock = compact ? pacerHour(resetsAt, style: .compact) : pacerClockTime(resetsAt)
-    } else {
-        clock = compact ? pacerWeekdayClockCompact(resetsAt) : pacerWeekdayClock(resetsAt)
+        return compact ? pacerHour(resetsAt, style: .compact) : pacerClockTime(resetsAt)
     }
-    return "resets \(rel) · \(clock)"
+    return compact ? pacerWeekdayClockCompact(resetsAt) : pacerWeekdayClock(resetsAt)
+}
+
+/// `pacerResetCaption` for a widget: "resets in 2h · 9p", its countdown
+/// kept current by the system between timeline refreshes (a widget cannot
+/// run `PacerReadAge.Schedule`). The same words as the string form at the
+/// moment it is drawn, rounded to the unit the way the system's relative
+/// styles round.
+///
+/// In the README screenshot build the widget clock is pinned (`PacerClock`)
+/// and self-updating text would read the real clock, so the countdown is
+/// written out as of the pinned instant instead (#154).
+public func pacerWidgetResetCaption(
+    resetsAt: Date,
+    durationSeconds: TimeInterval,
+    compact: Bool = false
+) -> Text {
+    // `.narrow` is `RelativeDateTimeFormatter`'s `.abbreviated` ("in 2h"),
+    // `.abbreviated` its `.short` ("in 2 hr."): the string form's words.
+    let countdown = Date.AnchoredRelativeFormatStyle(
+        anchor: resetsAt, allowedFields: [.day, .hour, .minute], presentation: .named,
+        unitsStyle: compact ? .narrow : .abbreviated)
+    let clock = pacerResetClock(resetsAt, durationSeconds: durationSeconds, compact: compact)
+    guard PacerClock.pinned == nil else {
+        return Text(verbatim: "resets \(countdown.format(PacerClock.now)) · \(clock)")
+    }
+    return Text("resets \(Text(.currentDate, format: countdown)) · \(clock)")
 }
 
 // MARK: - Cached formatters

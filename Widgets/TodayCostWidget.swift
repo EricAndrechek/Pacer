@@ -20,16 +20,18 @@ struct TodayCostEntry: TimelineEntry {
 
 struct TodayCostProvider: TimelineProvider {
     func placeholder(in context: Context) -> TodayCostEntry {
-        TodayCostEntry(date: Date(), costUSD: 12.34, tokens: 1_234_567, modelCount: 2, isFresh: true)
+        TodayCostEntry(date: PacerClock.now, costUSD: 12.34, tokens: 1_234_567, modelCount: 2, isFresh: true)
     }
 
     func getSnapshot(in context: Context, completion: @escaping (TodayCostEntry) -> Void) {
+        WidgetRefreshRecord.snapshot(WidgetKinds.todayCost, context)
         completion(currentEntry())
     }
 
     func getTimeline(in context: Context, completion: @escaping (Timeline<TodayCostEntry>) -> Void) {
         let entry = currentEntry()
-        let nextRefresh = Date().addingTimeInterval(300)
+        let nextRefresh = WidgetRefresh.after(300)
+        WidgetRefreshRecord.timeline(WidgetKinds.todayCost, context, next: nextRefresh)
         completion(Timeline(entries: [entry], policy: .after(nextRefresh)))
     }
 
@@ -37,7 +39,7 @@ struct TodayCostProvider: TimelineProvider {
         do {
             let container = try PacerStore.sharedModelContainer()
             let context = ModelContext(container)
-            let today = TokenSample.formatDate(Date())
+            let today = TokenSample.formatDate(PacerClock.now)
             // Follows the window's account scope, read from App Group
             // defaults — a widget disagreeing with the dashboard beside it
             // about today's cost is worse than either answer.
@@ -52,14 +54,14 @@ struct TodayCostProvider: TimelineProvider {
             let cost = rows.reduce(0) { $0 + $1.totalCostUSD }
             let tokens = rows.reduce(Int64(0)) { $0 + $1.tokens.all }
             return TodayCostEntry(
-                date: Date(),
+                date: PacerClock.now,
                 costUSD: cost,
                 tokens: tokens,
                 modelCount: rows.count,
                 isFresh: true
             )
         } catch {
-            return TodayCostEntry(date: Date(), costUSD: 0, tokens: 0, modelCount: 0, isFresh: false)
+            return TodayCostEntry(date: PacerClock.now, costUSD: 0, tokens: 0, modelCount: 0, isFresh: false)
         }
     }
 }

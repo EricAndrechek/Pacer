@@ -587,8 +587,15 @@ struct PaceChartCard: View {
         let windowKey: String
         let title: String
         let duration: TimeInterval
-        /// Latest reading (nil ⇒ no sample yet — the genuine cold start).
+        /// Current utilization: the live meter's value when there is one
+        /// (`readout`), else the latest reading (nil ⇒ no sample yet — the
+        /// genuine cold start).
         let usedPct: Double?
+        /// The reading behind `usedPct` and the live value on it (#318), for
+        /// the hover text, the dotted segment and the forecast's start.
+        let readout: LiveMeterReadout?
+        /// `usedPct` is the live meter's estimate: written with its decimal.
+        var isEstimate: Bool { readout?.isEstimate ?? false }
         /// When that reading was taken.
         ///
         /// Needed because Pacer can only poll the account that currently owns
@@ -610,6 +617,10 @@ struct PaceChartCard: View {
         let typicalPollGap: TimeInterval?
         /// Window rollover (nil ⇒ idle / server anchored no cycle).
         let resetsAt: Date?
+        /// Measured burn over the last half hour of readings
+        /// (`RecentBurn.percentPerHour`, the figure `pacer report` prints as
+        /// "now"), for the grey burn-rate chip. Nil below two readings.
+        let recentBurn: Double?
         /// Projection-free actual line — the shared-image-parity base the
         /// column layers its forecast overlay onto.
         let baseChart: PaceChartView.Data?
@@ -718,15 +729,26 @@ struct PaceChartCard: View {
                 let side = PaceColumnLayout.scopedSide(
                     group: row.group, duration: duration,
                     fiveHourDuration: Self.fiveHourDuration, sevenDayDuration: Self.sevenDayDuration)
+                let readout = Self.readout(account: entry.accountId, key: row.identity,
+                                           at: row.sampledAt, percent: row.percent,
+                                           resetsAt: row.resetsAt, now: now)
                 tagged.append((side, Column(
                     id: Self.columnID(entry.accountId, row.identity),
                     accountId: entry.accountId, windowKey: row.identity,
                     title: Self.decorate(row.label, with: entry.label),
                     duration: duration,
-                    usedPct: row.percent,
-                    readingAt: row.sampledAt, newestAnyAccountAt: newestAny,
+                    usedPct: readout.percent,
+                    readout: readout,
+                    // The readout's reading: the newer of this card's and the
+                    // live meter's, so the "read … ago" label, the number and
+                    // its hover are about one reading (#318).
+                    readingAt: readout.reading.at, newestAnyAccountAt: newestAny,
                     typicalPollGap: pollGap,
                     resetsAt: row.resetsAt,
+                    recentBurn: RecentBurn.percentPerHour(
+                        readings: entry.scoped.filter { $0.identity == row.identity }
+                            .map { .init(at: $0.sampledAt, percent: $0.percent, resetsAt: $0.resetsAt) },
+                        now: now, duration: duration),
                     baseChart: .cycle(scoped: row, history: entry.scoped,
                                       duration: duration, now: now),
                     isActive: row.isActive, isActiveAccount: isActiveAccount(entry),
@@ -767,19 +789,36 @@ struct PaceChartCard: View {
         return "\(title) · \(label)"
     }
 
+    /// One window's number through the shared live meter (#318). Read from
+    /// `body` (through `columns`), so a new live value redraws the card.
+    private static func readout(account: String?, key: String, at: Date, percent: Double,
+                                resetsAt: Date?, now: Date) -> LiveMeterReadout {
+        LiveMeterBoard.shared.readout(account: account, window: key,
+                                      reading: MeterReading(at: at, percent: percent, resetsAt: resetsAt),
+                                      now: now)
+    }
+
     private func fixedColumn(_ entry: AccountSeries, title: String, key: String,
                              duration: TimeInterval,
                              samples: [LimitSamplePoint], now: Date,
                              newestAnyAccountAt: Date?, typicalPollGap: TimeInterval?) -> Column {
         let latest = samples.first
+        let readout = latest.map {
+            Self.readout(account: entry.accountId, key: key, at: $0.sampledAt, percent: $0.usedPercentage,
+                         resetsAt: $0.resetsAt, now: now)
+        }
         return Column(
             id: Self.columnID(entry.accountId, key),
             accountId: entry.accountId, windowKey: key,
             title: Self.decorate(title, with: entry.label), duration: duration,
-            usedPct: latest?.usedPercentage,
-            readingAt: latest?.sampledAt, newestAnyAccountAt: newestAnyAccountAt,
+            usedPct: readout?.percent ?? latest?.usedPercentage,
+            readout: readout,
+            readingAt: readout?.reading.at ?? latest?.sampledAt, newestAnyAccountAt: newestAnyAccountAt,
             typicalPollGap: typicalPollGap,
             resetsAt: latest?.resetsAt,
+            recentBurn: RecentBurn.percentPerHour(
+                readings: samples.map { .init(at: $0.sampledAt, percent: $0.usedPercentage, resetsAt: $0.resetsAt) },
+                now: now, duration: duration),
             baseChart: .cycle(fixed: samples, duration: duration, now: now),
             isActive: false, isActiveAccount: isActiveAccount(entry),
             severity: nil, isScoped: false)
@@ -849,6 +888,13 @@ struct PaceChartCard: View {
         let plan: [(accountId: String?, scoped: [String])] = series.map {
             ($0.accountId, scopedRows($0).map(\.identity))
         }
+        // The live values the columns show, so every forecast starts where
+        // the number on screen is (#318). Taken here, on the main actor,
+        // and handed to the ask as values.
+        let liveByAccount: [String: [String: LiveMeterValue]] = Dictionary(
+            uniqueKeysWithValues: plan.compactMap { entry in
+                entry.accountId.map { ($0, LiveMeterBoard.shared.values[$0] ?? [:]) }
+            })
         var nextSelected: [String: WindowProjection] = [:]
         var nextOutlooks: [String: UsageIntelligenceEngine.BurnOutlook] = [:]
         var nextEnds: [String: Estimate] = [:]
@@ -858,6 +904,7 @@ struct PaceChartCard: View {
             let engine = engines.engine(forAccount: entry.accountId)
             let account = entry.accountId
             let scoped = entry.scoped
+            let live = account.flatMap { liveByAccount[$0] } ?? [:]
             let computed = await askEngine {
                 () -> ([String: WindowProjection],
                        [String: UsageIntelligenceEngine.BurnOutlook],
@@ -885,16 +932,18 @@ struct PaceChartCard: View {
                     }
                 }
                 for window in RateLimitWindowKind.allCases {
+                    let v = live[window.rawValue]
                     absorb(key: window.rawValue,
-                           outlook: await engine.burnOutlook(window: window),
-                           end: await engine.ask(.rateLimitOutlook(window)),
-                           list: await engine.rateLimitTrajectories(window: window))
+                           outlook: await engine.burnOutlook(window: window, live: v),
+                           end: await engine.ask(.rateLimitOutlook(window), live: v),
+                           list: await engine.rateLimitTrajectories(window: window, live: v))
                 }
                 for id in scoped {
+                    let v = live[id]
                     absorb(key: id,
-                           outlook: await engine.burnOutlook(windowKey: id),
-                           end: await engine.ask(.scopedOutlook(id)),
-                           list: await engine.rateLimitTrajectories(windowKey: id))
+                           outlook: await engine.burnOutlook(windowKey: id, live: v),
+                           end: await engine.ask(.scopedOutlook(id), live: v),
+                           list: await engine.rateLimitTrajectories(windowKey: id, live: v))
                 }
                 if let fittedAt { why["fit|\(account ?? "")"] = "\(Int(Date().timeIntervalSince(fittedAt)))s" }
                 return (sel, out, ends, why)
@@ -954,6 +1003,13 @@ struct PaceChartCard: View {
         // changes (a scoped window appears / disappears, or an account joins).
         let windowKey = cols.map(\.id).joined(separator: ",")
         let hasScoped = cols.contains { $0.isScoped }
+        // The live numbers on screen: when one moves a whole point, the
+        // forecasts are re-asked from it (debounced with the engine's own
+        // refits). Not on each tenth: that moves every scan cycle while
+        // busy, and the chart already re-anchors the drawn forecast on the
+        // tip, so a tenth changes nothing the asks would.
+        let liveKey = cols.compactMap { c in c.readout?.live.map { "\(c.id)=\(Int($0.percent))" } }
+            .joined(separator: ",")
 
         // The "via oauth · just now" freshness chip lives in the page header
         // (`RateLimitSourceChip` in DashboardView) — it describes the whole
@@ -1073,6 +1129,7 @@ struct PaceChartCard: View {
         .onReceive(NotificationCenter.default.publisher(for: .pacerEngineDidRecompute)) { _ in
             scheduleProjectionRefresh()
         }
+        .onChange(of: liveKey) { _, _ in scheduleProjectionRefresh() }
         .task {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(60))
@@ -1202,13 +1259,10 @@ struct PaceChartCard: View {
         return accounts.first { $0.id == id }?.shortLabel
     }
 
-    /// Account identity, whether Claude Code is on it, and how fresh its
-    /// numbers are — said once for the whole group.
+    /// Account identity and whether Claude Code is on it, said once for the
+    /// whole group. How fresh its numbers are is under each number.
     @ViewBuilder
     private func accountHeader(_ group: AccountGroup) -> some View {
-        let stale = ReadingFreshness.isStale(
-            readingAt: group.readingAt, newestAnyAccountAt: group.newestAnyAccountAt,
-            typicalGap: group.typicalPollGap)
         HStack(spacing: 8) {
             Text(group.label ?? "Account")
                 .font(.system(size: 11, weight: .semibold))
@@ -1228,12 +1282,8 @@ struct PaceChartCard: View {
                     .foregroundStyle(.secondary)
             }
             if let at = group.readingAt {
-                // Always, not only when stale. "How current is this?" is a
-                // question about every account on screen, and answering it only
-                // for the bad case leaves the good case ambiguous — silence
-                // reads as "no information" rather than "fine".
-                AccountReadingAge(
-                    accountId: group.id, readingAt: at, stale: stale,
+                AccountAuthPause(
+                    accountId: group.id, readingAt: at,
                     lastTurnAt: accountTotals.totals.first { $0.accountId == group.id }?.lastTurnAt)
             }
             Spacer(minLength: 0)
@@ -1294,17 +1344,18 @@ struct PaceChartCard: View {
 /// pace% line, status + burn chips, the shared `PaceChartView`, and the outlook
 /// caption. The view itself is in PacerUI so the widget extension renders the
 /// same chart pixel-for-pixel.
-/// "read 3m ago", or "auth paused" when the account's token expired while it
-/// was idle (#198). Its own view so its own body reads the token pool and the
-/// minute: a pause begins with nothing written to the store.
-private struct AccountReadingAge: View {
+/// "auth paused" when the account's token expired while it was idle (#198),
+/// else nothing: how old the readings are is the caption under each number
+/// (#318), and saying it here as well put the same age on screen three times.
+/// Its own view so its own body reads the token pool and the minute: a pause
+/// begins with nothing written to the store.
+private struct AccountAuthPause: View {
     let accountId: String
     let readingAt: Date
-    let stale: Bool
     let lastTurnAt: Date?
 
     var body: some View {
-        TimelineView(.everyMinute) { context in
+        TimelineView(PacerReadAge.Schedule()) { context in
             if TokenPoolStatus.shared.isAuthPaused(
                 account: accountId, lastReadingAt: readingAt,
                 lastActivityAt: lastTurnAt, now: context.date) {
@@ -1312,13 +1363,6 @@ private struct AccountReadingAge: View {
                     .font(.system(size: 10))
                     .foregroundStyle(.orange)
                     .help(AuthPause.reason)
-            } else {
-                Text("read \(pacerRelative(readingAt))")
-                    .font(.system(size: 10))
-                    .foregroundStyle(stale ? .orange : .secondary)
-                    .help(stale
-                          ? "This account is not being polled right now."
-                          : "When Pacer last read this account's limits.")
             }
         }
     }
@@ -1411,17 +1455,20 @@ private struct PaceColumn: View {
         // whenever the account was last read. Drawing the dashed line anyway
         // projects from a point that has already moved.
         guard !isStale else { return base }
-        guard let projection else { return base }
-        // Re-anchor the forecast onto the live actual tail so the dashed line
-        // continues the solid one without a step.
-        guard let tail = base.points.last else { return base }
+        // The live meter's dotted stretch past the last reading (#318).
+        // `base` itself stays readings-only for the shared image.
+        let withLive = column.readout.map { base.withLive($0, now: base.points.last?.time ?? Date()) } ?? base
+        guard let projection else { return withLive }
+        // Re-anchor the forecast onto the line's tip (the live value, else
+        // the reading) so the dashed line continues it without a step.
+        guard let tail = withLive.tip else { return withLive }
         let rebased = projection.trajectory.reanchored(toTime: tail.time, value: tail.value)
         let pts = rebased.points.map { PaceChartView.Data.Point(time: $0.at, value: $0.usedPercentage) }
         // At/over the cap the trajectory collapses to its origin — fall back to
         // the projection-free chart.
-        guard pts.count >= 2 else { return base }
-        return base.withProjection(pts, crossesFullAt: rebased.crossesFullAt,
-                                   claimed: outlook?.willHitLimitBeforeReset ?? false)
+        guard pts.count >= 2 else { return withLive }
+        return withLive.withProjection(pts, crossesFullAt: rebased.crossesFullAt,
+                                       claimed: outlook?.willHitLimitBeforeReset ?? false)
     }
 
     var body: some View {
@@ -1436,7 +1483,10 @@ private struct PaceColumn: View {
         let live = liveChartData(base: base)
         return VStack(alignment: .leading, spacing: 8) {
             header(chartData: base)
-            heroLine
+            VStack(alignment: .leading, spacing: 0) {
+                heroLine
+                readCaption
+            }
             chipRow
             chartSlot(live: live)
             outlookLines
@@ -1463,47 +1513,52 @@ private struct PaceColumn: View {
 
     @ViewBuilder
     private var chipRowContent: some View {
-        // Every chip here is a verdict about the present — "behind", "on pace",
-        // "limit in 40 min". A stale reading cannot support any of them: the
-        // account may have been sitting untouched since, or may have been
-        // hammered by whatever `cswap` switched *to*. The caption says when the
-        // number is from; that is the only honest claim left.
+        // Every chip here is a claim about the present — "+16%/hr", "limit in
+        // 40 min". A stale reading cannot support any of them: the account may
+        // have been sitting untouched since, or may have been hammered by
+        // whatever `cswap` switched *to*. The caption says when the number is
+        // from; that is the only honest claim left.
         if isStale {
             EmptyView()
         } else if let used = column.usedPct, let cycle, !cycle.isAwaiting {
-            let band = PaceBand(usedPct: used, paceEndPct: cycle.paceFraction * 100)
+            // Moving: the burn rate and the forecast. Idle: the forecast only
+            // ("holds until reset"), and at 0% nothing (`RecentBurn.chipRow`).
+            let row = RecentBurn.chipRow(percentPerHour: column.recentBurn, shownPercent: used)
             HStack(spacing: 6) {
-                paceChip(band: band)
-                burnChipView
+                burnRateChip(row.burn)
+                if row.showsForecast { forecastChipView }
             }
         }
     }
 
+    /// How fast the window is moving now, grey, so the forecast chip beside
+    /// it is the one that carries a colour (#318). It replaced the "behind" /
+    /// "on pace" / "danger" badges, which said again what the number's
+    /// colour, the "/ 68%" pace mark and the chart already show.
     @ViewBuilder
-    private func paceChip(band: PaceBand) -> some View {
-        Group {
-            switch band {
-            case .green:
-                Chip(text: "behind", systemImage: "checkmark", tint: .green, size: .compact)
-            case .white:
-                Chip(text: "on pace", tint: .secondary, size: .compact)
-            case .yellow:
-                Chip(text: "ahead", systemImage: "exclamationmark", tint: .yellow, size: .compact)
-            case .red:
-                Chip(text: "danger", systemImage: "exclamationmark.triangle.fill", tint: .red, size: .compact)
-            }
-        }
-        .fixedSize()
-    }
-
-    @ViewBuilder
-    private var burnChipView: some View {
-        if let used = column.usedPct, let outlook,
-           let chip = IntelligenceFormatting.burnChip(outlook: outlook, endEstimate: endEstimate,
-                                                      duration: duration, usedPct: used) {
-            Chip(text: chip.text, systemImage: chip.symbol, tint: chip.tint, size: .compact)
+    private func burnRateChip(_ text: String?) -> some View {
+        if let text {
+            Chip(text: text, systemImage: "arrow.up.right", tint: .secondary, size: .compact)
                 .fixedSize()
-                .help(chip.help)
+                .help("Over the last 30 minutes of readings.")
+        }
+    }
+
+    /// Where the window ends up (`ForecastChip`): the colour is that outcome,
+    /// how sure the forecast is goes in the words and the hover. Built on
+    /// the shared minute schedule, so "limit in 40 min" counts down with the
+    /// ages beside it.
+    @ViewBuilder
+    private var forecastChipView: some View {
+        if let used = column.usedPct, let outlook {
+            TimelineView(PacerReadAge.Schedule()) { context in
+                if let chip = ForecastChip.make(outlook: outlook, endEstimate: endEstimate,
+                                                duration: duration, usedPct: used, now: context.date) {
+                    Chip(text: chip.text, tint: IntelligenceFormatting.color(chip.tint), size: .compact)
+                        .fixedSize()
+                        .help(chip.help)
+                }
+            }
         }
     }
 
@@ -1545,9 +1600,11 @@ private struct PaceColumn: View {
     /// Everything the share sheet needs to render and name this window's chart
     /// as an image — built from the same resolved values the live chart draws.
     private func sharePayload(chartData: PaceChartView.Data?) -> PaceSharePayload? {
+        // The shared image is the readings, number included: an estimate
+        // has no place in a picture that leaves the app.
         guard let chartData,
               let cycle, !cycle.isAwaiting,
-              let used = column.usedPct, let resets = column.resetsAt
+              let used = column.readout?.reading.percent ?? column.usedPct, let resets = column.resetsAt
         else { return nil }
         let windowName: String
         let slug: String
@@ -1662,17 +1719,12 @@ private struct PaceColumn: View {
 
     @ViewBuilder
     private var caption: some View {
-        if isStale, !groupedUnderAccountHeader, let readingAt = column.readingAt {
-            // Says what Pacer knows and when, instead of implying it is current.
-            // The reset time is deliberately dropped here: it came from the same
+        if isStale {
+            // The reset time is deliberately dropped: it came from the same
             // stale reading, and two facts of different ages side by side is
-            // what made this confusing in the first place.
-            Text("last read \(pacerRelative(readingAt))")
-                .lineLimit(1)
-                .font(.system(size: 10))
-                .foregroundStyle(.orange)
-                .help("This account is not being polled right now — Pacer can only "
-                      + "read the account that currently owns Claude Code's credentials.")
+            // what made this confusing in the first place. When the reading
+            // was taken is the caption under the number, in orange (#318).
+            EmptyView()
         } else if let cycle, cycle.isAwaiting {
             Text("cycle reset · awaiting")
                 .font(.system(size: 10))
@@ -1708,16 +1760,42 @@ private struct PaceColumn: View {
         }
     }
 
+    /// What Anthropic last read, under the number, always (#318): "estimate
+    /// · Anthropic read 50% 3m ago" under an estimate, "read 3m ago" under a
+    /// reading. Orange once this account has stopped being read. Always a
+    /// line's height, so a reading arriving never moves the card.
+    @ViewBuilder
+    private var readCaption: some View {
+        Group {
+            if let readout = column.readout, cycle?.isAwaiting != true {
+                PacerMeterCaption(readout, help: isStale
+                                  ? "This account is not being polled right now — Pacer can only "
+                                    + "read the account that currently owns Claude Code's credentials."
+                                  : nil)
+                    .foregroundStyle(isStale ? .orange : .secondary)
+            } else {
+                Text(" ")
+            }
+        }
+        .font(.system(size: 10))
+        .lineLimit(1)
+    }
+
     @ViewBuilder
     private var heroLine: some View {
         if let used = column.usedPct, let cycle, !cycle.isAwaiting {
             let paceEndPct = cycle.paceFraction * 100
             let band = PaceBand(usedPct: used, paceEndPct: paceEndPct)
             HStack(alignment: .firstTextBaseline, spacing: 4) {
-                Text("\(Int(used.rounded()))%")
-                    .font(.system(size: 26, weight: .semibold, design: .rounded))
-                    .monospacedDigit()
-                    .foregroundStyle(band.color)
+                // A reading whole, an estimate with its decimal (#318).
+                // The hover, "read 42% 3m ago · estimate 42.6%", is about
+                // the reading the caption below is about, on the same
+                // schedule, so the two always say the same age.
+                TimelineView(PacerReadAge.Schedule()) { context in
+                    PacerMeterValue(used, isEstimate: column.isEstimate, color: band.color)
+                        .font(.system(size: 26, weight: .semibold, design: .rounded))
+                        .help(column.readout.map { pacerMeterHelp($0, now: context.date) } ?? "")
+                }
                 Text("/")
                     .font(.system(size: 16))
                     .foregroundStyle(.tertiary)
@@ -1729,10 +1807,8 @@ private struct PaceColumn: View {
         } else if let idle = idleUsedPct {
             // Idle window: show the real reading on its own — no pace target to
             // divide against (no cycle), so no "/ NN%".
-            Text("\(Int(idle.rounded()))%")
+            PacerMeterValue(idle, isEstimate: column.isEstimate, color: .secondary)
                 .font(.system(size: 26, weight: .semibold, design: .rounded))
-                .monospacedDigit()
-                .foregroundStyle(.secondary)
         } else {
             Text("--")
                 .font(.system(size: 26, weight: .semibold, design: .rounded))

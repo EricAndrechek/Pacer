@@ -561,6 +561,19 @@ public actor UsageIntelligenceEngine {
         return Self.answer(question, features: f, fit: fit)
     }
 
+    /// `ask`, with the live meter's value (#318) as the rate-limit outlook's
+    /// "used now". Every other question ignores it.
+    public func ask(_ question: EngineQuestion, live: LiveMeterValue?) -> Estimate {
+        guard let f = features else {
+            return .insufficient(method: "engine", note: "engine not warmed up yet")
+        }
+        switch question {
+        case .rateLimitOutlook(let w): return Self.rateLimitOutlook(f, fit, windowKey: w.rawValue, live: live)
+        case .scopedOutlook(let key):  return Self.rateLimitOutlook(f, fit, windowKey: key, live: live)
+        default:                       return Self.answer(question, features: f, fit: fit)
+        }
+    }
+
     /// The pure answer function — `(question, features, fit) → Estimate`. The
     /// actor's `ask` is a thin wrapper so this whole surface tests directly.
     static func answer(_ question: EngineQuestion, features f: EngineFeatures, fit: Fit) -> Estimate {
@@ -634,12 +647,13 @@ public actor UsageIntelligenceEngine {
 
     // MARK: - Rate-limit outlook
 
-    static func rateLimitOutlook(_ f: EngineFeatures, _ fit: Fit, windowKey key: String) -> Estimate {
+    static func rateLimitOutlook(_ f: EngineFeatures, _ fit: Fit, windowKey key: String,
+                                 live: LiveMeterValue? = nil) -> Estimate {
         guard let samples = f.rateLimit[key], let rf = fit.rl[key] else {
             return .insufficient(method: "rate-limit", note: "no rate-limit history yet")
         }
         let (currentOpt, _) = BurnTrajectory.segment(samples: samples, duration: rf.duration, now: f.now)
-        guard let current = currentOpt else {
+        guard let current = currentOpt?.withLive(live, duration: rf.duration) else {
             return .insufficient(method: "rate-limit", note: "no live cycle")
         }
         let model = rf.roster.first { $0.id == rf.resolvedId }
@@ -755,21 +769,25 @@ public actor UsageIntelligenceEngine {
         }
     }
 
-    public func burnOutlook(window: RateLimitWindowKind) -> BurnOutlook? {
+    /// `live` is the live meter's value for this window (#318): the outlook
+    /// starts from it rather than the last reading. Nil asks as before.
+    public func burnOutlook(window: RateLimitWindowKind, live: LiveMeterValue? = nil) -> BurnOutlook? {
         guard let f = features else { return nil }
-        return Self.burnOutlook(f, fit, windowKey: window.rawValue)
+        return Self.burnOutlook(f, fit, windowKey: window.rawValue, live: live)
     }
 
     /// Generic sibling keyed by window identity — for scoped per-model windows.
-    public func burnOutlook(windowKey key: String) -> BurnOutlook? {
+    public func burnOutlook(windowKey key: String, live: LiveMeterValue? = nil) -> BurnOutlook? {
         guard let f = features else { return nil }
-        return Self.burnOutlook(f, fit, windowKey: key)
+        return Self.burnOutlook(f, fit, windowKey: key, live: live)
     }
 
-    static func burnOutlook(_ f: EngineFeatures, _ fit: Fit, windowKey key: String) -> BurnOutlook? {
+    static func burnOutlook(_ f: EngineFeatures, _ fit: Fit, windowKey key: String,
+                            live: LiveMeterValue? = nil) -> BurnOutlook? {
         guard let samples = f.rateLimit[key], let rf = fit.rl[key] else { return nil }
         let (currentOpt, _) = BurnTrajectory.segment(samples: samples, duration: rf.duration, now: f.now)
-        guard let current = currentOpt, current.resetsAt > f.now else { return nil }
+        guard let current = currentOpt?.withLive(live, duration: rf.duration), current.resetsAt > f.now
+        else { return nil }
 
         // Descriptive slope over the recent lookback (clamped to this cycle so
         // a reset boundary can't produce a bogus negative). Session-cadence
@@ -947,24 +965,27 @@ public actor UsageIntelligenceEngine {
     /// flagged with the engine's selection — one source of truth for the pace
     /// chart's overlay (take the selected one) and the compare-models sheet
     /// (show them all).
-    public func rateLimitTrajectories(window: RateLimitWindowKind) -> [BurnTrajectory.ScoredTrajectory] {
-        rateLimitTrajectories(windowKey: window.rawValue)
+    public func rateLimitTrajectories(window: RateLimitWindowKind,
+                                      live: LiveMeterValue? = nil) -> [BurnTrajectory.ScoredTrajectory] {
+        rateLimitTrajectories(windowKey: window.rawValue, live: live)
     }
 
     /// Generic sibling keyed by window identity — for scoped per-model windows.
-    public func rateLimitTrajectories(windowKey key: String) -> [BurnTrajectory.ScoredTrajectory] {
+    /// `live` as for `burnOutlook`.
+    public func rateLimitTrajectories(windowKey key: String,
+                                      live: LiveMeterValue? = nil) -> [BurnTrajectory.ScoredTrajectory] {
         guard let f = features else { return [] }
         let accuracy = accuracyBySurface[EngineSelfEval.rlSurface(key)]
-        return Self.rateLimitTrajectories(f, fit, windowKey: key, accuracy: accuracy)
+        return Self.rateLimitTrajectories(f, fit, windowKey: key, accuracy: accuracy, live: live)
     }
 
     static func rateLimitTrajectories(
         _ f: EngineFeatures, _ fit: Fit, windowKey key: String,
-        accuracy: EngineSelfEval.Accuracy?, sampleCount: Int = 48
+        accuracy: EngineSelfEval.Accuracy?, sampleCount: Int = 48, live: LiveMeterValue? = nil
     ) -> [BurnTrajectory.ScoredTrajectory] {
         guard let samples = f.rateLimit[key], let rf = fit.rl[key] else { return [] }
         let (currentOpt, _) = BurnTrajectory.segment(samples: samples, duration: rf.duration, now: f.now)
-        guard let current = currentOpt else { return [] }
+        guard let current = currentOpt?.withLive(live, duration: rf.duration) else { return [] }
         let span = current.resetsAt.timeIntervalSince(f.now)
         guard span > 0 else { return [] }
 

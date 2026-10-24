@@ -15,6 +15,10 @@ import PacerCore
 /// **read-only**, and walks the scopes. It exists because several rounds of
 /// "does this look right to you?" could have been one render and a look.
 ///
+/// The live meter is built once from that store before anything is drawn
+/// (`LiveMeterBoard.buildOnce`), so every page shows the estimates the app
+/// would, not bare readings. The `menu` page is the menu bar's dropdown.
+///
 /// Run it alongside the live app:
 ///
 ///     PACER_SCREENSHOT_MODE=1 PACER_RENDER_LIVE=auto \
@@ -47,6 +51,9 @@ enum LiveRenderMode {
         case projection, projectionWeekly
         /// Every model's info popover, for both windows.
         case modelInfo
+        /// The menu bar's dropdown: the SwiftUI content of the status menu
+        /// (`MenuStatusContent`), without the native items below it.
+        case menu
 
         /// Wide enough that the balanced grids take their many-column layout —
         /// a narrow render exercises a fallback the user is not looking at.
@@ -59,6 +66,7 @@ enum LiveRenderMode {
             case .now, .badges: return 900
             case .projection, .projectionWeekly: return 760
             case .modelInfo: return 1040
+            case .menu: return MenuStatusContent.popoverWidth
             }
         }
 
@@ -81,6 +89,16 @@ enum LiveRenderMode {
             case .projectionWeekly:
                 ProjectionCompareModal(windowKey: RateLimitWindowName.sevenDay,
                                        limitAccountId: UsageScope.shared.limitAccountId)
+            case .menu:
+                // On a menu's own surface, as it drops: the page canvas
+                // behind every other render is not what a menu sits on.
+                MenuStatusContent()
+                    .background(Color(nsColor: .windowBackgroundColor))
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .strokeBorder(Color.primary.opacity(0.1), lineWidth: 1)
+                    )
             case .modelInfo:
                 VStack(alignment: .leading, spacing: 0) {
                     Text("5-hour").font(.headline).padding(.horizontal, 16).padding(.top, 16)
@@ -137,6 +155,15 @@ enum LiveRenderMode {
             await Task.detached(priority: .userInitiated) { await engine.recompute() }.value
         }
         log("warmed \(allAccounts.count + 1) engine(s)")
+
+        // The live meter, built once from this read-only store: without it
+        // every surface draws Anthropic's last readings, where the app draws
+        // its estimates. Nothing rebuilds it after this, and nothing is
+        // written.
+        await LiveMeterBoard.shared.buildOnce(container: container)
+        let live = LiveMeterBoard.shared.values
+        log("live meter: \(live.values.reduce(0) { $0 + $1.values.filter(\.isEstimate).count }) estimate(s) "
+            + "across \(live.count) account(s)")
 
         for target in targets {
             UsageScope.shared.selectEphemeral(target.accountId)

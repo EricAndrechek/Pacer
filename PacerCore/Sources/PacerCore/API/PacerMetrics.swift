@@ -147,7 +147,13 @@ public struct PacerMetrics: Sendable {
             // unchanged either way.
             if let live = w.livePercentage {
                 m.append(PacerMetric("pacer_rate_limit_live_used_ratio", live / 100,
-                                     help: "Live estimate of utilization (0–1): used_ratio plus the whole points the API spend since that reading adds at the fitted per-model rates, capped at 1.",
+                                     help: "Live utilization (0–1) as Pacer shows it: when live_estimate is 1, used_ratio plus the API spend since that reading at the fitted per-model rates, to a thousandth, capped at 1; when 0, used_ratio itself.",
+                                     labels: labels))
+                m.append(PacerMetric("pacer_rate_limit_live_whole_ratio", (w.liveWholePercentage ?? live) / 100,
+                                     help: "live_used_ratio cut to whole points (0–1): what the pacing gate and threshold alerts judge.",
+                                     labels: labels))
+                m.append(PacerMetric("pacer_rate_limit_live_estimate", (w.liveIsEstimate ?? false) ? 1 : 0,
+                                     help: "1 when live_used_ratio is an estimate, 0 when it is the reading (nothing counted spent since).",
                                      labels: labels))
                 if let asOf = w.liveAsOf {
                     m.append(PacerMetric("pacer_rate_limit_live_age_seconds",

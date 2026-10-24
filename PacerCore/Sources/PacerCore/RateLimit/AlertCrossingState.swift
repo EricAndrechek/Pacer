@@ -24,6 +24,11 @@ public struct AlertCrossingState: Codable, Equatable, Sendable {
     private var readings: [String: Reading] = [:]
     private var dailyCost: Double?
     private var dailyCostDate: String?
+    /// The last live estimate judged per key (#318), kept apart from
+    /// `readings`: the reset rule and every other alert judge readings only,
+    /// so an estimate that climbs and is corrected down can never look like
+    /// a reading that fell. Optional so a state persisted before it decodes.
+    private var estimates: [String: Reading]?
 
     public init() {}
 
@@ -50,6 +55,30 @@ public struct AlertCrossingState: Codable, Equatable, Sendable {
         readings[key] = Reading(percent: percent, resetsAt: resetsAt, sampledAt: sampledAt)
         guard let previous else { return nil }
         return Step(previousPercent: previous.percent, previousResetsAt: previous.resetsAt)
+    }
+
+    /// Record the newest live estimate for `key`, for the threshold alerts
+    /// when the user has them follow estimates (`RateLimitAlertSource`).
+    ///
+    /// - Returns: what to judge this one against, or nil when there is
+    ///   nothing to judge: not an estimate (the reading's own path judges
+    ///   it), restarted past its reset (the new window's reset is not known
+    ///   until its first reading, and with it the dedup key), built on a
+    ///   reading the readings path has not judged yet (it goes first, so a
+    ///   line a reading crossed is announced as a reading), or not newer
+    ///   than the last estimate judged. Against whichever was judged last,
+    ///   that reading or the previous estimate. Whole points
+    ///   (`LiveMeterValue.percent`), as the alerts are.
+    public mutating func advanceEstimate(_ key: String, live: LiveMeterValue) -> Step? {
+        guard live.isEstimate, !live.restarted, let judged = readings[key],
+              judged.sampledAt >= live.reading.at.addingTimeInterval(-1) else { return nil }
+        var all = estimates ?? [:]
+        let previous = all[key]
+        if let previous, previous.sampledAt >= live.asOf { return nil }
+        all[key] = Reading(percent: live.percent, resetsAt: live.reading.resetsAt, sampledAt: live.asOf)
+        estimates = all
+        let last = previous.flatMap { $0.sampledAt > judged.sampledAt ? $0 : nil } ?? judged
+        return Step(previousPercent: last.percent, previousResetsAt: last.resetsAt)
     }
 
     /// Record today's cost, and say whether it rose.
