@@ -593,6 +593,7 @@ final class PaceRun {
         var accounts: [String] = []
         var active = ""
         var pct: [Slot: Double] = [:]
+        var live: [Slot: Double] = [:]
         var fields: [String: [Slot: String]] = [:]
         func slot(_ p: PaceMetricPoint) -> Slot {
             let s = Slot(account: p.label("account"), window: p.label("window"))
@@ -604,12 +605,15 @@ final class PaceRun {
             "pacer_rate_limit_reset_seconds", "pacer_rate_limit_hit_eta_seconds",
             "pacer_rate_limit_will_hit", "pacer_rate_limit_burn_percent_per_hour",
             "pacer_rate_limit_recent_burn_percent_per_hour", "pacer_rate_limit_sample_age_seconds",
+            "pacer_rate_limit_live_age_seconds",
         ]
         for p in points {
             if p.name == "pacer_account_info" {
                 if p.label("active") == "true" { active = p.label("account") }
             } else if p.name == "pacer_rate_limit_used_ratio" {
                 pct[slot(p)] = p.value * 100
+            } else if p.name == "pacer_rate_limit_live_used_ratio" {
+                live[slot(p)] = p.value * 100
             } else if kept.contains(p.name) {
                 fields[p.name, default: [:]][slot(p)] = p.raw
             }
@@ -618,19 +622,26 @@ final class PaceRun {
         if wanted.isEmpty { wanted = !active.isEmpty ? active : (accounts.count == 1 ? accounts[0] : "") }
         if wanted == "all" { wanted = "" }
         return order.compactMap { s in
-            guard wanted.isEmpty || s.account.hasPrefix(wanted), let percent = pct[s] else { return nil }
+            guard wanted.isEmpty || s.account.hasPrefix(wanted), let reading = pct[s] else { return nil }
             func f(_ name: String) -> String? { fields[name]?[s] }
+            // Judge the live value (#318) when Pacer served one on a reading
+            // recent enough for its measured error to hold; else the reading.
+            let sampleAge = f("pacer_rate_limit_sample_age_seconds")
+            let fresh = sampleAge.map { PaceFormat.number($0) <= PaceRules.liveMaxReadingAge } ?? false
+            let livePercent = fresh ? live[s] : nil
             return PaceRow(
                 account: s.account, identity: s.window,
                 label: PaceRules.label(forIdentity: s.window),
                 model: PaceRules.model(forIdentity: s.window),
-                percent: percent,
+                percent: livePercent ?? reading,
                 resetsIn: f("pacer_rate_limit_reset_seconds"),
                 hitEta: f("pacer_rate_limit_hit_eta_seconds"),
                 burn: f("pacer_rate_limit_burn_percent_per_hour"),
                 willHit: f("pacer_rate_limit_will_hit") ?? "0",
                 recentBurn: f("pacer_rate_limit_recent_burn_percent_per_hour"),
-                sampleAge: f("pacer_rate_limit_sample_age_seconds"))
+                sampleAge: sampleAge,
+                reading: livePercent == nil ? nil : reading,
+                liveAge: livePercent == nil ? nil : f("pacer_rate_limit_live_age_seconds"))
         }
     }
 
@@ -770,8 +781,12 @@ final class PaceRun {
                !PaceRules.binds(windowModel: row.model, wanted: model) {
                 mine = "  — binds \(row.model) only"
             }
+            // The live value is what the gate judges; the reading it started
+            // from beside it, when the two differ.
+            let reading = row.isLive && row.readingPercent != row.percent
+                ? " (reading \(PaceFormat.percent(PaceFormat.awkNumber(row.readingPercent)))%)" : ""
             io.out(prefix + Self.pad(row.label, 10) + " " + Self.pad(PaceFormat.percent(row.percentText), 4, right: true)
-                   + "% used" + rate + full + " · resets in " + Self.pad(PaceFormat.human(row.resetsIn), 7)
+                   + "% used" + reading + rate + full + " · resets in " + Self.pad(PaceFormat.human(row.resetsIn), 7)
                    + " (" + PaceFormat.clock(row.resetsIn, now: now) + ")" + mine + "\n")
         }
     }
@@ -792,7 +807,8 @@ final class PaceRun {
         text += "  \"accountSince\": \(since.isEmpty ? "null" : "\"\(since)\""),\n  \"windows\": [\n"
         text += selected.map { row in
             "    {\"account\": \"\(row.account)\", \"identity\": \"\(row.identity)\", \"label\": \"\(row.label)\", "
-            + "\"model\": \"\(row.model)\", \"usedPercent\": \(row.percentText), "
+            + "\"model\": \"\(row.model)\", \"usedPercent\": \(PaceFormat.awkNumber(row.readingPercent)), "
+            + (row.isLive ? "\"livePercent\": \(row.percentText), \"liveAgeSeconds\": \(row.liveAge ?? "null"), " : "")
             + "\"resetsInSeconds\": \(row.resetsIn ?? "null"), "
             + "\"willHitLimit\": \(PaceFormat.number(row.willHit) == 1 ? "true" : "false"), "
             + "\"hitEtaSeconds\": \(row.hitEta ?? "null"), \"burnPercentPerHour\": \(row.burn ?? "null"), "

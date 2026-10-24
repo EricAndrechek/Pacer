@@ -190,6 +190,96 @@ struct PaceCommandTests {
         #expect(capped.out.contains("cap 99.5%"))
     }
 
+    // MARK: - The live value (#318)
+
+    /// 5h read at 90% 150 s ago, climbing 45 points an hour, and Pacer's live
+    /// value from the spend since: `live` percent, 4 s old.
+    static func liveMetrics(live: Double, sampleAge: Int = 150, burn: Double = 45) -> String {
+        """
+        pacer_rate_limit_used_ratio{account="org",window="five_hour"} 0.9
+        pacer_rate_limit_reset_seconds{account="org",window="five_hour"} 3600
+        pacer_rate_limit_recent_burn_percent_per_hour{account="org",window="five_hour"} \(PaceFormat.awkNumber(burn))
+        pacer_rate_limit_sample_age_seconds{account="org",window="five_hour"} \(sampleAge)
+        pacer_rate_limit_live_used_ratio{account="org",window="five_hour"} \(String(live / 100))
+        pacer_rate_limit_live_age_seconds{account="org",window="five_hour"} 4
+        pacer_account_info{account="org",name="o",active="true"} 1
+        """
+    }
+
+    /// The reading alone at 45/h and 150 s old pads 45 × 450 s = 6 points:
+    /// a safe limit of 94. Judged on the live value, the padding is the live
+    /// value's own error at that burn, 2 points: 98. Its 4 s of age is well
+    /// inside what that padding was measured with.
+    @Test func aLiveValueIsJudgedWithItsOwnPadding() throws {
+        let under = try PaceSandbox(metrics: Self.liveMetrics(live: 97))
+        let go = runPace(under, ["gate"], extra: ["CLAUDE_CODE_SESSION_ID": ""])
+        #expect(go.status == 0)
+        #expect(go.out.contains("5h 97%"))
+        #expect(go.out.contains("safe limit 5h 98%"))
+
+        let over = try PaceSandbox(metrics: Self.liveMetrics(live: 98))
+        let pause = runPace(over, ["gate"], extra: ["CLAUDE_CODE_SESSION_ID": ""])
+        #expect(pause.status == 10)
+        #expect(pause.out.contains("5h at 98% >= safe limit 98%"))
+        #expect(over.stateText.contains("\"usedPercent\": 98"))
+    }
+
+    /// The same reading with no live value: the old rule, as ever.
+    @Test func withoutALiveValueTheReadingRuleStands() throws {
+        let box = try PaceSandbox(metrics: """
+        pacer_rate_limit_used_ratio{account="org",window="five_hour"} 0.9
+        pacer_rate_limit_reset_seconds{account="org",window="five_hour"} 3600
+        pacer_rate_limit_recent_burn_percent_per_hour{account="org",window="five_hour"} 45
+        pacer_rate_limit_sample_age_seconds{account="org",window="five_hour"} 150
+        pacer_account_info{account="org",name="o",active="true"} 1
+        """)
+        let result = runPace(box, ["gate"], extra: ["CLAUDE_CODE_SESSION_ID": ""])
+        #expect(result.status == 0)
+        #expect(result.out.contains("5h 90%"))
+        #expect(result.out.contains("safe limit 5h 94%"))
+    }
+
+    /// Past 15 minutes the live value's error was not measured to hold, so
+    /// the gate goes back to the reading and pads for its age.
+    @Test func aLiveValueOnAStaleReadingIsSetAside() throws {
+        let box = try PaceSandbox(metrics: Self.liveMetrics(live: 99, sampleAge: 901, burn: 10))
+        let result = runPace(box, ["gate"], extra: ["CLAUDE_CODE_SESSION_ID": ""])
+        #expect(result.status == 0)
+        #expect(result.out.contains("5h 90%"))
+        // 10/h × (901 + 300) s = 3.3 → 4 points.
+        #expect(result.out.contains("safe limit 5h 96%"))
+    }
+
+    @Test func jsonKeepsTheReadingAndAddsTheLiveValue() throws {
+        let box = try PaceSandbox(metrics: Self.liveMetrics(live: 93))
+        let json = runPace(box, ["json"], extra: ["CLAUDE_CODE_SESSION_ID": ""])
+        #expect(json.out.contains("\"usedPercent\": 90, \"livePercent\": 93, \"liveAgeSeconds\": 4,"))
+        #expect(json.out.contains("\"safeLimit\": 98"))
+        let report = runPace(box, ["report"], extra: ["CLAUDE_CODE_SESSION_ID": ""])
+        #expect(report.out.contains("93% used (reading 90%)"))
+    }
+
+    @Test func theLivePaddingFollowsTheBurnBands() {
+        func row(burn: Double, liveAge: String = "0") -> PaceRow {
+            PaceRow(account: "org", identity: "five_hour", label: "5h", model: "", percent: 50,
+                    resetsIn: "3600", hitEta: nil, burn: nil, willHit: "0",
+                    recentBurn: PaceFormat.awkNumber(burn), sampleAge: "120",
+                    reading: 48, liveAge: liveAge)
+        }
+        #expect(PaceRules.safeLimit(row(burn: 0)) == 99)
+        #expect(PaceRules.safeLimit(row(burn: 19.9)) == 99)
+        #expect(PaceRules.safeLimit(row(burn: 20)) == 98)
+        #expect(PaceRules.safeLimit(row(burn: 59)) == 98)
+        #expect(PaceRules.safeLimit(row(burn: 60)) == 97)
+        #expect(PaceRules.safeLimit(row(burn: 150)) == 97)
+        // Up to a minute old, the padding already covers it; a stalled
+        // refresh pads for the climb beyond that minute.
+        #expect(PaceRules.safeLimit(row(burn: 60, liveAge: "60")) == 97)
+        #expect(PaceRules.safeLimit(row(burn: 60, liveAge: "61")) == 96)
+        #expect(PaceRules.safeLimit(row(burn: 60, liveAge: "120")) == 96)
+        #expect(PaceRules.safeLimit(row(burn: 60, liveAge: "121")) == 95)
+    }
+
     @Test func aRejectedRequestSaysWhatWasRejected() throws {
         let box = try PaceSandbox(metrics: nil)
         let server = try PaceStubServer(status: 400,

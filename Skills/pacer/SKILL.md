@@ -355,11 +355,17 @@ Write nothing else there: no notes, plans, scripts, logs or directories.
 ## 9. Parameters and policy
 
 - `--cap N` (default: the **safe limit**): pause when any watched window is at
-  or over N%. The default stops just before the limit, nothing earlier:
-  100% minus how far usage can climb before a fresher reading. That's the
-  window's recent burn × (the reading's age + one worst-case 5-minute poll),
-  at least 1 point. Heavy use stops near 90%, light use near 99%; `report` and
-  `json` show each window's figure, and `pacer safecap` prints the limit
+  or over N%. The default stops just before the limit, nothing earlier.
+  When Pacer has a **live value** for a window (the last reading plus what
+  the spend since it adds), the gate judges that, and the safe limit is 100%
+  minus the live value's own error at the window's burn: 1 point under 20%/h,
+  2 up to 60%/h, 3 above. Otherwise (no fit yet, or a reading over 15 minutes
+  old) it judges the reading: 100% minus the window's recent burn × (the
+  reading's age + one worst-case 5-minute poll). Always at least 1 point.
+  Heavy use stops near 97% with a live value and near 90% without; light use
+  near 99%. `report` shows the live value with the reading beside it, `json`
+  gives `usedPercent` (the reading), `livePercent` and the `safeLimit` it was
+  judged against, and `pacer safecap` prints the limit
   `gate` would apply to each binding window, one per line, for scripts.
   **Pass `--cap` only when the user, or the task, decides to keep part of a
   window in reserve.** How much to spend is their call, not a default's.
