@@ -74,7 +74,7 @@ struct LiveMeterEstimatorProbe {
                 let board = LiveMeterBoard.build(container: container, now: now)
                 let ms = Date().timeIntervalSince(started) * 1000
                 let text = board.keys.sorted().map { a in
-                    a.suffix(4) + ": " + board[a]!.keys.sorted().map { k in
+                    String(a.suffix(4)) + ": " + board[a]!.keys.sorted().map { k in
                         let v = board[a]![k]!
                         return String(format: "%@ %.0f→%.0f (carry %.2f)", k, v.reading.percent, v.percent, v.carry)
                     }.joined(separator: ", ")
