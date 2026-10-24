@@ -7,7 +7,10 @@
 #
 # `scopes` is `auto` (all-accounts plus every account, the default), or a
 # comma-separated list of `all` and account ids. Output defaults to
-# ./screenshots/live.
+# ./screenshots/live. `PACER_RENDER_PAGES=menu,pace` (make: `PAGES=`) renders
+# only those pages (`LiveRenderMode.Page`); `menu` is the menu bar's dropdown,
+# written as live-menu-<scope>.png. The live meter is built once from the
+# read-only store first, so the renders show estimates as the app does.
 #
 # Why this is a script and not a one-liner
 # ---------------------------------------

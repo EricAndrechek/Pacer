@@ -97,6 +97,19 @@ public final class LiveMeterBoard {
         refresh()
     }
 
+    /// One build from `container` and nothing after it: no observers, no
+    /// expiry, no rebuilds. For a process that draws and exits, the live
+    /// render (`make render-live`), so its pictures show the estimates the
+    /// app would rather than bare readings. `build` only reads, so a
+    /// read-only container is enough.
+    public func buildOnce(container: ModelContainer, now: Date = Date()) async {
+        stop()
+        let built = await Task.detached(priority: .userInitiated) {
+            Self.build(container: container, now: now)
+        }.value
+        values = built
+    }
+
     /// Stop and forget every value: nothing rebuilds them any more.
     public func stop() {
         for o in observers { NotificationCenter.default.removeObserver(o) }

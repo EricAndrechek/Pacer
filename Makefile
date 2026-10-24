@@ -221,7 +221,10 @@ record-relaunch:
 
 .PHONY: render-live
 ## Render the real cards against the real store to PNGs (see bin/dev-render-live.sh).
+## Every page by default, the menu bar's dropdown (`menu`) among them, with the
+## live meter's estimates as the app shows them.
 ## Usage: make render-live            (all accounts + each account)
 ##        make render-live SCOPES=all
+##        make render-live PAGES=menu,pace
 render-live:
-	@bin/dev-render-live.sh "$(or $(SCOPES),auto)" "$(or $(OUT),$(PWD)/screenshots/live)"
+	@PACER_RENDER_PAGES="$(PAGES)" bin/dev-render-live.sh "$(or $(SCOPES),auto)" "$(or $(OUT),$(PWD)/screenshots/live)"
