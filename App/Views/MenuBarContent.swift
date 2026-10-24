@@ -628,7 +628,7 @@ private struct MenuBarLabelContent: View, Equatable {
             // No animation either way.
             if let pct {
                 PacerMeterValue(pct, isEstimate: isEstimate,
-                                color: UsageBand(percentage: pct) == .red ? Color.red : Color.primary,
+                                color: UsageBand(percentage: pct).valueTextColor,
                                 prefix: prefix ?? "")
             } else {
                 Text((prefix ?? "") + "—")
@@ -670,18 +670,41 @@ final class StatusMenuOpening {
     func willOpen() { count &+= 1 }
 }
 
-/// The "data" portion of the status-bar NSMenu — pace rows for 5h /
-/// 7d and today's spend / tokens. Hosted in a single `NSMenuItem.view`
-/// (see `PacerAppDelegate.buildStatusMenu`) so the action items
-/// (Open / Settings / Quit) below it can be real `NSMenuItem`s with
-/// native chrome, keyboard shortcuts, and macOS's automatic
-/// menu-bar handoff behavior.
+/// The "data" portion of the status-bar NSMenu: one block per account, one
+/// fuel bar per window, then today's totals. Hosted in a single
+/// `NSMenuItem.view` (see `PacerAppDelegate.buildStatusMenu`) so the action
+/// items (Open / Settings / Quit) below it can be real `NSMenuItem`s with
+/// native chrome, keyboard shortcuts, and macOS's automatic menu-bar handoff
+/// behavior.
+///
+/// **The layout (#318, the owner's "fuel bars").** Each account is its name
+/// (a green dot and "signed in" for the login Claude Code is using), a row
+/// per window (5H, 7D, each scoped cap) and one muted caption line:
+///
+///     work • signed in
+///     5H    [▓░···|·········]   0.8%
+///     7D    [▓▓▓▓▓▓|▓▓▓░····]  54.5%
+///     FABLE [····|··········]     0%
+///     weekly limit in 28 hr · 5-hour resets in 4 hr
+///
+/// - The bar (`PacerFuelBar`) is the window's use, in its `UsageBand`
+///   colour; an estimate's extra part is a lighter tail; the tick is where
+///   even pace would be by now. The value is `PacerMeterFormat`'s: whole
+///   for a reading, one decimal for an estimate.
+/// - An idle window shows a muted "idle" and an empty bar
+///   (`MenuBarWindowItem.fuelRow`).
+/// - The caption says only the reset and forecast facts that matter, the
+///   most urgent first, two at most (`AccountCaption`), in the forecast
+///   chip's words (`ForecastChip`), on the shared minute schedule.
+///
+/// What the rings, "pace 43%", "read 50%" and the per-row "resets in" /
+/// "limit in" captions said, the bar, its tick, its tail and the account's
+/// caption now say once. The Tokens row went with them: the approved
+/// layout keeps Today and Outlook.
 ///
 /// Why this exists separately from `MenuBarLabel`: the label is what
 /// shows in the menu bar all the time (gauge + chips); this is what
-/// drops down when the user clicks. The label is reactive at the
-/// chip level via @AppStorage; this view is reactive at the data
-/// level via @Query.
+/// drops down when the user clicks.
 struct MenuStatusContent: View {
     @State private var rateLimits: [LimitSamplePoint] = []
     @Query private var globalToday: [DailyAggregate]
@@ -750,14 +773,14 @@ struct MenuStatusContent: View {
         scopedSamples = loaded.scoped
         loadedAccount = account
 
-        // Concurrent accounts get a group each; sequential ones do not.
+        // Concurrent accounts get a block each; sequential ones do not.
         //
         // When two accounts run at the same time both caps bind at once, and
         // showing one is showing half. Used one at a time — the ordinary
-        // switcher case — only one binds, and a second group is noise in a menu
-        // that has to stay glanceable. The mode is decided from facts, not a
-        // heuristic: a session-mode config root, or activation spans that
-        // genuinely overlap.
+        // switcher case — only one binds, and a second block is noise in a
+        // menu that has to stay glanceable. The mode is decided from facts,
+        // not a heuristic: a session-mode config root, or activation spans
+        // that genuinely overlap.
         //
         // Several clients on several accounts at once is the same thing
         // (#245): Desktop running a routine on one account while the CLI is on
@@ -783,75 +806,152 @@ struct MenuStatusContent: View {
         }
     }
 
-    /// Engine answers for the outlook touches: per-window crossing (the
-    /// trailing caption goes red "limit in 6 hr" when a pre-reset hit is
-    /// projected) and the fixed Outlook row (projection once actionable,
-    /// pace-vs-normal before). Row COUNT stays constant — NSMenuItem.view
-    /// is measured at attach time, so conditional rows would clip.
+    // MARK: - Blocks
+
+    /// The block id of the one-account layout, which follows the scope.
+    static let scopeBlock = "scope"
+
+    /// One account's block: its name, whether it is the signed-in login, and
+    /// its windows at their live values.
+    struct Block: Identifiable {
+        let id: String
+        /// Whose engine answers for its windows; nil follows the scope.
+        let account: String?
+        /// Nil for a single-account user, who has no question to answer.
+        let name: String?
+        /// True: a green dot and "signed in". False (the one-account layout
+        /// pinned to another login): an orange "not signed in". Nil: neither.
+        let signedIn: Bool?
+        let clients: [String]
+        let windows: [MenuBarWindowItem]
+    }
+
+    /// One window's row as drawn at the menu's opening.
+    struct Row: Identifiable {
+        let window: MenuBarWindowItem
+        let fuel: MenuBarFuelRow
+        var id: String { window.key }
+    }
+
+    /// Every block the dropdown lists: one per active account when they run
+    /// concurrently, else the scope's account. Built in `body`, so a new live
+    /// value redraws it.
+    private var blocks: [Block] {
+        guard perAccount.isEmpty else {
+            return perAccount.map {
+                Block(id: $0.id, account: $0.id, name: $0.label, signedIn: $0.isActive ? true : nil,
+                      clients: $0.clients, windows: $0.windows)
+            }
+        }
+        // Whose limits these are, when that is a question at all. The menu
+        // bar reads the picked account, or the signed-in one when the scope
+        // is "all accounts", and it is the surface read without opening the
+        // app, so a percentage with no owner is a number you cannot act on.
+        let all = (try? menuModelContext.fetch(FetchDescriptor<Account>())) ?? []
+        let shown = UsageScope.limitAccountId(in: menuModelContext)
+        let name = all.count > 1 ? all.first { $0.id == shown }?.shortLabel : nil
+        let signedIn = shown.map { id in all.first { $0.isActive }?.id == id } ?? true
+        return [Block(id: Self.scopeBlock, account: loadedAccount, name: name,
+                      signedIn: name == nil ? nil : signedIn, clients: [], windows: windows)]
+    }
+
+    private var fiveHour: LimitSamplePoint? { rateLimits.first { $0.window == "five_hour" } }
+    private var sevenDay: LimitSamplePoint? { rateLimits.first { $0.window == "seven_day" } }
+
+    /// The scope's windows: 5h, 7d, then each scoped per-model window in the
+    /// latest poll, in the dashboard's glued-heroes order, at their live
+    /// values.
+    private var windows: [MenuBarWindowItem] {
+        MenuBarWindowSource.items(fiveHour: fiveHour, sevenDay: sevenDay, scoped: scopedSamples,
+                                  live: loadedAccount.flatMap { LiveMeterBoard.shared.values[$0] } ?? [:])
+    }
+
+    // MARK: - Forecasts
+
+    /// Each block's forecast per window: the engine's outlook and where it
+    /// ends at the reset, the two `ForecastChip.make` reads, asked with the
+    /// live value the row shows as the card asks them. The caption words
+    /// them (`AccountCaption`).
+    struct WindowForecast: Sendable {
+        let outlook: UsageIntelligenceEngine.BurnOutlook?
+        let end: Estimate?
+    }
+
+    /// What one block asks the engine: its windows, each with the live value
+    /// its row shows.
+    struct EnginePlan: Sendable {
+        struct Window: Sendable {
+            let key: String
+            let isScoped: Bool
+            let live: LiveMeterValue?
+        }
+        let block: String
+        let account: String?
+        let windows: [Window]
+
+        /// Changes with the window set and with each live value's whole
+        /// point, the forecast's own resolution, so a re-ask follows the
+        /// number rather than every tenth.
+        var key: String {
+            block + ":" + windows.map { "\($0.key)=\($0.live.map { Int($0.percent) } ?? -1)" }
+                .joined(separator: ",")
+        }
+    }
+
     @Environment(\.usageEngines) private var engines
-    @State private var outlooks: [String: UsageIntelligenceEngine.BurnOutlook] = [:]
-    /// The same captions for each account group in the concurrent layout,
-    /// keyed by account and then window. Each group asks its own account's
-    /// engine. The groups used to read `outlooks`, which is keyed by window
-    /// alone and comes from the scope's engine, so every account's 5h row
-    /// showed the same "limit in N hr", including an account that was not
-    /// burning at all (#163).
-    @State private var groupOutlooks: [String: [String: UsageIntelligenceEngine.BurnOutlook]] = [:]
+    @State private var forecasts: [String: [String: WindowForecast]] = [:]
     @State private var todayEOD: Estimate?
     @State private var pacePercentile: Double?
+    /// Bumped by each engine recompute, so the asking task restarts (and a
+    /// burst of recomputes coalesces into the last one).
+    @State private var engineTick = 0
 
-    private func refreshEngine(
-        scopedIdentities: [String],
-        groups: [(account: String, scoped: [String])]
-    ) async {
+    private func refreshEngine(_ plans: [EnginePlan]) async {
         // The menu bar follows the window's scope for spend, so its outlook
-        // captions come from the same scope's engine — otherwise the dropdown
-        // would show one account's cost above every account's projection.
+        // comes from the same scope's engine: otherwise the dropdown would
+        // show one account's cost above every account's projection.
         guard let host = engines else { return }
         let engine = host.engine(forAccount: UsageScope.storedAccountId)
-        // Rate limits are per account: under "all accounts" the captions are
-        // the active login's, from its own engine, the one the dashboard's
-        // column for that account reads (#303).
+        // Rate limits are per account: under "all accounts" the one-account
+        // block is the active login's, from its own engine, the one the
+        // dashboard's column for that account reads (#303). Each concurrent
+        // block asks its own account's engine (#163).
         let limitsEngine = UsageScope.storedAccountId.map { host.engine(forAccount: $0) }
             ?? host.rateLimitEngine
-        let groupEngines = groups.map {
-            (account: $0.account, scoped: $0.scoped, engine: host.engine(forAccount: $0.account))
+        let asked = plans.map { plan in
+            (plan: plan, engine: plan.block == Self.scopeBlock ? limitsEngine : host.engine(forAccount: plan.account))
         }
         // Off the main actor — `burnOutlook` runs `DiurnalBurnModel.fit`, and a
         // launch-time profile found it doing exactly that on the main thread
         // from here. See `askEngine`.
-        let ids = scopedIdentities
         let computed = await askEngine {
-            () -> (outlooks: [String: UsageIntelligenceEngine.BurnOutlook],
-                   groups: [String: [String: UsageIntelligenceEngine.BurnOutlook]],
-                   eod: Estimate, pace: Estimate) in
-            var perGroup: [String: [String: UsageIntelligenceEngine.BurnOutlook]] = [:]
-            for group in groupEngines {
-                perGroup[group.account] = await Self.outlooks(from: group.engine, scoped: group.scoped)
+            () -> (forecasts: [String: [String: WindowForecast]], eod: Estimate, pace: Estimate) in
+            var out: [String: [String: WindowForecast]] = [:]
+            for entry in asked {
+                out[entry.plan.block] = await Self.forecasts(from: entry.engine, windows: entry.plan.windows)
             }
-            return (await Self.outlooks(from: limitsEngine, scoped: ids),
-                    perGroup,
-                    await engine.ask(.projectedCost(.today)),
-                    await engine.ask(.pace))
+            return (out, await engine.ask(.projectedCost(.today)), await engine.ask(.pace))
         }
-        outlooks = computed.outlooks
-        groupOutlooks = computed.groups
+        // A scope switch or a newer recompute restarted the task: this
+        // answer is no longer wanted.
+        guard !Task.isCancelled else { return }
+        forecasts = computed.forecasts
         todayEOD = computed.eod
         pacePercentile = computed.pace.isInsufficient ? nil : computed.pace.value
     }
 
-    /// One engine's caption for every fixed window, and for each scoped
-    /// per-model window by identity, so each dynamic row gets the same
-    /// "limit in N hr" caption as 5h and 7d.
-    private nonisolated static func outlooks(
-        from engine: UsageIntelligenceEngine, scoped ids: [String]
-    ) async -> [String: UsageIntelligenceEngine.BurnOutlook] {
-        var next: [String: UsageIntelligenceEngine.BurnOutlook] = [:]
-        for w in RateLimitWindowKind.allCases {
-            if let o = await engine.burnOutlook(window: w) { next[w.rawValue] = o }
-        }
-        for id in ids {
-            if let o = await engine.burnOutlook(windowKey: id) { next[id] = o }
+    private nonisolated static func forecasts(
+        from engine: UsageIntelligenceEngine, windows: [EnginePlan.Window]
+    ) async -> [String: WindowForecast] {
+        var next: [String: WindowForecast] = [:]
+        for w in windows {
+            if !w.isScoped, let kind = RateLimitWindowKind(rawValue: w.key) {
+                next[w.key] = WindowForecast(outlook: await engine.burnOutlook(window: kind, live: w.live),
+                                             end: await engine.ask(.rateLimitOutlook(kind), live: w.live))
+            } else {
+                next[w.key] = WindowForecast(outlook: await engine.burnOutlook(windowKey: w.key, live: w.live),
+                                             end: await engine.ask(.scopedOutlook(w.key), live: w.live))
+            }
         }
         return next
     }
@@ -874,161 +974,199 @@ struct MenuStatusContent: View {
         )
     }
 
-    private var fiveHour: LimitSamplePoint? { rateLimits.first { $0.window == "five_hour" } }
-    private var sevenDay: LimitSamplePoint? { rateLimits.first { $0.window == "seven_day" } }
-
-    /// Every window the dropdown lists: 5h, 7d, then each scoped per-model
-    /// window in the latest poll, in the dashboard's glued-heroes order, at
-    /// their live values.
-    private var windows: [MenuBarWindowItem] {
-        MenuBarWindowSource.items(fiveHour: fiveHour, sevenDay: sevenDay, scoped: scopedSamples,
-                                  live: loadedAccount.flatMap { LiveMeterBoard.shared.values[$0] } ?? [:])
-    }
-
-    /// The account whose limits are on screen, named only when more than one
-    /// exists — a single-account user has no question to answer.
-    private var limitAccountLabel: String? {
-        let all = (try? menuModelContext.fetch(FetchDescriptor<Account>())) ?? []
-        guard all.count > 1 else { return nil }
-        return all.first { $0.id == UsageScope.limitAccountId(in: menuModelContext) }?.shortLabel
-    }
-
-    /// Whether that account is the one Claude Code is actually signed into.
-    private var ownerIsSignedIn: Bool {
-        let all = (try? menuModelContext.fetch(FetchDescriptor<Account>())) ?? []
-        guard let shown = UsageScope.limitAccountId(in: menuModelContext) else { return true }
-        return all.first { $0.isActive }?.id == shown
-    }
-
-
     private var todayCost: Double {
         todayAggregates.reduce(0) { $0 + $1.totalCostUSD }
     }
 
-    private var todayTokens: Int64 {
-        todayAggregates.reduce(0) { $0 + $1.tokens.all }
-    }
-
-    /// The popover's fixed width. Named because the screenshot harness used to
-    /// carry its own hard-coded copy (300pt) — close enough to pass unnoticed
-    /// while the real value was 280, and a visible clip once it became 336.
-    static let popoverWidth: CGFloat = 336
+    /// The popover's fixed width, the approved mockup's. Named because the
+    /// screenshot harness used to carry its own hard-coded copy, close enough
+    /// to pass unnoticed and a visible clip once the two drifted.
+    ///
+    /// The host (`NSMenuItem.view`) does not re-measure when the SwiftUI
+    /// body changes size; `menuWillOpen` re-reads `fittingSize` on each
+    /// open, so the height follows the blocks, and the width stays this.
+    static let popoverWidth: CGFloat = 300
 
     var body: some View {
-        // Width is fixed because the host (`NSMenuItem.view`) doesn't
-        // re-measure when the SwiftUI body changes size — the menu tracks the
-        // view's frame at attach time.
-        //
-        // 280pt was sized for a row of "pace 50% · resets in 2 hr." Then the
-        // rows gained a 54pt label column, because scoped windows need naming
-        // and "5-HOUR" has to sit somewhere. Nothing re-measured, so the two
-        // captions absorbed the loss and both truncated: "pace 6…" cut a
-        // percentage mid-number, and "resets in…" said nothing at all. A menu
-        // whose numbers are ellipses is not a readout.
-        //
-        // 336pt is that 280 plus the label column and its gap, so the captions
-        // get back exactly what they lost. Still inside the range Apple's own
-        // status menus occupy (Wi-Fi ~280, Sound ~300).
-        // Every open re-runs this body, so "pace 43%", "resets in 2 hr" and
-        // the awaiting-a-new-cycle state are judged against the clock at the
-        // moment the menu drops, not at the last poll or save. The host is
-        // kept between opens and nothing else here moves with the clock.
+        // Every open re-runs this body, so the bars, the idle states and the
+        // captions are judged against the clock at the moment the menu
+        // drops, not at the last poll or save. The host is kept between
+        // opens and nothing else here moves with the clock.
         let _ = StatusMenuOpening.shared.count
-        let windows = self.windows
-        let scopedIds = windows.filter(\.isScoped).map(\.key)
-        let groups = perAccount.map {
-            (account: $0.id, scoped: $0.windows.filter(\.isScoped).map(\.key))
+        let now = PacerClock.now
+        let blocks = self.blocks
+        let plans = blocks.map { block in
+            EnginePlan(block: block.id, account: block.account, windows: block.windows.map {
+                EnginePlan.Window(key: $0.key, isScoped: $0.isScoped, live: $0.readout?.live)
+            })
         }
-        // Stable key so `.task(id:)` re-asks the engine when the window SET
-        // changes (a scoped window appears / disappears, or an account group
-        // comes or goes), not on every save.
-        let windowKey = ([windows.map(\.key).joined(separator: ",")]
-            + perAccount.map { "\($0.id):" + $0.windows.map(\.key).joined(separator: ",") })
-            .joined(separator: "|")
-        return VStack(alignment: .leading, spacing: 4) {
-            // Whose limits these are, when that is a question at all.
-            //
-            // The menu bar reads the picked account, or the signed-in one when
-            // the scope is "all accounts" — and said so nowhere. That is the
-            // worst surface to leave ambiguous: it is the one you read
-            // *without opening the app*, so there is no scope control on screen
-            // to check against, and a percentage with no owner is a number you
-            // cannot act on. Worse when the app is scoped to the account you
-            // are not signed into: real limits, belonging to a login your
-            // terminal is not billing.
-            if perAccount.isEmpty, let owner = limitAccountLabel {
-                HStack(spacing: 4) {
-                    Text(owner)
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                    if !ownerIsSignedIn {
-                        Text("· not signed in")
-                            .font(.system(size: 10))
-                            .foregroundStyle(.orange)
-                    }
-                    Spacer(minLength: 0)
-                }
-                .padding(.bottom, 2)
-                .help(ownerIsSignedIn
-                      ? "These limits belong to the account Claude Code is using."
-                      : "Pacer is scoped to this account, but Claude Code is signed "
-                        + "into a different one — your next message is billed elsewhere.")
-                .pacerToolTip(ownerIsSignedIn
-                      ? "These limits belong to the account Claude Code is using."
-                      : "Pacer is scoped to this account, but Claude Code is signed "
-                        + "into a different one — your next message is billed elsewhere.")
-            }
-            if perAccount.isEmpty {
-                // One pace row per window — 5h, 7d, then each scoped per-model
-                // window. Fully dynamic: rows appear/vanish with the latest poll.
-                ForEach(windows) { window in
-                    paceRow(window: window, outlook: outlooks[window.key])
-                }
-            } else {
-                ForEach(perAccount) { group in
-                    HStack(spacing: 4) {
-                        Text(group.label)
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                        if group.isActive {
-                            Text("· signed in")
-                                .font(.system(size: 10))
-                                .foregroundStyle(.green)
-                        }
-                        ForEach(group.clients, id: \.self) { client in
-                            Text("· \(client)")
-                                .font(.system(size: 10))
-                                .foregroundStyle(.green)
-                        }
-                        Spacer(minLength: 0)
-                    }
-                    .padding(.top, group.id == perAccount.first?.id ? 0 : 6)
-                    ForEach(group.windows) { window in
-                        paceRow(window: window, outlook: groupOutlooks[group.id]?[window.key])
-                    }
-                }
+        let engineKey = plans.map(\.key).joined(separator: "|") + "#\(engineTick)"
+        return VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(blocks.enumerated()), id: \.element.id) { index, block in
+                accountBlock(block, now: now)
+                    .padding(.top, index == 0 ? 0 : 12)
             }
             // Native NSMenu items don't have inset separators; ours
             // here is a SwiftUI Divider that runs the content width —
             // close enough that the eye doesn't catch it as "off."
             Divider()
-                .padding(.vertical, 4)
-            todayValueRow(label: "Today", value: pacerCost(todayCost), tooltip: pacerCostExact(todayCost))
-            todayValueRow(label: "Tokens", value: pacerTokens(todayTokens), tooltip: "\(pacerTokensExact(todayTokens)) tokens")
-            outlookRow
+                .padding(.vertical, 8)
+            VStack(alignment: .leading, spacing: 4) {
+                todayValueRow(label: "Today", value: pacerCost(todayCost), tooltip: pacerCostExact(todayCost))
+                outlookRow
+            }
         }
         .padding(.horizontal, 14)
-        .padding(.vertical, 8)
+        .padding(.vertical, 10)
         .frame(width: Self.popoverWidth, alignment: .leading)
-        // Re-ask when the window set changes (scoped windows discovered) so a
-        // freshly-appeared row gets its outlook caption without waiting for the
-        // next engine recompute.
         .task(id: reloadKey) { reloadWindows() }
-        .task(id: windowKey) { await refreshEngine(scopedIdentities: scopedIds, groups: groups) }
+        // Re-ask when the window set changes (a scoped window appears), a
+        // live value crosses a whole point, or the engine recomputes.
+        .task(id: engineKey) { await refreshEngine(plans) }
         .onReceive(NotificationCenter.default.publisher(for: .pacerEngineDidRecompute)) { _ in
-            Task { await refreshEngine(scopedIdentities: scopedIds, groups: groups) }
+            engineTick &+= 1
         }
     }
+
+    // MARK: - An account's block
+
+    @ViewBuilder
+    private func accountBlock(_ block: Block, now: Date) -> some View {
+        let rows = block.windows.map { Row(window: $0, fuel: $0.fuelRow(now: now)) }
+        let forecasts = self.forecasts[block.id] ?? [:]
+        VStack(alignment: .leading, spacing: 5) {
+            if let name = block.name {
+                header(block, name: name)
+            }
+            ForEach(rows) { row in
+                barRow(row)
+            }
+            // Whether the line is there is decided at the opening, so the
+            // menu's height (measured then) holds while it stays open; what
+            // it says follows the shared minute schedule.
+            if !AccountCaption.facts(Self.captionWindows(rows, forecasts, at: now), now: now).isEmpty {
+                TimelineView(PacerReadAge.Schedule()) { context in
+                    // The schedule's entry can predate this opening when the
+                    // menu was closed between minutes.
+                    let at = max(context.date, now)
+                    let text = AccountCaption.text(Self.captionWindows(rows, forecasts, at: at), now: at)
+                    Text(text.isEmpty ? " " : text)
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                .padding(.top, 1)
+            }
+        }
+    }
+
+    /// The caption's inputs: each window with a number, its running cycle's
+    /// reset, and its forecast chip as the card would draw it at `at`.
+    private static func captionWindows(_ rows: [Row], _ forecasts: [String: WindowForecast],
+                                       at: Date) -> [AccountCaption.Window] {
+        rows.compactMap { row in
+            guard case let .percent(shown, _) = row.fuel.value else { return nil }
+            let forecast = forecasts[row.window.key]
+            let chip = forecast?.outlook.flatMap { outlook in
+                ForecastChip.make(outlook: outlook, endEstimate: forecast?.end,
+                                  duration: row.window.duration, usedPct: shown, now: at)
+            }
+            return AccountCaption.Window(name: row.window.captionName, percent: shown,
+                                         resetsAt: row.fuel.resetsAt, forecast: chip)
+        }
+    }
+
+    /// "work • signed in", "work · not signed in", or just the name.
+    @ViewBuilder
+    private func header(_ block: Block, name: String) -> some View {
+        let active = (block.signedIn == true ? ["signed in"] : []) + block.clients
+        let help: String? = block.id == Self.scopeBlock
+            ? (block.signedIn == false
+               ? "Pacer is scoped to this account, but Claude Code is signed "
+                 + "into a different one — your next message is billed elsewhere."
+               : "These limits belong to the account Claude Code is using.")
+            : nil
+        HStack(spacing: 5) {
+            if !active.isEmpty {
+                Circle()
+                    .fill(Color.green)
+                    .frame(width: 6, height: 6)
+            }
+            Text(name)
+                .font(.system(size: 12, weight: .semibold))
+                .lineLimit(1)
+            if !active.isEmpty {
+                Text(active.joined(separator: " · "))
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            if block.signedIn == false {
+                Text("not signed in")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.orange)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.bottom, 1)
+        .modifier(MenuHelp(text: help))
+    }
+
+    /// One window: its label, its bar, its number.
+    private func barRow(_ row: Row) -> some View {
+        HStack(spacing: 8) {
+            // A small accent dot marks the scoped window currently *in effect*.
+            HStack(spacing: 3) {
+                if row.window.isActive {
+                    Circle()
+                        .fill(Color.accentColor)
+                        .frame(width: 5, height: 5)
+                        .pacerToolTip("Currently in effect")
+                }
+                Text(row.window.barLabel)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .tracking(0.4)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+            }
+            .frame(width: 38, alignment: .leading)
+
+            PacerFuelBar(reading: row.fuel.reading, estimate: row.fuel.estimate, pace: row.fuel.pace)
+
+            rowValue(row)
+                .frame(minWidth: 44, alignment: .trailing)
+        }
+    }
+
+    @ViewBuilder
+    private func rowValue(_ row: Row) -> some View {
+        switch row.fuel.value {
+        case .noReading:
+            // An account seen before its first poll (#241): no number, not 0%.
+            Text("—")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.tertiary)
+                .pacerToolTip("No reading yet")
+        case .idle:
+            Text("idle")
+                .font(.system(size: 12))
+                .foregroundStyle(.tertiary)
+        case let .percent(pct, isEstimate):
+            PacerMeterValue(pct, isEstimate: isEstimate, color: UsageBand(percentage: pct).valueTextColor)
+                .font(.system(size: 12, weight: .semibold).monospacedDigit())
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+                // "read 42% 3m ago", and the estimate's number when it is
+                // one. The menu re-reads on every open, so the age is as of
+                // the open.
+                .pacerToolTip(row.window.readout.map { pacerMeterHelp($0) } ?? "")
+        }
+    }
+
+    // MARK: - Totals
 
     /// Fixed Outlook row, same language as the dashboard's Today tile:
     /// "≈$650 by tonight" once the range is actionable, the pace phrase
@@ -1059,156 +1197,6 @@ struct MenuStatusContent: View {
     }
 
     @ViewBuilder
-    private func paceRow(window: MenuBarWindowItem,
-                         outlook: UsageIntelligenceEngine.BurnOutlook? = nil) -> some View {
-        HStack(spacing: 8) {
-            // Label column, fixed width so every row's gauge stays aligned. A
-            // small accent dot marks the scoped window currently *in effect*.
-            HStack(spacing: 3) {
-                if window.isActive {
-                    Circle()
-                        .fill(Color.accentColor)
-                        .frame(width: 5, height: 5)
-                        .help("Currently in effect")
-                        .pacerToolTip("Currently in effect")
-                }
-                Text(window.displayName.uppercased())
-                    .font(.system(size: 10, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.secondary)
-                    .tracking(0.5)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.75)
-            }
-            .frame(width: 54, alignment: .leading)
-
-            if let pct = window.usedPercentage, let resets = window.resetsAt {
-                let cycle = DisplayCycle.resolve(resetsAt: resets, duration: window.duration)
-                // One gauge for both states, dimmed while awaiting. As two
-                // branches it was a new view at every cycle reset, the one
-                // moment its fill animation is worth seeing (#140).
-                //
-                // No number inside: it is printed right beside the ring, and
-                // an estimate's "50.7" did not fit a 22 pt ring. The reading
-                // is drawn solid, the estimated stretch past it as a lighter
-                // tail in the same colour (#318).
-                CircularGauge(
-                    reading: window.readout?.reading.percent ?? pct,
-                    estimate: window.isEstimate ? pct : nil,
-                    lineWidth: 3,
-                    showsLabel: false
-                )
-                .frame(width: 22, height: 22)
-                .opacity(cycle.isAwaiting ? 0.4 : 1)
-                if cycle.isAwaiting {
-                    // Stale cycle (Pacer hasn't polled a fresh one yet).
-                    // Show a muted "awaiting" line — no pace math from
-                    // prior-cycle numbers.
-                    Text("—")
-                        .font(.system(size: 12, weight: .semibold).monospacedDigit())
-                        .foregroundStyle(.tertiary)
-                        .frame(width: 32, alignment: .trailing)
-
-                    Text("awaiting new cycle")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
-
-                    Spacer(minLength: 0)
-                } else {
-                    let pacePct = cycle.paceFraction * 100
-                    let band = PaceBand(usedPct: pct, paceEndPct: pacePct)
-
-                    HStack(alignment: .firstTextBaseline, spacing: 3) {
-                        PacerMeterValue(pct, isEstimate: window.isEstimate)
-                            .font(.system(size: 12, weight: .semibold).monospacedDigit())
-                            // 32pt fits "99%" and not "100%", so at the cap
-                            // this wrapped to "100" over "%" (issue #125).
-                            // minWidth keeps every two-digit row
-                            // pixel-identical to before and lets only the
-                            // three-digit case (and an estimate's decimal)
-                            // take the room it needs.
-                            .lineLimit(1)
-                            .fixedSize(horizontal: true, vertical: false)
-                            .frame(minWidth: 32, alignment: .trailing)
-                            // "read 42% 3m ago", and the estimate's number
-                            // when it is one. The menu re-reads on every
-                            // open, so the age is as of the open.
-                            .pacerToolTip(window.readout.map { pacerMeterHelp($0) } ?? "")
-                        // What Anthropic last read, beside the estimate it is
-                        // built on: "51.3% read 50%" (#318). A reading needs
-                        // no echo.
-                        if let readout = window.readout, readout.isEstimate {
-                            Text(readout.readPercentText)
-                                .font(.system(size: 10))
-                                .monospacedDigit()
-                                .foregroundStyle(.tertiary)
-                                .lineLimit(1)
-                                .fixedSize(horizontal: true, vertical: false)
-                        }
-                    }
-
-                    Text("pace \(Int(pacePct.rounded()))%")
-                        .font(.system(size: 11, weight: .medium))
-                        .monospacedDigit()
-                        .foregroundStyle(band.color)
-                        // Never the column that gives way: "pace 6…" is a
-                        // number cut in half, which reads as a smaller number
-                        // rather than as missing text.
-                        .lineLimit(1)
-                        .fixedSize(horizontal: true, vertical: false)
-
-                    Spacer(minLength: 4)
-
-                    // The trailing caption escalates to the projected cap hit
-                    // when the engine sees one coming — same answer the
-                    // dashboard tiles and the notification share.
-                    // Whole points: an estimate of 99.6% has not reached
-                    // the limit.
-                    if (window.readout?.wholePercent ?? pct).rounded() >= 100 {
-                        // Already at the cap (as displayed): say so, never a
-                        // future crossing. The outlook's last-refit snapshot can
-                        // lag a point behind the live reading and would
-                        // otherwise read "limit in N min" beside a "100%".
-                        Text("at the limit")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(.red)
-                            .lineLimit(1)
-                    } else {
-                        // On the shared minute schedule: the menu re-reads on
-                        // every open, and while it stays open the countdown
-                        // still moves with every other age in the app.
-                        TimelineView(PacerReadAge.Schedule()) { context in
-                            if let o = outlook, o.willHitLimitBeforeReset,
-                               let eta = ForecastChip.relativeCrossing(o.projectedFullAt, now: context.date) {
-                                // Only the engine's confirmed claim goes red
-                                // (#304): a single refit's point crossing was
-                                // claimed here, and 87% of claimed 5-hour
-                                // cycles never reached the cap.
-                                Text("limit \(eta)")
-                                    .font(.system(size: 10, weight: .semibold))
-                                    .foregroundStyle(.red)
-                                    .lineLimit(1)
-                            } else {
-                                Text("resets \(pacerRelative(resets, style: .short, now: context.date))")
-                                    .font(.system(size: 10))
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                            }
-                        }
-                    }
-                }
-            } else {
-                // No reading at all — an account seen before its first poll
-                // (#241) — says so; a reading still missing its reset time
-                // keeps the old wording.
-                Text(window.usedPercentage == nil ? "no reading yet" : "collecting…")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.tertiary)
-                Spacer(minLength: 0)
-            }
-        }
-    }
-
-    @ViewBuilder
     private func todayValueRow(label: String, value: String, tooltip: String? = nil) -> some View {
         HStack(spacing: 8) {
             Text(label)
@@ -1222,6 +1210,20 @@ struct MenuStatusContent: View {
                 .foregroundStyle(.primary)
                 .help(tooltip ?? value)
                 .pacerToolTip(tooltip ?? value)
+        }
+    }
+}
+
+/// `.help` and the AppKit tooltip together, only when there is something to
+/// say: `.help` alone does nothing in a menu-bar surface on macOS 26+.
+private struct MenuHelp: ViewModifier {
+    let text: String?
+
+    func body(content: Content) -> some View {
+        if let text {
+            content.help(text).pacerToolTip(text)
+        } else {
+            content
         }
     }
 }

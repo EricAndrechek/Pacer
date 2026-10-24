@@ -190,3 +190,86 @@ public enum MenuBarWindows {
         return resolved
     }
 }
+
+// MARK: - The dropdown's fuel bars (#318)
+
+/// What one window's row in the menu-bar dropdown draws: a bar, a tick at
+/// even pace, and a value or "idle". Decided here, from the item and the
+/// instant the menu opened, so the rule is tested rather than buried in a
+/// view.
+public struct MenuBarFuelRow: Sendable, Equatable {
+
+    public enum Value: Sendable, Equatable {
+        /// No reading yet: "—", never a confident 0%.
+        case noReading
+        /// No window running (none started, or past its reset with nothing
+        /// read or estimated since): a muted "idle" and an empty bar.
+        case idle
+        /// The number: the live estimate (one decimal) or the reading.
+        case percent(Double, isEstimate: Bool)
+    }
+
+    public let value: Value
+    /// The bar's solid stretch: Anthropic's reading. Nil draws the empty track.
+    public let reading: Double?
+    /// The bar's lighter tail, to the estimate.
+    public let estimate: Double?
+    /// Where even pace would have the window by now, 0–1; nil when no cycle
+    /// is running.
+    public let pace: Double?
+    /// The running cycle's reset, for the caption; nil when none is running.
+    public let resetsAt: Date?
+}
+
+public extension MenuBarWindowItem {
+    /// "5H", "7D", "FABLE": the row's label.
+    var barLabel: String {
+        switch key {
+        case RateLimitWindowName.fiveHour where !isScoped: return "5H"
+        case RateLimitWindowName.sevenDay where !isScoped: return "7D"
+        default: return displayName.uppercased()
+        }
+    }
+
+    /// "5-hour", "weekly", "Fable": how the caption names it.
+    var captionName: String {
+        switch key {
+        case RateLimitWindowName.fiveHour where !isScoped: return "5-hour"
+        case RateLimitWindowName.sevenDay where !isScoped: return "weekly"
+        default: return displayName
+        }
+    }
+
+    /// The row at `now`.
+    ///
+    /// - A running cycle: the bar (the reading, an estimate's tail past it),
+    ///   the pace tick, the number.
+    /// - Past its reset: the old cycle's reading is not this window's, so the
+    ///   row is idle, unless the live meter has restarted an estimate for the
+    ///   new one, which is drawn alone (its tail from 0), with no tick: the
+    ///   new cycle's clock is not known until it is read.
+    /// - No cycle at all: idle at 0%; above it (an estimate on a window the
+    ///   first turn has just opened) the number and its bar, no tick.
+    func fuelRow(now: Date) -> MenuBarFuelRow {
+        guard let shown = usedPercentage else {
+            return MenuBarFuelRow(value: .noReading, reading: nil, estimate: nil, pace: nil, resetsAt: nil)
+        }
+        let reading = readout?.reading.percent ?? shown
+        let estimate = isEstimate ? shown : nil
+        let number = MenuBarFuelRow.Value.percent(shown, isEstimate: isEstimate)
+        let idle = MenuBarFuelRow(value: .idle, reading: nil, estimate: nil, pace: nil, resetsAt: nil)
+        // The readout's reading is the newer of the row's and the live
+        // value's, so its reset is the current one.
+        guard let resetsAt = readout.map({ $0.reading.resetsAt }) ?? resetsAt else {
+            guard PacerMeterFormat.tenths(shown) > 0 else { return idle }
+            return MenuBarFuelRow(value: number, reading: reading, estimate: estimate, pace: nil, resetsAt: nil)
+        }
+        let cycle = DisplayCycle.resolve(resetsAt: resetsAt, duration: duration, now: now)
+        guard !cycle.isAwaiting else {
+            guard isEstimate else { return idle }
+            return MenuBarFuelRow(value: number, reading: reading, estimate: estimate, pace: nil, resetsAt: nil)
+        }
+        return MenuBarFuelRow(value: number, reading: reading, estimate: estimate,
+                              pace: cycle.paceFraction, resetsAt: resetsAt)
+    }
+}

@@ -32,4 +32,10 @@ public extension UsageBand {
         case .red:    return .red
         }
     }
+
+    /// A % printed beside something already in the band's colour (the menu
+    /// bar's icon, the dropdown's bar): red only at the red band, primary
+    /// otherwise. Yellow and orange text read poorly in menus, and the
+    /// glyph beside it already carries the band.
+    var valueTextColor: Color { self == .red ? .red : .primary }
 }

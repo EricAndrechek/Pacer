@@ -33,14 +33,33 @@ public struct ForecastChip: Sendable, Equatable {
         case neutral
     }
 
+    /// What the chip says, for a surface that words it its own way (the
+    /// dropdown's caption, `AccountCaption`) or ranks windows by it.
+    public enum Kind: Sendable, Equatable {
+        /// At the top of the window now.
+        case atLimit
+        /// Crosses before the reset, claimed: "limit in 9 hr".
+        case limit(at: Date)
+        /// Crosses before the reset, the claim withheld: "may hit limit in 9 hr".
+        case mayHitLimit(at: Date)
+        /// Ends at the limit with no crossing before the reset.
+        case limitAroundReset
+        /// Ends under the limit: "≈52% at reset".
+        case atReset(Double)
+        /// Idle; the forecast keeps it where it is.
+        case holds
+    }
+
     public let text: String
     public let tint: Tint
     public let help: String
+    public let kind: Kind
 
-    public init(text: String, tint: Tint, help: String) {
+    public init(text: String, tint: Tint, help: String, kind: Kind) {
         self.text = text
         self.tint = tint
         self.help = help
+        self.kind = kind
     }
 
     /// The forecast ends at or past this: said as the limit, not as a number
@@ -65,7 +84,8 @@ public struct ForecastChip: Sendable, Equatable {
         if usedPct.rounded(.down) >= 100 {
             return ForecastChip(
                 text: "at the limit", tint: .band(.red),
-                help: "You're at the top of this window — usage can't climb further until it resets.")
+                help: "You're at the top of this window — usage can't climb further until it resets.",
+                kind: .atLimit)
         }
         let ratio = capPaceRatio(slopePercentPerHour: outlook.slopePercentPerHour, windowSeconds: duration)
         let atReset = endEstimate.flatMap { $0.isInsufficient ? nil : $0.value }
@@ -75,7 +95,8 @@ public struct ForecastChip: Sendable, Equatable {
             case .holds?:
                 return ForecastChip(
                     text: "holds until reset", tint: .neutral,
-                    help: "No movement in the last \(quiet), so the forecast keeps it here until it resets.")
+                    help: "No movement in the last \(quiet), so the forecast keeps it here until it resets.",
+                    kind: .holds)
             case .atReset(let end)?:
                 return atResetChip(
                     Double(end),
@@ -85,21 +106,24 @@ public struct ForecastChip: Sendable, Equatable {
             }
         }
         var help = capPaceHelp(slopePercentPerHour: outlook.slopePercentPerHour, windowSeconds: duration)
-        if outlook.willHitLimitBeforeReset, let eta = relativeCrossing(outlook.projectedFullAt, now: now) {
+        if outlook.willHitLimitBeforeReset, let hit = outlook.projectedFullAt,
+           let eta = relativeCrossing(hit, now: now) {
             if let phrase = crossingPhrase(outlook, now: now) {
                 let when = phrase
                     .replacingOccurrences(of: "→ may hit limit ", with: "")
                     .replacingOccurrences(of: "→ limit ", with: "")
                 help += " Crossing projected \(when), at your typical rhythm."
             }
-            return ForecastChip(text: "limit \(eta)", tint: .band(.red), help: help)
+            return ForecastChip(text: "limit \(eta)", tint: .band(.red), help: help, kind: .limit(at: hit))
         }
         // The line crosses before the reset but the claim is withheld: the
         // crossing, hedged in the words. The outcome is still the limit, so
         // the colour is the limit's.
-        if let withheld = outlook.hitWithheld, let eta = relativeCrossing(outlook.projectedFullAt, now: now) {
+        if let withheld = outlook.hitWithheld, let hit = outlook.projectedFullAt,
+           let eta = relativeCrossing(hit, now: now) {
             help += " The forecast line reaches 100% \(eta). " + withheldReason(withheld)
-            return ForecastChip(text: "may hit limit \(eta)", tint: .band(.red), help: help)
+            return ForecastChip(text: "may hit limit \(eta)", tint: .band(.red), help: help,
+                                kind: .mayHitLimit(at: hit))
         }
         guard let e = endEstimate, !e.isInsufficient else { return nil }
         if let band = e.interval80 {
@@ -113,11 +137,12 @@ public struct ForecastChip: Sendable, Equatable {
     /// it rounds to the limit without crossing it first.
     static func atResetChip(_ end: Double, help: String) -> ForecastChip {
         if end >= limitAroundResetFloor {
-            return ForecastChip(text: "limit around reset", tint: .band(.red), help: help)
+            return ForecastChip(text: "limit around reset", tint: .band(.red), help: help,
+                                kind: .limitAroundReset)
         }
         let shown = end.rounded()
         return ForecastChip(text: "≈\(Int(shown))% at reset",
-                            tint: .band(UsageBand(percentage: shown)), help: help)
+                            tint: .band(UsageBand(percentage: shown)), help: help, kind: .atReset(shown))
     }
 
     // MARK: - Crossing words
@@ -136,7 +161,7 @@ public struct ForecastChip: Sendable, Equatable {
     /// Coarse duration words: minutes under 90 (rounded to 5), hours under
     /// 48, days beyond. Crossing forecasts carry hours of uncertainty; finer
     /// units would be false precision.
-    static func coarseEta(_ d: Date, now: Date) -> String {
+    public static func coarseEta(_ d: Date, now: Date) -> String {
         let s = max(0, d.timeIntervalSince(now))
         if s < 90 * 60 {
             return "\(max(5, Int((s / 300).rounded()) * 5)) min"
