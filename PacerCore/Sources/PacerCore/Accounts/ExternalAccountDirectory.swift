@@ -99,13 +99,9 @@ public struct ExternalAccountDirectory: Sendable {
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
         fileManager: FileManager = .default
     ) -> [URL] {
-        let sessionParents = [
-            homeDirectory.appendingPathComponent(".claude-swap-backup/sessions"),
-            homeDirectory.appendingPathComponent(".local/share/claude-swap/sessions"),
-        ]
         var out: [URL] = []
         var seen = Set<String>()
-        for parent in sessionParents {
+        for parent in profileSessionDirectories(homeDirectory: homeDirectory) {
             guard let entries = try? fileManager.contentsOfDirectory(
                 at: parent, includingPropertiesForKeys: [.isDirectoryKey],
                 options: [.skipsHiddenFiles]
@@ -122,6 +118,44 @@ public struct ExternalAccountDirectory: Sendable {
             }
         }
         return out
+    }
+
+    /// The folders a switcher keeps its session profiles in, one profile per
+    /// subdirectory, whether or not they exist yet: claude-swap's macOS
+    /// location and its XDG one, like `loadClaudeSwap`. No disk access.
+    ///
+    /// The scan watches the ones that exist, so a profile created while Pacer
+    /// runs is heard on its first transcript write (#322).
+    public static func profileSessionDirectories(
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> [URL] {
+        [
+            homeDirectory.appendingPathComponent(".claude-swap-backup/sessions"),
+            homeDirectory.appendingPathComponent(".local/share/claude-swap/sessions"),
+        ].map(\.canonicalPathURL)
+    }
+
+    /// When a session profile's own history begins: the creation of its
+    /// directory, which every transcript written under it postdates.
+    ///
+    /// The attribution trail starts a profile's first span here rather than
+    /// at the moment Pacer first read its config (#322). A profile is found
+    /// *after* its first turns are written — on that turn's write while Pacer
+    /// runs, or at the next launch — and a span opened at the sighting left
+    /// every turn before it unattributed, because a pinned root never falls
+    /// back to the default login.
+    ///
+    /// nil when no such date belongs to this profile alone: its `projects/`
+    /// is a symlink (claude-swap's `--share-history` points it at the default
+    /// history), so the transcripts under it are the default login's as much
+    /// as this profile's, and stretching the profile's span over them could
+    /// only misattribute; or there is no `projects/`, or no date to read.
+    public static func historyStart(ofProfile root: URL) -> Date? {
+        let projects = root.appendingPathComponent("projects")
+        guard let values = try? projects.resourceValues(forKeys: [.isSymbolicLinkKey]),
+              values.isSymbolicLink != true
+        else { return nil }
+        return (try? root.resourceValues(forKeys: [.creationDateKey]))?.creationDate
     }
 
     /// claude-swap keeps its roster in `sequence.json` under its backup root.
