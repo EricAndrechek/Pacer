@@ -1183,6 +1183,17 @@ struct MenuStatusContent: View {
             }
             return "—"
         }()
+        // The likely range behind the point, where there is one. With the
+        // Tokens row gone this is the menu's last row, and the tooltip
+        // self-test (`MenuBarTooltipSelfTest`) hovers the bottom rows.
+        let help: String = {
+            if let e = todayEOD, let band = e.interval80,
+               IntelligenceFormatting.rangeIsActionable(e, spendSoFar: todayCost) {
+                return "Likely \(IntelligenceFormatting.approxCost(band.lowerBound))–"
+                    + "\(IntelligenceFormatting.approxCost(band.upperBound)) by midnight"
+            }
+            return value
+        }()
         HStack(spacing: 8) {
             Text("Outlook")
                 .font(.system(size: 12))
@@ -1193,6 +1204,8 @@ struct MenuStatusContent: View {
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
+                .help(help)
+                .pacerToolTip(help)
         }
     }
 
