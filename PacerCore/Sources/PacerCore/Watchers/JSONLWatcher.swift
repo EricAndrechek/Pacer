@@ -75,13 +75,15 @@ public actor JSONLWatcher {
     /// Cached so `updateLiveCadence` can restart the stream with a new
     /// latency without re-resolving roots.
     private var liveRootPaths: [String] = []
-    /// Folders watched for *new* roots rather than as roots (Claude Desktop's
-    /// agent-mode folder, #250). Only a `.claude/projects` transcript under one
-    /// counts as a change: Cowork also writes an `audit.jsonl` per action
-    /// there, and waking a scan for each would be a cycle for nothing.
+    /// Folders watched for *new* roots rather than as roots: Claude Desktop's
+    /// agent-mode folder (#250) and a switcher's session-profile folders
+    /// (#322). Only a transcript inside a root's `projects/` under one counts
+    /// as a change (`isTranscript`): Cowork also writes an `audit.jsonl` per
+    /// action there, a profile its own `history.jsonl` per prompt typed, and
+    /// waking a scan for each would be a cycle for nothing.
     ///
     /// Read from the FSEvents callback's hop, so it is actor state like the
-    /// rest; set once by `start`.
+    /// rest; set by `start` and `updateWatchedPaths`.
     private var discoveryPaths: [String] = []
     /// Live coalesce window in nanoseconds. Used by `coalesceTrigger`
     /// for its `Task.sleep` budget. Tunable at runtime via
@@ -194,8 +196,9 @@ public actor JSONLWatcher {
 
     /// A root under a discovery folder is already covered by it: FSEvents
     /// streams are recursive, and one watch per Cowork session would be
-    /// dozens of paths for one folder.
-    private static func watchPaths(
+    /// dozens of paths for one folder. A switcher's existing profiles are
+    /// covered by their sessions folder the same way.
+    static func watchPaths(
         roots: [ClaudePathResolver.ResolvedRoot], discovery: [String], extraPaths: [String]
     ) -> [String] {
         roots.map { $0.projectsDirectory.path }
@@ -341,8 +344,8 @@ public actor JSONLWatcher {
         var foundJsonl = false
         pathsLock.lock()
         for path in paths where path.hasSuffix(".jsonl") {
-            if discoveryPaths.contains(where: { path.hasPrefix($0) }),
-               !path.contains("/.claude/projects/") { continue }
+            if let folder = discoveryPaths.first(where: { path.hasPrefix($0) }),
+               !Self.isTranscript(path, underDiscoveryFolder: folder) { continue }
             changedPaths.insert(path)
             foundJsonl = true
         }
@@ -355,6 +358,18 @@ public actor JSONLWatcher {
             lastJsonlFSEventAt = Date()
             coalesceTrigger()
         }
+    }
+
+    /// Whether a `.jsonl` under a discovery folder (which ends in `/`) is a
+    /// transcript, the only kind of file there worth a scan: it sits in a
+    /// root's `projects/`. Cowork's roots are `<…>/.claude/` deep inside the
+    /// folder; a switcher's profiles are the folder's own children, so their
+    /// transcripts are `<profile>/projects/…`.
+    static func isTranscript(_ path: String, underDiscoveryFolder folder: String) -> Bool {
+        if path.contains("/.claude/projects/") { return true }
+        let below = path.dropFirst(folder.count)
+            .split(separator: "/", maxSplits: 2, omittingEmptySubsequences: false)
+        return below.count == 3 && below[1] == "projects"
     }
 
     /// Whether the next backstop tick should skip its emit. Returns

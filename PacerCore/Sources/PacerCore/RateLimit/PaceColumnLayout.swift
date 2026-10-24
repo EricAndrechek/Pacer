@@ -71,7 +71,7 @@ public enum PaceColumnLayout {
     /// grid dropping columns (6→2+2+2) instead of overflowing as width shrinks.
     ///
     /// Callers use this only for `itemCount > 2`; the 5h/7d-only case keeps its
-    /// original two-column `HStack`.
+    /// original two-column `HStack` arrangement (`PaceCardArrangement.pair`).
     public static func columnCount(
         itemCount: Int,
         availableWidth: Double,

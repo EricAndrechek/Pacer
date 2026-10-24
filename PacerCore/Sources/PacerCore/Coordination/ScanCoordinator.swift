@@ -615,6 +615,8 @@ public final class ScanCoordinator {
         self.container = container
         self.configuration = configuration
         self.homeDirectory = homeDirectory
+        self.profileSessionDirectories = ExternalAccountDirectory.profileSessionDirectories(
+            homeDirectory: homeDirectory)
         self.keychainStamp = keychainStamp
         self.fastRejectRecheckDelay = fastRejectRecheckDelay
         self.fastRejectLateRecheckDelay = fastRejectLateRecheckDelay
@@ -768,9 +770,14 @@ public final class ScanCoordinator {
         return report
     }
 
-    /// Session-profile roots found this resolution pass, kept so the trail
-    /// recorder can bind each to its account without re-walking the disk.
+    /// Session-profile roots found by the last resolution or re-listing, kept
+    /// so the trail recorder can bind each to its account without re-walking
+    /// the disk.
     private var sessionProfileRoots: [ClaudePathResolver.ResolvedRoot] = []
+    /// The roots the environment names (`resolver.resolve()`), kept so a
+    /// re-listing of session profiles can leave out one that is also a
+    /// primary root without resolving the environment again.
+    private var primaryRoots: [ClaudePathResolver.ResolvedRoot] = []
 
     /// Every root worth scanning: the environment's, plus any per-account
     /// session profile an external switcher has created.
@@ -781,27 +788,144 @@ public final class ScanCoordinator {
     /// tokens and cost simply missing rather than misattributed. Discovery is
     /// best-effort and additive: a switcher that is not installed contributes
     /// nothing, and a path that fails validation is dropped rather than
-    /// breaking the scan.
+    /// breaking the scan. Profiles created later are picked up while running
+    /// (`refreshProfileRootsIfNeeded`, #322).
     private func resolveAllRoots() throws -> [ClaudePathResolver.ResolvedRoot] {
-        let primary = try resolver.resolve()
-        // This coordinator's home, not the process's: a test or probe that
-        // gives it a home of its own must not scan the machine's profiles.
-        let discovered = resolver.resolveAdditional(
-            ExternalAccountDirectory.discoverProfileRoots(homeDirectory: homeDirectory)
-        )
-        sessionProfileRoots = discovered.filter { !primary.contains($0) }
+        primaryRoots = try resolver.resolve()
+        // Both spellings of each folder: FSEvents reports resolved paths.
+        profileSessionPrefixes = Array(Set(profileSessionDirectories.flatMap {
+            [$0.path + "/", $0.resolvingSymlinksInPath().path + "/"]
+        }))
+        sessionProfileRoots = discoverSessionProfileRoots()
+        lastProfileRootRefresh = Date()
         if !sessionProfileRoots.isEmpty {
             log("roots: +\(sessionProfileRoots.count) session profile(s)")
         }
-        let known = Set((primary + sessionProfileRoots).map(\.root.path))
+        let known = Set((primaryRoots + sessionProfileRoots).map(\.root.path))
         desktopRoots = (desktopSessions?.scanRoots ?? []).filter { !known.contains($0.root.path) }
         desktopInstallIds = (desktopSessions?.installs ?? []).map(\.id)
         if !desktopRoots.isEmpty {
             log("roots: +\(desktopRoots.count) from \(desktopInstallIds.count) Claude Desktop install(s)")
         }
         lastDesktopRootRefresh = Date()
-        return primary + sessionProfileRoots + desktopRoots
+        return primaryRoots + sessionProfileRoots + desktopRoots
     }
+
+    /// The switcher's session profiles on disk now, minus any that is also a
+    /// primary root (a probe pointed at a profile with `CLAUDE_CONFIG_DIR`),
+    /// which would otherwise be scanned twice and bound as pinned. Compared by
+    /// path: a listed directory and a hand-built one can disagree as `URL`s.
+    private func discoverSessionProfileRoots() -> [ClaudePathResolver.ResolvedRoot] {
+        let primary = Set(primaryRoots.map(\.root.path))
+        // This coordinator's home, not the process's: a test or probe that
+        // gives it a home of its own must not scan the machine's profiles.
+        return resolver.resolveAdditional(
+            ExternalAccountDirectory.discoverProfileRoots(homeDirectory: homeDirectory)
+        ).filter { !primary.contains($0.root.path) }
+    }
+
+    /// Where the switcher keeps its profiles (`ExternalAccountDirectory`),
+    /// existing or not. Fixed by the home directory.
+    private let profileSessionDirectories: [URL]
+    /// Those folders as path prefixes, as written and as resolved.
+    private var profileSessionPrefixes: [String] = []
+    private var lastProfileRootRefresh: Date?
+    /// How often a full-walk cycle lists the switcher's folders again. A new
+    /// profile's first write also asks (see `refreshProfileRootsIfNeeded`), so
+    /// this is only the backstop, at Desktop's cadence for the same reason.
+    private static let profileRootRefreshInterval: TimeInterval = 60
+    /// Re-listings since launch. A test seam: a cycle that changed nothing
+    /// must not list.
+    private(set) var profileRootRelistsForTesting = 0
+
+    /// Pick up session profiles created since the roots were resolved (#322).
+    ///
+    /// A `cswap run` (or any terminal pinning `CLAUDE_CONFIG_DIR` to a new
+    /// profile) while Pacer ran stayed unscanned until the next launch: its
+    /// turns missing from every total, with nothing to say so.
+    ///
+    /// The same two triggers as Desktop's agent-mode sessions, for the same
+    /// reason. The switcher's folders are watched (`extraWatchPaths`), so a
+    /// new profile's first transcript write arrives as a hint no root claims,
+    /// and is listed at once; a full walk (`hinted == nil`) lists once a
+    /// minute, the backstop for a dropped event or folders that appeared after
+    /// launch. Any other cycle costs a prefix check per hint and no disk.
+    ///
+    /// Not on cswap's state files, though the login watcher already watches
+    /// its usage cache: that is rewritten on every poll of every account and
+    /// says nothing about sessions, and a profile only becomes a root once
+    /// Claude Code has written a transcript into it — `projects/` is what
+    /// makes it one — which is after anything `cswap run` itself writes. The
+    /// transcript write is the event that matters, so that is what is heard.
+    ///
+    /// A profile that has gone stays a root until the next launch. Walking a
+    /// missing folder costs nothing, whereas dropping one on a listing that
+    /// failed for a moment would leave its next live writes claimed by no
+    /// root — read as the default login's, the one account they are known not
+    /// to be.
+    ///
+    /// Returns the hint with any path no root can claim dropped, and the
+    /// profiles added. When any were, `hinted` is nil: this cycle walks every
+    /// root, so a new profile is read from its first line.
+    private func refreshProfileRootsIfNeeded(
+        hinted: Set<String>?
+    ) -> (hinted: Set<String>?, added: [ClaudePathResolver.ResolvedRoot]) {
+        let unclaimed = (hinted ?? []).filter {
+            isUnderProfileSessions($0) && !Self.isClaimed($0, by: resolvedRoots)
+        }
+        let due = hinted == nil && (lastProfileRootRefresh.map {
+            Date().timeIntervalSince($0) >= Self.profileRootRefreshInterval } ?? true)
+        guard !unclaimed.isEmpty || due else { return (hinted, []) }
+        lastProfileRootRefresh = Date()
+        profileRootRelistsForTesting += 1
+        // A folder that appeared since launch (the switcher installed while
+        // Pacer ran) is watched from now on.
+        if extraWatchPaths != watchedExtraPaths { watchNeedsUpdate = true }
+        let known = Set(sessionProfileRoots.map(\.root.path))
+        let added = discoverSessionProfileRoots().filter { !known.contains($0.root.path) }
+        if !added.isEmpty {
+            log("roots: +\(added.count) session profile(s) while running "
+                + "(\(known.count + added.count) in all)")
+            sessionProfileRoots += added
+            // A profile outranks a Desktop root at the same path, as at launch.
+            let addedPaths = Set(added.map(\.root.path))
+            desktopRoots = desktopRoots.filter { !addedPaths.contains($0.root.path) }
+            resolvedRoots = primaryRoots + sessionProfileRoots + desktopRoots
+            watchNeedsUpdate = true
+        }
+        // A file under the switcher's folders that no profile claims even now
+        // (no `projects/` around it) must not reach the scanner, which would
+        // stamp it with no root: the default login's account, for a turn known
+        // to be some profile's.
+        guard added.isEmpty else { return (nil, added) }
+        return (hinted.map { $0.subtracting(unclaimed) }, [])
+    }
+
+    private func isUnderProfileSessions(_ path: String) -> Bool {
+        profileSessionPrefixes.contains { path.hasPrefix($0) }
+    }
+
+    /// Whether some root claims `path` the way the scanner decides it: by the
+    /// root's `projects/` as written, then as resolved, since FSEvents reports
+    /// resolved paths (`JSONLScanner.collectHintedCandidates`). The resolved
+    /// pass runs only for a path the first one could not place.
+    private static func isClaimed(_ path: String, by roots: [ClaudePathResolver.ResolvedRoot]) -> Bool {
+        if ClaudePathResolver.ResolvedRoot.root(forFile: path, among: roots) != nil { return true }
+        let resolved = roots.map {
+            ClaudePathResolver.ResolvedRoot(
+                root: $0.root, projectsDirectory: $0.projectsDirectory.resolvingSymlinksInPath(),
+                fixedProjectPath: $0.fixedProjectPath)
+        }
+        return ClaudePathResolver.ResolvedRoot.root(forFile: path, among: resolved) != nil
+    }
+
+    /// Test seams for the roots and folders a cycle works from.
+    var resolvedRootsForTesting: [ClaudePathResolver.ResolvedRoot] { resolvedRoots }
+    /// The extra folders the watcher was last handed.
+    var watchedExtraPathsForTesting: [String] { watchedExtraPaths }
+    /// Make the next full walk re-list the switcher's folders, as if a minute
+    /// had passed.
+    func expireProfileRootRefreshForTesting() { lastProfileRootRefresh = nil }
 
     /// The roots Claude Desktop adds: one per agent-mode (Cowork) session
     /// (#250), and each install's own `CLAUDE_CONFIG_DIR` (#295). Kept apart
@@ -817,10 +941,42 @@ public final class ScanCoordinator {
     private static let desktopRootRefreshInterval: TimeInterval = 60
 
     /// The folders the watcher covers besides the scan roots: Desktop's
-    /// agent-mode folders, so a Cowork session that starts after launch is
-    /// heard on its first write rather than at the next restart.
+    /// agent-mode folders (#250) and the switcher's session-profile folders
+    /// (#322), so a Cowork session or a `cswap run` profile that starts after
+    /// launch is heard on its first write rather than at the next restart.
+    /// Only folders that exist; one that appears later is added by the next
+    /// re-listing.
+    ///
+    /// Watching a sessions folder rather than each profile's `projects/` also
+    /// delivers its config rewrites, `history.jsonl` and the like. The watcher
+    /// drops those before they can wake a cycle (`JSONLWatcher.isTranscript`):
+    /// they cost it a string check per event, batched at its latency, and
+    /// never a scan.
     private var extraWatchPaths: [String] {
-        (desktopSessions?.agentSessionDirectories ?? []).map(\.path)
+        let fm = FileManager.default
+        return (desktopSessions?.agentSessionDirectories ?? []).map(\.path)
+            + profileSessionDirectories.filter { dir in
+                var isDirectory: ObjCBool = false
+                return fm.fileExists(atPath: dir.path, isDirectory: &isDirectory)
+                    && isDirectory.boolValue
+            }.map(\.path)
+    }
+    /// What the watcher was last handed, so a re-listing that changed nothing
+    /// it watches restarts nothing.
+    private var watchedExtraPaths: [String] = []
+    /// Set by a re-listing that changed what should be watched; acted on once
+    /// per cycle by `rewatchIfNeeded`, so the watcher gets one up-to-date
+    /// request rather than one per refresher, possibly out of order.
+    private var watchNeedsUpdate = false
+
+    private func rewatchIfNeeded() {
+        guard watchNeedsUpdate else { return }
+        watchNeedsUpdate = false
+        let watcher = self.watcher, roots = resolvedRoots, extra = extraWatchPaths
+        watchedExtraPaths = extra
+        // Not awaited: the watcher restarts its stream only when the paths
+        // differ, and the cycle should not wait on its actor for that.
+        Task { await watcher.updateWatchedPaths(roots: roots, extraPaths: extra) }
     }
 
     /// Pick up agent-mode sessions started since the roots were resolved.
@@ -862,8 +1018,7 @@ public final class ScanCoordinator {
         if installIds != desktopInstallIds {
             // A new install brings a folder to watch; one gone takes its own.
             desktopInstallIds = installIds
-            let watcher = self.watcher, roots = resolvedRoots, extra = extraWatchPaths
-            Task { await watcher.updateWatchedPaths(roots: roots, extraPaths: extra) }
+            watchNeedsUpdate = true
         }
         return (nil, true)
     }
@@ -928,7 +1083,8 @@ public final class ScanCoordinator {
         // buffer, and the cycle after resumes from the cursors this one
         // saved — the persister rejects anything read twice by its key.
         walkEveryFileNextCycle = true
-        await watcher.start(roots: resolvedRoots, extraPaths: extraWatchPaths)
+        watchedExtraPaths = extraWatchPaths
+        await watcher.start(roots: resolvedRoots, extraPaths: watchedExtraPaths)
         if await abandonIfStopped() { return }
         // Apply whatever visibility state we already have at startup —
         // a login-at-launch invocation has no window, so this widens
@@ -1901,10 +2057,21 @@ public final class ScanCoordinator {
             let paths = watcher.consumeChangedPaths()
             hintedPaths = paths.isEmpty ? nil : paths
         }
-        // Claude Desktop's agent-mode sessions come and go while Pacer runs.
-        // A new one's first write arrives as a hint no root claims.
+        // A switcher's session profiles (#322) and Claude Desktop's agent-mode
+        // sessions (#250) come and go while Pacer runs. A new one's first
+        // write arrives as a hint no root claims.
+        let profileRoots = refreshProfileRootsIfNeeded(hinted: hintedPaths)
+        hintedPaths = profileRoots.hinted
+        if !profileRoots.added.isEmpty {
+            // Bound to their accounts before the walk below reads a line of
+            // them, as launch-time profiles are at the top of the cycle: a
+            // profile's turns must never be read as the default login's.
+            recorder.pollPinnedRoots(profileRoots.added.map(\.root))
+            activePersister.accountTrail = recorder.trail()
+        }
         let desktopRoots = refreshDesktopRootsIfNeeded(hinted: hintedPaths)
         hintedPaths = desktopRoots.hinted
+        rewatchIfNeeded()
         if hintedPaths?.isEmpty == true { hintedPaths = nil }
         let consumeMs = tickMs()
         // A full scan means "read every transcript from byte zero" — a first

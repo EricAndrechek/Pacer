@@ -197,4 +197,96 @@ struct AccountTrailRecorderTests {
         #expect(trail.accountId(at: at, rootPath: profile.standardizedFileURL.path) == "org-session")
         #expect(trail.hasConcurrentAccounts)
     }
+
+    /// A profile with its own `projects/`, its config naming `org`, created at
+    /// `created`.
+    private func makeProfile(_ home: URL, _ name: String, org: String, created: Date,
+                             sharedHistory: URL? = nil) throws -> URL {
+        let profile = home.appendingPathComponent(".claude-swap-backup/sessions/\(name)")
+        try FileManager.default.createDirectory(at: profile, withIntermediateDirectories: true)
+        let projects = profile.appendingPathComponent("projects")
+        if let sharedHistory {
+            try FileManager.default.createSymbolicLink(at: projects, withDestinationURL: sharedHistory)
+        } else {
+            try FileManager.default.createDirectory(at: projects, withIntermediateDirectories: true)
+        }
+        try "{\"oauthAccount\":{\"organizationUuid\":\"\(org)\"}}"
+            .write(to: profile.appendingPathComponent(".claude.json"), atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.creationDate: created], ofItemAtPath: profile.path)
+        return profile.canonicalPathURL
+    }
+
+    // #322: a profile is only ever found after turns were written in it — on
+    // its first write while Pacer runs, or at the next launch. A span opened
+    // at the sighting left those turns unattributed.
+    @Test("a profile's first span starts when the profile was created, not when it was found")
+    func firstPinnedSpanStartsAtTheProfilesCreation() throws {
+        let home = try makeHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let context = ModelContext(try makeContainer())
+        let created = Date(timeIntervalSince1970: 1_000_000)
+        let profile = try makeProfile(home, "2-personal", org: "org-session", created: created)
+        let found = Date(timeIntervalSince1970: 2_000_000)
+
+        let recorder = makeRecorder(home, context)
+        recorder.pollPinnedRoots([profile], now: found)
+
+        let spans = try context.fetch(FetchDescriptor<AccountActivation>())
+        #expect(spans.count == 1)
+        #expect(spans.first?.startedAt == created)
+        // A turn written between the profile's creation and its discovery is
+        // the profile's account's; nothing before the profile existed is.
+        let trail = recorder.trail()
+        #expect(trail.accountId(at: created.addingTimeInterval(60), rootPath: profile.path) == "org-session")
+        #expect(trail.accountId(at: created.addingTimeInterval(-60), rootPath: profile.path) == nil)
+    }
+
+    @Test("a root that has had a span gets no backdated one, so no recorded history is overlapped")
+    func onlyTheFirstPinnedSpanIsBackdated() throws {
+        let home = try makeHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let context = ModelContext(try makeContainer())
+        let created = Date(timeIntervalSince1970: 1_000_000)
+        let profile = try makeProfile(home, "2-personal", org: "org-old", created: created)
+        let firstSeen = Date(timeIntervalSince1970: 2_000_000)
+        let recorder = makeRecorder(home, context)
+        recorder.pollPinnedRoots([profile], now: firstSeen)
+
+        // The profile is signed into another account later on.
+        let config = profile.appendingPathComponent(".claude.json")
+        try "{\"oauthAccount\":{\"organizationUuid\":\"org-new\"}}"
+            .write(to: config, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSince1970: 3_000_000)], ofItemAtPath: config.path)
+        let relogged = Date(timeIntervalSince1970: 3_000_000)
+        recorder.pollPinnedRoots([profile], now: relogged)
+
+        let spans = try context.fetch(FetchDescriptor<AccountActivation>(
+            sortBy: [SortDescriptor(\.startedAt)]))
+        #expect(spans.map(\.accountId) == ["org-old", "org-new"])
+        #expect(spans.map(\.startedAt) == [created, relogged])
+        #expect(spans.first?.endedAt == relogged)
+    }
+
+    @Test("a profile sharing the default history is not backdated over it")
+    func sharedHistoryProfileStartsWhenFound() throws {
+        let home = try makeHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let context = ModelContext(try makeContainer())
+        let defaultProjects = home.appendingPathComponent(".claude/projects")
+        try FileManager.default.createDirectory(at: defaultProjects, withIntermediateDirectories: true)
+        let profile = try makeProfile(home, "2-personal", org: "org-session",
+                                      created: Date(timeIntervalSince1970: 1_000_000),
+                                      sharedHistory: defaultProjects)
+        let found = Date(timeIntervalSince1970: 2_000_000)
+
+        let recorder = makeRecorder(home, context)
+        recorder.pollPinnedRoots([profile], now: found)
+
+        // Its `projects/` is the default login's history too: stretching the
+        // profile's span over it could only misattribute.
+        let spans = try context.fetch(FetchDescriptor<AccountActivation>())
+        #expect(spans.first?.startedAt == found)
+        #expect(ExternalAccountDirectory.historyStart(ofProfile: profile) == nil)
+    }
 }

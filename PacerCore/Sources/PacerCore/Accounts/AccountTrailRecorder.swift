@@ -127,6 +127,14 @@ public final class AccountTrailRecorder {
     /// left open. There is no reliable way to tell from outside whether a
     /// session is still running, and it does not matter: any turn ever
     /// written under that root belongs to that account whenever it happened.
+    ///
+    /// Which is why a root's *first* span starts at the profile's history
+    /// start (`ExternalAccountDirectory.historyStart(ofProfile:)`), not now:
+    /// a profile is only ever found after turns were written in it — at its
+    /// first transcript write while Pacer runs (#322), or at the next launch
+    /// — and a span opened at the sighting left those turns unattributed. A
+    /// root that has had any span keeps the old rule, so no recorded history
+    /// is overlapped.
     public func pollPinnedRoots(_ roots: [URL], now: Date = Date()) {
         for root in roots {
             guard let (url, modified) = observer.currentConfig(
@@ -139,7 +147,8 @@ public final class AccountTrailRecorder {
                 configAt: url, rootPath: root.standardizedFileURL.path
             ) else { continue }
             record(observation, now: now, source: AccountActivation.sourceExternal,
-                   evidence: "session profile \(root.lastPathComponent)")
+                   evidence: "session profile \(root.lastPathComponent)",
+                   firstSpanStart: { ExternalAccountDirectory.historyStart(ofProfile: root) })
             applyLabels(from: observation)
         }
     }
@@ -565,11 +574,17 @@ public final class AccountTrailRecorder {
 
     /// Apply an observation to the trail, opening and closing activations as
     /// needed. Idempotent: re-applying the same account is a no-op.
+    ///
+    /// `firstSpanStart` lets the first span a root ever gets begin earlier
+    /// than `now` (see `pollPinnedRoots`). Asked only when that span is about
+    /// to be inserted and nothing has ever been recorded for the root, so the
+    /// usual cycle — an unchanged account — never calls it.
     public func record(
         _ observation: ActiveAccountObserver.Observation,
         now: Date,
         source: String,
-        evidence: String?
+        evidence: String?,
+        firstSpanStart: (() -> Date?)? = nil
     ) {
         let accountKey = observation.accountKey
         let open = openActivations(rootPath: observation.rootPath)
@@ -583,9 +598,15 @@ public final class AccountTrailRecorder {
             activation.endedAt = now
         }
         if !open.contains(where: { $0.accountId == accountKey }) {
+            var startedAt = now
+            if open.isEmpty, let firstSpanStart,
+               !hasRecordedAnything(rootPath: observation.rootPath),
+               let start = firstSpanStart(), start < now {
+                startedAt = start
+            }
             context.insert(AccountActivation(
                 accountId: accountKey,
-                startedAt: now,
+                startedAt: startedAt,
                 rootPath: observation.rootPath,
                 source: source,
                 evidence: evidence
@@ -616,6 +637,15 @@ public final class AccountTrailRecorder {
     /// Drop the cached trail — for callers that wrote activations by another
     /// route (a backfill, a manual assignment in Settings).
     public func invalidate() { cachedTrail = nil }
+
+    /// Whether any span, open or closed, was ever recorded for this root. An
+    /// unreadable store answers yes, which keeps the conservative start.
+    private func hasRecordedAnything(rootPath: String?) -> Bool {
+        var descriptor = FetchDescriptor<AccountActivation>(
+            predicate: #Predicate { $0.rootPath == rootPath })
+        descriptor.fetchLimit = 1
+        return ((try? context.fetchCount(descriptor)) ?? 1) > 0
+    }
 
     private func openActivations(rootPath: String?) -> [AccountActivation] {
         let descriptor = FetchDescriptor<AccountActivation>(

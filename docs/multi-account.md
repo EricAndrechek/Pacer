@@ -265,6 +265,21 @@ missing from tokens, cost and project history with nothing to indicate a hole.
 is bound to its account from the profile's *own* `oauthAccount` — never the
 switcher's say-so — before its transcripts are parsed.
 
+A profile created while Pacer runs (`cswap run`) is picked up without a
+restart (#322), the way Claude Desktop's agent-mode sessions are: the
+switcher's sessions folders are watched, so the profile's first transcript
+write arrives as a file no root claims and the folders are listed again then;
+a full-walk cycle also lists them once a minute. Its existing transcripts are
+read from the start, bound first. A profile that disappears stays a root until
+the next launch, because a missed listing must never leave a profile's live
+writes to be read as the default login's.
+
+A profile's **first** span starts when the profile directory was created, not
+when Pacer first read its config: a profile is only ever found after turns were
+written in it, and a span opened at the sighting left them unattributed. Not
+for a profile whose `projects/` is a symlink (`--share-history`), whose
+transcripts are the default login's too.
+
 ### Labels
 
 Two accounts on the same plan derive the identical placeholder

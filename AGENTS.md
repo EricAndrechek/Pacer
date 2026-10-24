@@ -314,6 +314,31 @@ Rules that follow from it:
   it also means a visual change needs the same sign-off any shared view does —
   flag it, don't slip it in as a side effect of unrelated work.
 
+## Forecasts and estimates: a point by default, the range one step in
+
+**Glanceable views show one number.** Dashboard cards, the menu bar and its
+dropdown, widgets, chips and notifications show the estimate itself: the
+projection at reset, the cost by tonight, the live meter. Not "$10.5k–$12k",
+not "52–61%", not a band drawn behind a glanceable chart. The owner reads a
+range at a glance as noise, and a range on every surface buries the one number
+that answers "will I make it?" (owner, 2026-10-20 and 2026-10-24).
+
+**The uncertainty is still shown, one step in:** on hover, on click, or in a
+detail sheet. The pace card is the pattern. Its big number and chips are
+points; the prediction details behind them carry the calibrated range, the
+model, its track record and why a claim is hedged. The Outlook row's tooltip
+("Likely $X–$Y by midnight") and the end-of-day bar's hover do the same for
+money. Give any new forecast the same two layers.
+
+- **A range shown anywhere is a calibrated one:** the engine's conformal band,
+  built from each model's own past misses. Never the spread between candidate
+  models, which is not calibrated (#203, closed).
+- **Hedge in words, not in a range,** where a point would overclaim: "may hit
+  limit in 9 hr" for a crossing the engine will not confirm yet.
+- **This is the default, not a ban.** A view whose whole job is the
+  uncertainty (the compare-models sheet, a detail sheet's accuracy section)
+  shows it directly.
+
 ## Conventions
 
 - Bundle ID: `com.ericandrechek.pacer`. App Group: `YZXWMJ5VBY.com.ericandrechek.pacer`

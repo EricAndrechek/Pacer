@@ -84,7 +84,9 @@ So the tournament reproduces the right choice with no human in the loop.
    only help, never regress. It'll be selected automatically if it starts
    winning (more history, or better features — stacking the simple
    forecasters' outputs as features is the obvious next lever).
-4. **Uncertainty — tracked in #203.** The spread of candidate predictions
-   as a cheap interval ("$10.5k–$12k"). It is uncalibrated and conflicts with
-   the "points, not ranges" UI rule; the proposal there is not to build it.
-   Calibrated bands are the engine's conformal ones.
+4. **Uncertainty — #203, closed (not planned).** The spread of candidate
+   predictions as a cheap interval ("$10.5k–$12k") is uncalibrated, so it is
+   not built. Calibrated bands are the engine's conformal ones, and they are
+   shown one step in (hover, click, a detail sheet), never on a glanceable
+   surface: see AGENTS.md, "Forecasts and estimates: a point by default, the
+   range one step in".
