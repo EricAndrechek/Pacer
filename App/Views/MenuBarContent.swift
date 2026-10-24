@@ -902,11 +902,33 @@ struct MenuStatusContent: View {
     @State private var forecasts: [String: [String: WindowForecast]] = [:]
     @State private var todayEOD: Estimate?
     @State private var pacePercentile: Double?
-    /// Bumped by each engine recompute, so the asking task restarts (and a
-    /// burst of recomputes coalesces into the last one).
+    /// Bumped by each engine recompute, so the asking task restarts.
     @State private var engineTick = 0
+    /// One ask in flight, the latest request queued behind it — the gate
+    /// `PaceChartCard.runProjectionRefresh` uses, for the same reason. A
+    /// restart does not stop the ask it was waiting on (`askEngine` is
+    /// detached), and dropping that answer as cancelled left the dropdown on
+    /// "Outlook —" with no forecasts whenever restarts (a burst of recomputes,
+    /// a live value crossing a point) came faster than one ask finished.
+    @State private var isAskingEngine = false
+    @State private var queuedPlans: [EnginePlan]?
 
     private func refreshEngine(_ plans: [EnginePlan]) async {
+        guard !isAskingEngine else {
+            queuedPlans = plans
+            return
+        }
+        isAskingEngine = true
+        var next: [EnginePlan]? = plans
+        while let current = next {
+            queuedPlans = nil
+            await askEngineOnce(current)
+            next = queuedPlans
+        }
+        isAskingEngine = false
+    }
+
+    private func askEngineOnce(_ plans: [EnginePlan]) async {
         // The menu bar follows the window's scope for spend, so its outlook
         // comes from the same scope's engine: otherwise the dropdown would
         // show one account's cost above every account's projection.
@@ -932,9 +954,9 @@ struct MenuStatusContent: View {
             }
             return (out, await engine.ask(.projectedCost(.today)), await engine.ask(.pace))
         }
-        // A scope switch or a newer recompute restarted the task: this
-        // answer is no longer wanted.
-        guard !Task.isCancelled else { return }
+        // No scope check: a scope switch rebuilds this view
+        // (`MenuBarKeyedContent`), so an old account's answer lands in state
+        // nothing shows. A newer request is already queued behind this one.
         forecasts = computed.forecasts
         todayEOD = computed.eod
         pacePercentile = computed.pace.isInsufficient ? nil : computed.pace.value
