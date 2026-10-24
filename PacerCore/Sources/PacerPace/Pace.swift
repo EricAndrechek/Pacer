@@ -1,4 +1,5 @@
 import Foundation
+import PacerCore
 
 /// What a `pace` run can touch, injectable so the commands can be tested
 /// in-process: output, the clock, sleeping, the network, and `git`.
@@ -594,6 +595,8 @@ final class PaceRun {
         var active = ""
         var pct: [Slot: Double] = [:]
         var live: [Slot: Double] = [:]
+        var liveWhole: [Slot: Double] = [:]
+        var liveEstimate: [Slot: Bool] = [:]
         var fields: [String: [Slot: String]] = [:]
         func slot(_ p: PaceMetricPoint) -> Slot {
             let s = Slot(account: p.label("account"), window: p.label("window"))
@@ -613,7 +616,12 @@ final class PaceRun {
             } else if p.name == "pacer_rate_limit_used_ratio" {
                 pct[slot(p)] = p.value * 100
             } else if p.name == "pacer_rate_limit_live_used_ratio" {
-                live[slot(p)] = p.value * 100
+                // A tenth at most: undo the ratio's float error (0.426 × 100).
+                live[slot(p)] = (p.value * 1000).rounded() / 10
+            } else if p.name == "pacer_rate_limit_live_whole_ratio" {
+                liveWhole[slot(p)] = (p.value * 100).rounded()
+            } else if p.name == "pacer_rate_limit_live_estimate" {
+                liveEstimate[slot(p)] = p.value == 1
             } else if kept.contains(p.name) {
                 fields[p.name, default: [:]][slot(p)] = p.raw
             }
@@ -629,11 +637,16 @@ final class PaceRun {
             let sampleAge = f("pacer_rate_limit_sample_age_seconds")
             let fresh = sampleAge.map { PaceFormat.number($0) <= PaceRules.liveMaxReadingAge } ?? false
             let livePercent = fresh ? live[s] : nil
+            // The gate judges whole points (#318): the estimate cut to a
+            // whole number. A Pacer from before the decimal served whole
+            // points as `live_used_ratio` and no whole ratio.
+            let whole = livePercent.map { liveWhole[s] ?? ($0 + 1e-6).rounded(.down) }
+            let estimate = (livePercent != nil && liveEstimate[s] == true) ? livePercent : nil
             return PaceRow(
                 account: s.account, identity: s.window,
                 label: PaceRules.label(forIdentity: s.window),
                 model: PaceRules.model(forIdentity: s.window),
-                percent: livePercent ?? reading,
+                percent: whole ?? reading,
                 resetsIn: f("pacer_rate_limit_reset_seconds"),
                 hitEta: f("pacer_rate_limit_hit_eta_seconds"),
                 burn: f("pacer_rate_limit_burn_percent_per_hour"),
@@ -641,7 +654,8 @@ final class PaceRun {
                 recentBurn: f("pacer_rate_limit_recent_burn_percent_per_hour"),
                 sampleAge: sampleAge,
                 reading: livePercent == nil ? nil : reading,
-                liveAge: livePercent == nil ? nil : f("pacer_rate_limit_live_age_seconds"))
+                liveAge: livePercent == nil ? nil : f("pacer_rate_limit_live_age_seconds"),
+                estimate: estimate)
         }
     }
 
@@ -781,12 +795,17 @@ final class PaceRun {
                !PaceRules.binds(windowModel: row.model, wanted: model) {
                 mine = "  — binds \(row.model) only"
             }
-            // The live value is what the gate judges; the reading it started
-            // from beside it, when the two differ.
-            let reading = row.isLive && row.readingPercent != row.percent
-                ? " (reading \(PaceFormat.percent(PaceFormat.awkNumber(row.readingPercent)))%)" : ""
-            io.out(prefix + Self.pad(row.label, 10) + " " + Self.pad(PaceFormat.percent(row.percentText), 4, right: true)
-                   + "% used" + reading + rate + full + " · resets in " + Self.pad(PaceFormat.human(row.resetsIn), 7)
+            // An estimate (#318) is written as every Pacer surface writes it,
+            // with its decimal, marked, and the reading it started from:
+            // `42.6% est · read 42% 3m ago`. A reading stays `42% used`.
+            var shown = Self.pad(PaceFormat.percent(row.percentText), 4, right: true) + "% used"
+            if let estimate = row.estimate {
+                let age = row.sampleAge.map { " " + PaceFormat.human($0) + " ago" } ?? ""
+                shown = Self.pad(PacerMeterFormat.number(estimate, isEstimate: true), 4, right: true) + "% est · read "
+                    + PacerMeterFormat.percent(row.readingPercent, isEstimate: false) + age
+            }
+            io.out(prefix + Self.pad(row.label, 10) + " " + shown
+                   + rate + full + " · resets in " + Self.pad(PaceFormat.human(row.resetsIn), 7)
                    + " (" + PaceFormat.clock(row.resetsIn, now: now) + ")" + mine + "\n")
         }
     }
@@ -808,7 +827,12 @@ final class PaceRun {
         text += selected.map { row in
             "    {\"account\": \"\(row.account)\", \"identity\": \"\(row.identity)\", \"label\": \"\(row.label)\", "
             + "\"model\": \"\(row.model)\", \"usedPercent\": \(PaceFormat.awkNumber(row.readingPercent)), "
-            + (row.isLive ? "\"livePercent\": \(row.percentText), \"liveAgeSeconds\": \(row.liveAge ?? "null"), " : "")
+            + (row.isLive
+               ? "\"livePercent\": \(PaceFormat.awkNumber(row.estimate ?? row.readingPercent)), "
+                 + "\"liveWholePercent\": \(row.percentText), "
+                 + "\"liveIsEstimate\": \(row.isEstimate ? "true" : "false"), "
+                 + "\"liveAgeSeconds\": \(row.liveAge ?? "null"), "
+               : "")
             + "\"resetsInSeconds\": \(row.resetsIn ?? "null"), "
             + "\"willHitLimit\": \(PaceFormat.number(row.willHit) == 1 ? "true" : "false"), "
             + "\"hitEtaSeconds\": \(row.hitEta ?? "null"), \"burnPercentPerHour\": \(row.burn ?? "null"), "

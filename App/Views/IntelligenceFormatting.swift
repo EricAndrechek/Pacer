@@ -120,128 +120,9 @@ enum IntelligenceFormatting {
         return "\(top) · \(cap)"
     }
 
-    /// The crossing as window-scaled copy, leading with the conformal
-    /// earliest–latest range whenever the engine has one: the point crossing
-    /// alone over-promises (model selection optimizes end-of-cycle error, and
-    /// the candidates' crossing *times* legitimately spread hours apart).
-    /// Same-day ranges read as clock times ("→ limit 4 PM–9 PM"), multi-day
-    /// ones as day labels ("→ limit tomorrow–Sat"). When the lower band never
-    /// crosses — the reset may genuinely win — the phrasing softens to "may
-    /// hit limit". ("Limit", not "cap": Eric flagged "cap" as a poor word,
-    /// and "limit" matches the hero chip + Anthropic's own term.)
-    static func crossingPhrase(_ o: UsageIntelligenceEngine.BurnOutlook) -> String? {
-        crossingPhrase(at: o.projectedFullAt, earliest: o.projectedFullAtEarliest,
-                       latest: o.projectedFullAtLatest, usedPct: o.usedPct)
-    }
-
-    static func crossingPhrase(at hit: Date?, earliest: Date?, latest: Date?, usedPct: Double) -> String? {
-        guard let hit else { return nil }
-        if let earliest, let latest, latest > earliest {
-            let bothToday = earliest.timeIntervalSinceNow < 22 * 3600
-                && latest.timeIntervalSinceNow < 22 * 3600
-            if bothToday {
-                // Keep minutes when the whole range lands within ~3 hours —
-                // "around 10 AM" for a 25-minute-away crossing reads stale.
-                let fmt: Date.FormatStyle = latest.timeIntervalSinceNow < 3 * 3600
-                    ? .dateTime.hour().minute() : .dateTime.hour()
-                let lo = earliest.formatted(fmt)
-                let hi = latest.formatted(fmt)
-                return lo == hi ? "→ limit around \(lo)" : "→ limit \(lo)–\(hi)"
-            }
-            let lo = dayLabel(earliest), hi = dayLabel(latest)
-            if lo == hi {
-                let dp0 = dayPart(earliest), dp1 = dayPart(latest)
-                return dp0 == dp1 ? "→ limit \(lo) \(dp0)" : "→ limit \(lo) \(dp0)–\(dp1)"
-            }
-            return "→ limit \(lo)–\(hi)"
-        }
-        let pointFmt: Date.FormatStyle = hit.timeIntervalSinceNow < 3 * 3600
-            ? .dateTime.hour().minute() : .dateTime.hour()
-        let point = hit.timeIntervalSinceNow < 22 * 3600
-            ? "around \(hit.formatted(pointFmt))"
-            : "\(hit.formatted(.dateTime.weekday(.abbreviated))) \(dayPart(hit))"
-        // A calibrated earliest with no latest-plausible crossing means the
-        // lower band says the reset might come first — assert the cap only
-        // when usage is already so high it's near-inevitable; otherwise say
-        // "may". (No bands at all keeps the plain assertion: there's no
-        // evidence either way, and the point is the model's best answer.)
-        if earliest != nil, latest == nil, usedPct < 90 {
-            return "→ may hit limit \(point)"
-        }
-        return "→ limit \(point)"
-    }
-
-    /// "in 45 min" / "in 7 hr" / "in 3 days" — the relative form of the
-    /// crossing for the hero-tile chip, the menu bar, and notification
-    /// titles. A POINT, deliberately (points not ranges — Eric, 2026-07-06):
-    /// the chip surfaces are glanceable and a "5 min–32 hr" range there reads
-    /// broken, while the coarse units already say "approximately". The
-    /// calibrated earliest–latest range still speaks where there's room to
-    /// explain it — `crossingPhrase` in the hover tooltip and the
-    /// notification body's "likely between…" line.
-    static func relativeCrossingPhrase(_ o: UsageIntelligenceEngine.BurnOutlook) -> String? {
-        relativeCrossingPhrase(at: o.projectedFullAt)
-    }
-
-    static func relativeCrossingPhrase(at hit: Date?) -> String? {
-        guard let hit else { return nil }
-        return "in \(coarseEta(hit).text)"
-    }
-
-    /// Coarse duration words — minutes under 90 (rounded to 5), hours under
-    /// 48, days beyond. Crossing forecasts carry hours of uncertainty;
-    /// finer-grained units would be false precision.
-    private static func coarseEta(_ d: Date) -> (amount: String, unit: String, text: String) {
-        let s = max(0, d.timeIntervalSinceNow)
-        if s < 90 * 60 {
-            let m = max(5, Int((s / 300).rounded()) * 5)
-            return ("\(m)", "min", "\(m) min")
-        }
-        if s < 48 * 3600 {
-            let h = max(2, Int((s / 3600).rounded()))
-            return ("\(h)", "hr", "\(h) hr")
-        }
-        let days = max(2, Int((s / 86400).rounded()))
-        return ("\(days)", "days", "\(days) days")
-    }
-
-    /// "today" / "tomorrow" / "Sat" — day-scale label for multi-day
-    /// crossing ranges.
-    static func dayLabel(_ d: Date) -> String {
-        let cal = Calendar.current
-        if cal.isDateInToday(d) { return "today" }
-        if cal.isDateInTomorrow(d) { return "tomorrow" }
-        return d.formatted(.dateTime.weekday(.abbreviated))
-    }
-
-    /// Current burn relative to the rate that exactly reaches 100% at reset
-    /// (100% ÷ window length). >1 means the limit comes before the reset if
-    /// the rate holds. Kept as the *color* driver for the burn chip; the
-    /// "0.5× sustainable pace" text form it used to feed read as jargon
-    /// (Eric, 2026-06-12) and is gone — chips now say what happens instead
-    /// ("≈52% at reset" / "limit in 7 hr").
-    static func capPaceRatio(slopePercentPerHour slope: Double, windowSeconds: TimeInterval) -> Double {
-        let capPace = 100.0 / (windowSeconds / 3600)
-        return capPace > 0 ? slope / capPace : 0
-    }
-
     /// "0.3×" / "1.8×" / "12×" — one decimal below ten, whole above.
     static func multiple(_ ratio: Double) -> String {
         ratio >= 10 ? String(format: "%.0f×", ratio) : String(format: "%.1f×", ratio)
-    }
-
-    /// Burn-chip tooltip: the raw rate plus what it means in plain words.
-    static func capPaceHelp(slopePercentPerHour slope: Double, windowSeconds: TimeInterval) -> String {
-        let capPace = 100.0 / (windowSeconds / 3600)
-        return String(format: "Burning %+.1f%%/hr. A steady %.1f%%/hr would land exactly at 100%% when this window resets — anything faster hits the limit early.", slope, capPace)
-    }
-
-    static func dayPart(_ d: Date) -> String {
-        switch Calendar.current.component(.hour, from: d) {
-        case ..<12: return "morning"
-        case ..<17: return "afternoon"
-        default:    return "evening"
-        }
     }
 
     static func ordinal(_ n: Int) -> String {
@@ -249,80 +130,14 @@ enum IntelligenceFormatting {
         return f.string(from: NSNumber(value: n)) ?? "\(n)th"
     }
 
-    // MARK: - Burn chip (shared by the 5h/7d columns and the scoped tiles)
+    // MARK: - Forecast chip colours
 
-    /// Chip text + tint + tooltip for a window's burn outlook — the single
-    /// source of truth for the "≈52% at reset" / "limit in 7 hr" / "at the
-    /// limit" verdict, used by both the fixed 5h/7d pace columns and the scoped
-    /// per-model tiles (extract-shared, don't copy). `nil` when effectively idle
-    /// (chip hidden). Outcome language, not rate ratios.
-    ///
-    /// `usedPct` is the LIVE reading the hero shows, deliberately separate from
-    /// `outlook.usedPct` (the engine's last-refit snapshot): when the hero reads
-    /// 100% we must never project a *future* crossing the lagging snapshot
-    /// implies.
-    static func burnChip(
-        outlook: UsageIntelligenceEngine.BurnOutlook,
-        endEstimate: Estimate?,
-        duration: TimeInterval,
-        usedPct: Double
-    ) -> (text: String, tint: Color, help: String, symbol: String)? {
-        if usedPct.rounded() >= 100 {
-            return ("at the limit", .red,
-                    "You're at the top of this window — usage can't climb further until it resets.", "flame.fill")
-        }
-        let ratio = capPaceRatio(slopePercentPerHour: outlook.slopePercentPerHour, windowSeconds: duration)
-        let atReset = endEstimate.flatMap { $0.isInsufficient ? nil : $0.value }
-        guard ratio >= BurnRate.idleFractionOfCapPace else {
-            let quiet = WindowSpec.isWeeklyScale(duration: duration) ? "day" : "90 minutes"
-            switch BurnRate.idleVerdict(usedPct: usedPct, atReset: atReset) {
-            case .holds?:
-                return ("holds until reset", .secondary,
-                        "No movement in the last \(quiet), so the forecast keeps it here until it resets.", "pause.fill")
-            case .atReset(let end)?:
-                return ("≈\(end)% at reset", .green,
-                        "Quiet for the last \(quiet), but your usual rhythm picks up again before the reset.", "flame.fill")
-            case nil:
-                return nil
-            }
-        }
-        var help = capPaceHelp(slopePercentPerHour: outlook.slopePercentPerHour, windowSeconds: duration)
-        if outlook.willHitLimitBeforeReset, let eta = relativeCrossingPhrase(outlook) {
-            if let phrase = crossingPhrase(outlook) {
-                let when = phrase
-                    .replacingOccurrences(of: "→ may hit limit ", with: "")
-                    .replacingOccurrences(of: "→ limit ", with: "")
-                help += " Crossing projected \(when), at your typical rhythm."
-            }
-            return ("limit \(eta)", .red, help, "flame.fill")
-        }
-        // The line crosses before the reset but the claim is withheld: say the
-        // crossing, hedged. Falling through printed the at-reset value, which
-        // that same crossing clamps to "≈100% at reset".
-        if let withheld = outlook.hitWithheld, let eta = relativeCrossingPhrase(outlook) {
-            help += " The forecast line reaches 100% \(eta). " + withheldReason(withheld)
-            return ("may hit limit \(eta)", .orange, help, "flame.fill")
-        }
-        let tint: Color = ratio < 0.9 ? .green : ratio < 1.15 ? .secondary : .orange
-        if let e = endEstimate, !e.isInsufficient {
-            if let band = e.interval80 {
-                help += String(format: " Calibrated range at reset: %.0f–%.0f%%.",
-                               band.lowerBound, band.upperBound)
-            }
-            return ("≈\(Int(e.value.rounded()))% at reset", tint, help, "flame.fill")
-        }
-        return (String(format: "%+.1f%%/hr", outlook.slopePercentPerHour), tint, help, "flame.fill")
-    }
-
-    static func withheldReason(_ w: UsageIntelligenceEngine.BurnOutlook.HitWithheld) -> String {
-        switch w {
-        case .earlyInWindow:
-            return String(format: "Not called below %.0f%% used: early bursts usually slow down.",
-                          BurnRate.warningUsedFloor)
-        case .slowEndResetsFirst:
-            return "Not called yet: at the slow end of its usual error, the window resets first."
-        case .unconfirmed:
-            return "Called once it holds on the next update."
+    /// The colour for a forecast chip's tint (`ForecastChip`): the band the
+    /// window ends up in, or grey.
+    static func color(_ tint: ForecastChip.Tint) -> Color {
+        switch tint {
+        case .band(let band): return band.color
+        case .neutral:        return .secondary
         }
     }
 }

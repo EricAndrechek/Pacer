@@ -164,12 +164,15 @@ struct PacerMetricsTests {
             identity: "five_hour", label: "5-hour", group: "session",
             usedPercent: 42, resetsAt: nil, resetsInSeconds: 7200,
             sampledAt: generated.addingTimeInterval(-150), sampleAgeSeconds: 150,
-            livePercentage: 45, liveAsOf: generated.addingTimeInterval(-4), liveAddedPoints: 3)
+            livePercentage: 45.6, liveAsOf: generated.addingTimeInterval(-4), liveAddedPoints: 3,
+            liveIsEstimate: true, liveWholePercentage: 45)
         let text = PacerMetrics(snapshot: sampleSnapshot(limits: .init(fiveHour: five, sevenDay: nil)),
                                 version: "1.0", build: "1").prometheusText()
         #expect(text.contains("pacer_rate_limit_used_ratio{window=\"five_hour\"} 0.42"))
         #expect(text.contains("pacer_rate_limit_sample_age_seconds{window=\"five_hour\"} 150"))
-        #expect(text.contains("pacer_rate_limit_live_used_ratio{window=\"five_hour\"} 0.45"))
+        #expect(text.contains("pacer_rate_limit_live_used_ratio{window=\"five_hour\"} 0.456"))
+        #expect(text.contains("pacer_rate_limit_live_whole_ratio{window=\"five_hour\"} 0.45"))
+        #expect(text.contains("pacer_rate_limit_live_estimate{window=\"five_hour\"} 1"))
         #expect(text.contains("pacer_rate_limit_live_age_seconds{window=\"five_hour\"} 4"))
         #expect(text.contains("# TYPE pacer_rate_limit_live_used_ratio gauge"))
     }

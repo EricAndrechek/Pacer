@@ -159,6 +159,11 @@ struct BulkMergeSheet: View {
     }
 
     var body: some View {
+        // The "last active 2d ago" labels are day-scale ages, and this sheet
+        // can be opened from Settings, which the main window's midnight
+        // `.id(dayKey)` does not rebuild. Read here so the rollover redraws
+        // them (#318).
+        let _ = PacerToday.shared.key
         VStack(alignment: .leading, spacing: 16) {
             header
             canonicalPicker

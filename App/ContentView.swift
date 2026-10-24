@@ -89,13 +89,30 @@ struct ContentView: View {
     /// the Dock or Cmd+Tab'd, macOS shows the title bar text; with
     /// this in place the user gets at-a-glance pacing without
     /// surfacing the dashboard.
-    private var windowSubtitle: String { Self.windowSubtitle(for: scopedAccount) }
+    private var windowSubtitle: String {
+        Self.windowSubtitle(for: scopedAccount,
+                            live: scopedAccount.flatMap { LiveMeterBoard.shared.values[$0.id] } ?? [:])
+    }
 
-    private static func windowSubtitle(for account: Account?) -> String {
+    /// Each window at its live value (#318), from the account's cached
+    /// latest readings: "5h 42.6% • 7d 12%", a reading whole and an estimate
+    /// with its decimal (`PacerMeterFormat`). `live` is read in `body`
+    /// (through `windowSubtitle`), so a new value retitles the window.
+    private static func windowSubtitle(for account: Account?, live: [String: LiveMeterValue]) -> String {
         guard let account else { return "" }
+        let now = Date()
+        func shown(_ key: String, _ pct: Double?, _ resets: Date?) -> String? {
+            guard let pct else { return nil }
+            // `latestPolledAt` is the poll's `sampledAt`, the instant the
+            // live value's reading carries too.
+            let reading = MeterReading(at: account.latestPolledAt ?? .distantPast, percent: pct, resetsAt: resets)
+            return LiveMeterReadout(reading: reading, live: live[key], now: now).text
+        }
         let parts: [String?] = [
-            account.latestFiveHourPct.map { "5h \(Int($0.rounded()))%" },
-            account.latestSevenDayPct.map { "7d \(Int($0.rounded()))%" }
+            shown(RateLimitWindowName.fiveHour, account.latestFiveHourPct, account.latestFiveHourResetsAt)
+                .map { "5h \($0)" },
+            shown(RateLimitWindowName.sevenDay, account.latestSevenDayPct, account.latestSevenDayResetsAt)
+                .map { "7d \($0)" }
         ]
         return parts.compactMap { $0 }.joined(separator: " • ")
     }
@@ -540,9 +557,12 @@ struct ToolbarFreshness: View {
     //
     // `.equatable()` on `PillBody` (below) already stopped the AppKit relayout,
     // which was the 2026-06-23 fix. It cannot stop the outer body or these
-    // fetches; only not being a `@Query` does that. One second is far finer
-    // than the value's own granularity and costs four capped fetches.
-    private static let refreshInterval: TimeInterval = 1
+    // fetches; only not being a `@Query` does that.
+    //
+    // The clock half runs on `PacerReadAge.Schedule`'s instants, the whole
+    // minutes every age label in the app changes on (#318): the pill's "3m
+    // ago" moves with the cards' "read 3m ago". It used to tick once a
+    // second, sixty times the label's own granularity.
     @State private var display: Display = Display(state: .none, label: "", tooltip: "")
     /// What the derived getters below read. Refreshed by `refresh()`; these
     /// were `@Query` arrays, and everything downstream is unchanged.
@@ -562,17 +582,17 @@ struct ToolbarFreshness: View {
     /// Each is capped (`fetchLimit = 1`, or a single keyed meta row) and
     /// `sampledAt` is indexed, so this is four index seeks — the problem was
     /// never the cost of one refresh, it was doing it on every save forever.
-    /// The 1 Hz tick. Only the *label* needs re-deriving each second — the
-    /// timestamps it formats change when the scanner writes, not when the
-    /// clock moves — so this reads the one cheap unpredicated row and rebuilds
-    /// the display; everything account-predicated is loaded on the write
-    /// signal instead. See `refreshScopedProbes`.
+    /// The minute tick, and each scan cycle. Only the *label* needs
+    /// re-deriving as the clock moves — the timestamps it formats change when
+    /// the scanner writes — so this reads the one cheap unpredicated row and
+    /// rebuilds the display as of `now`; everything account-predicated is
+    /// loaded on the write signal instead. See `refreshScopedProbes`.
     ///
     /// The one row is read off the main thread, like `NowStrip`'s probes: a
     /// cheap read still waits its turn for the store, and on the main thread
     /// at 1 Hz that turned every tick of an engine refit into a stall (#152).
     @MainActor
-    private func refresh() async {
+    private func refresh(now: Date = PacerClock.now) async {
         if !scanReadInFlight {
             scanReadInFlight = true
             defer { scanReadInFlight = false }
@@ -583,27 +603,27 @@ struct ToolbarFreshness: View {
                     predicate: #Predicate<ClaudeCodeMeta> { $0.key == key })))?.first?.value
             }.value
         }
-        display = currentDisplay
+        display = currentDisplay(now: now)
     }
 
     /// What the pill shows now. "auth paused" in place of an ever-older
     /// "33m ago" when the limits' account has no unexpired token left and
     /// nothing has used it since its last reading (#198); the reason is the
     /// tooltip.
-    private var currentDisplay: Display {
+    private func currentDisplay(now: Date = PacerClock.now) -> Display {
         // Ahead of everything else: while history is being rebuilt the other
         // readings are mid-change, and this is the one thing worth saying.
         if let step = rebuild.step {
             return Display(state: .recent, label: "Updating history…", tooltip: step.detail)
         }
         let lastUse = [tokens.first?.sampledAt, sessionRows.first?.lastSeenAt].compactMap { $0 }.max()
-        if sessionActivity != .active,
+        if sessionActivity(now: now) != .active,
            TokenPoolStatus.shared.isAuthPaused(
             account: UsageScope.shared.limitAccountId,
-            lastReadingAt: rateLimits.first?.sampledAt, lastActivityAt: lastUse) {
+            lastReadingAt: rateLimits.first?.sampledAt, lastActivityAt: lastUse, now: now) {
             return Display(state: .stale, label: AuthPause.label, tooltip: AuthPause.reason)
         }
-        return Display(state: freshness, label: label, tooltip: tooltip)
+        return Display(state: freshness(now: now), label: label(now: now), tooltip: tooltip(now: now))
     }
 
     /// The account-predicated probes, re-read on the write signal rather than
@@ -632,7 +652,7 @@ struct ToolbarFreshness: View {
         } else {
             sessionRows = ((try? modelContext.fetch(Self.sessionProbe)) ?? []).map(\.sessionRow)
         }
-        display = currentDisplay
+        display = currentDisplay()
     }
 
     private static func tokenProbe(account: String?) -> FetchDescriptor<TokenSample> {
@@ -668,8 +688,8 @@ struct ToolbarFreshness: View {
     /// `LiveSessionActivity.activeThreshold`. We only ever surface
     /// the active state in the toolbar — recent/idle is covered by
     /// the regular freshness label.
-    private var sessionActivity: LiveSessionActivity? {
-        sessionRows.first.map { LiveSessionActivity.from(lastSeen: $0.lastSeenAt) }
+    private func sessionActivity(now: Date) -> LiveSessionActivity? {
+        sessionRows.first.map { LiveSessionActivity.from(lastSeen: $0.lastSeenAt, now: now) }
     }
 
     private var lastActivity: Date? {
@@ -705,15 +725,15 @@ struct ToolbarFreshness: View {
         return Self.fractionalParser.date(from: raw) ?? Self.plainParser.date(from: raw)
     }
 
-    private var freshness: FreshnessPulse.Freshness {
+    private func freshness(now: Date) -> FreshnessPulse.Freshness {
         guard let last = lastActivity else { return .none }
-        let age = Date().timeIntervalSince(last)
+        let age = now.timeIntervalSince(last)
         if age < 120 { return .live }
         if age < 600 { return .recent }
         return .stale
     }
 
-    private var label: String {
+    private func label(now: Date) -> String {
         // "active" specifically means Claude Code is generating right
         // now (most-recent SessionInfo.lastSeenAt within 5 min). The
         // prior version of this label included an elapsed-since-
@@ -723,13 +743,15 @@ struct ToolbarFreshness: View {
         // the duration jumped between unrelated session start times.
         // "active" alone is unambiguous; the tooltip carries the
         // detail for a hover.
-        if sessionActivity == .active {
+        if sessionActivity(now: now) == .active {
             return "active"
         }
-        switch freshness {
+        switch freshness(now: now) {
         case .live:        return "live"
         case .recent, .stale:
-            if let last = lastActivity { return pacerRelative(last) }
+            // The cards' formatter, so "3m ago" here and "read 3m ago" there
+            // are one way of saying an age.
+            if let last = lastActivity { return PacerReadAge.string(last, now: now) }
             return "—"
         case .none:        return "no data yet"
         }
@@ -737,8 +759,8 @@ struct ToolbarFreshness: View {
 
     /// Long-form tooltip on hover so the user can see the exact
     /// timestamp without parsing the relative label.
-    private var tooltip: String {
-        if sessionActivity == .active, let s = sessionRows.first {
+    private func tooltip(now: Date) -> String {
+        if sessionActivity(now: now) == .active, let s = sessionRows.first {
             let f = DateFormatter()
             f.dateStyle = .none
             f.timeStyle = .medium
@@ -764,12 +786,14 @@ struct ToolbarFreshness: View {
     /// that don't actually change what the pill shows.
     var body: some View {
         // `.equatable()` still gates the toolbar relayout, so a tick that
-        // produces an identical `Display` costs nothing below this point.
-        // The difference now is that this outer body runs on a 1 s timer
-        // rather than on every store save.
+        // produces an identical `Display` costs nothing below this point:
+        // the pill redraws only when its text changes.
         PillBody(display: display).equatable()
             .onReceive(NotificationCenter.default.publisher(for: .pacerScanCycleDidComplete)) { _ in
                 refreshScopedProbes()
+                // The scan meta moves with every cycle; read it now rather
+                // than at the next minute.
+                Task { await refresh() }
             }
             // Rate-limit rows arrive from every account's poll; a scan cycle
             // only reports the active login's. Read in `body` so the pill
@@ -782,17 +806,20 @@ struct ToolbarFreshness: View {
             .onChange(of: scope.accountId) { _, _ in refreshScopedProbes() }
             // Read here so the pill depends on it: shown the moment a rebuild
             // starts and gone the moment it ends, not on the next 1 s tick.
-            .onChange(of: rebuild.step) { _, _ in display = currentDisplay }
+            .onChange(of: rebuild.step) { _, _ in display = currentDisplay() }
             .task {
                 refreshScopedProbes()
                 await refresh()
                 // `Task.sleep` rather than a `Timer` publisher so the loop is
                 // owned by the view's lifetime — it stops when the window
-                // closes instead of ticking against a dead view.
+                // closes instead of ticking against a dead view. It wakes on
+                // the shared schedule's instants, the whole minutes, so the
+                // pill changes with every other age on screen.
                 while !Task.isCancelled {
-                    try? await Task.sleep(for: .seconds(Self.refreshInterval))
+                    let next = PacerReadAge.nextChange(after: Date())
+                    try? await Task.sleep(for: .seconds(max(0.05, next.timeIntervalSinceNow)))
                     if Task.isCancelled { break }
-                    await refresh()
+                    await refresh(now: max(next, Date()))
                 }
             }
     }

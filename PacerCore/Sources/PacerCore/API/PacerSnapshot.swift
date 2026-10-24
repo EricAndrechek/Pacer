@@ -148,19 +148,33 @@ public struct PacerSnapshotPayload: Codable, Sendable {
             /// is: the usage has kept climbing since (pace's safe limit).
             public let sampledAt: Date?
             public let sampleAgeSeconds: Int?
-            /// The live meter (#318): `usedPercent` plus the whole points the
-            /// API spend since that reading adds, at each model's fitted rate,
-            /// capped at 100 and restarted at a reset. `nil` with no fit yet
-            /// (a new login, under 14 days of history) or no reading in the
-            /// last hour — read `usedPercent` then. Never stored as a reading.
+            /// The live meter (#318): what the meter reads now, as every
+            /// Pacer surface shows it. With `liveIsEstimate` true it is the
+            /// estimate, to one decimal (42.6): `usedPercent` plus where the
+            /// meter sat inside that point plus the API spend since, at each
+            /// model's fitted rate, cut (not rounded) to a tenth, capped at
+            /// 100, restarted at a reset. With `liveIsEstimate` false nothing
+            /// counted has been spent since the reading and it is `usedPercent`
+            /// itself, whole. `nil` with no fit yet (a new login, under 14 days
+            /// of history), a weak one, or no reading in the last hour: read
+            /// `usedPercent` then. Never stored as a reading.
             ///
             /// `usedPercent` keeps meaning the last reading, so a client that
-            /// never reads these sees exactly what it did before.
+            /// never reads these sees exactly what it did before. Anthropic's
+            /// readings are whole numbers, so a decimal here is always Pacer's.
             public let livePercentage: Double?
+            /// Whether `livePercentage` is an estimate rather than the
+            /// reading. Present whenever `livePercentage` is.
+            public let liveIsEstimate: Bool?
+            /// The whole points the estimate has certainly reached:
+            /// `livePercentage` cut to a whole number. What the `pacer` gate
+            /// and Pacer's threshold alerts judge.
+            public let liveWholePercentage: Double?
             /// The moment `livePercentage` describes: when this payload was
             /// built. It is not rebased; spend since then is not in it.
             public let liveAsOf: Date?
-            /// `livePercentage` minus the reading (minus 0 after a reset).
+            /// `liveWholePercentage` minus the reading (minus 0 after a
+            /// reset): whole points.
             public let liveAddedPoints: Double?
 
             public init(identity: String, label: String, group: String,
@@ -175,7 +189,8 @@ public struct PacerSnapshotPayload: Codable, Sendable {
                         isActive: Bool? = nil, severity: String? = nil,
                         sampledAt: Date? = nil, sampleAgeSeconds: Int? = nil,
                         livePercentage: Double? = nil, liveAsOf: Date? = nil,
-                        liveAddedPoints: Double? = nil) {
+                        liveAddedPoints: Double? = nil, liveIsEstimate: Bool? = nil,
+                        liveWholePercentage: Double? = nil) {
                 self.identity = identity
                 self.label = label
                 self.group = group
@@ -197,6 +212,8 @@ public struct PacerSnapshotPayload: Codable, Sendable {
                 self.livePercentage = livePercentage
                 self.liveAsOf = liveAsOf
                 self.liveAddedPoints = liveAddedPoints
+                self.liveIsEstimate = liveIsEstimate
+                self.liveWholePercentage = liveWholePercentage
             }
         }
 
@@ -355,7 +372,8 @@ public extension PacerSnapshotPayload.Limits.Window {
             // As built: the live value describes `liveAsOf`, and a rebase
             // knows no spend after it. Its age is `now − liveAsOf`.
             livePercentage: livePercentage, liveAsOf: liveAsOf,
-            liveAddedPoints: liveAddedPoints)
+            liveAddedPoints: liveAddedPoints, liveIsEstimate: liveIsEstimate,
+            liveWholePercentage: liveWholePercentage)
     }
 }
 
@@ -752,9 +770,11 @@ public enum PacerSnapshotBuilder {
             severity: severity,
             sampledAt: sampledAt,
             sampleAgeSeconds: sampledAt.map { PacerSnapshotPayload.seconds(from: $0, until: now) },
-            livePercentage: live?.percent,
+            livePercentage: live?.shownPercent,
             liveAsOf: live?.asOf,
-            liveAddedPoints: live?.addedPoints)
+            liveAddedPoints: live?.addedPoints,
+            liveIsEstimate: live?.isEstimate,
+            liveWholePercentage: live?.percent)
     }
 
     /// The most recent session for one account, or across every account when

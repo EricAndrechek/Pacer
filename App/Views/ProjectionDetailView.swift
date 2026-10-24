@@ -33,6 +33,12 @@ struct ProjectionCompareModal: View {
     @State private var trajectories: [BurnTrajectory.ScoredTrajectory] = []
     @State private var accuracy: EngineSelfEval.Accuracy?
     @State private var loaded = false
+    /// How close the live meter has been today (#318), recomputed with the
+    /// actuals; nil without a live fit or enough readings.
+    /// The readings against the live estimate just before each, and today's
+    /// agreement (#318), recomputed with the actuals off the main actor;
+    /// nil without a live fit or enough readings. Nothing is stored.
+    @State private var liveReview: LiveMeterDrift.Review?
 
     /// The account whose actuals to plot, inherited from the card that opened
     /// the modal — a drill-down that changed scope on the way in would be
@@ -59,9 +65,22 @@ struct ProjectionCompareModal: View {
         return scopedLatest?.label ?? "Model"
     }
 
+    /// The latest reading this modal loaded, through the shared live meter
+    /// (#318). Read from `body`, so a new live value redraws the modal.
+    private var readout: LiveMeterReadout? {
+        let reading: MeterReading?
+        if isFixed {
+            reading = points.last.map { MeterReading(at: $0.sampledAt, percent: $0.usedPercentage, resetsAt: $0.resetsAt) }
+        } else {
+            reading = scopedLatest.map { MeterReading(at: $0.sampledAt, percent: $0.percent, resetsAt: $0.resetsAt) }
+        }
+        return reading.map { LiveMeterBoard.shared.readout(account: limitAccountId, window: windowKey, reading: $0) }
+    }
+
     /// Current-cycle actuals + a synthesized "now" tail, from whichever source
     /// backs this window (fixed 5h/7d → `RateLimitSample`; scoped → the scoped
-    /// identity's `UsageLimitSample` history).
+    /// identity's `UsageLimitSample` history), ending at the live value when
+    /// there is one.
     private var chartData: PaceChartView.Data? {
         let now = Date()
         let data: PaceChartView.Data?
@@ -74,13 +93,14 @@ struct ProjectionCompareModal: View {
         guard let data,
               !DisplayCycle.resolve(resetsAt: data.resetsAt, duration: duration).isAwaiting
         else { return nil }
-        return data
+        return readout.map { data.withLive($0, now: data.points.last?.time ?? now) } ?? data
     }
 
-    /// "62% used · resets Mon 6 AM" — the cycle context the chart is read in.
+    /// "62% used · resets Mon 6 AM" — the cycle context the chart is read in;
+    /// "62.4% used" when the number is the live meter's estimate (#318).
     private var subtitle: String? {
         guard let data = chartData else { return nil }
-        let used = "\(Int(data.usedPct.rounded()))% used"
+        let used = "\(readout?.text ?? PacerMeterFormat.percent(data.usedPct, isEstimate: false)) used"
         let resets = "resets \(data.resetsAt.formatted(.dateTime.weekday(.abbreviated).hour()))"
         return "\(used) · \(resets)"
     }
@@ -89,10 +109,13 @@ struct ProjectionCompareModal: View {
         // Filled in after the modal is on screen and read inside
         // `PacerModalContent`'s stored closure, so read here too (#140;
         // AGENTS.md, "SwiftUI state and data flow").
-        let _ = (trajectories, accuracy, loaded, actualsLoaded)
+        let _ = (trajectories, accuracy, loaded, actualsLoaded, liveReview)
         // Read here, by value, so a poll written by any context reloads the
         // actuals (`RateLimitWriteSignal`).
         let writes = RateLimitWriteSignal.shared.generation
+        // The live number, read here too: when it moves, the fan is re-asked
+        // from it (#318).
+        let livePercent = readout?.live?.percent
         PacerModalContent(
             title: "\(windowTitle) projection",
             subtitle: subtitle,
@@ -105,7 +128,7 @@ struct ProjectionCompareModal: View {
                 // where the solid line ends — the engine's snapshot origin is
                 // otherwise stale, leaving the whole fan starting below and to
                 // the left of the current dot.
-                let overlays = data.points.last.map { tail in
+                let overlays = data.tip.map { tail in
                     trajectories.map { $0.reanchored(toTime: tail.time, value: tail.value) }
                 } ?? trajectories
                 ProjectionDetailView(
@@ -113,8 +136,11 @@ struct ProjectionCompareModal: View {
                     resetsAt: data.resetsAt,
                     durationSeconds: duration,
                     actual: data.points,
+                    live: data.live,
                     trajectories: overlays,
-                    accuracy: accuracy
+                    accuracy: accuracy,
+                    liveReadout: readout?.isEstimate == true ? readout : nil,
+                    liveReview: liveReview
                 )
             } else if loaded && actualsLoaded {
                 Text("Not enough data to compare models yet.")
@@ -127,6 +153,7 @@ struct ProjectionCompareModal: View {
         }
         .task { await refresh() }
         .task(id: writes) { await loadActuals() }
+        .onChange(of: livePercent) { _, _ in Task { await refresh() } }
         .onReceive(NotificationCenter.default.publisher(for: .pacerEngineDidRecompute)) { _ in
             Task { await refresh() }
         }
@@ -169,6 +196,19 @@ struct ProjectionCompareModal: View {
         scopedPoints = loaded.scoped
         scopedLatest = loaded.latest
         actualsLoaded = true
+        // Recomputed from the readings and turns at each new reading;
+        // nothing about it is stored. The chart covers this window's cycle,
+        // at most its last day; the agreement line, today.
+        guard let account else { return }
+        let resets = fixed ? loaded.points.last?.resetsAt : loaded.latest?.resetsAt
+        let window = duration
+        liveReview = await Task.detached(priority: .utility) {
+            let now = Date()
+            let cycleStart = resets.map { $0.addingTimeInterval(-window) } ?? now.addingTimeInterval(-window)
+            return LiveMeterDrift.review(context: ModelContext(container), account: account, window: key,
+                                         chartFrom: max(cycleStart, now.addingTimeInterval(-86_400)),
+                                         agreementSince: Calendar.current.startOfDay(for: now), now: now)
+        }.value
     }
 
     private func refresh() async {
@@ -179,8 +219,9 @@ struct ProjectionCompareModal: View {
             return
         }
         let key = windowKey
+        let live = readout?.live
         let computed = await askEngine { () -> ([BurnTrajectory.ScoredTrajectory], EngineSelfEval.Accuracy?) in
-            (await engine.rateLimitTrajectories(windowKey: key),
+            (await engine.rateLimitTrajectories(windowKey: key, live: live),
              await engine.selfEvalAccuracy(surface: EngineSelfEval.rlSurface(key)))
         }
         trajectories = computed.0
@@ -198,11 +239,21 @@ struct ProjectionDetailView: View {
     let resetsAt: Date
     let durationSeconds: TimeInterval
     let actual: [PaceChartView.Data.Point]
+    /// The live meter's value at now (#318): a dotted stretch from the last
+    /// reading, where the projections start. Nil: the line ends at the
+    /// reading.
+    var live: PaceChartView.Data.Point? = nil
     let trajectories: [BurnTrajectory.ScoredTrajectory]
     /// Per-method scored record for this window (completed cycles + median
     /// miss) — powers the selected model's earned-record footer. Nil until
     /// the engine has scored a cycle.
     let accuracy: EngineSelfEval.Accuracy?
+    /// The live meter's estimate and the reading under it (#318), for the
+    /// line under the chart; nil when the number is the reading.
+    var liveReadout: LiveMeterReadout? = nil
+    /// The readings against the live estimate just before each, and how close
+    /// it has been today; nil without a live fit.
+    var liveReview: LiveMeterDrift.Review? = nil
 
     /// Stable per-model colors for the lines and the legend swatches.
     private static let palette: [String: Color] = [
@@ -368,9 +419,67 @@ struct ProjectionDetailView: View {
 
     // MARK: - Body
 
+    /// Anthropic's readings against the live estimate just before each, over
+    /// this window's cycle (at most its last day), ending at the estimate
+    /// now (#318). Small, under the forecast chart; absent without a fit.
+    @ViewBuilder
+    private var liveComparison: some View {
+        if let review = liveReview, review.readings.count >= 2, let first = review.readings.first {
+            let readings = review.readings.map { PaceChartView.Data.Point(time: $0.at, value: $0.percent) }
+            let estimates = comparisonEstimates(review)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Readings and the live estimate")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                LiveMeterComparisonChart(readings: readings, estimates: estimates, start: first.at,
+                                         end: estimates.last.map { max($0.time, readings.last?.time ?? $0.time) }
+                                            ?? readings.last?.time ?? first.at)
+                    .frame(height: 90)
+                Text("Solid: Anthropic's readings. Dotted: the estimate just before each.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+            }
+        }
+    }
+
+    /// The estimate just before each reading, then the estimate now when the
+    /// number on screen is one, so the dotted line ends where the hero is.
+    private func comparisonEstimates(_ review: LiveMeterDrift.Review) -> [PaceChartView.Data.Point] {
+        var out = review.estimates.map { PaceChartView.Data.Point(time: $0.at, value: $0.shown) }
+        if let r = liveReadout, let asOf = r.live?.asOf, asOf > (out.last?.time ?? .distantPast) {
+            out.append(.init(time: asOf, value: r.percent))
+        }
+        return out
+    }
+
+    /// "Live meter: 45.2%, read 42% 3m ago · within 1 point of the next
+    /// reading 90% of the time today". Either half alone when only it
+    /// applies. The reading's age is on the shared minute schedule
+    /// (`PacerReadAge`).
+    @ViewBuilder
+    private var liveLine: some View {
+        let agreement = liveReview?.agreement.map {
+            "within 1 point of the next reading \(Int(($0.share * 100).rounded()))% of the time today"
+        }
+        if let r = liveReadout {
+            let whole = PacerMeterFormat.percent(r.reading.percent, isEstimate: false)
+            let reset = r.live?.restarted == true ? ", reset since" : ""
+            let tail = agreement.map { " · \($0)" } ?? ""
+            PacerAgeLabel(r.reading.at) { age in
+                Text("Live meter: \(r.text), read \(whole) \(age)\(reset)\(tail)")
+            }
+        } else if let agreement {
+            Text("Live meter: \(agreement)")
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             chart.frame(height: 240)
+            liveComparison
+            liveLine
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
             accuracyTable
             Text(legendText)
                 .font(.system(size: 11))
@@ -465,7 +574,16 @@ struct ProjectionDetailView: View {
                     .interpolationMethod(.monotone)
             }
         }
-        if let tail = filteredActuals.last {
+        // The live meter's estimate past the last reading (#318), dotted
+        // like the pace card's.
+        if let live, let last = filteredActuals.last, live.time > last.time {
+            ForEach([last, live]) { p in
+                LineMark(x: .value("t", p.time), y: .value("pct", p.value), series: .value("s", "live"))
+                    .foregroundStyle(bandColor(at: live))
+                    .lineStyle(StrokeStyle(lineWidth: 2.4, lineCap: .round, dash: [0.5, 4]))
+            }
+        }
+        if let tail = live ?? filteredActuals.last {
             PointMark(x: .value("t", tail.time), y: .value("pct", tail.value))
                 .foregroundStyle(bandColor(at: tail))
                 .symbolSize(60)
@@ -611,9 +729,13 @@ struct ProjectionDetailView: View {
                     }
                     Spacer()
                     if let crossAt = st.trajectory.crossesFullAt {
-                        Text("limit \(pacerRelative(crossAt, style: .short))")
-                            .help(pacerRelativeExact(crossAt))
-                            .font(.system(size: 11)).foregroundStyle(.red.opacity(0.85))
+                        // Counts down on the shared minute schedule while the
+                        // sheet stays open.
+                        TimelineView(PacerReadAge.Schedule()) { context in
+                            Text("limit \(pacerRelative(crossAt, style: .short, now: context.date))")
+                                .help(pacerRelativeExact(crossAt))
+                                .font(.system(size: 11)).foregroundStyle(.red.opacity(0.85))
+                        }
                     }
                     Text(st.typicalAbsError.isFinite
                          ? String(format: "within ±%.0f%%", st.typicalAbsError)

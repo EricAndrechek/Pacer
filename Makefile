@@ -35,7 +35,7 @@ LEGACY_STORE   := $(HOME)/Library/Group Containers/group.com.ericandrechek.pacer
 # Mark targets that don't produce a file as PHONY so make doesn't
 # get confused if a file with the same name appears.
 .PHONY: help build vendor prune verify test app install uninstall reinstall \
-        logs logs-tail status open clean-data perf-snapshot screenshots verify-data \
+        logs logs-tail widget-log status open clean-data perf-snapshot screenshots verify-data \
         verify-archive test-ingest-parity \
         assign-accounts reassign-account \
         pricing-snapshot
@@ -168,6 +168,17 @@ logs-tail:  ## Print the last 100 lines of the app log (for AI use).
 		tail -n 100 "$(LOG_ERR)"; \
 	fi
 
+widget-log:  ## Every widget timeline macOS granted (last 50 lines of the App Group's widget-refreshes.log), then the app's hourly [Widgets] summaries. N=<lines> for more.
+	@WLOG="$(STORE_DIR)/widget-refreshes.log"; \
+	if [ ! -f "$$WLOG" ]; then \
+		echo "(no widget timelines recorded yet at $$WLOG)"; \
+	else \
+		echo "==> $$WLOG (last $(or $(N),50))"; \
+		tail -n $(or $(N),50) "$$WLOG"; \
+	fi; \
+	echo; echo "==> hourly summaries in $(LOG_ERR)"; \
+	grep -h '\[Widgets\] last hour' "$(LOG_ERR).1" "$(LOG_ERR)" 2>/dev/null | tail -n 24 || true
+
 status:  ## Show install state, app PID, log file sizes, recent log lines.
 	@$(REPO_ROOT)/bin/dev-status.sh
 
@@ -210,7 +221,10 @@ record-relaunch:
 
 .PHONY: render-live
 ## Render the real cards against the real store to PNGs (see bin/dev-render-live.sh).
+## Every page by default, the menu bar's dropdown (`menu`) among them, with the
+## live meter's estimates as the app shows them.
 ## Usage: make render-live            (all accounts + each account)
 ##        make render-live SCOPES=all
+##        make render-live PAGES=menu,pace
 render-live:
-	@bin/dev-render-live.sh "$(or $(SCOPES),auto)" "$(or $(OUT),$(PWD)/screenshots/live)"
+	@PACER_RENDER_PAGES="$(PAGES)" bin/dev-render-live.sh "$(or $(SCOPES),auto)" "$(or $(OUT),$(PWD)/screenshots/live)"

@@ -33,25 +33,27 @@ struct LiveSessionEntry: TimelineEntry {
 struct LiveSessionProvider: TimelineProvider {
     func placeholder(in context: Context) -> LiveSessionEntry {
         LiveSessionEntry(
-            date: Date(),
+            date: PacerClock.now,
             session: .init(
                 projectDisplayName: "Pacer",
                 totalTokens: 142_300,
                 costUSD: 4.12,
                 topModel: "sonnet-4-6",
-                firstSeenAt: Date().addingTimeInterval(-38 * 60),
-                lastSeenAt: Date().addingTimeInterval(-30)
+                firstSeenAt: PacerClock.now.addingTimeInterval(-38 * 60),
+                lastSeenAt: PacerClock.now.addingTimeInterval(-30)
             )
         )
     }
 
     func getSnapshot(in context: Context, completion: @escaping (LiveSessionEntry) -> Void) {
+        WidgetRefreshRecord.snapshot(WidgetKinds.liveSession, context)
         completion(currentEntry())
     }
 
     func getTimeline(in context: Context, completion: @escaping (Timeline<LiveSessionEntry>) -> Void) {
         let entry = currentEntry()
-        let nextRefresh = Date().addingTimeInterval(300)
+        let nextRefresh = PacerClock.now.addingTimeInterval(300)
+        WidgetRefreshRecord.timeline(WidgetKinds.liveSession, context, next: nextRefresh)
         completion(Timeline(entries: [entry], policy: .after(nextRefresh)))
     }
 
@@ -75,10 +77,10 @@ struct LiveSessionProvider: TimelineProvider {
                 rows = try context.fetch(d).map(\.sessionRow)
             }
             guard let s = rows.first else {
-                return LiveSessionEntry(date: Date(), session: nil)
+                return LiveSessionEntry(date: PacerClock.now, session: nil)
             }
             return LiveSessionEntry(
-                date: Date(),
+                date: PacerClock.now,
                 session: .init(
                     projectDisplayName: pacerShortPath(s.projectPath),
                     totalTokens: s.tokens.all,
@@ -89,7 +91,7 @@ struct LiveSessionProvider: TimelineProvider {
                 )
             )
         } catch {
-            return LiveSessionEntry(date: Date(), session: nil)
+            return LiveSessionEntry(date: PacerClock.now, session: nil)
         }
     }
 }
@@ -209,7 +211,8 @@ struct LiveSessionWidgetView: View {
                 .foregroundStyle(.tertiary)
                 .lineLimit(1)
         case .recent, .idle:
-            Text("seen \(pacerRelative(s.lastSeenAt))")
+            // Keeps itself current between timeline refreshes (#318).
+            Text("seen \(PacerReadAge.widgetText(s.lastSeenAt))")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
                 .lineLimit(1)
@@ -224,7 +227,7 @@ struct LiveSessionWidgetView: View {
             case .active:
                 Text("\(formatDurationShort(s.elapsedSeconds)) elapsed")
             case .recent, .idle:
-                Text("last seen \(pacerRelative(s.lastSeenAt))")
+                Text("last seen \(PacerReadAge.widgetText(s.lastSeenAt))")
             }
             Spacer()
             // Show the started-at clock time on medium so the user

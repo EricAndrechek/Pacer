@@ -434,22 +434,27 @@ struct PacerSnapshotAPITests {
 
         let five = try #require(limits.fiveHour)
         #expect(five.usedPercent == 37)            // still the reading
-        // $10 Opus × 0.2 + $4 Fable at the pooled 0.15 = 2.6 → 2. Never the
-        // fit's intercept, which is 40 points an hour here.
-        #expect(five.livePercentage == 39)
+        // $10 Opus × 0.2 + $4 Fable at the pooled 0.15 = 2.6, on a lone
+        // reading's carry of 0.25: 39.85, shown cut to 39.8, 39 whole. Never
+        // the fit's intercept, which is 40 points an hour here.
+        #expect(five.livePercentage == 39.8)
+        #expect(five.liveIsEstimate == true)
+        #expect(five.liveWholePercentage == 39)
         #expect(five.liveAddedPoints == 2)
         #expect(five.liveAsOf == now)
 
         // No 7-day fit: no live value, and the reading alone.
         let seven = try #require(limits.sevenDay)
         #expect(seven.livePercentage == nil)
+        #expect(seven.liveIsEstimate == nil)
         #expect(seven.liveAsOf == nil)
         #expect(seven.usedPercent == 21)
 
         // The Fable cap counts the Fable turn only: $4 × 0.5.
         let fable = try #require(limits.scoped.first { $0.identity == "weekly_scoped|Fable|" })
         #expect(fable.usedPercent == 16)
-        #expect(fable.livePercentage == 18)
+        #expect(fable.livePercentage == 18.2)
+        #expect(fable.liveWholePercentage == 18)
         let opus = try #require(limits.scoped.first { $0.identity == "weekly_scoped|Opus|" })
         #expect(opus.livePercentage == nil)
     }
@@ -472,13 +477,16 @@ struct PacerSnapshotAPITests {
         Self.seed(ModelContext(container), now: now)
         let plain = try Self.build(container, account: nil, now: now).encodedJSON()
         #expect(!plain.contains("livePercentage"))
+        #expect(!plain.contains("liveIsEstimate"))
         #expect(!plain.contains("liveAsOf"))
         #expect(plain.contains("\"usedPercent\" : 37"))
 
         let full = try Self.makeFullContainer()
         let later = Self.seedLive(full, now: now)
         let live = try Self.build(full, account: nil, now: later).encodedJSON()
-        #expect(live.contains("\"livePercentage\" : 39"))
+        #expect(live.contains("\"livePercentage\" : 39.8"))
+        #expect(live.contains("\"liveIsEstimate\" : true"))
+        #expect(live.contains("\"liveWholePercentage\" : 39"))
         #expect(live.contains("\"liveAddedPoints\" : 2"))
         #expect(live.contains("\"liveAsOf\""))
         #expect(live.contains("\"usedPercent\" : 37"))

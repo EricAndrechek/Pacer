@@ -1,4 +1,5 @@
 import SwiftUI
+import WidgetKit
 import PacerCore
 import PacerUI
 
@@ -22,6 +23,37 @@ enum WidgetStyle {
 /// to `PacerDesign.cardBackground` (PacerUI) so a one-line edit there
 /// retunes both the dashboard cards and the widget container fills.
 var widgetCardBackground: Color { PacerDesign.cardBackground }
+
+/// When a widget's timeline asks to be rebuilt: `interval` from now, or the
+/// next local midnight when that comes first. A widget that shows today's
+/// numbers rolls over with the day rather than showing yesterday's for up to
+/// one more interval. Read through `PacerClock.now`, like every widget date
+/// (#154).
+enum WidgetRefresh {
+    static func after(_ interval: TimeInterval, now: Date = PacerClock.now) -> Date {
+        let next = now.addingTimeInterval(interval)
+        let cal = Calendar.current
+        guard let tomorrow = cal.date(byAdding: .day, value: 1, to: cal.startOfDay(for: now)) else { return next }
+        return min(next, tomorrow)
+    }
+}
+
+/// One line per timeline and snapshot macOS asks the extension for, in the
+/// App Group's `widget-refreshes.log` (`WidgetRefreshLog`): the only record of
+/// which of the app's reload requests WidgetKit granted, and when. This
+/// process's stderr reaches no log anyone reads. Off while the clock is
+/// pinned for the README screenshots, whose timelines are not the user's.
+enum WidgetRefreshRecord {
+    static func timeline(_ kind: String, _ context: TimelineProviderContext, next: Date) {
+        guard PacerClock.pinned == nil else { return }
+        WidgetRefreshLog.record(.timeline, kind: kind, family: "\(context.family)", next: next)
+    }
+
+    static func snapshot(_ kind: String, _ context: TimelineProviderContext) {
+        guard PacerClock.pinned == nil else { return }
+        WidgetRefreshLog.record(.snapshot, kind: kind, family: "\(context.family)", next: nil)
+    }
+}
 
 /// `0.6h` → `36m`, `6500s` → `1h 48m`. Used by elapsed/remaining
 /// captions in widgets where space rules out a long format. Stays

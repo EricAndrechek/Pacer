@@ -125,6 +125,9 @@ final class AppBackgroundService {
     func start() {
         guard coordinator == nil else { return }
         RateLimitWriteSignal.shared.seed(from: container.mainContext)
+        // The live meter every surface reads (#318), rebuilt on each reading
+        // and each scan cycle that wrote turns.
+        LiveMeterBoard.shared.start(container: container)
 
         let costMode = PacerPreferences.costMode()
         Log.write("AppBackground", "starting; cost mode: \(costMode)")

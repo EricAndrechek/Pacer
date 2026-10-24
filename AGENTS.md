@@ -476,9 +476,11 @@ App/
     MenuBarContent.swift        — MenuBarLabel (SwiftUI view rendered into the
                                   NSStatusItem.button via NSHostingView, with tooltip,
                                   pulse animation on threshold crossings, palette-rendered
-                                  SF Symbol band coloring) + MenuBarContent (popover —
-                                  pace columns, today's totals, hover-state footer
-                                  buttons). PacerAppDelegate hosts both; right-click on
+                                  SF Symbol band coloring) + MenuStatusContent (the
+                                  dropdown — a block per account, a PacerFuelBar per
+                                  window, one AccountCaption line, today's totals;
+                                  `make render-live PAGES=menu` draws it off-screen).
+                                  PacerAppDelegate hosts both; right-click on
                                   the status item shows a native NSMenu (Open Pacer /
                                   Settings / Quit) instead of the popover.
 

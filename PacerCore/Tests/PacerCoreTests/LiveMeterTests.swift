@@ -299,6 +299,6 @@ struct LiveMeterTests {
         let v = try #require(source.values(account: "acct", windows: [prior], now: readAt)[RateLimitWindowName.fiveHour])
         #expect(v.percent == 34)
         let line = LiveMeterDrift.line(account: "org-acct", window: RateLimitWindowName.fiveHour, read: 33, live: v)
-        #expect(line == "acct five_hour: read 33% · live showed 34% (30% 5m ago +4, $20.00 per-model) · +1")
+        #expect(line == "acct five_hour: read 33% · live showed 34% (30% 5m ago +4, carry 0.25, $20.00 per-model) · +1")
     }
 }
