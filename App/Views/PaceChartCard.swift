@@ -1520,10 +1520,13 @@ private struct PaceColumn: View {
         // from; that is the only honest claim left.
         if isStale {
             EmptyView()
-        } else if column.usedPct != nil, let cycle, !cycle.isAwaiting {
+        } else if let used = column.usedPct, let cycle, !cycle.isAwaiting {
+            // Moving: the burn rate and the forecast. Idle: the forecast only
+            // ("holds until reset"), and at 0% nothing (`RecentBurn.chipRow`).
+            let row = RecentBurn.chipRow(percentPerHour: column.recentBurn, shownPercent: used)
             HStack(spacing: 6) {
-                burnRateChip
-                forecastChipView
+                burnRateChip(row.burn)
+                if row.showsForecast { forecastChipView }
             }
         }
     }
@@ -1533,10 +1536,9 @@ private struct PaceColumn: View {
     /// "on pace" / "danger" badges, which said again what the number's
     /// colour, the "/ 68%" pace mark and the chart already show.
     @ViewBuilder
-    private var burnRateChip: some View {
-        if let text = RecentBurn.chipText(column.recentBurn) {
-            let idle = column.recentBurn.map { $0 < RecentBurn.idleBelow } ?? true
-            Chip(text: text, systemImage: idle ? nil : "arrow.up.right", tint: .secondary, size: .compact)
+    private func burnRateChip(_ text: String?) -> some View {
+        if let text {
+            Chip(text: text, systemImage: "arrow.up.right", tint: .secondary, size: .compact)
                 .fixedSize()
                 .help("Over the last 30 minutes of readings.")
         }

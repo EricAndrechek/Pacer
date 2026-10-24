@@ -133,12 +133,34 @@ struct LiveMeterDisplayTests {
         #expect(RecentBurn.chipText(rate) == "+16%/hr")
         #expect(RecentBurn.chipText(0.2) == "+0.2%/hr")
         #expect(RecentBurn.chipText(9.97) == "+10%/hr")
-        #expect(RecentBurn.chipText(0) == "idle")
-        #expect(RecentBurn.chipText(0.04) == "idle")
-        // A reading that went down is not moving up either.
-        #expect(RecentBurn.chipText(-2) == "idle")
-        // Too few readings for a rate: no chip, not a confident "idle".
+        // Not moving: no burn chip (round 4). A reading that went down is
+        // not moving up either. Too few readings for a rate: no chip.
+        #expect(RecentBurn.chipText(0) == nil)
+        #expect(RecentBurn.chipText(0.04) == nil)
+        #expect(RecentBurn.chipText(-2) == nil)
         #expect(RecentBurn.chipText(nil) == nil)
+    }
+
+    /// The owner's round-4 rules for the card's chip row.
+    @Test func theChipRowDropsIdleAndSaysNothingAtZero() {
+        // Moving: the burn rate and the forecast.
+        #expect(RecentBurn.chipRow(percentPerHour: 16, shownPercent: 48)
+                == .init(burn: "+16%/hr", showsForecast: true))
+        // Idle above 0%: "holds until reset" alone, no grey "idle" beside it.
+        #expect(RecentBurn.chipRow(percentPerHour: 0, shownPercent: 62)
+                == .init(burn: nil, showsForecast: true))
+        #expect(RecentBurn.chipRow(percentPerHour: 0.04, shownPercent: 0.3)
+                == .init(burn: nil, showsForecast: true))
+        // Idle at 0%, as written ("0%", "0.0%"): no chip at all.
+        #expect(RecentBurn.chipRow(percentPerHour: 0, shownPercent: 0)
+                == .init(burn: nil, showsForecast: false))
+        #expect(RecentBurn.chipRow(percentPerHour: -1, shownPercent: 0.04)
+                == .init(burn: nil, showsForecast: false))
+        // No rate yet: nothing claims it is idle, so the forecast stays.
+        #expect(RecentBurn.chipRow(percentPerHour: nil, shownPercent: 0)
+                == .init(burn: nil, showsForecast: true))
+        // And at 0% the forecast chip itself has nothing to hold.
+        #expect(Self.chip(Self.outlook(slope: 0), end: nil, used: 0) == nil)
     }
 
     // MARK: - The estimate and the reading

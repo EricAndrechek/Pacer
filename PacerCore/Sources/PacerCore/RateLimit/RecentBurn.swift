@@ -70,19 +70,54 @@ public enum RecentBurn {
     public static let idleBelow = 0.05
 
     /// The burn-rate chip on a window's card (#318), from the same 30-minute
-    /// figure `pacer report` prints as "now": "+16%/hr", "+0.4%/hr", or
-    /// "idle" when the readings have not moved. Nil when the readings cannot
-    /// support a rate (fewer than two in the lookback): no chip, rather than
-    /// a confident "idle".
+    /// figure `pacer report` prints as "now": "+16%/hr" or "+0.4%/hr". Nil
+    /// when the readings have not moved, and when they cannot support a rate
+    /// (fewer than two in the lookback).
     ///
     /// It replaced the "behind" / "on pace" / "danger" badges, which repeated
     /// what the number's colour, the "/ 68%" pace mark and the chart already
     /// show. The burn rate is new: how fast the window is moving right now.
     /// Grey on every card, so the forecast chip beside it is the one that
     /// carries a colour.
+    ///
+    /// There is no "idle" chip any more (round 4): beside "holds until reset"
+    /// it said the same thing twice, and on a window at 0% it was the only
+    /// chip and said nothing anyone needed (`chipRow`).
     public static func chipText(_ percentPerHour: Double?) -> String? {
-        guard let rate = percentPerHour else { return nil }
-        guard rate >= idleBelow else { return "idle" }
+        guard let rate = percentPerHour, rate >= idleBelow else { return nil }
         return rate >= 9.95 ? String(format: "+%.0f%%/hr", rate) : String(format: "+%.1f%%/hr", rate)
+    }
+
+    /// Which chips a window's card draws under its number.
+    public struct ChipRow: Sendable, Equatable {
+        /// The burn-rate chip's words (`chipText`), nil for none.
+        public let burn: String?
+        /// Whether the forecast chip (`ForecastChip.make`) is drawn. It can
+        /// still have nothing to say.
+        public let showsForecast: Bool
+
+        public init(burn: String?, showsForecast: Bool) {
+            self.burn = burn
+            self.showsForecast = showsForecast
+        }
+    }
+
+    /// The card's chip row (#318, the owner's round-4 rules):
+    ///
+    ///     moving                    "+16%/hr"  and the forecast chip
+    ///     idle, above 0%            the forecast chip only ("holds until reset")
+    ///     idle, at 0%               no chip at all
+    ///     no rate (under two readings)   the forecast chip only
+    ///
+    /// "Idle" is the readings' own half hour (`idleBelow`), not the engine's
+    /// slope. `shownPercent` is the number the card shows, the live estimate
+    /// or the reading; "at 0%" is what it writes as zero ("0%", "0.0%"). An
+    /// idle window at 0% has nothing to hold, and a forecast there could
+    /// only be the engine's rhythm guessing at a window nobody is using.
+    public static func chipRow(percentPerHour: Double?, shownPercent: Double) -> ChipRow {
+        guard let rate = percentPerHour, rate < idleBelow else {
+            return ChipRow(burn: chipText(percentPerHour), showsForecast: true)
+        }
+        return ChipRow(burn: nil, showsForecast: PacerMeterFormat.tenths(shownPercent) > 0)
     }
 }
