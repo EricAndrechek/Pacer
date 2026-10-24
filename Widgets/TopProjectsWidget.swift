@@ -88,12 +88,14 @@ struct TopProjectsProvider: AppIntentTimelineProvider {
     }
 
     func snapshot(for configuration: TopProjectsConfigurationIntent, in context: Context) async -> TopProjectsEntry {
-        currentEntry(configuration: configuration)
+        WidgetRefreshRecord.snapshot(WidgetKinds.topProjects, context)
+        return currentEntry(configuration: configuration)
     }
 
     func timeline(for configuration: TopProjectsConfigurationIntent, in context: Context) async -> Timeline<TopProjectsEntry> {
         let entry = currentEntry(configuration: configuration)
         let nextRefresh = WidgetRefresh.after(1800)  // 30 min, or midnight
+        WidgetRefreshRecord.timeline(WidgetKinds.topProjects, context, next: nextRefresh)
         return Timeline(entries: [entry], policy: .after(nextRefresh))
     }
 

@@ -1,4 +1,5 @@
 import SwiftUI
+import WidgetKit
 import PacerCore
 import PacerUI
 
@@ -34,6 +35,23 @@ enum WidgetRefresh {
         let cal = Calendar.current
         guard let tomorrow = cal.date(byAdding: .day, value: 1, to: cal.startOfDay(for: now)) else { return next }
         return min(next, tomorrow)
+    }
+}
+
+/// One line per timeline and snapshot macOS asks the extension for, in the
+/// App Group's `widget-refreshes.log` (`WidgetRefreshLog`): the only record of
+/// which of the app's reload requests WidgetKit granted, and when. This
+/// process's stderr reaches no log anyone reads. Off while the clock is
+/// pinned for the README screenshots, whose timelines are not the user's.
+enum WidgetRefreshRecord {
+    static func timeline(_ kind: String, _ context: TimelineProviderContext, next: Date) {
+        guard PacerClock.pinned == nil else { return }
+        WidgetRefreshLog.record(.timeline, kind: kind, family: "\(context.family)", next: next)
+    }
+
+    static func snapshot(_ kind: String, _ context: TimelineProviderContext) {
+        guard PacerClock.pinned == nil else { return }
+        WidgetRefreshLog.record(.snapshot, kind: kind, family: "\(context.family)", next: nil)
     }
 }
 

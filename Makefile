@@ -35,7 +35,7 @@ LEGACY_STORE   := $(HOME)/Library/Group Containers/group.com.ericandrechek.pacer
 # Mark targets that don't produce a file as PHONY so make doesn't
 # get confused if a file with the same name appears.
 .PHONY: help build vendor prune verify test app install uninstall reinstall \
-        logs logs-tail status open clean-data perf-snapshot screenshots verify-data \
+        logs logs-tail widget-log status open clean-data perf-snapshot screenshots verify-data \
         verify-archive test-ingest-parity \
         assign-accounts reassign-account \
         pricing-snapshot
@@ -167,6 +167,17 @@ logs-tail:  ## Print the last 100 lines of the app log (for AI use).
 	else \
 		tail -n 100 "$(LOG_ERR)"; \
 	fi
+
+widget-log:  ## Every widget timeline macOS granted (last 50 lines of the App Group's widget-refreshes.log), then the app's hourly [Widgets] summaries. N=<lines> for more.
+	@WLOG="$(STORE_DIR)/widget-refreshes.log"; \
+	if [ ! -f "$$WLOG" ]; then \
+		echo "(no widget timelines recorded yet at $$WLOG)"; \
+	else \
+		echo "==> $$WLOG (last $(or $(N),50))"; \
+		tail -n $(or $(N),50) "$$WLOG"; \
+	fi; \
+	echo; echo "==> hourly summaries in $(LOG_ERR)"; \
+	grep -h '\[Widgets\] last hour' "$(LOG_ERR).1" "$(LOG_ERR)" 2>/dev/null | tail -n 24 || true
 
 status:  ## Show install state, app PID, log file sizes, recent log lines.
 	@$(REPO_ROOT)/bin/dev-status.sh

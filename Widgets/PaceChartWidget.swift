@@ -143,12 +143,14 @@ struct PaceChartProvider: AppIntentTimelineProvider {
     }
 
     func snapshot(for configuration: PaceChartConfigurationIntent, in context: Context) async -> PaceChartEntry {
-        currentEntry(primary: configuration.primaryWindow, secondary: configuration.secondaryWindow)
+        WidgetRefreshRecord.snapshot(WidgetKinds.paceChart, context)
+        return currentEntry(primary: configuration.primaryWindow, secondary: configuration.secondaryWindow)
     }
 
     func timeline(for configuration: PaceChartConfigurationIntent, in context: Context) async -> Timeline<PaceChartEntry> {
         let entry = currentEntry(primary: configuration.primaryWindow, secondary: configuration.secondaryWindow)
         let next = PacerClock.now.addingTimeInterval(K.refreshSeconds)
+        WidgetRefreshRecord.timeline(WidgetKinds.paceChart, context, next: next)
         return Timeline(entries: [entry], policy: .after(next))
     }
 

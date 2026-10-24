@@ -59,12 +59,14 @@ struct DailyChartProvider: AppIntentTimelineProvider {
     }
 
     func snapshot(for configuration: DailyChartConfigurationIntent, in context: Context) async -> DailyChartEntry {
-        currentEntry(range: configuration.range)
+        WidgetRefreshRecord.snapshot(WidgetKinds.dailyChart, context)
+        return currentEntry(range: configuration.range)
     }
 
     func timeline(for configuration: DailyChartConfigurationIntent, in context: Context) async -> Timeline<DailyChartEntry> {
         let entry = currentEntry(range: configuration.range)
         let nextRefresh = WidgetRefresh.after(900)  // 15 min, or midnight
+        WidgetRefreshRecord.timeline(WidgetKinds.dailyChart, context, next: nextRefresh)
         return Timeline(entries: [entry], policy: .after(nextRefresh))
     }
 

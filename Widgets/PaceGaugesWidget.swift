@@ -96,12 +96,14 @@ struct PaceGaugesProvider: AppIntentTimelineProvider {
     }
 
     func snapshot(for configuration: PaceGaugesConfigurationIntent, in context: Context) async -> PaceGaugesEntry {
-        currentEntry(primary: configuration.primaryWindow, secondary: configuration.secondaryWindow)
+        WidgetRefreshRecord.snapshot(WidgetKinds.paceGauges, context)
+        return currentEntry(primary: configuration.primaryWindow, secondary: configuration.secondaryWindow)
     }
 
     func timeline(for configuration: PaceGaugesConfigurationIntent, in context: Context) async -> Timeline<PaceGaugesEntry> {
         let entry = currentEntry(primary: configuration.primaryWindow, secondary: configuration.secondaryWindow)
         let nextRefresh = PacerClock.now.addingTimeInterval(300)
+        WidgetRefreshRecord.timeline(WidgetKinds.paceGauges, context, next: nextRefresh)
         return Timeline(entries: [entry], policy: .after(nextRefresh))
     }
 
