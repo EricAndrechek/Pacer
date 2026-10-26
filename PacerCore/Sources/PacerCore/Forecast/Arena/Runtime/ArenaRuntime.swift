@@ -153,11 +153,14 @@ public actor ArenaRecordScorer {
         self.cancel = cancel; self.config = config; self.calendar = calendar; self.landed = landed
     }
 
-    /// What a full pass is for: the scored models and how deep. A change runs
-    /// a full pass again; otherwise passes read only the recent weeks.
+    /// What a full pass is for: the models that can run and how deep. A
+    /// change runs a full pass again (so a network whose weights just
+    /// arrived is scored over months, not only the recent weeks); otherwise
+    /// passes read only the recent weeks.
     var fingerprint: String {
         "v1|\(EngineSelfEval.rlBucketVersion)|\(config.sessionCycleCap)/\(config.weeklyCycleCap)|"
-            + roster.selectable.map(\.name).sorted().joined(separator: ",")
+            + roster.selectable.filter { Self.weightsPresent($0, roster: roster, services: services) }
+                .map(\.name).sorted().joined(separator: ",")
     }
 
     // MARK: Loop
@@ -211,6 +214,7 @@ public actor ArenaRecordScorer {
         guard !roster.isEmpty, !cancel.isSet else { return report }
         let started = SuspendingClock.now
         var streams: [Stream] = []
+        let fingerprint = self.fingerprint
         for account in accounts {
             guard !cancel.isSet else { return report }
             let full = coveredFingerprint[account] != fingerprint

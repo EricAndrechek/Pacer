@@ -10,15 +10,19 @@ import SwiftData
 /// forecast and the first-launch estimate the merge notes quote.
 ///
 /// Off by default: `PACER_ARENA_PERF=1 swift test --filter RuntimeRegistryProbe`.
+/// Weights come from where the Timestral tests find them; or
 /// `PACER_ARENA_WEIGHTS=<dir>` points at a `ForecastWeights` folder
-/// (`<org>/<name>@<rev>/`) so models that pin weights run too. Synthetic data
-/// only.
+/// (`<org>/<name>@<rev>/`). Synthetic data only.
 @Suite("Arena runtime: registry probe", .serialized,
        .enabled(if: ProcessInfo.processInfo.environment["PACER_ARENA_PERF"] == "1"))
 struct RuntimeRegistryProbe {
 
     static func weights() -> @Sendable (String) -> URL? {
-        guard let root = ProcessInfo.processInfo.environment["PACER_ARENA_WEIGHTS"] else { return { _ in nil } }
+        // Default: wherever the Timestral tests find them (the store, this
+        // checkout's Vendor/ForecastWeights, a Hugging Face cache).
+        guard let root = ProcessInfo.processInfo.environment["PACER_ARENA_WEIGHTS"] else {
+            return { TimestralTestWeights.url($0) }
+        }
         return { id in
             let dir = URL(fileURLWithPath: root).appendingPathComponent(id, isDirectory: true)
             return FileManager.default.fileExists(atPath: dir.appendingPathComponent("model.safetensors").path)
