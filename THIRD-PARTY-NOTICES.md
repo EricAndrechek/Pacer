@@ -37,12 +37,16 @@ pinned to the exact revision Pacer was scored against.
 - Weights: `amazon/chronos-2`, revision `29ec3766d36d6f73f0696f85560a422f50e8498c`
   (about 478 MB), downloaded on first use; not bundled.
 
-## TimesFM 2.5 (Google) - being added
+## TimesFM 2.5 (Google)
 
-- Upstream: https://github.com/google-research/timesfm
-- Used: code port and weights, once the port lands. Not yet in this tree.
-- Licence: expected to be Apache License 2.0, to be confirmed from the
-  upstream files and the source-file header when the port is merged.
-  Copyright line: to be added then.
-- Weights: to be downloaded on first use at a pinned revision, to be recorded
-  here.
+- Upstream: https://github.com/google-research/timesfm (`timesfm` 3.0.2);
+  weights https://huggingface.co/google/timesfm-2.5-200m-pytorch
+- Used: both. The TimesFM 2.5 inference code is ported to Swift
+  (`.../Kit/FM/TimesFM/`), and the weights are loaded.
+- Licence: Apache License 2.0 (code; the weights' model card at the pinned
+  revision also states Apache-2.0, and the repository has no separate LICENSE
+  file, so the card is kept beside the downloaded weights).
+  Copyright 2025 Google LLC.
+- Weights: `google/timesfm-2.5-200m-pytorch`, revision
+  `1d952420fba87f3c6dee4f240de0f1a0fbc790e3` (about 925 MB), downloaded on
+  first use; not bundled.
