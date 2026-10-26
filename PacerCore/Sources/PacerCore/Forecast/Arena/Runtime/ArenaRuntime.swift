@@ -95,6 +95,18 @@ public actor ArenaRecordScorer {
         /// What an incremental pass reads, as the engine's refit does.
         public var incrementalDays = 32
         public var cuts = EngineSelfEval.rlCutFractions
+        /// Child forecasts a window's runner keeps (`ArenaRunner.memoLimit`).
+        /// A parent's backtests at successive cuts of a cycle mostly repeat
+        /// (their times are aligned to the history's start), so the memo is
+        /// what makes ensembles affordable. Bounded by memory: a Monte-Carlo
+        /// child keeps 200 paths over its grid, ~100 KB on a five-hour grid
+        /// and ~550 KB on a weekly one, so the worst case is about 50 MB and
+        /// 100 MB per window being scored.
+        public var sessionMemoLimit = 512
+        public var weeklyMemoLimit = 192
+        /// Cycles a window scores before the next window's turn.
+        public var sessionCyclesPerTurn = 4
+        public var weeklyCyclesPerTurn = 2
         public init() {}
     }
 
@@ -169,7 +181,9 @@ public actor ArenaRecordScorer {
         let models: [ArenaModelSpec]
         let store: ArenaHistoryStore
         let surface: String
-        let runner: ArenaRunner
+        /// Live only during the stream's turn (`pass`), so one window's memo
+        /// is held at a time.
+        var runner: ArenaRunner?
         var queue: [BurnTrajectory.Cycle]       // newest first
         var existing: Set<String>
     }
@@ -195,27 +209,36 @@ public actor ArenaRecordScorer {
                   + "\(Set(streams.flatMap { $0.models.map(\.name) }).count) model(s), "
                   + String(format: "%.0f%% of a core", config.dutyCycle * 100))
 
-        // Newest cycle of each window in turn, so every window's selection
-        // has something to go on early.
+        // Each window in turn, newest cycles first, a few cycles a turn, so
+        // every window's selection has something to go on early. A turn's
+        // cycles share one runner: a parent's backtests over neighbouring
+        // cycles mostly repeat, and its memo answers them; dropping it at the
+        // end of the turn keeps one window's memo in memory at a time.
         var lastLog = SuspendingClock.now
-        var round = 0
         while streams.contains(where: { !$0.queue.isEmpty }) {
             for i in streams.indices where !streams[i].queue.isEmpty {
-                guard !cancel.isSet else { return report }
-                let cycle = streams[i].queue.removeFirst()
-                let news = await score(cycle, in: &streams[i], report: &report)
-                report.cycles += 1
-                if !news.isEmpty {
-                    persist(news, surface: streams[i].surface)
-                    report.outcomes += news.count
-                    await landed(streams[i].account, news)
-                }
-                if SuspendingClock.now - lastLog >= .seconds(120) {
-                    lastLog = SuspendingClock.now
-                    log(report, of: queued, since: started)
+                let weekly = streams[i].window.isWeeklyScale
+                let runner = ArenaRunner(registry: roster.registry, services: services)
+                runner.memoLimit = weekly ? config.weeklyMemoLimit : config.sessionMemoLimit
+                streams[i].runner = runner
+                defer { streams[i].runner = nil }
+                for _ in 0..<(weekly ? config.weeklyCyclesPerTurn : config.sessionCyclesPerTurn) {
+                    guard !cancel.isSet else { return report }
+                    guard !streams[i].queue.isEmpty else { break }
+                    let cycle = streams[i].queue.removeFirst()
+                    let news = await score(cycle, in: &streams[i], report: &report)
+                    report.cycles += 1
+                    if !news.isEmpty {
+                        persist(news, surface: streams[i].surface)
+                        report.outcomes += news.count
+                        await landed(streams[i].account, news)
+                    }
+                    if SuspendingClock.now - lastLog >= .seconds(120) {
+                        lastLog = SuspendingClock.now
+                        log(report, of: queued, since: started)
+                    }
                 }
             }
-            round += 1
         }
         log(report, of: queued, since: started, done: true)
         MemoryHygiene.relieve()
@@ -258,7 +281,8 @@ public actor ArenaRecordScorer {
             let cap = window.isWeeklyScale ? config.weeklyCycleCap : config.sessionCycleCap
             let completed = cycles.filter { $0.resetsAt <= now }.sorted { $0.resetsAt > $1.resetsAt }.prefix(cap)
             let surface = EngineScope.account(account).qualify(EngineSelfEval.rlSurface(window.key))
-            let existing = existingKeys(surface: surface, methods: models.map(\.name))
+            let existing = existingKeys(surface: surface, methods: models.map(\.name),
+                                        periods: completed.map { EngineSelfEval.periodKeyRL($0.resetsAt) })
             let wanted = models.count * config.cuts.count
             let queue = completed.filter { c in
                 let period = EngineSelfEval.periodKeyRL(c.resetsAt)
@@ -269,8 +293,7 @@ public actor ArenaRecordScorer {
             }
             guard !queue.isEmpty else { continue }
             out.append(Stream(account: account, window: window, binding: binding, models: models, store: store,
-                              surface: surface, runner: ArenaRunner(registry: roster.registry, services: services),
-                              queue: Array(queue), existing: existing))
+                              surface: surface, runner: nil, queue: Array(queue), existing: existing))
         }
         return out
     }
@@ -303,9 +326,10 @@ public actor ArenaRecordScorer {
             let busyStart = SuspendingClock.now
             for spec in missing {
                 let k = Self.key(s.surface, spec.name, cf, period)
+                guard let runner = s.runner else { return out }
                 report.forecasts += 1
                 do {
-                    let p = try s.runner.projection(model: spec.name, binding: s.binding, history: cut,
+                    let p = try runner.projection(model: spec.name, binding: s.binding, history: cut,
                                                     resetAt: ArenaTime.millis(cycle.resetsAt))
                     let shown = BurnTrajectory.displayedAtReset(p.closure, partial: partial)
                     guard shown.isFinite else { declined.insert(k); report.declined += 1; continue }
@@ -339,9 +363,14 @@ public actor ArenaRecordScorer {
         EngineEvalOutcome.makeKey(surface: surface, method: model, bucket: EngineSelfEval.rlBucket(cut), periodKey: period)
     }
 
-    private func existingKeys(surface: String, methods: [String]) -> Set<String> {
+    /// The stored keys among these cycles' rows: only the cycles a pass could
+    /// score, so a pass every fifteen minutes doesn't load the whole record.
+    private func existingKeys(surface: String, methods: [String], periods: [String]) -> Set<String> {
+        guard !periods.isEmpty else { return [] }
         var d = FetchDescriptor<EngineEvalOutcome>(
-            predicate: #Predicate { $0.surface == surface && methods.contains($0.method) })
+            predicate: #Predicate {
+                $0.surface == surface && methods.contains($0.method) && periods.contains($0.periodKey)
+            })
         d.propertiesToFetch = [\.key]
         return Set(((try? ModelContext(container).fetch(d)) ?? []).map(\.key))
     }
@@ -423,7 +452,7 @@ public actor ArenaLiveForecaster {
     /// Returns whether anything new landed.
     private func make(_ r: ArenaLiveRequest, cut: ArenaHistory, asOf: Date) -> Bool {
         let runner = ArenaRunner(registry: roster.registry, services: services)
-        let duration = r.resetsAt.timeIntervalSince(r.resetsAt.addingTimeInterval(-TimeInterval(r.binding.target.windowMillis) / 1000))
+        let duration = TimeInterval(r.binding.target.windowMillis) / 1000
         var any = false
         for model in r.models {
             guard !cancel.isSet else { return any }
