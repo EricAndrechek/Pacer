@@ -125,44 +125,48 @@ def test_calibrated_quantiles_agree_with_calibrated_paths(calib_data, calib_regi
         assert _within_mc(d.q, P, d.levels, slack=0.05), case
 
 
-def test_fixture_reproduces_from_its_own_inputs(calib_data, calib_registry, cases, tmp_path):
+@pytest.mark.parametrize("name,target", [("g1-10-fable-analog", Target.METER_5H),
+                                         ("spend-decay-30m", Target.METER_5H),
+                                         ("spend-decay-6h", Target.METER_7D)])
+def test_fixture_reproduces_from_its_own_inputs(calib_data, calib_registry, cases, name, target):
     """A fixture's outputs come back exactly from its inputs alone: a
-    snapshot rebuilt from the JSON's readings, nothing else (what a port's
-    test does)."""
-    from arena.cli_portfix import Local, make_case
-    from arena.snapshot.schema import TABLES
-    from arena.snapshot.views import SnapshotData, Tier
-    info = calib_registry.load("g1-10-fable-analog")
-    case = next(c for c in cases if c["target"] is Target.METER_5H)
+    snapshot rebuilt from the JSON's readings (and spend), nothing else
+    (what a port's test does)."""
+    from arena.cli_portfix import Local, fixture_pricing, is_spend_model, make_case, snapshot_from_case
+    info = calib_registry.load(name)
+    case = next(c for c in cases if c["target"] is target)
     io, out = make_case(calib_data, info, case, include_raw=True)
     doc = json.loads(json.dumps({"io": io, "out": out}))            # what lands on disk
     inp, rq = doc["io"]["inputs"], doc["io"]["request"]
-    rd = inp["readings"]
-    n = len(rd["t_event"])
-    cols = {"t_event": rd["t_event"], "t_known": rd["t_known"], "t_known_src": ["observed"] * n,
-            "account": [inp["account"]] * n, "window_kind": [inp["window_kind"]] * n, "scope_model": [None] * n,
-            "identity": [None] * n, "util_pct": rd["util_pct"], "resets_at": rd["resets_at"], "state": rd["state"],
-            "severity": [None] * n, "source": ["oauth"] * n, "origin": ["archive"] * n, "dup_group": [None] * n,
-            "backwards_pp": [0.0] * n}
-    schema = TABLES["meter_readings"].arrow_schema()
-    import pyarrow as pa
-    arrays = []
-    for f in schema:
-        v = cols[f.name]
-        arrays.append(pa.array(v, type=pa.int64()).cast(f.type) if pa.types.is_timestamp(f.type)
-                      else pa.array(v, type=f.type))
-    frame = pl.from_arrow(pa.Table.from_arrays(arrays, schema=schema))
-    small = SnapshotData({"meter_readings": frame}, snapshot_id=f"{calib_data.snapshot_id}/{case['id']}",
-                         tier=Tier("synthetic", inp["history_start"], rq["now"]), manifest={})
+    assert ("turns" in inp) == is_spend_model(info)
+    small = snapshot_from_case(doc["io"])
     local = Local(small, tz_offset_min=inp["tz_offset_min"])
-    target = Target(rq["target"])
-    tr = TargetRequest(rq["key"], target, (rq["account"],), np.asarray(rq["grid"], np.int64), "pct", 200, None, None,
-                       rq["reset_at"])
+    tr = TargetRequest(rq["key"], Target(rq["target"]), (rq["account"],), np.asarray(rq["grid"], np.int64), "pct",
+                       200, None, None, rq["reset_at"])
     req = Request(rq["now"], Scope((rq["account"],)), (tr,))
-    m = local.instance(info, small.view(req.scope, "current_code", inp["history_start"]), rq["now"])
-    d = detq.quantiles(m, req)[rq["key"]]
+    view = small.view(req.scope, "current_code", inp["history_start"])
+    with fixture_pricing():
+        m = local.instance(info, view, rq["now"])
+        d = detq.quantiles(m, req)[rq["key"]]
     assert d.exact == doc["out"]["exact"]
     assert np.allclose(d.q, np.asarray(doc["out"]["quantiles"], dtype=float), atol=1e-6)
+
+
+@pytest.mark.parametrize("name,target", [("spend-decay-30m", Target.METER_5H), ("spend-decay-6h", Target.METER_7D)])
+def test_spend_decay_quantiles_agree_with_its_paths(calib_data, calib_registry, cases, name, target):
+    info = calib_registry.load(name)
+    seen = 0
+    for case in cases:
+        if case["target"] is not target:
+            continue
+        req, key = _request(case)
+        m = _fitted(calib_data, info, case)
+        d = detq.quantiles(m, req)[key]
+        assert d.exact
+        P = m.forecast(req).by_key[key].paths
+        assert _within_mc(d.q, P, d.levels), (case, d.detail.get("mode"))
+        seen += 1
+    assert seen
 
 
 def test_port_fixtures_refuse_a_real_snapshot(tmp_path, monkeypatch):
@@ -190,12 +194,17 @@ needs_fixtures = pytest.mark.skipif(not (FIXTURES / "cases.json").is_file(), rea
 @needs_fixtures
 def test_committed_fixtures_are_small_and_consistent():
     files = sorted(FIXTURES.glob("*.json"))
-    assert sum(f.stat().st_size for f in files) < 1_100_000
+    assert sum(f.stat().st_size for f in files) < 1_400_000
     cases = {c["id"]: c for c in json.loads((FIXTURES / "cases.json").read_text())["cases"]}
-    assert len(cases) >= 20
-    assert {c["request"]["target"] for c in cases.values()} == {"meter.five_hour", "meter.seven_day"}
-    models = [f for f in files if f.name != "cases.json"]
+    spend = {c["id"]: c for c in json.loads((FIXTURES / "cases-spend.json").read_text())["cases"]}
+    assert len(cases) >= 20 and len(spend) >= 12
+    for cs in (cases, spend):
+        assert {c["request"]["target"] for c in cs.values()} == {"meter.five_hour", "meter.seven_day"}
+    assert all("turns" in c["inputs"] for c in spend.values())
+    cases.update(spend)
+    models = [f for f in files if not f.name.startswith("cases")]
     assert {json.loads(f.read_text())["model"] for f in models} >= {
+        "spend-decay-30m", "spend-decay-6h", "calib-spend-decay-30m", "calib-spend-decay-6h",
         "g1-10-fable-analog", "fm-timestral-5m-meter", "calib-g1-10-fable-analog", "calib-fm-timestral-5m-meter"}
     for f in models:
         doc = json.loads(f.read_text())

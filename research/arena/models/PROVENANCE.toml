@@ -24,6 +24,12 @@ kind = "port"            # the calibration layer (kit/calib.py) over g2-06-opus-
 [models.calib-g2-08-fable-burst]
 kind = "port"            # the calibration layer (kit/calib.py) over g2-08-fable-burst; written by the coordinator, no generation
 
+[models.calib-spend-decay-30m]
+kind = "port"            # the calibration layer (kit/calib.py) over spend-decay-30m; written by the coordinator, no generation
+
+[models.calib-spend-decay-6h]
+kind = "port"            # the calibration layer (kit/calib.py) over spend-decay-6h; written by the coordinator, no generation
+
 [models.combo-ewa]
 kind = "port"
 

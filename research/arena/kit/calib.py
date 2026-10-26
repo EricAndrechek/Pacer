@@ -58,6 +58,7 @@ curves, e.g. a child's exact quantiles at (i + 0.5)/200), which is how
 """
 from __future__ import annotations
 
+import gc
 from dataclasses import asdict, dataclass
 
 import numpy as np
@@ -651,6 +652,11 @@ class CalibModel:
                 continue
             added = sum(self.store.add(req, fc) for req, fc in items)
             self.ctx.log(f"backtest {self.child} every {every / HOUR_MS:g}h: {len(items)} origins, {added} forecasts")
+            del items
+        # Only the compact records stay (40 levels per grid time per forecast);
+        # with in-process workers the backtest children's histories sit in
+        # reference cycles until the cyclic collector runs: run it now.
+        gc.collect()
 
     def update(self, events):
         self.history = self.history.extend(events)

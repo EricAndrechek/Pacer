@@ -19,6 +19,10 @@ reads the same intermediates the model's own `forecast` draws its paths from.
   mixture, the cold-start pace fallback) the forecast is a simulation: `exact`
   is False and the quantiles are those of `MC_PATHS` simulated paths (seeded),
   to be matched within Monte-Carlo error, not exactly.
+- **spend-decay** (`models/spend-decay-*`): each path is the centre forecast
+  plus one past cut's error trajectory, drawn uniformly, kept in
+  [reading, 100] and non-decreasing: the equal-weight type-1 quantiles of
+  those paths are exact (and the lognormal fallback has a closed form).
 - **The calibration layer** (`kit.calib.CalibModel`): the child's
   deterministic quantile curves at CURVE_LEVELS, treated as that many
   comonotone paths, through `kit.calib.apply`, read at the levels. Exact when
@@ -109,6 +113,8 @@ def quantiles(model, request, levels=LEVELS_OUT) -> dict[str, DetQ]:
         return timestral_quantiles(model, request, levels)
     if _analog_module(model) is not None:
         return analog_quantiles(model, request, levels)
+    if _spend_decay_module(model) is not None:
+        return spend_decay_quantiles(model, request, levels)
     raise NotImplementedError(f"no deterministic quantiles for {type(model).__module__}.{type(model).__name__}")
 
 
@@ -234,6 +240,91 @@ def analog_quantiles(model, request, levels=LEVELS_OUT) -> dict[str, DetQ]:
         finally:
             model.rng = saved
         out[tr.key] = from_sampled(lv, np.sort(P, axis=0), detail)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# spend-decay-* (models/spend-decay-30m, -6h, -1d)
+# ---------------------------------------------------------------------------
+
+def _spend_decay_module(model):
+    mod = sys.modules.get(type(model).__module__)
+    return mod if mod is not None and all(hasattr(mod, n) for n in ("state", "path", "build_cases", "FRACS")) \
+        else None
+
+
+def spend_decay_parts(model, tr) -> dict:
+    """Everything `Model._meter` computes before it draws, as it computes
+    it: the meter now, the conversion, the cut's state, the chosen τ, the
+    centre path, and the error trajectories of the picked past cuts on the
+    grid (or None: the lognormal fallback)."""
+    from kit import baselines as B
+    from kit import spend
+    from arena.snapshot.cycles import window_ms
+    S = _spend_decay_module(model)
+    h = model.history
+    m = B.meter_now(h, tr)
+    acct = tr.accounts[0]
+    dur = window_ms(m.window_kind)
+    out = {"kind": m.window_kind, "latest": m.latest, "latest_t": m.latest_t, "start": m.start, "reset": m.reset}
+    d = spend.fit_details(h, acct, m.window_kind, m.scope_model)
+    if d is None:
+        out["mode"] = "flat"
+        return out
+    k = d.rates
+    st = S.state(h, acct, k, m.start, m.reset, m.latest_t, m.latest, h.now, model.lookback)
+    u_now = (h.now - m.start) / dur
+    cases = model._case_table(acct, m.window_kind, m.scope_model)
+    weekly = m.window_kind != "five_hour"
+    tau_i = model._pick_tau(cases, acct, u_now >= 0.5, weekly, m.window_kind)
+    tau = S.TAUS_H[tau_i] * 3_600_000
+    lead = (np.asarray(tr.grid) - h.now).astype(np.float64)
+    centre = S.path(st, tau, lead)
+    pick = model._spread_cases(cases, acct, u_now, st["burn"] > 0)
+    out.update(rates=k, weak=bool(d.conversion.weak), r2=float(d.conversion.r2), state=st, u_now=u_now,
+               tau_h=float(S.TAUS_H[tau_i]), centre=centre, n_cases=0 if cases is None else len(cases["phase"]))
+    if pick is None:
+        out["mode"] = "lognormal"
+        return out
+    err = cases["truth"][pick] - cases["centre"][pick, tau_i]
+    left = max(m.reset - h.now, 1)
+    f = np.clip(lead / left, 0.0, 1.0)
+    xs = np.concatenate(([0.0], S.FRACS))
+    e = np.stack([np.interp(f, xs, np.concatenate(([0.0], row))) for row in err])
+    out.update(mode="cases", picked=len(pick), errors=e)
+    return out
+
+
+def spend_decay_quantiles(model, request, levels=LEVELS_OUT) -> dict[str, DetQ]:
+    """Exact: the model draws each path's error trajectory uniformly from
+    the picked past cuts, so its distribution is those cuts' paths with equal
+    weight, each kept within [the reading, 100] and made non-decreasing:
+    their equal-weight type-1 quantiles. The fallback with too few cuts
+    scales the predicted rise by exp(N(0, 0.6²)): every path is a monotone
+    function of that one factor, so the quantile at α is the path at the
+    factor's α-quantile. With no conversion, the reading, flat."""
+    from scipy.special import ndtri
+    lv = np.asarray(levels, dtype=np.float64)
+    out = {}
+    for tr in request.targets:
+        if WINDOW_FOR.get(tr.target) is None:
+            continue
+        p = spend_decay_parts(model, tr)
+        G = len(tr.grid)
+        latest = p["latest"]
+        if p["mode"] == "flat":
+            q = np.full((len(lv), G), latest)
+        elif p["mode"] == "lognormal":
+            mult = np.exp(0.6 * ndtri(lv))
+            P = latest + (p["centre"][None, :] - latest) * mult[:, None]
+            q = np.maximum.accumulate(np.clip(P, latest, 100.0), axis=1)
+        else:
+            P = np.maximum.accumulate(np.clip(p["centre"][None, :] + p["errors"], latest, 100.0), axis=1)
+            q = weighted_type1(P, np.ones(len(P)), lv)
+        detail = {k: v for k, v in p.items() if k not in ("errors",)}
+        if "state" in detail:
+            detail["state"] = {k: float(v) for k, v in detail["state"].items()}
+        out[tr.key] = DetQ(lv, q, True, 0, detail)
     return out
 
 

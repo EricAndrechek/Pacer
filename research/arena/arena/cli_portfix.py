@@ -1,18 +1,22 @@
 """`arena port-fixtures`: JSON fixtures that a port of a model (Swift, in
 Pacer) checks itself against, written from a SYNTHETIC snapshot only.
 
-    arena port-fixtures --model NAME --snapshot ID --cases N --seed S --out DIR
+    arena port-fixtures --model NAME --snapshot ID --cases N --seed S --out DIR [--spend-cases M]
 
 Each case is one meter target (five-hour and weekly alternate) of one
-account at one moment. Per case the file holds:
+account at one moment; spend models get their own cases (`cases-spend.json`,
+with longer weekly histories), every other model the shared `cases.json`. Per case the file holds:
 
 - **inputs**: exactly what the model read, compactly: the account's readings
   of that window from the history start to `now` (thinned: a row is kept when
   its value, state or cycle changes, at least every `KEEPALIVE_MIN` minutes, and
   the first and last), with their own `t_known`; the device's UTC offset; the
-  history start. The model's outputs below were computed from THESE rows (a
-  snapshot reduced to them), not from the full snapshot, so they are exact
-  for these inputs by construction;
+  history start; for a spend model (`spend-*`), the account's spend as one
+  pseudo-turn per family per 5 minutes (`spend_turns`). The model's outputs
+  below were computed from THESE rows (a snapshot reduced to them, spend
+  priced by `fixture_pricing`), not from the full snapshot, so they are exact
+  for these inputs by construction; `snapshot_from_case` rebuilds that
+  snapshot from the JSON alone;
 - **request**: target, grid, `now`, `reset_at`;
 - **outputs**: the model's deterministic quantiles (`kit.detq`) at LEVELS_OUT
   on the grid and the median path; `exact` says whether they are exact (to
@@ -59,6 +63,7 @@ DAY_MS = 24 * HOUR_MS
 KEEPALIVE_MIN = 60
 WEEKLY_FIXTURE_STEP = 2 * HOUR_MS          # fixtures' weekly grids: the dense head, then every 2 h
 HISTORY_DAYS = {"five_hour": 4, "seven_day": 10}
+SPEND_HISTORY_DAYS = {"five_hour": 4, "seven_day": 12}   # spend models learn from complete past cycles
 MIN_LEAD = {"five_hour": 30 * MIN_MS, "seven_day": DAY_MS}
 WINDOW = {Target.METER_5H: "five_hour", Target.METER_7D: "seven_day"}
 FORMAT = "pacer-arena-port-fixture/1"
@@ -145,6 +150,13 @@ class Local:
 # Cases
 # ---------------------------------------------------------------------------
 
+def is_spend_model(info: ModelInfo) -> bool:
+    """A model that reads spend (turns) as well as readings, itself or
+    through a child (`calib-spend-*`): its fixture inputs carry the
+    account's spend."""
+    return info.name.startswith("spend-") or any(is_spend_model(c) for c in info.children.values())
+
+
 def is_synthetic(snapshot_id: str) -> bool:
     d = snapshot_dir(snapshot_id)
     try:
@@ -185,7 +197,11 @@ def fixture_grid(target: Target, now: int, reset: int) -> np.ndarray:
     return np.append(g[g < reset], np.int64(reset))
 
 
-def pick_cases(index: TierIndex, n: int, seed: int) -> list[dict]:
+def pick_cases(index: TierIndex, n: int, seed: int, history_days: dict | None = None,
+               prefix: str = "c") -> list[dict]:
+    """n cases, five-hour and weekly alternating, at random moments of
+    random accounts while that window is active with time left."""
+    days = history_days or HISTORY_DAYS
     rng = np.random.default_rng(seed)
     accts = [a for a in index.accounts if index.meter(a, Target.METER_5H) is not None]
     t0, t1 = index.tier.start, index.tier.end
@@ -195,19 +211,19 @@ def pick_cases(index: TierIndex, n: int, seed: int) -> list[dict]:
         wk = WINDOW[target]
         for _ in range(500):
             acct = accts[int(rng.integers(len(accts)))]
-            now = int(rng.integers(t0 + HISTORY_DAYS[wk] * DAY_MS + DAY_MS, t1 - DAY_MS))
+            now = int(rng.integers(t0 + days[wk] * DAY_MS + DAY_MS, t1 - DAY_MS))
             now -= now % 1000
             c = index.meter(acct, target).cycle_at(now)
             if c is not None and c.reset_at - now >= MIN_LEAD[wk]:
-                cases.append({"id": f"c{i:02d}", "target": target, "account": acct, "now": now,
-                              "reset_at": int(c.reset_at), "start": now - HISTORY_DAYS[wk] * DAY_MS})
+                cases.append({"id": f"{prefix}{i:02d}", "target": target, "account": acct, "now": now,
+                              "reset_at": int(c.reset_at), "start": now - days[wk] * DAY_MS})
                 break
         else:
             raise SystemExit(f"no active {wk} cycle found for case {i}")
     return cases
 
 
-def reduced(data: SnapshotData, case: dict) -> tuple[SnapshotData, pl.DataFrame, int | None]:
+def reduced(data: SnapshotData, case: dict, with_turns: bool = False) -> tuple[SnapshotData, pl.DataFrame, int | None]:
     """The snapshot cut to what the case's model reads: the account's thinned
     readings of the window, known by now and from the history start; plus the
     device's UTC offset at now."""
@@ -223,9 +239,79 @@ def reduced(data: SnapshotData, case: dict) -> tuple[SnapshotData, pl.DataFrame,
                              pl.lit(0.0).alias("backwards_pp"))
     f = f.select(r.columns).cast(r.schema)
     tz = TierIndex(data).tz_offset_at(case["now"]) if data.tables["turns"].height else None
-    small = SnapshotData({"meter_readings": f}, snapshot_id=f"{data.snapshot_id}/{case['id']}",
+    tables = {"meter_readings": f}
+    if with_turns:
+        tables["turns"] = spend_turns(data, case, tz)
+    small = SnapshotData(tables, snapshot_id=f"{data.snapshot_id}/{case['id']}",
                          tier=Tier("synthetic", case["start"], case["now"]), manifest={})
     return small, f, tz
+
+
+SPEND_BUCKET_MS = 5 * MIN_MS
+
+
+def spend_turns(data: SnapshotData, case: dict, tz: int | None) -> pl.DataFrame:
+    """The account's spend known at now, from the history start, as one
+    pseudo-turn per model family per 5 minutes: t_event the bucket's last
+    turn's, t_known its latest, the cost (priced as `kit.spend` prices: rates
+    known at now, best output) summed and rounded to a micro-dollar, which is
+    carried in `input` (and read back by `fixture_pricing`). A spend model
+    reads nothing else from turns, so its outputs on these pseudo-turns are
+    exact for the fixture's own spend inputs."""
+    from arena.pricing import SYNTHETIC_MODEL, price_turns as arena_price
+    from arena.snapshot.schema import TABLES
+    t = data.tables["turns"]
+    te, tk = pl.col("t_event").dt.epoch("ms"), pl.col("t_known").dt.epoch("ms")
+    t = t.filter((pl.col("account") == case["account"]) & (pl.col("model") != SYNTHETIC_MODEL)
+                 & (tk <= case["now"]) & (te >= case["start"]))
+    t = arena_price(t, data.tables["prices"].filter(pl.col("t_known").dt.epoch("ms") <= case["now"]),
+                    as_of=case["now"], output="best")
+    t = t.with_columns(pl.col("model_family").fill_null("other"), (te // SPEND_BUCKET_MS).alias("_b"),
+                       te.alias("_te"), tk.alias("_tk"))
+    g = (t.group_by(["model_family", "_b"]).agg(pl.col("_te").max(), pl.col("_tk").max(),
+                                                pl.col("cost_usd").fill_null(0.0).sum().alias("cost"))
+         .sort(["_te", "model_family"]))
+    micro = (g["cost"] * 1e6).round(0).cast(pl.Int64)
+    n = g.height
+    schema = TABLES["turns"].arrow_schema()
+    cols = {f.name: pa_nulls(f.type, n) for f in schema}
+    cols.update(t_event=g["_te"], t_known=g["_tk"], account=[case["account"]] * n,
+                model=[f"fixture-{x}" for x in g["model_family"].to_list()], model_family=g["model_family"],
+                input=micro, output=[0] * n, cache_read=[0] * n, cache_write_5m=[0] * n, cache_write_1h=[0] * n,
+                output_reliable=[True] * n, tz_offset_min=[tz] * n, call_id=list(range(1, n + 1)),
+                revised_mask=[0] * n, t_known_src=["observed"] * n)
+    import pyarrow as pa
+    arrays = []
+    for f in schema:
+        v = cols[f.name]
+        v = v.to_list() if hasattr(v, "to_list") else v
+        arrays.append(pa.array(v, type=pa.int64()).cast(f.type) if pa.types.is_timestamp(f.type)
+                      else pa.array(v, type=f.type))
+    return pl.from_arrow(pa.Table.from_arrays(arrays, schema=schema))
+
+
+def pa_nulls(typ, n: int) -> list:
+    return [None] * n
+
+
+class fixture_pricing:
+    """While active, `kit.spend` prices a turn at its `input` micro-dollars
+    (the pseudo-turns of `spend_turns`), so a spend model reads exactly the
+    fixture's costs."""
+
+    def __enter__(self):
+        import kit.spend as ks
+        self._ks, self._orig = ks, ks._price_turns
+
+        def priced(turns, prices, as_of=None, output="raw"):
+            return turns.with_columns((pl.col("input").cast(pl.Float64) * 1e-6).alias("cost_usd"),
+                                      pl.lit("ok").alias("price_flag"))
+        ks._price_turns = priced
+        return self
+
+    def __exit__(self, *exc):
+        self._ks._price_turns = self._orig
+        return False
 
 
 def inputs_json(f: pl.DataFrame, case: dict, tz: int | None) -> dict:
@@ -247,6 +333,50 @@ def inputs_json(f: pl.DataFrame, case: dict, tz: int | None) -> dict:
         "n_readings": f.height,
         "span_s": int((now - int(te[0])) / 1000) if len(te) else 0,
     }
+
+
+def snapshot_from_case(io: dict, snapshot_id: str = "fixture") -> SnapshotData:
+    """The reference consumer: a snapshot rebuilt from a fixture case's
+    JSON inputs alone (what a port's test feeds its own code). Run spend
+    models on it under `fixture_pricing`."""
+    import pyarrow as pa
+    from arena.snapshot.schema import TABLES
+    inp, rq = io["inputs"], io["request"]
+
+    def frame(name: str, cols: dict, n: int) -> pl.DataFrame:
+        schema = TABLES[name].arrow_schema()
+        arrays = []
+        for f in schema:
+            v = cols.get(f.name, [None] * n)
+            arrays.append(pa.array(v, type=pa.int64()).cast(f.type) if pa.types.is_timestamp(f.type)
+                          else pa.array(v, type=f.type))
+        return pl.from_arrow(pa.Table.from_arrays(arrays, schema=schema))
+    rd = inp["readings"]
+    n = len(rd["t_event"])
+    tables = {"meter_readings": frame("meter_readings", {
+        "t_event": rd["t_event"], "t_known": rd["t_known"], "t_known_src": ["observed"] * n,
+        "account": [inp["account"]] * n, "window_kind": [inp["window_kind"]] * n, "util_pct": rd["util_pct"],
+        "resets_at": rd["resets_at"], "state": rd["state"], "source": ["oauth"] * n, "origin": ["archive"] * n,
+        "backwards_pp": [0.0] * n}, n)}
+    if "turns" in inp:
+        tu = inp["turns"]
+        m = len(tu["t_event"])
+        tables["turns"] = frame("turns", {
+            "t_event": tu["t_event"], "t_known": tu["t_known"], "t_known_src": ["observed"] * m,
+            "account": [inp["account"]] * m, "model": [f"fixture-{x}" for x in tu["family"]],
+            "model_family": tu["family"], "input": tu["cost_micro_usd"], "output": [0] * m, "cache_read": [0] * m,
+            "cache_write_5m": [0] * m, "cache_write_1h": [0] * m, "output_reliable": [True] * m,
+            "tz_offset_min": [inp["tz_offset_min"]] * m, "call_id": list(range(1, m + 1)),
+            "revised_mask": [0] * m}, m)
+    return SnapshotData(tables, snapshot_id=snapshot_id, tier=Tier("synthetic", inp["history_start"], rq["now"]),
+                        manifest={})
+
+
+def turns_json(t: pl.DataFrame) -> dict:
+    return {"columns": ["t_event", "t_known", "family", "cost_micro_usd"],
+            "note": "one pseudo-turn per model family per 5 min (kit.spend reads only these); cost in micro-USD",
+            "t_event": t["t_event"].dt.epoch("ms").to_list(), "t_known": t["t_known"].dt.epoch("ms").to_list(),
+            "family": t["model_family"].to_list(), "cost_micro_usd": t["input"].to_list()}
 
 
 def _num(x, nd: int = 6):
@@ -300,7 +430,8 @@ def make_case(data: SnapshotData, info: ModelInfo, case: dict, *, include_raw: b
     """(inputs, outputs) of one case for one model (and the fitted model
     itself when `keep_model`)."""
     from kit import detq
-    small, f, tz = reduced(data, case)
+    spend_model = is_spend_model(info)
+    small, f, tz = reduced(data, case, with_turns=spend_model)
     local = Local(small, tz_offset_min=tz)
     target = case["target"]
     acct = case["account"]
@@ -309,8 +440,13 @@ def make_case(data: SnapshotData, info: ModelInfo, case: dict, *, include_raw: b
     req = Request(case["now"], Scope((acct,), "scope_only"),
                   (TargetRequest(key, target, (acct,), grid, "pct", 200, None, None, case["reset_at"]),))
     view = small.view(req.scope, "current_code", case["start"])
-    model = local.instance(info, view, case["now"])
-    det = detq.quantiles(model, req, detq.LEVELS_OUT)[key]
+    if spend_model:
+        with fixture_pricing():
+            model = local.instance(info, view, case["now"])
+            det = detq.quantiles(model, req, detq.LEVELS_OUT)[key]
+    else:
+        model = local.instance(info, view, case["now"])
+        det = detq.quantiles(model, req, detq.LEVELS_OUT)[key]
     detail = dict(det.detail)
     if not include_raw:
         detail.pop("raw", None)
@@ -324,6 +460,8 @@ def make_case(data: SnapshotData, info: ModelInfo, case: dict, *, include_raw: b
     if not det.exact and det.lo is not None:
         out["mc_bounds"] = {"lo": _arr(det.lo), "hi": _arr(det.hi)}
     inputs = inputs_json(f, case, tz)
+    if spend_model:
+        inputs["turns"] = turns_json(small.tables["turns"])
     request = {"key": key, "target": str(target), "account": acct, "now": case["now"],
                "reset_at": case["reset_at"], "grid": [int(x) for x in grid]}
     if keep_model:
@@ -374,17 +512,22 @@ def run(a: argparse.Namespace) -> int:
     reg = Registry([MODELS_DIR] + [Path(p) for p in (a.models_root or [])])
     infos = [reg.load(n) for n in names]
     data = SnapshotData.load(sid, "synthetic")
-    cases = pick_cases(TierIndex(data), int(a.cases), int(a.seed))
+    index = TierIndex(data)
+    cases = pick_cases(index, int(a.cases), int(a.seed))
+    spend_cases = pick_cases(index, int(a.spend_cases), int(a.seed) + 1, SPEND_HISTORY_DAYS, "s")
     out_dir = Path(a.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     shared: dict[str, dict] = {}
+    shared_spend: dict[str, dict] = {}
     from kit.calib import CalibModel
     for info in infos:
         rows, fits = [], []
-        for case in cases:
+        spend = is_spend_model(info)
+        mine = [c for c in (spend_cases if spend else cases) if str(c["target"]) in info.targets]
+        for case in mine:
             io, res, model = make_case(data, info, case, include_raw=case["target"] is Target.METER_5H,
                                        keep_model=True)
-            shared.setdefault(case["id"], io)
+            (shared_spend if spend else shared).setdefault(case["id"], io)
             rows.append({"case": case["id"], **res})
             if isinstance(model, CalibModel) and len(fits) < 2 and not any(
                     f["kind"] == WINDOW[case["target"]] for f in fits):
@@ -396,11 +539,14 @@ def run(a: argparse.Namespace) -> int:
         if fits:
             doc["fit_parity"] = fits
         (out_dir / f"{info.name}.json").write_text(json.dumps(doc, separators=(",", ":")) + "\n")
-    cases_doc = {"format": FORMAT, "spec": "docs/port-spec.md#parity", "snapshot": sid, "seed": int(a.seed),
-                 "keepalive_min": KEEPALIVE_MIN, "weekly_grid_step_ms": WEEKLY_FIXTURE_STEP,
-                 "cases": [{"id": cid, **io} for cid, io in shared.items()]}
-    (out_dir / "cases.json").write_text(json.dumps(cases_doc, separators=(",", ":")) + "\n")
-    print(f"{len(cases)} cases, {len(infos)} models -> {out_dir}")
+    for name, got in (("cases.json", shared), ("cases-spend.json", shared_spend)):
+        if not got:
+            continue
+        doc = {"format": FORMAT, "spec": "docs/port-spec.md#parity", "snapshot": sid, "seed": int(a.seed),
+               "keepalive_min": KEEPALIVE_MIN, "weekly_grid_step_ms": WEEKLY_FIXTURE_STEP,
+               "spend_bucket_ms": SPEND_BUCKET_MS, "cases": [{"id": cid, **io} for cid, io in got.items()]}
+        (out_dir / name).write_text(json.dumps(doc, separators=(",", ":")) + "\n")
+    print(f"{len(shared)} cases, {len(shared_spend)} spend cases, {len(infos)} models -> {out_dir}")
     return 0
 
 
@@ -409,6 +555,8 @@ def register(subparsers) -> None:
     p.add_argument("--model", required=True, help="model name(s), comma-separated")
     p.add_argument("--snapshot", required=True, help="a SYNTHETIC snapshot id (real ones are refused)")
     p.add_argument("--cases", type=int, default=20)
+    p.add_argument("--spend-cases", type=int, default=12,
+                   help="cases for spend models (their inputs carry turns), five-hour and weekly alternating")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--out", required=True)
     p.add_argument("--models-root", action="append", help="another folder of models")
