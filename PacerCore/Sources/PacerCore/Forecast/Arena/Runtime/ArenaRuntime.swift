@@ -582,14 +582,16 @@ public final class ArenaRuntime: Sendable {
     private let ensureWeights: @Sendable ([String]) async -> Void
     public let compareLimit: Int
 
-    // MERGE (feat/fm-timestral, `Forecast/Arena/Kit/FM/ArenaWeightStore`):
-    // the two wiring points for pretrained weights. Replace the bodies with
-    //   `ArenaWeightStore.services` (the folder holding a pinned network) and
-    //   `{ ids in await ArenaWeightStore.ensureAvailable(ids) }`.
-    // Until then no model that pins weights, itself or through a child, is
-    // offered or scored, and nothing is downloaded.
-    public static let defaultWeights: @Sendable (String) -> URL? = { _ in nil }
-    public static let defaultEnsureWeights: @Sendable ([String]) async -> Void = { _ in }
+    /// Pretrained weights (`ArenaWeightStore`): the folder holding a pinned
+    /// network when it is on this Mac, never a download. A model whose
+    /// weights (or a child's) are missing is not offered or scored until a
+    /// later pass finds them.
+    public static let defaultWeights: @Sendable (String) -> URL? = ArenaWeightStore.services
+    /// Fetches what is missing: one file at a time, never on an expensive or
+    /// constrained network, each verified against its pin.
+    public static let defaultEnsureWeights: @Sendable ([String]) async -> Void = { ids in
+        await ArenaWeightStore.ensureAvailable(ids)
+    }
 
     /// - Parameters:
     ///   - onRecordLanded: new outcomes for an account were saved; hand them
