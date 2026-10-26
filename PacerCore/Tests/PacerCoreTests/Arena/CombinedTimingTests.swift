@@ -87,9 +87,21 @@ extension CombinedTimingTests {
         let store = CombinedSynthetic.history(days: 120, end: end)
         let services = TimestralTestWeights.services()
         var lines: [String] = []
+        // Wall time and this process's CPU time, with Accelerate on one
+        // thread: on a busy Mac the CPU time is the steadier number.
+        FMBackends.setBLASThreading(singleThreaded: true)
+        defer { FMBackends.setBLASThreading(singleThreaded: false) }
+        func cpu() -> Double {
+            var u = rusage()
+            getrusage(RUSAGE_SELF, &u)
+            return Double(u.ru_utime.tv_sec + u.ru_stime.tv_sec) * 1e3 + Double(u.ru_utime.tv_usec + u.ru_stime.tv_usec) / 1e3
+        }
+        var lastCPU = 0.0
         func ms(_ f: () throws -> Void) rethrows -> Double {
             let s = DispatchTime.now().uptimeNanoseconds
+            let c0 = cpu()
             try f()
+            lastCPU = cpu() - c0
             return Double(DispatchTime.now().uptimeNanoseconds - s) / 1e6
         }
         for (target, later) in [(ArenaTarget.meterFiveHour, ArenaTime.hour), (.meterSevenDay, 3 * ArenaTime.hour)] {
@@ -115,14 +127,15 @@ extension CombinedTimingTests {
                 m.fit(h)
                 let before = (cache.hits, cache.misses)
                 let t1 = try ms { _ = try m.forecast(req) }
+                let c1 = lastCPU
                 let gspec = ArenaRegistry.spec("g2-06-opus-fmgate2")!
                 let gctx = ArenaContext(spec: gspec, seed: 1, services: services, runner: runner, history: { h })
                 let g = try G206OpusFMGate2(context: gctx)
                 g.fm.cutCache = cache
                 g.fit(h)
                 let t2 = try ms { _ = try g.forecast(req) }
-                lines.append(String(format: "%@ %@: g1-08 %.0f ms (%d cuts computed, %d memoized), then g2-06 on the same cut %.1f ms",
-                                    target.rawValue, label, t1, cache.misses - before.1, cache.hits - before.0, t2))
+                lines.append(String(format: "%@ %@: g1-08 %.0f ms wall / %.0f ms CPU (%d cuts computed, %d memoized), then g2-06 on the same cut %.1f ms wall / %.1f ms CPU",
+                                    target.rawValue, label, t1, c1, cache.misses - before.1, cache.hits - before.0, t2, lastCPU))
             }
         }
         print("Combined per-forecast timings (120-day synthetic history)\n" + lines.joined(separator: "\n"))
