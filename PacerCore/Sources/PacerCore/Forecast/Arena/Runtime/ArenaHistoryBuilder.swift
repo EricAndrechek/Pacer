@@ -120,7 +120,8 @@ public enum ArenaHistoryBuilder {
     /// One account's limit rows at or after `since`: the live tables and the
     /// archive, merged as the engine's record pass merges them (live wins).
     public static func readLimits(container: ModelContainer, account: String, since: Date) -> LimitRows {
-        let context = ModelContext(container)
+        // Made only for the SwiftData fallbacks: the raw reads need none.
+        lazy var context = ModelContext(container)
         let url = storeURL(container)
         let liveRate: [EngineFeatures.RateRow]
         let liveScoped: [EngineFeatures.ScopedRow]
@@ -153,7 +154,7 @@ public enum ArenaHistoryBuilder {
                       isActive: r.isActive)
             }
         }
-        let archived = readArchive(context: context, url: url, account: account)
+        let archived = readArchive(context: { context }, url: url, account: account)
         let rate = UsageIntelligenceEngine.merged(liveRate, archived.rate.filter { $0.at >= since },
                                                   key: { "\($0.window)|\($0.at.timeIntervalSince1970)" }, at: \.at)
         let scoped = UsageIntelligenceEngine.merged(stamped, archived.scoped.filter { $0.at >= since },
@@ -161,14 +162,14 @@ public enum ArenaHistoryBuilder {
         return LimitRows(rate: rate, scoped: scoped)
     }
 
-    private static func readArchive(context: ModelContext, url: URL?, account: String)
+    private static func readArchive(context: () -> ModelContext, url: URL?, account: String)
         -> (rate: [EngineFeatures.RateRow], scoped: [EngineFeatures.ScopedRow]) {
         if let url, let rate = RawLimitReader.archivedRateRows(storeURL: url, account: account),
            let scoped = RawLimitReader.archivedScopedRows(storeURL: url, account: account) {
             return (rate, scoped)
         }
         let rateKind = AccountUsageArchive.kindRateLimit, scopedKind = AccountUsageArchive.kindUsageLimit
-        let rows = (try? context.fetch(FetchDescriptor<AccountUsageArchive>(
+        let rows = (try? context().fetch(FetchDescriptor<AccountUsageArchive>(
             predicate: #Predicate { $0.accountId == account && ($0.kind == rateKind || $0.kind == scopedKind) },
             sortBy: [SortDescriptor(\.sampledAt)]))) ?? []
         return UsageIntelligenceEngine.archivedLimits(rows)
@@ -200,7 +201,13 @@ public enum ArenaHistoryBuilder {
     public static func spendRows(_ turns: [Turn]) -> [ArenaSpendRow] {
         struct Acc { var last: Millis; var cost: Double?; var turns: Int; var tokens: Int }
         var buckets: [Int: [String: Acc]] = [:]
-        for t in turns {
+        // Summed in one fixed order, whatever order the read returned them
+        // in: a floating-point sum depends on its order, and the raw read and
+        // the SwiftData one (which has no sort) must build the same history.
+        let ordered = turns.sorted {
+            ($0.at, $0.family, $0.costUSD ?? -.infinity, $0.tokens) < ($1.at, $1.family, $1.costUSD ?? -.infinity, $1.tokens)
+        }
+        for t in ordered {
             let b = Int(floorDiv(t.at, spendBucketMillis))
             var acc = buckets[b]?[t.family] ?? Acc(last: t.at, cost: nil, turns: 0, tokens: 0)
             acc.last = max(acc.last, t.at)
@@ -226,9 +233,33 @@ public enum ArenaHistoryBuilder {
         return (a % b != 0 && (a < 0) != (b < 0)) ? q - 1 : q
     }
 
-    /// The account's turns in `(after, through]`, priced and bucketed.
+    /// The account's turns in `(after, through]`, priced and bucketed: raw
+    /// SQLite where the store is a file (`RawSpendReader`), SwiftData
+    /// otherwise. `pace` runs between days (the CPU budget's checkpoint).
     static func readSpend(container: ModelContainer, account: String, after: Date, through: Date,
-                          pricing: PricingTable.Snapshot, mode: CostMode) -> [ArenaSpendRow] {
+                          pricing: PricingTable.Snapshot, mode: CostMode,
+                          pace: () -> Void = {}) -> [ArenaSpendRow] {
+        if let url = storeURL(container) {
+            var turns: [Turn] = []
+            var families: [String: String] = [:]
+            let ok = RawSpendReader.forEach(storeURL: url, account: account, after: after, through: through,
+                                            between: pace) { s in
+                guard s.model != "<synthetic>" else { return }
+                let fam = families[s.model] ?? { let f = family(s.model); families[s.model] = f; return f }()
+                turns.append(Turn(at: ArenaTime.millis(s.sampledAt), family: fam,
+                                  costUSD: cost(s, pricing: pricing, mode: mode), tokens: tokens(s.breakdown)))
+            }
+            if ok { return spendRows(turns) }
+        }
+        return readSpendThroughSwiftData(container: container, account: account, after: after, through: through,
+                                         pricing: pricing, mode: mode, pace: pace)
+    }
+
+    /// The same through SwiftData: in-memory stores (tests, probes), and the
+    /// fallback when the raw read meets a schema it does not know.
+    static func readSpendThroughSwiftData(container: ModelContainer, account: String, after: Date, through: Date,
+                                          pricing: PricingTable.Snapshot, mode: CostMode,
+                                          pace: () -> Void = {}) -> [ArenaSpendRow] {
         // A day at a time, each through a context of its own and dropped:
         // memory is one day's turns, never the walk's (#337). Not `ModelWalk`:
         // its offset pages assume nothing writes the table mid-walk, and this
@@ -247,20 +278,23 @@ public enum ArenaHistoryBuilder {
             autoreleasepool {
                 for s in (try? ModelContext(container).fetch(d)) ?? [] where s.model != "<synthetic>" {
                     turns.append(Turn(at: ArenaTime.millis(s.sampledAt), family: family(s.model),
-                                      costUSD: cost(s, pricing: pricing, mode: mode),
-                                      tokens: Int(s.inputTokens + s.outputTokens + s.cacheReadTokens
-                                                  + s.cacheCreation5mTokens + s.cacheCreation1hTokens)))
+                                      costUSD: cost(s, pricing: pricing, mode: mode), tokens: tokens(s.breakdown)))
                 }
             }
+            pace()
             from = to
         }
         return spendRows(turns)
     }
 
+    static func tokens(_ b: TokenBreakdown) -> Int {
+        Int(b.inputTokens + b.outputTokens + b.cacheReadTokens + b.cacheCreation5mTokens + b.cacheCreation1hTokens)
+    }
+
     /// One turn's cost, or nil when nothing prices it. `.display` reads as
     /// `.auto` here: display mode zeroes a turn with no stored cost, and a
     /// model fed that zero would learn the account spent nothing.
-    static func cost(_ s: TokenSample, pricing: PricingTable.Snapshot, mode: CostMode) -> Double? {
+    static func cost<S: AggregatableSample>(_ s: S, pricing: PricingTable.Snapshot, mode: CostMode) -> Double? {
         let m: CostMode = mode == .display ? .auto : mode
         let c = CostCalculator.sampleCost(s, mode: m, snapshot: pricing)
         if s.sourceCostUSD == nil || m == .calculate,
@@ -298,24 +332,24 @@ public enum ArenaHistoryBuilder {
     /// `account`'s history from `now - depthDays` to `now`.
     public static func build(container: ModelContainer, account: String, now: Date,
                              depthDays: Int = depthDays, mode: CostMode? = nil,
-                             pricing: PricingTable.Snapshot? = nil) -> Built {
+                             pricing: PricingTable.Snapshot? = nil, pace: () -> Void = {}) -> Built {
         let since = now.addingTimeInterval(-Double(depthDays) * 86400)
         return build(container: container, account: account, now: now,
                      limits: readLimits(container: container, account: account, since: since),
-                     depthDays: depthDays, mode: mode, pricing: pricing)
+                     depthDays: depthDays, mode: mode, pricing: pricing, pace: pace)
     }
 
     /// The same, from limit rows the caller already read (the scorer reads
     /// them once for both the history and the cycles it scores).
     public static func build(container: ModelContainer, account: String, now: Date, limits: LimitRows,
                              depthDays: Int = depthDays, mode: CostMode? = nil,
-                             pricing: PricingTable.Snapshot? = nil) -> Built {
+                             pricing: PricingTable.Snapshot? = nil, pace: () -> Void = {}) -> Built {
         let since = now.addingTimeInterval(-Double(depthDays) * 86400)
         let sinceMs = ArenaTime.millis(since)
         let meters = meters(account: account, rows: limits).mapValues { $0.filter { $0.tEvent >= sinceMs } }
         let spend = readSpend(container: container, account: account, after: since, through: now,
                               pricing: pricing ?? Self.pricing(container: container),
-                              mode: mode ?? PacerPreferences.costMode())
+                              mode: mode ?? PacerPreferences.costMode(), pace: pace)
         let store = makeStore(account: account, meters: meters, spend: spend, now: now, since: since)
         return Built(store: store, builtThrough: now, generation: UUID(), meters: meters, spend: spend)
     }
@@ -333,7 +367,7 @@ public enum ArenaHistoryBuilder {
     /// old timestamp are not seen until the next full build.
     public static func extend(_ built: Built, container: ModelContainer, account: String, now: Date,
                               depthDays: Int = depthDays, mode: CostMode? = nil,
-                              pricing: PricingTable.Snapshot? = nil) -> Built {
+                              pricing: PricingTable.Snapshot? = nil, pace: () -> Void = {}) -> Built {
         guard now > built.builtThrough else { return built }
         // The start stays where the full build put it, so memo keys (which
         // name it) and backtest lattices hold until the next full build; the
@@ -366,7 +400,7 @@ public enum ArenaHistoryBuilder {
         let reread = readSpend(container: container, account: account,
                                after: ArenaTime.date(openBucket - 1), through: now,
                                pricing: pricing ?? Self.pricing(container: container),
-                               mode: mode ?? PacerPreferences.costMode())
+                               mode: mode ?? PacerPreferences.costMode(), pace: pace)
         let spend = kept + reread
         return Built(store: makeStore(account: account, meters: meters, spend: spend, now: now, since: since),
                      builtThrough: now, generation: built.generation, meters: meters, spend: spend)
@@ -427,10 +461,20 @@ public actor ArenaHistoryCache {
 
     private let container: ModelContainer
     private let pricing: PricingTable.Snapshot?
+    private let pace: @Sendable () -> Void
     private var entries: [String: (built: ArenaHistoryBuilder.Built, fullAt: Date)] = [:]
+    /// Its own background queue, not the shared cooperative pool: a full
+    /// build reads and prices months of turns, synchronously, and pauses for
+    /// the CPU budget (`pace`) while it does. A live request that waits on it
+    /// lifts the queue to its own priority for as long as it waits.
+    private let queue = DispatchSerialQueue(label: "com.ericandrechek.pacer.arena.history", qos: .background)
+    public nonisolated var unownedExecutor: UnownedSerialExecutor { queue.asUnownedSerialExecutor() }
 
-    public init(container: ModelContainer, pricing: PricingTable.Snapshot? = nil) {
-        self.container = container; self.pricing = pricing
+    /// - Parameter pace: called between the days a build reads (the arena's
+    ///   CPU budget).
+    public init(container: ModelContainer, pricing: PricingTable.Snapshot? = nil,
+                pace: @escaping @Sendable () -> Void = {}) {
+        self.container = container; self.pricing = pricing; self.pace = pace
     }
 
     /// `account`'s history known at `now`.
@@ -438,11 +482,12 @@ public actor ArenaHistoryCache {
         if let e = entries[account], now.timeIntervalSince(e.fullAt) < Self.fullRebuildInterval {
             if now.timeIntervalSince(e.built.builtThrough) < Self.reuseInterval { return e.built }
             let next = ArenaHistoryBuilder.extend(e.built, container: container, account: account, now: now,
-                                                  pricing: pricing)
+                                                  pricing: pricing, pace: pace)
             entries[account] = (next, e.fullAt)
             return next
         }
-        let fresh = ArenaHistoryBuilder.build(container: container, account: account, now: now, pricing: pricing)
+        let fresh = ArenaHistoryBuilder.build(container: container, account: account, now: now, pricing: pricing,
+                                              pace: pace)
         entries[account] = (fresh, now)
         MemoryHygiene.relieve(minimumInterval: MemoryHygiene.recurringReliefInterval)
         return fresh

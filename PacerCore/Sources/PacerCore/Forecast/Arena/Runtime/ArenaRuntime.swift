@@ -11,12 +11,19 @@ import SwiftData
 // - `ArenaRecordScorer` back-computes each arena model over the account's
 //   completed cycles, at the engine's cuts and graded by the value the app
 //   shows (`displayedAtReset`), into the same `EngineEvalOutcome` rows the
-//   engine's own methods are scored into. Newest cycles first, at a fraction
-//   of one core, resumable: it skips every key already stored.
+//   engine's own methods are scored into. Newest cycles first, within a CPU
+//   budget (`ArenaCPUBudget`), resumable: it skips every key already stored.
 // - `ArenaLiveForecaster` makes the live projections the engine can draw
 //   (the pick, and the few the compare sheet lists), into `ArenaLiveCache`.
-// - `ArenaRuntime` holds both, the shared history and the engine's view of
-//   it (`ArenaEngineLink`).
+// - `ArenaRuntime` holds both, the shared history, the CPU budget they share
+//   and the engine's view of it all (`ArenaEngineLink`).
+//
+// Each runs on a serial dispatch queue of its own (a custom actor executor),
+// not on Swift's shared cooperative pool: their work is long, synchronous and
+// paced by sleeping the thread, which on a pool thread would take a thread
+// the rest of the app's tasks need. The scorer's and the history's queues are
+// background QoS (the lowest CPU and I/O tier macOS has), the live
+// forecaster's utility.
 
 /// What an engine needs from the runtime. A value: the engine reads the
 /// roster and cache synchronously and never awaits the runtime.
@@ -85,11 +92,16 @@ final class ArenaLogGate: @unchecked Sendable {
 public actor ArenaRecordScorer {
 
     public struct Config: Sendable {
-        /// Share of one core the scorer may use, averaged: it sleeps after
-        /// each cut for `busy × (1 − duty) / duty`.
+        /// Share of one core the arena may use, in CPU time, scorer and live
+        /// projections together (`ArenaCPUBudget`).
         public var dutyCycle: Double = 0.25
-        /// The longest single sleep, so a slow cut can't stall the queue.
-        public var maxSleep: TimeInterval = 30
+        /// New outcomes are saved and handed to the engines in batches, at
+        /// most this often (or at `flushOutcomes`), and at the end of a pass:
+        /// a save per cycle was hundreds of saves on a first pass, each a
+        /// write on the store the scan and the views read, and each batch an
+        /// ingest on the engine actor every ask queues behind.
+        public var flushInterval: TimeInterval = 60
+        public var flushOutcomes = 2000
         /// The most completed cycles scored per window, newest first:
         /// selection compares models over the cycles every one of them was
         /// scored on (`EngineSelfEval.arenaComparable`), so depth past a few
@@ -135,10 +147,18 @@ public actor ArenaRecordScorer {
     private let roster: ArenaRoster
     private let history: ArenaHistoryCache
     private let services: ArenaServices
+    private let budget: ArenaCPUBudget
     private let cancel: ArenaCancelFlag
     private let config: Config
     private let calendar: Calendar
     private let landed: @Sendable (_ account: String, _ outcomes: [EngineSelfEval.NewOutcome]) async -> Void
+    /// See the file header.
+    private let queue = DispatchSerialQueue(label: "com.ericandrechek.pacer.arena.scorer", qos: .background)
+    public nonisolated var unownedExecutor: UnownedSerialExecutor { queue.asUnownedSerialExecutor() }
+    /// Outcomes scored but not yet saved (`Config.flushInterval`).
+    private var unsaved: [(account: String, surface: String, news: [EngineSelfEval.NewOutcome])] = []
+    private var unsavedCount = 0
+    private var lastFlush = SuspendingClock.now
     /// (surface, model, cut, period) keys a model declined this process, so a
     /// pass doesn't ask again every fifteen minutes. Relaunch retries them.
     private var declined = Set<String>()
@@ -146,11 +166,14 @@ public actor ArenaRecordScorer {
     /// The accounts the last full pass covered, with the roster it scored.
     private var coveredFingerprint: [String: String] = [:]
 
+    /// - Parameter services: the scorer's own: its `isCancelled` is the CPU
+    ///   budget's checkpoint (`ArenaRuntime`).
     init(container: ModelContainer, roster: ArenaRoster, history: ArenaHistoryCache, services: ArenaServices,
-         cancel: ArenaCancelFlag, config: Config = Config(), calendar: Calendar = .current,
+         budget: ArenaCPUBudget, cancel: ArenaCancelFlag, config: Config = Config(), calendar: Calendar = .current,
          landed: @escaping @Sendable (String, [EngineSelfEval.NewOutcome]) async -> Void) {
         self.container = container; self.roster = roster; self.history = history; self.services = services
-        self.cancel = cancel; self.config = config; self.calendar = calendar; self.landed = landed
+        self.budget = budget; self.cancel = cancel; self.config = config; self.calendar = calendar
+        self.landed = landed
     }
 
     /// What a full pass is for: the models that can run and how deep. A
@@ -165,11 +188,14 @@ public actor ArenaRecordScorer {
 
     // MARK: Loop
 
-    /// Score now, then every `rescanInterval`, until `stop()`.
-    func start(accounts: @escaping @Sendable () async -> [String]) {
+    /// Score now, then every `rescanInterval`, until `stop()`. `beforePass`
+    /// runs first each time (the runtime fetches any weights still missing).
+    func start(accounts: @escaping @Sendable () async -> [String],
+               beforePass: @escaping @Sendable () async -> Void = {}) {
         guard loop == nil, !roster.isEmpty, !cancel.isSet else { return }
         loop = Task.detached(priority: .background) { [weak self] in
             while let self, !Task.isCancelled {
+                await beforePass()
                 let ids = await accounts()
                 await self.pass(accounts: ids)
                 if await self.isCancelled { return }
@@ -216,7 +242,7 @@ public actor ArenaRecordScorer {
         var streams: [Stream] = []
         let fingerprint = self.fingerprint
         for account in accounts {
-            guard !cancel.isSet else { return report }
+            guard !cancel.isSet else { saveUnsaved(); return report }
             let full = coveredFingerprint[account] != fingerprint
             streams += await self.streams(account: account, now: now, full: full)
             coveredFingerprint[account] = fingerprint
@@ -246,19 +272,23 @@ public actor ArenaRecordScorer {
                 runners[account] = runner
                 defer { prune(&streams[i]) }
                 for _ in 0..<(weekly ? config.weeklyCyclesPerTurn : config.sessionCyclesPerTurn) {
-                    guard !cancel.isSet else { return report }
+                    guard !cancel.isSet else { saveUnsaved(); return report }
                     guard !streams[i].queue.isEmpty else { break }
                     let cycle = streams[i].queue.removeFirst()
-                    let news = await score(cycle, in: &streams[i], runner: runner, report: &report)
+                    let news = score(cycle, in: &streams[i], runner: runner, report: &report)
                     report.cycles += 1
                     if !news.isEmpty {
-                        persist(news, surface: streams[i].surface)
                         report.outcomes += news.count
                         streams[i].records += news.map {
                             EngineSelfEval.Record(method: $0.method, bucket: $0.bucket, periodKey: $0.periodKey,
                                                   predicted: $0.predicted, truth: $0.truth)
                         }
-                        await landed(streams[i].account, news)
+                        unsaved.append((streams[i].account, streams[i].surface, news))
+                        unsavedCount += news.count
+                    }
+                    if unsavedCount >= config.flushOutcomes
+                        || SuspendingClock.now - lastFlush >= .seconds(config.flushInterval) {
+                        await flush()
                     }
                     if SuspendingClock.now - lastLog >= .seconds(120) {
                         lastLog = SuspendingClock.now
@@ -267,21 +297,53 @@ public actor ArenaRecordScorer {
                 }
             }
         }
+        await flush()
         log(report, of: queued, since: started, done: true)
         MemoryHygiene.relieve()
         return report
     }
 
+    /// Save what is unsaved, then hand each account's share to its engine.
+    private func flush() async {
+        lastFlush = SuspendingClock.now
+        let batch = saveUnsaved()
+        for (account, news) in batch where !news.isEmpty { await landed(account, news) }
+    }
+
+    /// Save what is unsaved in one transaction; returns it by account. Also
+    /// what a cancelled pass does on its way out (the engines are stopping
+    /// with it).
+    @discardableResult
+    private func saveUnsaved() -> [String: [EngineSelfEval.NewOutcome]] {
+        guard !unsaved.isEmpty else { return [:] }
+        let context = ModelContext(container)
+        let now = Date()
+        var byAccount: [String: [EngineSelfEval.NewOutcome]] = [:]
+        for (account, surface, news) in unsaved {
+            for n in news {
+                context.insert(EngineEvalOutcome(surface: surface, method: n.method, bucket: n.bucket,
+                                                 periodKey: n.periodKey, predicted: n.predicted, truth: n.truth,
+                                                 recordedAt: now))
+            }
+            byAccount[account, default: []] += news
+        }
+        try? context.save()
+        unsaved.removeAll()
+        unsavedCount = 0
+        return byAccount
+    }
+
     private func log(_ r: Report, of total: Int, since started: SuspendingClock.Instant, done: Bool = false) {
         let awake = SuspendingClock.now - started
+        let cpu = budget.totals
         // The three that cost the most, with their time per forecast.
         let slowest = r.modelSeconds.sorted { $0.value > $1.value }.prefix(3).map { id, s in
             String(format: "%@ %.0f ms", id, s * 1000 / Double(max(1, r.modelForecasts[id] ?? 1)))
         }.joined(separator: ", ")
         Log.write("Arena", (done ? "scored " : "progress ") + "\(r.cycles)/\(total) cycle(s): +\(r.outcomes) outcome(s) "
                   + "from \(r.forecasts) forecast(s), \(r.declined) declined, "
-                  + String(format: "busy %.0f s of %.0f s awake", r.busySeconds,
-                           Double(awake.components.seconds))
+                  + String(format: "busy %.0f s of %.0f s awake; arena cpu %.0f s, paced %.0f s", r.busySeconds,
+                           Double(awake.components.seconds), cpu.spent, cpu.slept)
                   + (slowest.isEmpty ? "" : "; slowest: \(slowest)"))
     }
 
@@ -293,16 +355,16 @@ public actor ArenaRecordScorer {
         guard limits.count > 0 else { return [] }
         let store: ArenaHistoryStore
         if full {
-            // Months of turns, priced: the pass's one burst of reading. Paced
-            // like a cut, so a first launch with several accounts doesn't
-            // read them all back to back.
-            let started = SuspendingClock.now
+            // Months of turns, priced: the pass's one burst of reading,
+            // paced by the budget a day at a time.
+            let budget = self.budget, cancel = self.cancel
+            budget.mark()
             let built = ArenaHistoryBuilder.build(container: container, account: account, now: now, limits: limits,
-                                                  pricing: config.pricing)
+                                                  pricing: config.pricing,
+                                                  pace: { budget.checkpoint(cancelled: { cancel.isSet }) })
+            budget.checkpoint(cancelled: { cancel.isSet })
             await history.install(built, account: account)
             store = built.store
-            let took = SuspendingClock.now - started
-            await pace(Double(took.components.seconds) + Double(took.components.attoseconds) * 1e-18)
         } else {
             store = await history.store(account: account, now: now)
         }
@@ -352,7 +414,7 @@ public actor ArenaRecordScorer {
     /// Every cut of one completed cycle, every model still missing at it:
     /// cuts outer, models inner, one history cut shared by the models.
     private func score(_ cycle: BurnTrajectory.Cycle, in s: inout Stream, runner: ArenaRunner,
-                       report: inout Report) async
+                       report: inout Report)
         -> [EngineSelfEval.NewOutcome] {
         guard let truth = cycle.samples.map(\.usedPercentage).max(), truth > 0 else { return [] }
         let duration = cycle.resetsAt.timeIntervalSince(cycle.cycleStart)
@@ -386,6 +448,10 @@ public actor ArenaRecordScorer {
                         + Double(d.components.attoseconds) * 1e-18
                     report.modelForecasts[spec.name, default: 0] += 1
                 }
+                // The model's CPU is charged at every check inside it (the
+                // scorer's `isCancelled`) and its tail here.
+                budget.mark()
+                defer { budget.checkpoint(cancelled: { cancel.isSet }) }
                 do {
                     let p = try runner.projection(model: spec.name, binding: s.binding, history: cut,
                                                     resetAt: ArenaTime.millis(cycle.resetsAt))
@@ -403,18 +469,9 @@ public actor ArenaRecordScorer {
                 }
             }
             let busy = SuspendingClock.now - busyStart
-            let busySeconds = Double(busy.components.seconds) + Double(busy.components.attoseconds) * 1e-18
-            report.busySeconds += busySeconds
-            await pace(busySeconds)
+            report.busySeconds += Double(busy.components.seconds) + Double(busy.components.attoseconds) * 1e-18
         }
         return out
-    }
-
-    /// Sleep long enough that this cut's work averages out to the duty cycle.
-    private func pace(_ busy: Double) async {
-        let d = min(1, max(0.01, config.dutyCycle))
-        let sleep = min(config.maxSleep, busy * (1 - d) / d)
-        if sleep > 0.001 { try? await Task.sleep(for: .seconds(sleep)) } else { await Task.yield() }
     }
 
     static func key(_ surface: String, _ model: String, _ cut: Double, _ period: String) -> String {
@@ -450,17 +507,6 @@ public actor ArenaRecordScorer {
         if s.models.isEmpty { s.queue.removeAll() }
     }
 
-    private func persist(_ news: [EngineSelfEval.NewOutcome], surface: String) {
-        let context = ModelContext(container)
-        let now = Date()
-        for n in news {
-            context.insert(EngineEvalOutcome(surface: surface, method: n.method, bucket: n.bucket,
-                                             periodKey: n.periodKey, predicted: n.predicted, truth: n.truth,
-                                             recordedAt: now))
-        }
-        try? context.save()
-    }
-
     /// Whether every pinned weight `spec` and its children need is on this
     /// Mac (`ArenaRunner.requiredWeights`, transitive). A model missing one
     /// throws `weightsUnavailable` at every cut, so it is not offered.
@@ -479,8 +525,12 @@ public actor ArenaLiveForecaster {
     private let history: ArenaHistoryCache
     private let cache: ArenaLiveCache
     private let services: ArenaServices
+    private let budget: ArenaCPUBudget
     private let cancel: ArenaCancelFlag
     private let landed: @Sendable (Set<String>) async -> Void
+    /// See the file header.
+    private let queue = DispatchSerialQueue(label: "com.ericandrechek.pacer.arena.live", qos: .utility)
+    public nonisolated var unownedExecutor: UnownedSerialExecutor { queue.asUnownedSerialExecutor() }
     private var pending: [String: ArenaLiveRequest] = [:]
     private var draining = false
     /// One runner per account, kept across refits for as long as the history
@@ -493,10 +543,12 @@ public actor ArenaLiveForecaster {
     /// says so once, not every refit.
     private var logged = Set<String>()
 
+    /// - Parameter services: the live forecaster's own: its `isCancelled` is
+    ///   the CPU budget's urgent checkpoint (`ArenaRuntime`).
     init(roster: ArenaRoster, history: ArenaHistoryCache, cache: ArenaLiveCache, services: ArenaServices,
-         cancel: ArenaCancelFlag, landed: @escaping @Sendable (Set<String>) async -> Void) {
+         budget: ArenaCPUBudget, cancel: ArenaCancelFlag, landed: @escaping @Sendable (Set<String>) async -> Void) {
         self.roster = roster; self.history = history; self.cache = cache; self.services = services
-        self.cancel = cancel; self.landed = landed
+        self.budget = budget; self.cancel = cancel; self.landed = landed
     }
 
     /// Queue requests; the newest per window wins.
@@ -515,6 +567,10 @@ public actor ArenaLiveForecaster {
     }
 
     private func drain() async {
+        // While this works the scorer waits at its checkpoints: the budget
+        // goes to what the dashboard is waiting for.
+        budget.beginUrgent()
+        defer { budget.endUrgent() }
         while !pending.isEmpty, !cancel.isSet {
             let batch = Array(pending.values)
             pending.removeAll()
@@ -552,6 +608,8 @@ public actor ArenaLiveForecaster {
                RateLimitCycle.contains(sampleReset: e.resetsAt, resets: r.resetsAt, duration: duration) {
                 continue
             }
+            budget.mark()
+            defer { budget.checkpoint(urgent: true, cancelled: { cancel.isSet }) }
             do {
                 let p = try runner.projection(model: model, binding: r.binding, history: cut,
                                               resetAt: ArenaTime.millis(r.resetsAt))
@@ -582,8 +640,11 @@ public final class ArenaRuntime: Sendable {
     public let history: ArenaHistoryCache
     public let scorer: ArenaRecordScorer
     public let live: ArenaLiveForecaster
+    /// The arena's share of the CPU, scorer and live together.
+    public let budget: ArenaCPUBudget
     let cancel = ArenaCancelFlag()
     private let ensureWeights: @Sendable ([String]) async -> Void
+    private let weights: @Sendable (String) -> URL?
     public let compareLimit: Int
 
     /// Pretrained weights (`ArenaWeightStore`): the folder holding a pinned
@@ -612,15 +673,32 @@ public final class ArenaRuntime: Sendable {
         self.roster = roster
         self.compareLimit = compareLimit
         self.ensureWeights = ensureWeights
-        let history = ArenaHistoryCache(container: container, pricing: config.pricing)
-        self.history = history
+        self.weights = weights
         let cancel = self.cancel
+        let budget = ArenaCPUBudget(rate: config.dutyCycle)
+        self.budget = budget
+        // The history pays like the rest but never waits for the urgent lane:
+        // the live forecaster is often what it is building for, and waits on it.
+        let history = ArenaHistoryCache(container: container, pricing: config.pricing,
+                                        pace: { budget.checkpoint(urgent: true, cancelled: { cancel.isSet }) })
+        self.history = history
         let gate = ArenaLogGate()
-        let services = ArenaServices(weights: weights, log: { gate.write($0, $1) }, isCancelled: { cancel.isSet })
-        self.scorer = ArenaRecordScorer(container: container, roster: roster, history: history, services: services,
-                                        cancel: cancel, config: config, landed: onRecordLanded)
-        self.live = ArenaLiveForecaster(roster: roster, history: history, cache: cache, services: services,
-                                        cancel: cancel, landed: onLiveLanded)
+        // Every check a model makes for cancellation is also where it pays
+        // for its CPU: the scorer's waits behind live work, the live
+        // forecaster's does not.
+        let scorerServices = ArenaServices(weights: weights, log: { gate.write($0, $1) }, isCancelled: {
+            budget.checkpoint(cancelled: { cancel.isSet })
+            return cancel.isSet
+        })
+        let liveServices = ArenaServices(weights: weights, log: { gate.write($0, $1) }, isCancelled: {
+            budget.checkpoint(urgent: true, cancelled: { cancel.isSet })
+            return cancel.isSet
+        })
+        self.scorer = ArenaRecordScorer(container: container, roster: roster, history: history,
+                                        services: scorerServices, budget: budget, cancel: cancel, config: config,
+                                        landed: onRecordLanded)
+        self.live = ArenaLiveForecaster(roster: roster, history: history, cache: cache, services: liveServices,
+                                        budget: budget, cancel: cancel, landed: onLiveLanded)
     }
 
     /// What every engine adopts.
@@ -632,18 +710,29 @@ public final class ArenaRuntime: Sendable {
 
     /// Start scoring `accounts()` in the background, and fetch any pinned
     /// weights the roster needs (without waiting: models whose weights are
-    /// missing are skipped until a later pass finds them).
+    /// missing are skipped until a later pass finds them). Every pass asks
+    /// for the missing weights again, so a download that failed is retried
+    /// in the same process (`ArenaWeightStore` backs off between tries).
     public func start(accounts: @escaping @Sendable () async -> [String]) {
         guard !roster.isEmpty else { return }
+        // One thread per BLAS call, process-wide (only the arena uses BLAS):
+        // Accelerate otherwise spreads each matrix product over every core,
+        // so a quarter of a core by the calling thread's clock could be the
+        // whole machine by the process's, and the budget counts the calling
+        // thread.
+        FMBackends.setBLASThreading(singleThreaded: true)
         // What the models that can be picked need, children included.
         let runner = ArenaRunner(registry: roster.registry)
         let ids = Array(Set(roster.selectable.flatMap { runner.requiredWeights($0.name) })).sorted()
-        if !ids.isEmpty {
-            let ensure = ensureWeights
-            Task.detached(priority: .background) { await ensure(ids) }
+        let ensure = ensureWeights, local = weights
+        let fetchMissing: @Sendable () async -> Void = {
+            let missing = ids.filter { local($0) == nil }
+            guard !missing.isEmpty else { return }
+            // Not awaited: a download takes minutes and the pass needs none.
+            Task.detached(priority: .background) { await ensure(missing) }
         }
         let scorer = self.scorer
-        Task { await scorer.start(accounts: accounts) }
+        Task.detached(priority: .background) { await scorer.start(accounts: accounts, beforePass: fetchMissing) }
     }
 
     /// Stop at the next model boundary and wait for it.

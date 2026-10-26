@@ -210,12 +210,32 @@ struct RuntimeEngineTests {
         let landed = Landed()
         let rt = Self.runtime(container, roster: [Self.peeker], config: config, landed: landed)
         _ = await rt.scorer.pass(accounts: [Self.account], now: Self.now)
-        let order = landed.batches.compactMap { $0.first?.periodKey }
+        // One batch for the pass (saved and handed over together, not per
+        // cycle: `Config.flushInterval`), in the order the cycles were scored.
+        #expect(landed.batches.count == 1)
+        var order: [String] = []
+        for n in landed.all where !order.contains(n.periodKey) { order.append(n.periodKey) }
         #expect(order.count == 3)
         #expect(order == order.sorted(by: >))
         // Exactly the three newest completed cycles.
         let engineSegments = try Self.completedResets(container)
         #expect(Set(order) == Set(engineSegments.suffix(3)))
+    }
+
+    /// Outcomes are saved and handed over in batches: at `flushOutcomes`
+    /// (here every cycle's worth) and whatever is left at the end of a pass,
+    /// every one of them stored exactly once.
+    @Test func outcomesAreSavedInBatches() async throws {
+        let container = try Self.seeded()
+        var config = Self.noSleep()
+        config.sessionCycleCap = 3
+        config.flushOutcomes = 1
+        let landed = Landed()
+        let rt = Self.runtime(container, roster: [Self.peeker], config: config, landed: landed)
+        let report = await rt.scorer.pass(accounts: [Self.account], now: Self.now)
+        #expect(landed.batches.count == 3)
+        #expect(landed.all.count == report.outcomes)
+        #expect(try Self.arenaRows(container, method: "test-peeker").count == report.outcomes)
     }
 
     static func completedResets(_ container: ModelContainer) throws -> [String] {
