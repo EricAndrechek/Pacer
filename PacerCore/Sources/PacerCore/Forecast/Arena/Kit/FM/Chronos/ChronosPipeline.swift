@@ -2,8 +2,8 @@ import Foundation
 
 /// `pipeline.py` `Chronos2Pipeline.predict_quantiles` on a `(B, V, T)`
 /// tensor, the one input form the arena's `Chronos2Backend` uses without
-/// covariates (licence and provenance: `ChronosConfig.swift`), plus that
-/// backend's own steps around it (`ArenaChronos`).
+/// covariates (licence and provenance: `ChronosConfig.swift`); the backend
+/// around it is `Chronos2Backend`.
 ///
 /// The tensor goes through `preprocess.from_tensor` and `Chronos2Dataset`
 /// in TEST mode: each series is one group of its variates, the last
@@ -92,59 +92,5 @@ public final class ChronosPipeline: @unchecked Sendable {
             first += series.count
         }
         return Quantiles(b: b, v: v, h: h, q: nq, values: out)
-    }
-}
-
-/// The arena's `Chronos2Backend` (`kit/fm/backends.py`) around the pipeline,
-/// without covariates: the context cut to `maxContext`, handed over in
-/// float32 (`ctx.astype(np.float32)`), and the quantiles sorted along Q
-/// (`Backend.quantiles` → `fix_crossing`), in float64. One loaded network per
-/// weights id per process (`weights.cached`), shared by every model and
-/// thread that names it.
-public enum ArenaChronos {
-    /// `Chronos2Backend.max_context`.
-    public static let maxContext = 8192
-
-    final class Cache: @unchecked Sendable {
-        let lock = NSLock()
-        var byID: [String: ChronosPipeline] = [:]
-    }
-
-    static let cache = Cache()
-
-    /// The pipeline for a weights id from its local folder (loaded once).
-    public static func pipeline(_ id: String, directory: URL) throws -> ChronosPipeline {
-        cache.lock.lock()
-        defer { cache.lock.unlock() }
-        if let p = cache.byID[id] { return p }
-        let p = ChronosPipeline(network: try ChronosNetwork(directory: directory))
-        cache.byID[id] = p
-        return p
-    }
-
-    /// The pipeline for a weights id, through the services' weight lookup.
-    public static func pipeline(_ id: String, services: ArenaServices) throws -> ChronosPipeline {
-        cache.lock.lock()
-        let hit = cache.byID[id]
-        cache.lock.unlock()
-        if let hit { return hit }
-        guard let dir = services.weights(id) else { throw ArenaError.weightsUnavailable(id) }
-        return try pipeline(id, directory: dir)
-    }
-
-    /// `Backend.quantiles` for Chronos-2 without covariates: `context`
-    /// `[B][V][T]` (NaN = missing) → `B × V × H × Q`, sorted along Q.
-    public static func quantiles(_ p: ChronosPipeline, context: [[[Double]]], horizon: Int) throws -> FMBackends.Quantiles {
-        let ctx: [[[Float]]] = context.map { $0.map { $0.suffix(maxContext).map(Float.init) } }
-        let out = try p.predictQuantiles(context: ctx, predictionLength: horizon)
-        let nq = out.q
-        var values = [Double](repeating: 0, count: out.values.count)
-        var row = [Double](repeating: 0, count: nq)
-        for i in 0..<(out.values.count / nq) {
-            for k in 0..<nq { row[k] = Double(out.values[i * nq + k]) }
-            row.sort()
-            for k in 0..<nq { values[i * nq + k] = row[k] }
-        }
-        return FMBackends.Quantiles(levels: p.quantileLevels, b: out.b, v: out.v, h: out.h, q: nq, values: values)
     }
 }

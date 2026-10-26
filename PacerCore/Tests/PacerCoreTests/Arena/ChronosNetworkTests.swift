@@ -10,7 +10,7 @@ enum ChronosTestWeights {
     static func services() -> ArenaServices { ArenaServices(weights: { TimestralTestWeights.url($0) }) }
     static func pipeline() throws -> ChronosPipeline? {
         guard let u = url() else { return nil }
-        return try ArenaChronos.pipeline(ChronosWeights.chronos2, directory: u)
+        return try Chronos2Backend.pipeline(ChronosWeights.chronos2, directory: u)
     }
 }
 
@@ -83,7 +83,7 @@ enum ChronosTestWeights {
         for out in fm.outputs {
             guard let d = out.detail, let want = Self.rawMatrix(d["raw"]), let ctx = Self.context(out) else { continue }
             let horizon = Int(d["horizon_steps"]?.number ?? 0)
-            let got = try ArenaChronos.quantiles(p, context: [[ctx]], horizon: horizon).curve()
+            let got = try Chronos2Backend(p).quantiles(context: [[ctx]], horizon: horizon).curve()
             Self.check(got, want, "five-hour \(out.case)", worst: &worst)
             checked += 1
         }
@@ -102,7 +102,7 @@ enum ChronosTestWeights {
             let out = try #require(fm.outputs.first { $0.case == w.case })
             let ctx = try #require(Self.context(out))
             #expect(ctx.count == 672)
-            let curve = try ArenaChronos.quantiles(p, context: [[ctx]], horizon: w.horizon).curve()
+            let curve = try Chronos2Backend(p).quantiles(context: [[ctx]], horizon: w.horizon).curve()
             Self.check(w.steps.map { curve[$0] }, w.raw, "weekly \(w.case)", worst: &worst)
         }
         #expect(ref.weekly.count == 10)
@@ -119,9 +119,9 @@ enum ChronosTestWeights {
         let ctxs = m.cases.compactMap { c in fm.outputs.first { $0.case == c }.flatMap(Self.context) }
         try #require(ctxs.count == 2)
         var worst = 0.0
-        let mv = try ArenaChronos.quantiles(p, context: [ctxs], horizon: m.horizon)
+        let mv = try Chronos2Backend(p).quantiles(context: [ctxs], horizon: m.horizon)
         for vi in 0..<2 { Self.check(m.steps.map { mv.curve(0, vi)[$0] }, m.multivariate[vi], "multivariate v\(vi)", worst: &worst) }
-        let bt = try ArenaChronos.quantiles(p, context: ctxs.map { [$0] }, horizon: m.horizon)
+        let bt = try Chronos2Backend(p).quantiles(context: ctxs.map { [$0] }, horizon: m.horizon)
         for bi in 0..<2 { Self.check(m.steps.map { bt.curve(bi, 0)[$0] }, m.batch[bi], "batch b\(bi)", worst: &worst) }
         print("Chronos-2 multi-row raw parity: worst |Δ|/max(1,|x|) = \(worst)")
     }
