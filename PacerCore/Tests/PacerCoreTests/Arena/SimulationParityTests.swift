@@ -51,12 +51,13 @@ import Testing
     }
 
     /// Two accounts in view: the other's history pooled into the behaviour
-    /// and the ceilings at half weight, and (m02) an account with no past of
-    /// its own borrowing the other's burn at half scale.
+    /// and the ceilings at half weight, (m02) an account with no past of its
+    /// own borrowing the other's burn at half scale, and (m04) a scoped
+    /// weekly cap.
     @Test func opusLimitMatchesTheArenaWithTwoAccounts() throws {
         let cov = try SimParity.opusLimit(cases: "sim-cases-multi", reference: "sim-g2-07-opus-limit-multi")
         print("g2-07-opus-limit (two-account cases): \(cov.summary)")
-        #expect(cov.compared == 4)
+        #expect(cov.compared == 5)
         #expect(cov.fraction <= Self.maxOutside, "\(cov.summary)")
         #expect(cov.detailMismatches.isEmpty, "\(cov.detailMismatches)")
     }
@@ -245,6 +246,7 @@ struct MultiCases: Decodable {
         let id: String
         let accounts: [String]
         let window_kind: String
+        let scope_model: String?
         let history_start: Int64
         let tz_offset_min: Int?
         let readings: [String: ArenaFixtures.Readings]
@@ -253,7 +255,7 @@ struct MultiCases: Decodable {
         func historyAndRequest(nPaths: Int) -> (ArenaHistory, ArenaRequest) {
             var meters: [ArenaMeterID: [ArenaReading]] = [:]
             for (acct, r) in readings {
-                meters[ArenaMeterID(account: acct, windowKind: window_kind)] = r.t_event.indices.map { i in
+                meters[ArenaMeterID(account: acct, windowKind: window_kind, scopeModel: scope_model)] = r.t_event.indices.map { i in
                     ArenaReading(tEvent: r.t_event[i], tKnown: r.t_known[i], utilPct: r.util_pct[i],
                                  resetsAt: r.resets_at[i], active: r.state[i] == "active")
                 }
@@ -262,7 +264,7 @@ struct MultiCases: Decodable {
             let h = ArenaHistory(store: store, now: request.now, accounts: accounts, start: history_start)
             let tr = ArenaTargetRequest(key: request.key, target: ArenaTarget(rawValue: request.target)!,
                                         accounts: [request.account], grid: request.grid, nPaths: nPaths,
-                                        resetAt: request.reset_at)
+                                        cap: scope_model, resetAt: request.reset_at)
             return (h, ArenaRequest(now: request.now, accounts: accounts, targets: [tr]))
         }
     }

@@ -113,6 +113,8 @@ MULTI = [
     {"id": "m01", "primary": "c13", "other": "c07"},
     {"id": "m02", "primary": "c02", "other": "c14", "history_hours": 2},
     {"id": "m03", "primary": "c03", "other": "c11"},
+    # A per-model weekly cap: weekly readings relabelled as a Fable cap.
+    {"id": "m04", "primary": "c05", "other": "c19", "scoped": "Fable"},
 ]
 
 
@@ -135,12 +137,16 @@ def multi_cases(doc):
                 "util_pct": [r["util_pct"][i] for i in keep],
                 "resets_at": [None if r["resets_at"][i] is None else r["resets_at"][i] + shift for i in keep],
                 "state": [r["state"][i] for i in keep]}
+        rq = dict(p["request"])
+        if "scoped" in m:
+            rq.update(target="meter.scoped", key=f"meter.scoped:{rq['account']}:{m['scoped']}")
         out.append({"id": m["id"], "made_from": m, "accounts": [p["inputs"]["account"], o["inputs"]["account"]],
-                    "window_kind": p["inputs"]["window_kind"], "history_start": start,
+                    "window_kind": "weekly_scoped" if "scoped" in m else p["inputs"]["window_kind"],
+                    "scope_model": m.get("scoped"), "history_start": start,
                     "tz_offset_min": p["inputs"]["tz_offset_min"],
                     "readings": {p["inputs"]["account"]: {k: rd_p[k] for k in ("t_event", "t_known", "util_pct", "resets_at", "state")},
                                  o["inputs"]["account"]: rd_o},
-                    "request": p["request"]})
+                    "request": rq})
     return out
 
 
@@ -148,14 +154,15 @@ def multi_snapshot(case):
     import pyarrow as pa
     from arena.snapshot.schema import TABLES
     from arena.snapshot.views import SnapshotData, Tier
-    cols = {k: [] for k in ("t_event", "t_known", "t_known_src", "account", "window_kind", "util_pct", "resets_at",
-                            "state", "source", "origin", "backwards_pp")}
+    cols = {k: [] for k in ("t_event", "t_known", "t_known_src", "account", "window_kind", "scope_model", "util_pct",
+                            "resets_at", "state", "source", "origin", "backwards_pp")}
     for acct, rd in case["readings"].items():
         n = len(rd["t_event"])
         cols["t_event"] += rd["t_event"]; cols["t_known"] += rd["t_known"]; cols["util_pct"] += rd["util_pct"]
         cols["resets_at"] += rd["resets_at"]; cols["state"] += rd["state"]
         cols["t_known_src"] += ["observed"] * n; cols["account"] += [acct] * n
         cols["window_kind"] += [case["window_kind"]] * n; cols["source"] += ["oauth"] * n
+        cols["scope_model"] += [case.get("scope_model")] * n
         cols["origin"] += ["archive"] * n; cols["backwards_pp"] += [0.0] * n
     n = len(cols["t_event"])
     schema = TABLES["meter_readings"].arrow_schema()
@@ -179,7 +186,7 @@ def main_multi(cases_path, out_cases, out_model):
         local = Local(small, tz_offset_min=case["tz_offset_min"])
         target = Target(rq["target"])
         tr = TargetRequest(rq["key"], target, (rq["account"],), np.asarray(rq["grid"], dtype=np.int64), "pct",
-                           detq.MC_PATHS, None, None, rq["reset_at"])
+                           detq.MC_PATHS, case.get("scope_model"), None, rq["reset_at"])
         req = Request(rq["now"], Scope(tuple(case["accounts"]), "scope_only"), (tr,))
         view = small.view(req.scope, "current_code", case["history_start"])
         model = local.instance(info, view, rq["now"])
