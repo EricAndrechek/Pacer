@@ -24,7 +24,7 @@ import Testing
     @Test func fableBurstMatchesTheArenaOnSpendCases() throws {
         let cov = try SimParity.fableBurst(cases: "cases-spend", reference: "sim-g2-08-fable-burst-spend")
         print("g2-08-fable-burst (spend cases): \(cov.summary)")
-        #expect(cov.compared > 0)
+        #expect(cov.compared == 6)
         #expect(cov.fraction <= Self.maxOutside, "\(cov.summary)")
         #expect(cov.detailMismatches.isEmpty, "\(cov.detailMismatches)")
     }
@@ -150,9 +150,6 @@ enum SimParity {
         for out in ref.outputs {
             let c = try #require(file.cases.first { $0.id == out.case })
             let d = out.detail
-            // The live start needs the spend kit's conversion; until the seam
-            // calls it, a case whose reference added live spend cannot match.
-            if (d?["live"]?.number ?? 0) > 0 && !SimSpendFit.conversionPorted { cov.skipped.append(out.case); continue }
             let h = ArenaFixtures.history(c)
             let m = instance(G208FableBurst.name, { G208FableBurst(context: $0) }, history: h)
             try m.fit(h)

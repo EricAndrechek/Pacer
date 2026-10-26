@@ -139,12 +139,9 @@ final class G208FableBurst: ArenaModel {
     }
 
     /// One account's five-hour readings known by now (`_readings` →
-    /// `kspend.meter_series`).
-    private func readings(_ account: String) throws -> SimMeterReadings {
-        let h = try h
-        return h.memo.value(key("readings", account)) {
-            SimMeterReadings.spendMeterSeries(h, account: account, windowKind: Self.window)
-        }
+    /// `kspend.meter_series`, memoized on the cut by the kit).
+    private func readings(_ account: String) throws -> KitSpend.MeterSeries {
+        KitSpend.meterSeries(try h, account: account, windowKind: Self.window)
     }
 
     /// This cycle's readings known by now (`_cycle_readings`): the trailing
@@ -403,16 +400,22 @@ final class G208FableBurst: ArenaModel {
     private func conversion(_ account: String) throws -> [Double]? {
         let h = try h
         return h.memo.value(key("conv", account)) { () -> SimBox<[Double]?> in
-            guard let d = SimSpendFit.fitDetails(h, account: account, windowKind: Self.window),
+            guard let d = KitSpend.fitDetails(h, account: account, windowKind: Self.window),
                   d.rates.allSatisfy(\.isFinite), d.rise >= 5 else { return SimBox(value: nil) }
-            if d.weak && d.pooled > 0 { return SimBox(value: Array(repeating: d.pooled, count: d.rates.count)) }
+            if d.conversion.weak && d.pooled > 0 { return SimBox(value: Array(repeating: d.pooled, count: d.rates.count)) }
             return SimBox(value: d.rates)
         }.value
     }
 
-    private func spendPoints(_ account: String, _ t0: Millis, _ t1: Millis, rates: [Double]?) throws -> Double {
-        guard let rates, t1 > t0 else { return 0 }
-        let sp = SimSpendFit.spentBetween(try h, account: account, t0, t1)
+    /// `_spend_points`: the spend over (t0, t1] converted to points. The
+    /// conversion is asked for only when there is spend to convert: the
+    /// Python fits it up front, but nothing spent converts to 0 whatever the
+    /// rates, and the fit (14 days of reading intervals) is most of a cold
+    /// forecast's cost.
+    private func spendPoints(_ account: String, _ t0: Millis, _ t1: Millis) throws -> Double {
+        guard t1 > t0, cfg.bool("live_spend", true) else { return 0 }
+        let sp = KitSpend.spentBetween(try h, account: account, t0, t1)
+        guard sp.contains(where: { $0 != 0 }), let rates = try conversion(account) else { return 0 }
         var s = 0.0
         for i in 0..<min(sp.count, rates.count) { s += sp[i] * rates[i] }
         return s
@@ -439,7 +442,6 @@ final class G208FableBurst: ArenaModel {
         let act = try activity(acct)
         let te = act.te
         let hz = try hazards(acct, now: now)
-        let rates = cfg.bool("live_spend", true) ? try conversion(acct) : nil
 
         // --- state now -------------------------------------------------
         let nNow = SimArrays.searchRight(te, now)          // te[..<nNow] are <= now
@@ -471,7 +473,7 @@ final class G208FableBurst: ArenaModel {
         if !lr.isFinite || lr <= 0 { lr = 1.0 }
         lr = max(lr, floorRate)
         // The readings lag the spend: converted spend since the last reading.
-        var livePts = t0 < now ? try spendPoints(acct, t0, now, rates: rates) : 0
+        var livePts = t0 < now ? try spendPoints(acct, t0, now) : 0
         livePts = min(max(livePts, 0), 100 - u0)
         let kRec = cfg.double("k_recent", 3.0)
         let eps = 0.15

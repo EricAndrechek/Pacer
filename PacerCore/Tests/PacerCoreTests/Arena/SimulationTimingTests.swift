@@ -11,7 +11,11 @@ import Testing
 /// under a loose ceiling that catches a pathology, not a regression of a
 /// few milliseconds (debug builds are several times slower than the app's).
 @Suite struct SimulationTimingTests {
-    static let ceilingMs = 1_500.0
+    #if DEBUG
+    static let ceilingMs = 5_000.0
+    #else
+    static let ceilingMs = 100.0
+    #endif
 
     static func ms(_ f: () throws -> Void) rethrows -> Double {
         let t0 = DispatchTime.now().uptimeNanoseconds

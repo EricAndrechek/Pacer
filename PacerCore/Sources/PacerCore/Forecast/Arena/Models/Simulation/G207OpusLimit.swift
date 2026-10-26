@@ -50,24 +50,22 @@ final class G207OpusLimit: ArenaModel {
 enum OpusLimitMeters {
     static func kind(_ target: ArenaTarget) -> String { target.windowKind }
 
-    static func series(_ h: ArenaHistory, _ acct: String, _ kind: String, _ cap: String?, _ now: Millis,
-                       memoPrefix: String) -> SimFMMeterSeries {
-        h.memo.value("\(memoPrefix)|series|\(acct)|\(kind)|\(cap ?? "")|\(now)") {
-            SimFMMeterSeries.meterSeries(h, account: acct, windowKind: kind, scopeModel: cap, now: now)
-        }
+    /// `meters._series` → `kit.fm.series.meter_series` (memoized on the cut by the kit).
+    static func series(_ h: ArenaHistory, _ acct: String, _ kind: String, _ cap: String?, _ now: Millis) -> FMSeries.MeterSeries {
+        FMSeries.meterSeries(h, account: acct, windowKind: kind, scopeModel: cap, now: now)
     }
 
     /// `current_level`: the meter now, from this cycle's latest reading.
-    static func currentLevel(_ s: SimFMMeterSeries, _ resetAt: Millis?) -> Double {
+    static func currentLevel(_ s: FMSeries.MeterSeries, _ resetAt: Millis?) -> Double {
         if let resetAt, let u = s.usedNow(resetAt) { return u }
         return 0
     }
 
     /// `stay_hours`: how long this cycle's meter has read u0 (since it last read lower).
-    static func stayHours(_ s: SimFMMeterSeries, _ resetAt: Millis?, _ u0: Double, _ now: Millis) -> Double {
+    static func stayHours(_ s: FMSeries.MeterSeries, _ resetAt: Millis?, _ u0: Double, _ now: Millis) -> Double {
         guard let resetAt, u0 > 0 else { return 0 }
         var t: [Millis] = [], u: [Double] = []
-        for i in 0..<s.count where s.inCycle(i, resetAt) { t.append(s.times[i]); u.append(s.cycleUtil[i]) }
+        for i in 0..<s.count where s.inCycle(i, resetAt: resetAt) { t.append(s.times[i]); u.append(s.cycleUtil[i]) }
         guard !t.isEmpty else { return 0 }
         let i = (u.lastIndex { $0 < u0 }).map { $0 + 1 } ?? 0
         if i >= t.count { return 0 }
@@ -76,8 +74,8 @@ enum OpusLimitMeters {
 
     /// `weekly_block_until`: the seven-day reset when the account's seven-day
     /// meter reads 100 now (the account is blocked until then), else nil.
-    static func weeklyBlockUntil(_ h: ArenaHistory, _ acct: String, _ now: Millis, memoPrefix: String) -> Millis? {
-        let s = series(h, acct, "seven_day", nil, now, memoPrefix: memoPrefix)
+    static func weeklyBlockUntil(_ h: ArenaHistory, _ acct: String, _ now: Millis) -> Millis? {
+        let s = series(h, acct, "seven_day", nil, now)
         guard s.count > 0, s.active[s.count - 1] else { return nil }
         let r = s.reset[s.count - 1]
         if r <= now || s.cycleUtil[s.count - 1] < 100 { return nil }
@@ -85,7 +83,7 @@ enum OpusLimitMeters {
     }
 
     /// `idle_hours`: hours since this meter last rose (any cycle).
-    static func idleHours(_ s: SimFMMeterSeries, _ now: Millis) -> Double {
+    static func idleHours(_ s: FMSeries.MeterSeries, _ now: Millis) -> Double {
         guard s.count >= 2 else { return 0 }
         guard let rose = (1..<s.count).last(where: { s.cum[$0] - s.cum[$0 - 1] > 0 }) else {
             return Double(now - s.times[0]) / Double(LimitSim.hour)
@@ -96,7 +94,7 @@ enum OpusLimitMeters {
     static func flatPaths(_ h: ArenaHistory, now: Millis, _ tr: ArenaTargetRequest) -> [[Double]] {
         let kind = kind(tr.target)
         let cap = tr.target == .meterScoped ? tr.cap : nil
-        let s = SimFMMeterSeries.meterSeries(h, account: tr.account, windowKind: kind, scopeModel: cap, now: now)
+        let s = series(h, tr.account, kind, cap, now)
         let u0 = currentLevel(s, tr.resetAt)
         return Array(repeating: Array(repeating: u0, count: tr.grid.count), count: max(tr.nPaths, 1))
     }
@@ -110,7 +108,7 @@ enum OpusLimitMeters {
         let c: LimitSim.Config
         let step: Millis
         let tzMs: Millis
-        let own: SimFMMeterSeries
+        let own: FMSeries.MeterSeries
         let ownH: LimitSim.StepHist
         let beh: LimitSim.Behaviour
         /// The learned keep per band, before the ceilings replace it with 1s.
@@ -138,7 +136,7 @@ enum OpusLimitMeters {
             let lookback = Millis(c.lookbackDays * Double(LimitSim.day))
             let stale = kind == "five_hour" ? 3 * step : 3 * LimitSim.hour
             let dur = LimitSim.windowMs(kind)
-            let own = series(hist, acct, kind, cap, now, memoPrefix: memoPrefix)
+            let own = series(hist, acct, kind, cap, now)
             var hists: [(LimitSim.StepHist, Double)] = []
             var falls: [[Millis]] = []
             let ownH = LimitSim.stepHistory(times: own.times, cum: own.cum, util: own.cycleUtil, active: own.active,
@@ -148,9 +146,9 @@ enum OpusLimitMeters {
                                             reset: own.reset, duration: dur))
             let otherW = c.otherAccountWeight
             let others = otherW > 0 ? hist.accounts.filter { $0 != acct } : []
-            var otherSeries: [SimFMMeterSeries] = []
+            var otherSeries: [FMSeries.MeterSeries] = []
             for a in others {
-                let s = series(hist, a, kind, cap, now, memoPrefix: memoPrefix)
+                let s = series(hist, a, kind, cap, now)
                 if s.count < 2 { continue }
                 otherSeries.append(s)
                 hists.append((LimitSim.stepHistory(times: s.times, cum: s.cum, util: s.cycleUtil, active: s.active,
@@ -175,7 +173,7 @@ enum OpusLimitMeters {
                 if otherW > 0 {
                     // Every other account, as the Python asks again (not only the ones with 2+ readings).
                     for a in others {
-                        let s = series(hist, a, kind, cap, now, memoPrefix: memoPrefix)
+                        let s = series(hist, a, kind, cap, now)
                         tops += LimitSim.cycleTops(times: s.times, util: s.cycleUtil, active: s.active, reset: s.reset,
                                                    duration: dur, now: now, zoneLo: c.zoneLo, parkMin: parkMin)
                             .map { ($0, otherW) }
@@ -250,7 +248,7 @@ enum OpusLimitMeters {
             // The account's seven-day limit reached blocks all use: this meter
             // holds until that limit resets (five-hour burn far lower, scoped
             // burn zero while the seven-day meter read 100).
-            if let until = weeklyBlockUntil(hist, acct, now, memoPrefix: memoPrefix) {
+            if let until = weeklyBlockUntil(hist, acct, now) {
                 let k = Int((Double(until - now) / Double(step)).rounded(.up))
                 delay = delay.map { $0.map { max($0, k) } } ?? Array(repeating: k, count: nPaths)
             }
