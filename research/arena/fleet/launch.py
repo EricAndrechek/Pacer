@@ -193,11 +193,21 @@ def launch_env(paths: FleetPaths, agent_dir: Path, claude: str) -> dict[str, str
     }
 
 
+def low_priority() -> list[str]:
+    """Run the agent (and everything it starts) below the owner's work:
+    macOS's utility QoS, inherited by every child process (verified,
+    docs/fleet-verification.md §7); `nice` where taskpolicy doesn't exist."""
+    if Path("/usr/sbin/taskpolicy").exists():
+        return ["/usr/sbin/taskpolicy", "-c", "utility"]
+    nice = shutil.which("nice")
+    return [nice, "-n", "10"] if nice else []
+
+
 def agent_argv(spec: AgentSpec, *, claude: str, settings: Path, brief: Path, session_id: str,
                prompt: str = PROMPT, env: dict[str, str]) -> list[str]:
     return [
         "/usr/bin/env", "-i", *[f"{k}={v}" for k, v in env.items()],
-        "/usr/sbin/taskpolicy", "-c", "utility",
+        *low_priority(),
         claude, "-p", prompt,
         "--model", spec.model, "--effort", spec.effort,
         "--max-turns", str(spec.max_turns), "--max-budget-usd", f"{spec.budget_usd:g}",

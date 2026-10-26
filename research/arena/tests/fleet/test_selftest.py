@@ -1,11 +1,22 @@
 """The self-test's preparation (never its launch): dummy data, two agents,
 the probe script and a settings file that passes the checker."""
+
+import sys
+
+import pytest
+
+# The agent fleet launches through macOS: the Claude Code sandbox it relies on
+# was verified with Seatbelt only (docs/fleet-verification.md), so these run
+# on macOS. Everything else under tests/ runs everywhere, CI included.
+pytestmark = pytest.mark.skipif(sys.platform != "darwin", reason="agent fleet: verified on macOS only")
+
 import json
 
 from fleet import selftest
 from fleet.sandbox import check_settings
 
 
+@pytest.mark.skipif(__import__("shutil").which("claude") is None, reason="needs the Claude Code CLI")
 def test_prepare_builds_a_safe_probe(tmp_path, monkeypatch):
     monkeypatch.setenv("ARENA_SELFTEST_ROOT", str(tmp_path / "st"))
     ctx = selftest.prepare(log=lambda *a: None)

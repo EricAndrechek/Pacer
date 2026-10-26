@@ -1,5 +1,15 @@
 """Collecting a generation: fetch, classify, register with the launcher's
 attribution, inbox, static review, transcript scan."""
+
+import sys
+
+import pytest
+
+# The agent fleet launches through macOS: the Claude Code sandbox it relies on
+# was verified with Seatbelt only (docs/fleet-verification.md), so these run
+# on macOS. Everything else under tests/ runs everywhere, CI included.
+pytestmark = pytest.mark.skipif(sys.platform != "darwin", reason="agent fleet: verified on macOS only")
+
 import json
 from pathlib import Path
 
