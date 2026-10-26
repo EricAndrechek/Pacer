@@ -100,23 +100,13 @@ import Testing
             let Q = m.query(h, req.targets[0])
             let T = m.table(h, kind: Q.kind, cap: Q.cap, accounts: Q.accounts, tz: Q.tz, Q.cfg)
             let (w, _, _) = Analog.meterWeights(T, Q.q, Q.cfg)
-            let (_, med) = Analog.analogQuantiles(T, Q.q, req.targets[0].grid, w: w, levels: Analog.levelsOut, Q.cfg)
+            let (_, med) = Analog.analogQuantiles(T, Q.q, req.targets[0].grid, w: w, levels: KitDetQ.levelsOut, Q.cfg)
             let want = try #require(p.o.detail?["shrink_median"]?.numbers)
             #expect(med?.map(Optional.init) == want, "\(p.c.id) shrink median")
         }
         print("analog five-hour parity: \(points) (level, grid) points, \(off.count) differ")
         #expect(points > 0)
         #expect(off.isEmpty, "\(off.prefix(10))")
-    }
-
-    /// `read_sorted`: sorted samples at `levels` (position level·n − 0.5,
-    /// linear between order statistics, clamped).
-    static func readSorted(_ col: [Double], _ level: Double) -> Double {
-        let n = col.count
-        let pos = min(max(level * Double(n) - 0.5, 0), Double(n - 1))
-        let i0 = Int(pos.rounded(.down)), i1 = min(i0 + 1, n - 1)
-        let a = pos - Double(i0)
-        return col[i0] * (1 - a) + col[i1] * a
     }
 
     /// The weekly cases are the day-model simulation: the port's own
@@ -139,7 +129,7 @@ import Testing
                 let col = paths.map { $0[j] }.sorted()
                 for (li, level) in p.o.levels.enumerated() {
                     points += 1
-                    let v = Self.readSorted(col, level)
+                    let v = KitDetQ.readSorted(col, level)
                     if v < bounds.lo[li][j] - 1e-9 || v > bounds.hi[li][j] + 1e-9 {
                         outside += 1
                         if worst.count < 12 {

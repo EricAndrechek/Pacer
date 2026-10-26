@@ -374,18 +374,6 @@ enum Analog {
 
     // MARK: - Deterministic quantiles (`kit/detq.analog_quantiles`)
 
-    /// `detq.LEVELS_OUT`: the levels the port fixtures compare.
-    static let levelsOut: [Double] = [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
-    /// `detq.CURVE_LEVELS`: the 200 levels a quantile forecast is read at as
-    /// comonotone paths (the calibration layer's view of a child).
-    static let curveLevels: [Double] = (0..<200).map { (Double($0) + 0.5) / 200 }
-    /// The levels the exact forecast carries: both sets, so either reads a
-    /// type-1 quantile exactly rather than between two.
-    static let forecastLevels: [Double] = Array(Set(levelsOut + curveLevels)).sorted()
-
-    /// `detq.TYPE1_TOL`.
-    static let type1Tol = 1e-9
-
     /// `weighted_type1(analog_trajectories(…), w, levels)`: per grid time,
     /// the smallest path value whose cumulative normalized weight (values
     /// ascending) reaches the level, within 1e-9. `[levels.count][grid]`.
@@ -443,7 +431,7 @@ enum Analog {
             var k = 0
             var cum = hist[0]
             for li in order {
-                let target = levels[li] - type1Tol
+                let target = levels[li] - KitDetQ.type1Tol
                 while cum < target && k < last { k += 1; cum += hist[k] }
                 out[li][j] = level(q.u, Double(lo + k))
             }

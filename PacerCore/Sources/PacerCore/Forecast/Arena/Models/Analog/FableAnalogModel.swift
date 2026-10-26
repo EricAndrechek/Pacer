@@ -153,8 +153,8 @@ final class FableAnalogModel: ArenaModel {
                     if ess >= minEss && blockShare <= 0 {
                         // The pure analog draw: its exact quantiles.
                         try ctx.checkCancelled()
-                        let (quantiles, _) = Analog.analogQuantiles(T, q, grid, w: w, levels: Analog.forecastLevels, kcfg)
-                        return ArenaTargetForecast(levels: Analog.forecastLevels, quantiles: quantiles, extras: ["ess": ess])
+                        let (quantiles, _) = Analog.analogQuantiles(T, q, grid, w: w, levels: KitDetQ.forecastLevels, kcfg)
+                        return ArenaTargetForecast(levels: KitDetQ.forecastLevels, quantiles: quantiles, extras: ["ess": ess])
                     }
                     paths = Analog.meterPathsFromTable(T, q, grid, nPaths: nPaths, rng: &rng, kcfg, w: w)
                 }
@@ -190,9 +190,7 @@ final class FableAnalogModel: ArenaModel {
         let shrink = kcfg.double("shrink", 1.0)
         if shrink < 1.0 && !P.isEmpty {
             for j in 0..<grid.count {
-                let col = P.map { $0[j] }.sorted()
-                let n = col.count
-                let med = n % 2 == 1 ? col[n / 2] : (col[n / 2 - 1] + col[n / 2]) / 2   // np.median
+                let med = KitDetQ.median(P.map { $0[j] })
                 for i in P.indices {
                     P[i][j] = min(max((med + shrink * (P[i][j] - med)).rounded(.toNearestOrEven), 0), 100)
                 }
