@@ -171,4 +171,42 @@ import Testing
         }
         print("fm-timesfm25-meter end to end: \(fm.outputs.count) cases, worst |Δ| five-hour \(worst.fiveHour), weekly \(worst.weekly) points")
     }
+
+    /// A scoped weekly cap is its own meter: the forecast starts at the cap's
+    /// reading, not the weekly meter's, never falls, and stays within 100
+    /// (the same synthetic store as Timestral's scoped test). The calstack
+    /// over it answers the cap too.
+    @Test func scopedCapReadsItsOwnMeter() throws {
+        guard let dir = TimestralTestWeights.url(FMWeights.timesfm25) else { return }
+        let base = TimestralSyntheticHistory.store(days: 20, seed: 3)
+        let week = ArenaMeterID(account: "A1", windowKind: "seven_day")
+        let capID = ArenaMeterID(account: "A1", windowKind: "weekly_scoped", scopeModel: "Fable")
+        let capRows = base.meters[week]!.map { r in
+            ArenaReading(tEvent: r.tEvent, tKnown: r.tKnown, utilPct: r.utilPct.map { ($0 / 3).rounded(.down) },
+                         resetsAt: r.resetsAt, active: r.active)
+        }
+        var meters = base.meters
+        meters[capID] = capRows
+        let store = ArenaHistoryStore(meters: meters, spend: base.spend, tzOffsetMin: -240, dataStart: base.dataStart)
+        let h = ArenaHistory(store: store, now: capRows.last!.tEvent - 3 * ArenaTime.hour, accounts: ["A1"])
+        let req = ArenaRunner.request(history: h, targets: [.meterScoped])
+        let tr = try #require(req.targets.first)
+        #expect(tr.cap == "Fable")
+        let used = try #require(FMSeries.meterSeries(h, account: "A1", windowKind: "weekly_scoped", scopeModel: "Fable")
+            .usedNow(tr.resetAt!))
+        let weekUsed = try #require(FMSeries.meterSeries(h, account: "A1", windowKind: "seven_day").usedNow(tr.resetAt!))
+        #expect(used < weekUsed)
+        let runner = ArenaRunner(registry: ArenaRegistry.all, services: ArenaServices(weights: {
+            $0 == FMWeights.timesfm25 ? dir : TimestralTestWeights.url($0)
+        }))
+        let tf = try #require(try runner.forecast(model: "fm-timesfm25-meter", history: h, request: req).byKey[tr.key])
+        let lo = tf.quantile(0.05), md = tf.median
+        #expect(abs(lo[0] - used) < 1, "starts at the cap's reading: \(lo[0]) vs \(used)")
+        #expect(md.allSatisfy { $0 >= used - 1e-9 && $0 <= 100 })
+        #expect(zip(md, md.dropFirst()).allSatisfy { $0 <= $1 + 1e-12 }, "median falls")
+        if TimestralTestWeights.url(FMWeights.timestral123M) != nil {
+            let st = try #require(try runner.forecast(model: "g1-01-sonnet-calstack", history: h, request: req).byKey[tr.key])
+            #expect(st.median.allSatisfy { $0 >= used - 1 && $0 <= 100 })
+        }
+    }
 }

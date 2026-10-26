@@ -14,7 +14,8 @@ import Testing
 /// Measured 2026-10-26 on an M4 Pro shared with four other builds (load
 /// 40–80), ms per forecast, both flip passes, one thread / default: the
 /// network 24 / 24 five-hour, 145 / 140–210 weekly; the model on the
-/// 120-day history 24 five-hour, 114 weekly. (PyTorch on the same machine:
+/// 120-day history 24 five-hour, 76–114 weekly; g1-01-sonnet-calstack with
+/// its children's backtests 309 five-hour, 559 weekly. (PyTorch on the same machine:
 /// 60 and 140–670.) Weight streaming bounds it: 786 MB of layer weights per
 /// pass at ~37 GB/s is 20 ms, whatever the batch; a weekly forecast is six
 /// passes (prefill, five autoregressive steps). Splitting the GEMMs across
@@ -65,5 +66,35 @@ struct TimesFMTimingTests {
                                 total / Double(max(n, 1)), n))
         }
         print("fm-timesfm25-meter on a 120-day history\n" + lines.joined(separator: "\n"))
+    }
+
+    /// g1-01-sonnet-calstack per forecast, its children's backtests included
+    /// (four origins each, on the five-minute lattice the runner memoizes):
+    /// one runner over every cut, as a backfill holds one.
+    @Test func calstackOnA120DayHistory() throws {
+        guard let dir = TimestralTestWeights.url(FMWeights.timesfm25),
+              TimestralTestWeights.url(FMWeights.timestral123M) != nil else { return }
+        let store = TimestralSyntheticHistory.store(days: 120)
+        let runner = ArenaRunner(registry: ArenaRegistry.all, services: ArenaServices(weights: {
+            $0 == FMWeights.timesfm25 ? dir : TimestralTestWeights.url($0)
+        }))
+        let last = store.meters.values.compactMap { $0.last?.tEvent }.max()!
+        var lines: [String] = []
+        for target in [ArenaTarget.meterFiveHour, .meterSevenDay] {
+            var n = 0, total = 0.0
+            for i in 0..<8 {
+                let now = last - Millis(i) * (30 * ArenaTime.day / 8) - 7 * ArenaTime.minute
+                let h = ArenaHistory(store: store, now: now, accounts: ["A1"])
+                let req = ArenaRunner.request(history: h, targets: [target])
+                guard !req.targets.isEmpty else { continue }
+                let t0 = DispatchTime.now().uptimeNanoseconds
+                _ = try runner.forecast(model: "g1-01-sonnet-calstack", history: h, request: req)
+                total += Double(DispatchTime.now().uptimeNanoseconds - t0) / 1e6
+                n += 1
+            }
+            lines.append(String(format: "g1-01-sonnet-calstack %@: %.0f ms/forecast over %d cuts", target.rawValue,
+                                total / Double(max(n, 1)), n))
+        }
+        print("g1-01-sonnet-calstack on a 120-day history\n" + lines.joined(separator: "\n"))
     }
 }
