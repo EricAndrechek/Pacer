@@ -43,3 +43,98 @@ struct TimestralTimingTests {
         print("Timestral timings\n" + lines.joined(separator: "\n"))
     }
 }
+
+/// A synthetic account with `days` of meter readings every minute (five-hour
+/// and weekly meters, idle nights, integer utils) and five-minute spend
+/// buckets: the size of history the app back-scores on first install.
+enum TimestralSyntheticHistory {
+    static func store(days: Int, seed: UInt64 = 11) -> ArenaHistoryStore {
+        var rng = ArenaRNG(seed: seed)
+        let start: Millis = 1_780_000_000_000 - 1_780_000_000_000 % ArenaTime.day
+        let end = start + Millis(days) * ArenaTime.day
+        var five: [ArenaReading] = [], week: [ArenaReading] = [], spend: [ArenaSpendRow] = []
+        var fiveReset: Millis? = nil, fiveUtil = 0.0
+        var weekReset = start + 7 * ArenaTime.day, weekUtil = 0.0
+        var t = start
+        while t < end {
+            let hour = Int((t % ArenaTime.day) / ArenaTime.hour)
+            let busy = hour >= 8 && hour < 23 && rng.uniform() < 0.7
+            if t >= weekReset { weekReset += 7 * ArenaTime.day; weekUtil = 0 }
+            if let r = fiveReset, t >= r { fiveReset = nil; fiveUtil = 0 }
+            if busy {
+                if fiveReset == nil { fiveReset = t + 5 * ArenaTime.hour }
+                let burn = max(0, rng.normal() * 0.15 + 0.12)
+                fiveUtil = min(100, fiveUtil + burn)
+                weekUtil = min(100, weekUtil + burn / 12)
+                if t % (5 * ArenaTime.minute) == 0 {
+                    spend.append(ArenaSpendRow(tEvent: t, tKnown: t + 2_000, family: rng.uniform() < 0.7 ? "opus" : "sonnet",
+                                               costUSD: burn * 0.4, turns: 3, tokens: 20_000))
+                }
+            }
+            five.append(ArenaReading(tEvent: t, tKnown: t + 1_000, utilPct: fiveReset == nil ? 0 : fiveUtil.rounded(.down),
+                                     resetsAt: fiveReset, active: fiveReset != nil))
+            week.append(ArenaReading(tEvent: t, tKnown: t + 1_000, utilPct: weekUtil.rounded(.down),
+                                     resetsAt: weekReset, active: true))
+            t += ArenaTime.minute
+        }
+        return ArenaHistoryStore(meters: [ArenaMeterID(account: "A1", windowKind: "five_hour"): five,
+                                          ArenaMeterID(account: "A1", windowKind: "seven_day"): week],
+                                 spend: ["A1": spend], tzOffsetMin: -240, dataStart: start)
+    }
+}
+
+/// Per-forecast wall time of every fm model on a 120-day history, at cuts
+/// spread over the last 30 days, each cut a fresh `ArenaHistory` (what a
+/// backfill does). Opt-in like the network timings.
+@Suite(.enabled(if: ProcessInfo.processInfo.environment["PACER_TIMESTRAL_BENCH"] != nil))
+struct TimestralBackfillTimingTests {
+    @Test func modelsOnA120DayHistory() throws {
+        let store = TimestralSyntheticHistory.store(days: 120)
+        let runner = ArenaRunner(registry: ArenaRegistry.all, services: TimestralTestWeights.services())
+        let last = store.meters.values.compactMap { $0.last?.tEvent }.max()!
+        var lines: [String] = []
+        let models = ["fm-timestral-5m-meter", "fm-timestral-28m-meter", "struct-timestral-5m", "struct-timestral-28m",
+                      "fm-timestral-209m-meter", "g2-01-haiku-weekly-209m-extended"]
+        for name in models {
+            guard let spec = ArenaRegistry.spec(name), spec.weights.allSatisfy({ TimestralTestWeights.url($0) != nil }) else {
+                lines.append("\(name): weights not here"); continue
+            }
+            for target in [ArenaTarget.meterFiveHour, .meterSevenDay] where spec.targets.contains(target) {
+                var n = 0, total = 0.0
+                let cuts = name.contains("209m") ? 6 : 40
+                for i in 0..<cuts {
+                    let now = last - Millis(i) * (30 * ArenaTime.day / Millis(cuts)) - 7 * ArenaTime.minute
+                    let h = ArenaHistory(store: store, now: now, accounts: ["A1"])
+                    let req = ArenaRunner.request(history: h, targets: [target])
+                    guard !req.targets.isEmpty else { continue }
+                    let t0 = DispatchTime.now().uptimeNanoseconds
+                    _ = try runner.forecast(model: name, history: h, request: req)
+                    total += Double(DispatchTime.now().uptimeNanoseconds - t0) / 1e6
+                    n += 1
+                }
+                lines.append(String(format: "%@ %@: %.1f ms/forecast over %d cuts", name, target.rawValue,
+                                    total / Double(max(n, 1)), n))
+            }
+        }
+        // What the shared store series saves: the 5M meter with it off.
+        FMSeries.storeSeriesEnabled = false
+        for target in [ArenaTarget.meterFiveHour, .meterSevenDay] {
+            var n = 0, total = 0.0
+            for i in 0..<40 {
+                let now = last - Millis(i) * (30 * ArenaTime.day / 40) - 7 * ArenaTime.minute
+                let h = ArenaHistory(store: store, now: now, accounts: ["A1"])
+                let req = ArenaRunner.request(history: h, targets: [target])
+                guard !req.targets.isEmpty else { continue }
+                let t0 = DispatchTime.now().uptimeNanoseconds
+                _ = try ArenaRunner(registry: ArenaRegistry.all, services: TimestralTestWeights.services())
+                    .forecast(model: "fm-timestral-5m-meter", history: h, request: req)
+                total += Double(DispatchTime.now().uptimeNanoseconds - t0) / 1e6
+                n += 1
+            }
+            lines.append(String(format: "fm-timestral-5m-meter %@ without the store series: %.1f ms/forecast", target.rawValue,
+                                total / Double(max(n, 1))))
+        }
+        FMSeries.storeSeriesEnabled = true
+        print("fm models on a 120-day history\n" + lines.joined(separator: "\n"))
+    }
+}

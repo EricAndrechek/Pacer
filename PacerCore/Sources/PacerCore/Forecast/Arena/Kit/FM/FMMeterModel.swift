@@ -87,13 +87,14 @@ public final class FMMeterModel: ArenaModel {
     func inputs(_ history: ArenaHistory, now: Millis, _ tr: ArenaTargetRequest, _ wk: String)
         -> (used: Double, ctxV: [Double], step: Millis) {
         let cap = tr.target == .meterScoped ? tr.cap : nil
-        let s = FMSeries.meterSeries(history, account: tr.accounts[0], windowKind: wk, scopeModel: cap, now: now)
+        // The cut's rows are the first `k` of `s` (no copy: see meterSeriesPrefix).
+        let (s, k) = FMSeries.meterSeriesPrefix(history, account: tr.accounts[0], windowKind: wk, scopeModel: cap, now: now)
         // No reading of this cycle known: the latest active reading, else 0.
-        let used = tr.resetAt.flatMap { s.usedNow($0) } ?? s.lastActiveUtil ?? 0
+        let used = tr.resetAt.flatMap { s.usedNow($0, count: k) } ?? s.lastActiveUtil(count: k) ?? 0
         let step = stepMs(wk)
         let ctxT = FMSeries.regularGrid(now: now, stepMs: step, n: contextSteps(wk))
         let stale = Millis(cfg.int("stale_min", 120)) * FMSeries.minMs
-        return (used, FMSeries.resampleLast(times: s.times, values: s.cum, grid: ctxT, staleMs: stale), step)
+        return (used, FMSeries.resampleLast(times: s.times, values: s.cum, grid: ctxT, staleMs: stale, count: k), step)
     }
 
     /// `MeterQuantiles`: `q` `[G][Q]`, the meter at each grid time at `levels`
