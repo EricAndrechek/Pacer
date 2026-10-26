@@ -187,7 +187,7 @@ final class G208FableBurst: ArenaModel {
     /// its bucket's turns at the bucket's last `tEvent`; the 20-turn floor
     /// counts the turns it summed (`turns`), so it means what the arena's
     /// count of raw turns meant (equal on the fixtures, one turn per row).
-    private func activity(_ account: String) throws -> Activity {
+    func activity(_ account: String) throws -> Activity {
         let h = try h
         return try h.memo.value(key("turns", account)) {
             let rows = h.spend(account: account)
@@ -239,7 +239,7 @@ final class G208FableBurst: ArenaModel {
     /// `_hazards`: per-bin hazards by age bucket (idle→active, active→idle)
     /// and their hour-of-day multipliers, from the account's activity bins
     /// over the whole history, blended with the prior pseudo-counts.
-    private func hazards(_ account: String, now: Millis) throws -> Hazards {
+    func hazards(_ account: String, now: Millis) throws -> Hazards {
         let h = try h
         let tz = tzMs
         return try h.memo.value(key("hazards", account)) {
@@ -358,7 +358,7 @@ final class G208FableBurst: ArenaModel {
     /// `_long_run_rate`: points per active bin over the history: the total
     /// within-cycle rise of the meter over the number of active bins in the
     /// span where readings exist.
-    private func longRunRate(_ account: String, now: Millis) throws -> Double? {
+    func longRunRate(_ account: String, now: Millis) throws -> Double? {
         let h = try h
         return try h.memo.value(key("lr_rate", account)) { SimBox(value: try computeLongRunRate(account, now: now)) }.value
     }
