@@ -62,6 +62,38 @@ import Testing
         #expect(cov.detailMismatches.isEmpty, "\(cov.detailMismatches)")
     }
 
+    /// The pools end to end against the Python with the real networks
+    /// (Timestral-123M under the burst mix, Timestral-5M under the opus
+    /// pool): the simulation child, the network child (builder C's port)
+    /// and the pooling together, within the bounds. Skipped when the
+    /// weights are not on this Mac.
+    @Test func poolsMatchTheArenaWithTheRealNetworks() throws {
+        for (pool, size, refs) in [
+            (G208FableBurstMix.name, "123m", [("cases-spend", "sim-g2-08-fable-burst-mix-spend"), ("cases", "sim-g2-08-fable-burst-mix")]),
+            (G207OpusPool.name, "5m", [("cases", "sim-g2-07-opus-pool"), ("cases-spend", "sim-g2-07-opus-pool-spend")]),
+        ] {
+            guard let id = TimestralTestWeights.ids[size], TimestralTestWeights.url(id) != nil else {
+                print("\(pool): Timestral-\(size) weights not on this Mac, skipped"); continue
+            }
+            var cov = SimParity.Coverage()
+            for (cases, ref) in refs {
+                let file = try ArenaFixtures.cases(cases)
+                for out in try ArenaFixtures.model(ref).outputs {
+                    let c = try #require(file.cases.first { $0.id == out.case })
+                    let runner = ArenaRunner(registry: ArenaRegistry.all, services: TimestralTestWeights.services())
+                    let fc = try runner.forecast(model: pool, history: ArenaFixtures.history(c),
+                                                 request: SimParity.request(c, nPaths: ArenaParityConstants.mcPaths))
+                    let paths = try #require(fc.byKey[c.request.key]?.paths)
+                    #expect(paths.count == ArenaParityConstants.mcPaths)
+                    SimParity.checkQuantiles(SimParity.quantiles(paths), out, into: &cov)
+                }
+            }
+            print("\(pool) with Timestral-\(size): \(cov.summary)")
+            #expect(cov.compared == (pool == G207OpusPool.name ? 32 : 16))
+            #expect(cov.fraction <= Self.maxOutside, "\(cov.summary)")
+        }
+    }
+
     /// One seed, one forecast: the runner seeds a model from (seed, name,
     /// now), so a backfill re-run reproduces every path.
     @Test func forecastsAreReproducible() throws {
