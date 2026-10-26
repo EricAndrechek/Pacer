@@ -129,7 +129,9 @@ import Testing
 
     @Test func everySpendModelAnswersEveryCase() throws {
         for c in try ArenaFixtures.cases("cases-spend").cases {
-            let runner = ArenaRunner(registry: ArenaRegistry.all)
+            // Weights where the Timestral tests find them: a wrapper over an
+            // fm-timestral model needs them (and is skipped without them).
+            let runner = ArenaRunner(registry: ArenaRegistry.all, services: TimestralTestWeights.services())
             let h = ArenaFixtures.history(c)
             let req = ArenaFixtures.request(c)
             let tr = req.targets[0]
@@ -139,6 +141,8 @@ import Testing
             let known = Set(ArenaRegistry.all.map(\.name))
             for spec in ArenaRegistry.spendModels
             where spec.targets.contains(tr.target) && spec.children.allSatisfy(known.contains) {
+                let chain = spec.children.compactMap { ArenaRegistry.spec($0) }.flatMap(\.weights) + spec.weights
+                if chain.contains(where: { TimestralTestWeights.url($0) == nil }) { continue }
                 let fc = try runner.forecast(model: spec.name, history: h, request: req)
                 let tf = try #require(fc.byKey[tr.key], "\(spec.name) \(c.id)")
                 #expect(tf.gridCount == tr.grid.count)

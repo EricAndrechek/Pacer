@@ -184,6 +184,86 @@ public enum FMSeries {
         return out
     }
 
+    /// `TurnFrame`: a model's recent spend rows, the `hours` hours ending at
+    /// `now`, what every hourly series and covariate of one forecast reads.
+    /// The rows arrive priced (`ArenaSpendRow.costUSD`, at the rates the app
+    /// or the fixture priced them); a row with no known price counts 0 here,
+    /// as an unpriced turn does in the Python.
+    ///
+    /// Two of the arena's activity covariates have no data in the contract:
+    /// the rows carry no session ids and there are no prompt rows. So
+    /// `sessionsPerHour` counts an hour with any spend as one session, and
+    /// `promptsPerHour` is zero: exactly what the arena computes on the port
+    /// fixtures' pseudo-turns (which carry no session and no prompts), so
+    /// the port matches the Python there, and an approximation of the
+    /// arena's real-data inputs in the app.
+    public struct TurnFrame: Sendable {
+        public let now: Millis
+        public let hours: Int
+        let tMs: [Millis]
+        let account: [String]
+        let family: [String]
+        let cost: [Double]
+        let tokens: [Double]
+        public let tzOffsetMin: Int
+
+        /// `accounts` nil: every account in view.
+        public init(_ history: ArenaHistory, hours: Int, accounts: [String]?, now: Millis? = nil) {
+            let now = now ?? history.now
+            self.now = now
+            self.hours = hours
+            let since = now - Millis(hours) * hourMs
+            var t: [Millis] = [], a: [String] = [], f: [String] = [], c: [Double] = [], k: [Double] = []
+            for acct in accounts ?? history.accounts {
+                for row in history.spend(account: acct) where row.tEvent > since && row.tEvent <= now {
+                    t.append(row.tEvent); a.append(acct); f.append(row.family)
+                    c.append(row.costUSD ?? 0); k.append(Double(row.tokens))
+                }
+            }
+            tMs = t; account = a; family = f; cost = c; tokens = k
+            // The Python takes the latest turn's offset, 0 with no turns.
+            tzOffsetMin = t.isEmpty ? 0 : (history.tzOffsetMin ?? 0)
+        }
+
+        func mask(_ accounts: [String], family fam: String? = nil) -> [Bool] {
+            let set = Set(accounts)
+            return tMs.indices.map { set.contains(account[$0]) && (fam == nil || family[$0] == fam) }
+        }
+
+        /// `[hours]` oldest first, ending at now: spend (USD) or tokens.
+        public func hourly(_ accounts: [String], what: String = "spend", family fam: String? = nil,
+                           hours h: Int? = nil) -> [Double] {
+            let m = mask(accounts, family: fam)
+            let idx = tMs.indices.filter { m[$0] }
+            let v = what == "spend" ? cost : tokens
+            return FMSeries.binSum(idx.map { tMs[$0] }, idx.map { v[$0] }, now: now, hours: h ?? hours)
+        }
+
+        public func families(_ accounts: [String]) -> [String] {
+            let m = mask(accounts)
+            return Set(tMs.indices.filter { m[$0] }.map { family[$0] }).sorted()
+        }
+
+        /// Distinct sessions with a turn in each hour: 1 for an hour with any
+        /// spend row (the rows carry no session id; see the type's note).
+        public func sessionsPerHour(_ accounts: [String], hours h: Int? = nil) -> [Double] {
+            let hh = h ?? hours
+            let m = mask(accounts)
+            var out = [Double](repeating: 0, count: hh)
+            for b in FMSeries.hourBins(tMs.indices.filter { m[$0] }.map { tMs[$0] }, now: now, hours: hh) where b >= 0 {
+                out[b] = 1
+            }
+            return out
+        }
+
+        /// Prompts per hour in the group's sessions: none known (see the
+        /// type's note), so zeros, as `prompts_per_hour` returns without a
+        /// prompts table.
+        public func promptsPerHour(_ accounts: [String], hours h: Int? = nil) -> [Double] {
+            [Double](repeating: 0, count: h ?? hours)
+        }
+    }
+
     /// The meter at each hour's end (max over the accounts), NaN where no
     /// reading in the 2 h before; idle counts 0 (`meter_level_hourly`).
     public static func meterLevelHourly(_ history: ArenaHistory, accounts: [String], windowKind: String,
