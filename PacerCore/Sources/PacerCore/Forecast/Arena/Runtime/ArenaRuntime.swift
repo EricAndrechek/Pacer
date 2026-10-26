@@ -98,11 +98,15 @@ public actor ArenaRecordScorer {
         /// Child forecasts a window's runner keeps (`ArenaRunner.memoLimit`).
         /// A parent's backtests at successive cuts of a cycle mostly repeat
         /// (their times are aligned to the history's start), so the memo is
-        /// what makes ensembles affordable. Bounded by memory: a Monte-Carlo
-        /// child keeps 200 paths over its grid, ~100 KB on a five-hour grid
-        /// and ~550 KB on a weekly one, so the worst case is about 50 MB and
-        /// 100 MB per window being scored.
-        public var sessionMemoLimit = 512
+        /// what makes ensembles affordable: the calibration layer backtests
+        /// its child at 24 origins on a fixed lattice (2 h apart on five-hour
+        /// windows), so neighbouring cuts and cycles share nearly all of them.
+        /// A turn adds ~25 entries a cut with today's roster. Bounded by
+        /// memory: a Monte-Carlo forecast keeps 200 paths over its grid,
+        /// ~100 KB on a five-hour grid and ~550 KB on a weekly one, so the
+        /// worst case (every entry paths) is about 100 MB, for the one window
+        /// being scored.
+        public var sessionMemoLimit = 1024
         public var weeklyMemoLimit = 192
         /// Cycles a window scores before the next window's turn.
         public var sessionCyclesPerTurn = 4
@@ -116,6 +120,9 @@ public actor ArenaRecordScorer {
         public var forecasts = 0
         public var declined = 0
         public var busySeconds = 0.0
+        /// Busy seconds and forecasts per model, for the log's slowest list.
+        public var modelSeconds: [String: Double] = [:]
+        public var modelForecasts: [String: Int] = [:]
         public init() {}
     }
 
@@ -256,10 +263,15 @@ public actor ArenaRecordScorer {
 
     private func log(_ r: Report, of total: Int, since started: SuspendingClock.Instant, done: Bool = false) {
         let awake = SuspendingClock.now - started
+        // The three that cost the most, with their time per forecast.
+        let slowest = r.modelSeconds.sorted { $0.value > $1.value }.prefix(3).map { id, s in
+            String(format: "%@ %.0f ms", id, s * 1000 / Double(max(1, r.modelForecasts[id] ?? 1)))
+        }.joined(separator: ", ")
         Log.write("Arena", (done ? "scored " : "progress ") + "\(r.cycles)/\(total) cycle(s): +\(r.outcomes) outcome(s) "
                   + "from \(r.forecasts) forecast(s), \(r.declined) declined, "
                   + String(format: "busy %.0f s of %.0f s awake", r.busySeconds,
-                           Double(awake.components.seconds)))
+                           Double(awake.components.seconds))
+                  + (slowest.isEmpty ? "" : "; slowest: \(slowest)"))
     }
 
     /// The windows of `account` there is something to score in.
@@ -355,6 +367,13 @@ public actor ArenaRecordScorer {
                 let k = Self.key(s.surface, spec.name, cf, period)
                 guard let runner = s.runner else { return out }
                 report.forecasts += 1
+                let modelStart = SuspendingClock.now
+                defer {
+                    let d = SuspendingClock.now - modelStart
+                    report.modelSeconds[spec.name, default: 0] += Double(d.components.seconds)
+                        + Double(d.components.attoseconds) * 1e-18
+                    report.modelForecasts[spec.name, default: 0] += 1
+                }
                 do {
                     let p = try runner.projection(model: spec.name, binding: s.binding, history: cut,
                                                     resetAt: ArenaTime.millis(cycle.resetsAt))

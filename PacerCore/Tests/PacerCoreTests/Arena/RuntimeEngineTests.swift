@@ -436,6 +436,25 @@ struct RuntimeEngineTests {
         #expect(await engine.arenaModelIds(windowKey: identity) == ["test-oracle"])
     }
 
+    /// Once judged, only the best few arena models (and any close to the
+    /// best) stay in the running, compared over the cycles all were scored on.
+    @Test func onlyTheBestFewArenaModelsStayContenders() {
+        func rows(_ m: String, err: Double, periods: ClosedRange<Int> = 1...30) -> [EngineSelfEval.Record] {
+            periods.map {
+                .init(method: m, bucket: "cut=0.50|v2", periodKey: String(format: "2026-01-%02dT00:00:00Z", $0),
+                      predicted: 50 + err, truth: 50)
+            }
+        }
+        let engine = rows("linear-recent", err: 12)
+        let arena = (1...6).flatMap { rows("m\($0)", err: Double($0)) } + rows("m1b", err: 1.05)
+        let ids: Set<String> = ["m1", "m1b", "m2", "m3", "m4", "m5", "m6"]
+        // Top four (m1, m1b, m2, m3); m4 is outside the 10% band; m5, m6 too.
+        #expect(EngineSelfEval.arenaLosers(engine + arena, arenaIds: ids, weekly: false) == ["m4", "m5", "m6"])
+        // Four or fewer judged: nobody is cut on rank.
+        let few = (1...4).flatMap { rows("m\($0)", err: Double($0)) }
+        #expect(EngineSelfEval.arenaLosers(engine + few, arenaIds: ["m1", "m2", "m3", "m4"], weekly: false).isEmpty)
+    }
+
     @Test func comparableRecordsShareOneSpan() {
         func r(_ m: String, _ p: String, _ err: Double) -> EngineSelfEval.Record {
             .init(method: m, bucket: "cut=0.50|v2", periodKey: p, predicted: 50 + err, truth: 50)
