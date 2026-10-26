@@ -155,6 +155,12 @@ AUTO=1 BURN=20 BURN7=2.5 t "9g expiring skips 5h room the week cannot pay for" '
   4 "1:0:-:90:ok 2:31:44:95:ok:7680 3:0:-:97:ok:2300 4:15:214:6:ok:9720" 'WEEK_MAX_1=90'
 AUTO=1 BURN=20 BURN7=2.5 t "9h expiring takes it when the week has room" 'WOULD SWITCH → 2 .*\[expiring: 2 has' \
   4 "1:0:-:90:ok 2:31:44:90:ok:7680 3:0:-:97:ok:2300 4:15:214:6:ok:9720" 'WEEK_MAX_1=90'
+# A window that resets before the burn could fill it rides out its reset
+# instead of switching away a minute early: 96% + 24%/h x (1 + 5) min < 100.
+BURN=24 t "L1 at the switch point, resets in 1m: rides it out" '^[0-9:]{8} no switch: 1 at 96% rides out its reset' \
+  1 "1:96:1:30:ok 2:0:-:20:ok 3:0:-:100:ok 4:0:-:100:ok"
+BURN=24 t "L2 at the switch point, resets in 30m: switches" 'WOULD SWITCH → 2 .*\[limit: 1 at 96%' \
+  1 "1:96:30:30:ok 2:0:-:20:ok 3:0:-:100:ok 4:0:-:100:ok"
 t "9d limit keeps a target expiring within 45m (stagger yields there)" 'WOULD SWITCH → 3 .*\[limit: 1 at 95%' \
   1 "1:95:200:30:ok 2:0:-:10:ok:8640 3:50:30:20:ok:600 4:0:-:100:ok"
 t "10a missing 5h reading is not room" '^[0-9:]{8} HOLD 1 .*2: -% room -, reset unknown, 7d 10% \[no reading\]' \

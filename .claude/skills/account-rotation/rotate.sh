@@ -542,10 +542,19 @@ while :; do
       fi
     fi
     held=0
+    # The switch point guards the next few minutes of burn, but a window that
+    # resets before that burn could fill it has nothing to switch away from:
+    # 2026-10-26 19:18Z a limit switch came one minute before the active's
+    # reset (96% at 24%/h), costing every session a cache rewrite for nothing.
+    # Same margin as the safe limit: the burn until the reset plus one poll.
+    b0=$(( burn < 0 ? 0 : burn )); outlasts=0
+    if [ "$myleft" != - ] && [ $(( mine * 3600 + b0 * (myleft + 300) )) -lt 360000 ]; then outlasts=1; fi
+    if [ "$outlasts" = 1 ] && [ "$mine" -ge $(( at - 3 )) ]; then
+      [ "$DRY" = 1 ] && say "no switch: $act at ${mine}% rides out its reset in $(fmt_left "$myleft") (at ${burn}%/h it cannot reach 100% first)"
     # Limit: no "GAP below the active" test any more. Any target with room
     # for BRIDGE_MIN_MINUTES of burn beats pausing every session; a nearly full
     # one bridges, and this rule (or stagger) brings the login back later.
-    if [ "$mine" -ge "$at" ] && [ -n "$best" ]; then
+    elif [ "$mine" -ge "$at" ] && [ -n "$best" ]; then
       kind=limit; [ "$pickroom" -lt 20 ] && kind=bridge
       switch_to "$pick" "$kind: $act at ${mine}% (switch point ${at}%, 7d ${mywk}%, 5h resets in $(fmt_left "$myleft")), $pick at ${pickv}% (room ${pickroom} ≥ ${need} for ${BRIDGE_MIN_MINUTES} min at ${burn}%/h, $(win_desc "${ID[$pick]}"))"
     elif [ "$mine" -ge "$at" ] && [ -n "$rsv" ]; then
