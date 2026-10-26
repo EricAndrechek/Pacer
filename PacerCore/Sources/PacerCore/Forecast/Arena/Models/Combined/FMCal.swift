@@ -270,7 +270,7 @@ public enum FMCal {
                 guard let vLast = v.last, vLast.isFinite else { cuts.append((c, nil)); continue }
                 let resetC = s.reset[j]
                 let phase = 1.0 - Double(resetC - c) / Double(duration)
-                let back = v[v.count - 1 - k30]
+                let back = v.count > k30 ? v[v.count - 1 - k30] : .nan
                 let act = back.isFinite ? vLast - back : 0.0
                 let meta = (cLast: vLast, used: s.cycleUtil[j], reset: resetC, phase: phase, act: act)
                 let rel = relative ? FMCal.relativeContext(v) : v

@@ -83,6 +83,7 @@ public final class MeterFM {
     }
 
     func base(_ history: ArenaHistory, now: Millis, _ tr: ArenaTargetRequest, _ wk: String) throws -> Base {
+        guard !tr.grid.isEmpty, !tr.accounts.isEmpty else { throw ArenaError.invalid("MeterFM: empty grid or scope") }
         let cap = tr.target == .meterScoped ? tr.cap : nil
         let acct = tr.accounts[0]
         let step = Millis(c("step_min", wk, wk == "five_hour" ? 5 : 15)) * FMSeries.minMs
