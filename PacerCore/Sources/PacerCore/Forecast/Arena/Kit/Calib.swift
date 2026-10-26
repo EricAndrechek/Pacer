@@ -172,6 +172,14 @@ public enum KitCalib {
         r.q.withUnsafeBufferPointer { qb in
             for i in 0..<n { meds[i] = recordMedian(UnsafeBufferPointer(rebasing: qb[(i * m)..<((i + 1) * m)])) }
         }
+        // A record's samples are sorted, and what `miss` does to them (scale
+        // around the median by s > 0, clip, round) never reorders them, so
+        // F(y−) and F(y) are two binary searches instead of a pass over all
+        // 40 (rows that are not sorted take the pass).
+        let sorted: [Bool] = r.q.withUnsafeBufferPointer { qb in
+            (0..<n).map { i in (1..<m).allSatisfy { qb[i * m + $0 - 1] <= qb[i * m + $0] } }
+        }
+        let mD = Double(m)
         var scaled = [Double](repeating: 0, count: m)
         var v = [Double](repeating: 0, count: n)
         func miss(_ s: Double, _ c: Double) -> Double {
@@ -181,14 +189,24 @@ public enum KitCalib {
                     for i in 0..<n {
                         let med = meds[i], fl = r.floor[i], wh = r.whole[i]
                         let base = i * m
-                        for j in 0..<m {
-                            // scale_samples, then finish: clip to [floor, 100],
-                            // round half to even where the child was whole.
-                            var x = min(max(med + s * (qb[base + j] - med), fl), 100.0)
-                            if wh { x = x.rounded(.toNearestOrEven) }
-                            sb[j] = x
+                        // scale_samples, then finish: clip to [floor, 100],
+                        // round half to even where the child was whole.
+                        @inline(__always) func t(_ j: Int) -> Double {
+                            let x = min(max(med + s * (qb[base + j] - med), fl), 100.0)
+                            return wh ? x.rounded(.toNearestOrEven) : x
                         }
-                        let (flo, fhi) = tieInterval(UnsafeBufferPointer(sb), r.y[i])
+                        let flo: Double, fhi: Double
+                        if sorted[i] {
+                            let y = r.y[i], lo = y - eps, hi = y + eps
+                            var a0 = 0, a1 = m
+                            while a0 < a1 { let mid = (a0 + a1) >> 1; if t(mid) < lo { a0 = mid + 1 } else { a1 = mid } }
+                            var b0 = a0, b1 = m
+                            while b0 < b1 { let mid = (b0 + b1) >> 1; if t(mid) <= hi { b0 = mid + 1 } else { b1 = mid } }
+                            (flo, fhi) = (Double(a0) / mD, Double(b0) / mD)
+                        } else {
+                            for j in 0..<m { sb[j] = t(j) }
+                            (flo, fhi) = tieInterval(UnsafeBufferPointer(sb), r.y[i])
+                        }
                         v[i] = (belowShare(flo, fhi, a) + 1.0 - belowShare(flo, fhi, b)) * w[i]
                     }
                 }
@@ -463,8 +481,12 @@ public enum KitCalib {
                 var q = [[Double]](repeating: [Double](repeating: 0, count: g), count: mLevels)
                 var col = [Double](repeating: 0, count: p.count)
                 for j in 0..<g {
-                    for i in p.indices { col[i] = p[i][j] }
-                    col.sort()
+                    var inOrder = true
+                    for i in p.indices {
+                        col[i] = p[i][j]
+                        if i > 0 && col[i] < col[i - 1] { inOrder = false }
+                    }
+                    if !inOrder { col.sort() }
                     for (li, lv) in levelGrid(mLevels).enumerated() {
                         q[li][j] = col.count == mLevels ? col[li] : KitDetQ.readSorted(col, lv)
                         q[li][j] = Double(Float(q[li][j]))

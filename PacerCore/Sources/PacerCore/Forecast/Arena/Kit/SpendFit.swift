@@ -66,8 +66,9 @@ extension KitSpend {
         var index: [Key: Int] = [:]
         var keys: [Key] = []
         var y: [Double] = [], p: [Double] = [], s: [Double] = []
+        let labels = rows.account
         for i in 0..<n {
-            let k = Key(a: rows.account[i], h: floorDiv(rows.t1[i] + offsetMs, hourMs))
+            let k = Key(a: labels[i], h: floorDiv(rows.t1[i] + offsetMs, hourMs))
             let g: Int
             if let j = index[k] { g = j } else {
                 g = keys.count; index[k] = g; keys.append(k); y.append(0); p.append(0); s.append(0)
@@ -102,10 +103,7 @@ extension KitSpend {
             .map { inSpan(intervals(history, account: $0, windowKind: windowKind, scopeModel: scopeModel)) }
         if !others.contains(where: { $0.count > 0 }) { return (own, true) }
         var out = Intervals.empty
-        for part in [own] + others where part.count > 0 {
-            out.account += part.account; out.t0 += part.t0; out.t1 += part.t1
-            out.rise += part.rise; out.spend += part.spend
-        }
+        for part in [own] + others where part.count > 0 { out.append(part) }
         return (out, false)
     }
 
@@ -126,11 +124,27 @@ extension KitSpend {
         precondition(dayStart <= localDayStart(history, account: account),
                      "a fit's span must end by the start of now's day")
         return history.memo.value("kit.spend.fit|\(account)|\(windowKind)|\(scopeModel ?? "")|\(dayStart)") {
-            let (rows, own) = spanRows(history, account: account, windowKind: windowKind, scopeModel: scopeModel,
-                                       dayStart: dayStart)
-            return KitBox(fit(rows, own: own, scopeModel: scopeModel, dayStart: dayStart,
-                              offsetMs: tzOffsetMs(history, account: account)).details)
+            let off = tzOffsetMs(history, account: account)
+            // A local midnight is a whole number of hours from the epoch in
+            // local time, so its span is whole hour buckets: the fast path.
+            if floorDiv(dayStart + off, hourMs) * hourMs == dayStart + off {
+                return KitBox(fitFromHours(history, account: account, windowKind: windowKind, scopeModel: scopeModel,
+                                           dayStart: dayStart, offsetMs: off))
+            }
+            return KitBox(fitOnDayByRows(history, account: account, windowKind: windowKind, scopeModel: scopeModel,
+                                         dayStart: dayStart))
         }.value
+    }
+
+    /// `fit_on_day` row by row, as the Python computes it: the reference
+    /// the hour-bucket fit is checked against, and the path for a
+    /// `dayStart` that is not on a local hour.
+    static func fitOnDayByRows(_ history: ArenaHistory, account: String, windowKind: String, scopeModel: String?,
+                               dayStart: Millis) -> FitDetails? {
+        let (rows, own) = spanRows(history, account: account, windowKind: windowKind, scopeModel: scopeModel,
+                                   dayStart: dayStart)
+        return fit(rows, own: own, scopeModel: scopeModel, dayStart: dayStart,
+                   offsetMs: tzOffsetMs(history, account: account)).details
     }
 
     /// The fit itself, on given rows: the details plus the per-row fitted
@@ -280,6 +294,15 @@ public enum KitMath {
             }
         }
         for a in 0..<k { for bb in 0..<a { G[a * k + bb] = G[bb * k + a] } }
+        return nnlsGram(G, c, rows: n)
+    }
+
+    /// `nnls` from the Gram matrix `G` (`k × k`, symmetric, row-major) and
+    /// `c = Xᵀy` of `rows` rows.
+    public static func nnlsGram(_ G0: [Double], _ c0: [Double], rows n: Int) -> [Double] {
+        let k = c0.count
+        guard n > 0, k > 0 else { return Array(repeating: 0, count: k) }
+        var G = G0, c = c0
         let scale = (0..<k).map { G[$0 * k + $0].squareRoot() }
         for a in 0..<k {
             c[a] = scale[a] > 0 ? c[a] / scale[a] : 0
