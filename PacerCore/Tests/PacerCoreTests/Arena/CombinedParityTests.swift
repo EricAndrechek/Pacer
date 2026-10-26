@@ -7,11 +7,12 @@ import Testing
 /// readings and pseudo-turns), with the Python's own outputs in
 /// `comb-g1-08-opus-fm.json` / `comb-g2-06-opus-fmgate2.json`.
 ///
-/// How those were made: `gen_comb_fixtures.py` (kept with the port's
-/// hand-back, not in the repo) run from `research/arena` with
+/// How those were made: `ArenaFixtures/comb-gen-fixtures.py` (its header
+/// has the three commands) run from `research/arena` with
 /// `uv run --extra fm`, on `cases-spend.json` rebuilt by
 /// `arena.cli_portfix.snapshot_from_case` (no snapshot read), Timestral-123M
-/// at the pinned revision. Per case and model:
+/// at the pinned revision; regenerating reproduces every file except the
+/// Python's own wall times (`detail.seconds`). Per case and model:
 ///
 /// - `detail.det`: the model with its two random steps pinned (a tied PIT
 ///   read at the middle of its tie, u = 0.5; no rationing) and a stable sort
