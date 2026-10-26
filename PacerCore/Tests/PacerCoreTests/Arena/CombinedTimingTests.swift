@@ -160,3 +160,50 @@ extension CombinedTimingTests {
         }
     }
 }
+
+extension CombinedTimingTests {
+    /// The background scorer's shape on a 120-day synthetic history: the
+    /// newest completed cycles, newest first, each at 8 cut points, both
+    /// models on each cut (one shared history cut, one runner per window,
+    /// the cut memo shared), as a first install would run them.
+    @Test func backfill() throws {
+        guard TimestralTestWeights.url(FMWeights.timestral123M) != nil else { return }
+        let end: Millis = 1_790_000_000_000
+        let store = CombinedSynthetic.history(days: 120, end: end)
+        let services = TimestralTestWeights.services()
+        FMBackends.setBLASThreading(singleThreaded: true)
+        defer { FMBackends.setBLASThreading(singleThreaded: false) }
+        var lines: [String] = []
+        for (target, cycles) in [(ArenaTarget.meterFiveHour, 40), (.meterSevenDay, 16)] {
+            let id = ArenaMeterID(account: "A1", windowKind: target.windowKind)
+            let resets = Array(Set(store.meters[id]!.compactMap(\.resetsAt)).filter { $0 <= end }.sorted().reversed().prefix(cycles))
+            let cache = FMCalCutCache(capacity: 4096)
+            let runner = ArenaRunner(registry: ArenaRegistry.all, services: services)
+            var n = 0, declined = 0
+            let start = DispatchTime.now().uptimeNanoseconds
+            for reset in resets {
+                for f in stride(from: 0.1, through: 0.8, by: 0.1) {
+                    let now = reset - target.windowMillis + Millis(Double(target.windowMillis) * f)
+                    let cut = ArenaHistory(store: store, now: now, accounts: ["A1"])
+                    let req = ArenaRunner.request(history: cut, targets: [target])
+                    guard !req.targets.isEmpty else { declined += 1; continue }
+                    for name in ["g1-08-opus-fm", "g2-06-opus-fmgate2"] {
+                        let spec = ArenaRegistry.spec(name)!
+                        let ctx = ArenaContext(spec: spec, seed: 1, services: services, runner: runner, history: { cut })
+                        let m: any ArenaModel = name.hasPrefix("g1") ? try G108OpusFM(context: ctx) : try G206OpusFMGate2(context: ctx)
+                        (m as? G108OpusFM)?.meters.cutCache = cache
+                        (m as? G206OpusFMGate2)?.fm.cutCache = cache
+                        try m.fit(cut)
+                        _ = try m.forecast(req)
+                        n += 1
+                    }
+                }
+            }
+            let s = Double(DispatchTime.now().uptimeNanoseconds - start) / 1e9
+            lines.append(String(format: "%@: %d cycles, %d forecasts (%d cuts idle) in %.1f s, %.0f ms a forecast; %d network cuts, %d memo answers, %d kept",
+                                target.rawValue, resets.count, n, declined, s, s * 1000 / Double(max(n, 1)),
+                                cache.misses, cache.hits, cache.count))
+        }
+        print("Combined backfill (120-day synthetic history, Accelerate on one thread)\n" + lines.joined(separator: "\n"))
+    }
+}
