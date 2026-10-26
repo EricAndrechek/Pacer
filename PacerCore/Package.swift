@@ -36,7 +36,11 @@ let package = Package(
         ),
         .testTarget(
             name: "PacerCoreTests",
-            dependencies: ["PacerCore", "PacerUI"]
+            dependencies: ["PacerCore", "PacerUI"],
+            // The forecast arena's port fixtures (`research/arena`,
+            // `arena port-fixtures`): synthetic inputs and the Python
+            // reference's outputs, which the Swift ports must reproduce.
+            resources: [.copy("ArenaFixtures")]
         ),
         .testTarget(
             name: "PacerPaceTests",
