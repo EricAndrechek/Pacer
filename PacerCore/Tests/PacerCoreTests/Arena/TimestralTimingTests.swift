@@ -8,6 +8,13 @@ import Testing
 /// (1344 of context), with Accelerate single-threaded and with its default
 /// threading. Opt-in (`PACER_TIMESTRAL_BENCH=1`), and meaningful only in a
 /// release build (`swift test -c release -Xswiftc -enable-testing`).
+///
+/// Measured 2026-10-26 on Apple silicon, the machine shared with other
+/// builds (ms per forecast, both symmetric passes; one thread / default):
+/// 5M 0.9 / 0.9 five-hour, 2.0 / 2.1 weekly; 28M 4.0 / 4.0, 7.1 / 7.1;
+/// 123M 15 / 16, 26 / 26; 209M 28 / 28, 44 / 45, and 70 / 55-71 with the
+/// 1344-step weekly context. A loaded run doubled the 209M numbers single-
+/// threaded (146 and 287 ms) while default threading held at 78 and 98.
 @Suite(.enabled(if: ProcessInfo.processInfo.environment["PACER_TIMESTRAL_BENCH"] != nil))
 struct TimestralTimingTests {
     static func context(_ n: Int, seed: UInt64) -> [Double] {
@@ -86,6 +93,11 @@ enum TimestralSyntheticHistory {
 /// Per-forecast wall time of every fm model on a 120-day history, at cuts
 /// spread over the last 30 days, each cut a fresh `ArenaHistory` (what a
 /// backfill does). Opt-in like the network timings.
+///
+/// Measured 2026-10-26 (release, ms per forecast, five-hour / weekly):
+/// fm-timestral-5m-meter 2.1 / 2.0 (3.6 / 4.5 without the shared store
+/// series); 28m-meter 7.5 / 6.1; struct-timestral-5m 23 / 33; struct-28m
+/// 54 / 67; 209m-meter weekly 32; g2-01-haiku-weekly-209m-extended 47.
 @Suite(.enabled(if: ProcessInfo.processInfo.environment["PACER_TIMESTRAL_BENCH"] != nil))
 struct TimestralBackfillTimingTests {
     @Test func modelsOnA120DayHistory() throws {
