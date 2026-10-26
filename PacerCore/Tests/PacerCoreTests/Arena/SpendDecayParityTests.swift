@@ -94,6 +94,17 @@ import Testing
         print("spend-decay-6h parity: detail max |Δ| \(r.detailMax), quantile max |Δ| \(r.quantileMax)")
     }
 
+    /// The other two variants, from reference files of our own made the
+    /// way `arena port-fixtures` makes them (`spend-decay-1h.json`,
+    /// `spend-decay-1d.json`; the generator, which reproduces the committed
+    /// -30m and -6h files exactly, is at the end of this file).
+    @Test func otherVariantsMatchThePython() throws {
+        let r1h = try check("spend-decay-1h")
+        let r1d = try check("spend-decay-1d")
+        #expect(r1h.checked == 6 && r1d.checked == 6)
+        print("spend-decay-1h parity: detail \(r1h.detailMax), quantiles \(r1h.quantileMax); spend-decay-1d: detail \(r1d.detailMax), quantiles \(r1d.quantileMax)")
+    }
+
     @Test func ndtriIsScipys() {
         // scipy.special.ndtri at these levels (printed with repr).
         #expect(abs(KitDetQ.ndtri(0.05) - -1.6448536269514729) < 1e-14)
@@ -206,3 +217,60 @@ import Testing
         print("stored quantile rows per forecast: " + report.joined(separator: ", "))
     }
 }
+
+/* How ArenaFixtures/spend-decay-1h.json and spend-decay-1d.json were made
+   (synthetic cases only), from research/arena:
+   uv run python -I variants_fixture.py cases-spend.json <out-dir>
+
+"""spend-decay-1h (five-hour cases) and spend-decay-1d (weekly cases) through
+kit.detq on the SYNTHETIC spend fixture cases, as `arena port-fixtures`
+writes them (same levels, same detail), without touching any snapshot.
+
+Usage (from research/arena): uv run python -I <this> <cases-spend.json> <out-dir>
+"""
+import json
+import sys
+from pathlib import Path
+
+import numpy as np
+
+from arena.cli_portfix import (MODELS_DIR, Local, _arr, detail_json, fixture_pricing, snapshot_from_case)
+from arena.episodes import target_key
+from arena.registry import Registry
+from arena.types import Request, Scope, Target, TargetRequest
+from kit import detq
+
+
+def main(src, out_dir):
+    cases = json.load(open(src))["cases"]
+    reg = Registry([MODELS_DIR])
+    for name, kind in (("spend-decay-1h", "five_hour"), ("spend-decay-1d", "seven_day")):
+        info = reg.load(name)
+        outs = []
+        for c in cases:
+            inp, rq = c["inputs"], c["request"]
+            if inp["window_kind"] != kind:
+                continue
+            acct = inp["account"]
+            target = Target(rq["target"])
+            small = snapshot_from_case(c)
+            local = Local(small, tz_offset_min=inp["tz_offset_min"])
+            grid = np.asarray(rq["grid"], dtype=np.int64)
+            key = target_key(target, (acct,))
+            req = Request(rq["now"], Scope((acct,), "scope_only"),
+                          (TargetRequest(key, target, (acct,), grid, "pct", 200, None, None, rq["reset_at"]),))
+            view = small.view(req.scope, "current_code", inp["history_start"])
+            with fixture_pricing():
+                model = local.instance(info, view, rq["now"])
+                det = detq.quantiles(model, req, detq.LEVELS_OUT)[key]
+            outs.append({"case": c["id"], "levels": list(detq.LEVELS_OUT), "quantiles": _arr(det.q),
+                         "median": _arr(det.median), "exact": bool(det.exact), "mc_paths": int(det.mc_paths),
+                         "detail": detail_json(dict(det.detail))})
+        json.dump({"format": "pacer-arena-port-fixture/1", "spec": "docs/port-spec.md#parity", "model": name,
+                   "snapshot": "cases-spend.json (synthetic, seed 42)", "seed": 42, "outputs": outs},
+                  open(Path(out_dir) / f"{name}.json", "w"))
+
+
+if __name__ == "__main__":
+    main(sys.argv[1], sys.argv[2])
+*/
