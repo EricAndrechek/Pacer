@@ -74,10 +74,12 @@ public struct ArenaRoster: Sendable {
     /// head (`fm-*-spend`) forecasts spend, not a meter, for the ensembles
     /// above it.
     public static let nonSelectablePrefixes = ["port-engine-"]
-    /// Exact names that are helpers only. Empty today: a port marks itself
-    /// with `selectable = false` in its config instead, which needs no edit
-    /// here.
-    public static let nonSelectableNames: Set<String> = []
+    /// Exact names that are helpers only. `port-live-meter` is the app's live
+    /// meter as an arena model, a starting point other models build on: as a
+    /// forecast it is the reading held, which `naive-flat` already is. A port
+    /// can also mark itself with `selectable = false` in its config, which
+    /// needs no edit here.
+    public static let nonSelectableNames: Set<String> = ["port-live-meter"]
 
     public static func isSelectable(_ spec: ArenaModelSpec) -> Bool {
         if nonSelectableNames.contains(spec.name) { return false }
@@ -148,7 +150,25 @@ extension DiurnalBurnModel {
 /// parts, so a model ported later has a sensible label without an edit here.
 public enum ArenaModelNames {
 
+    /// Models whose folder name says too little, from their `model.toml`
+    /// descriptions.
+    static let named: [String: (name: String, summary: String)] = [
+        "g1-10-fable-mix": ("Past moments, blended",
+                            "Pools the past-moments forecast with a second forecaster's, in fixed shares."),
+        "g2-07-opus-limit": ("Your habits near the limit",
+                             "Replays your own pace by time of day, with how you slow down near the cap, to the reset."),
+        "g2-07-opus-pool": ("Habits near the limit, blended",
+                            "Pools the near-the-limit simulation with a pretrained network's forecast."),
+        "g2-08-fable-burst-mix": ("Bursts of use, blended",
+                                  "Pools the simulated bursts of use with a pretrained network's forecast."),
+        "g2-01-haiku-weekly-209m-extended": ("Pretrained network (209M, two weeks)",
+                                             "A pretrained network reads two weeks of this meter and continues it."),
+        "port-live-meter": ("The live meter, held",
+                            "Your recent spend added to the latest reading, held to the reset."),
+    ]
+
     public static func displayName(_ id: String) -> String? {
+        if let n = named[id] { return n.name }
         if id.hasPrefix("calib-") {
             guard let base = displayName(String(id.dropFirst("calib-".count))) else { return nil }
             return base + ", calibrated range"
@@ -162,6 +182,7 @@ public enum ArenaModelNames {
         if id == "naive-linear-to-reset" { return "Average pace so far, held" }
         let size = sizeToken(id).map { " (\($0))" } ?? ""
         if id.hasPrefix("spend-decay-") { return "Recent spend, fading" + lookback(id) }
+        if id.hasPrefix("struct-") { return "Spend forecast, converted" + size }
         if id.contains("timestral") || id.contains("weekly-209m") || id.contains("weekly-28m") {
             return "Pretrained network" + size
         }
@@ -179,6 +200,7 @@ public enum ArenaModelNames {
     }
 
     public static func summary(_ id: String) -> String? {
+        if let n = named[id] { return n.summary }
         if id.hasPrefix("calib-") {
             guard let base = summary(String(id.dropFirst("calib-".count))) else { return nil }
             return base + " Its range is retuned on its own past misses."
@@ -189,6 +211,9 @@ public enum ArenaModelNames {
         if id == "naive-flat" { return "The meter stays at its latest reading until the reset." }
         if id.hasPrefix("spend-decay-") {
             return "Turns your recent spend into meter points at your own rate, with the pace fading toward the reset."
+        }
+        if id.hasPrefix("struct-") {
+            return "A network forecasts your spend, converted to meter points at your own rate."
         }
         if id.contains("timestral") || id.contains("weekly-209m") || id.contains("weekly-28m") || id.hasPrefix("fm-") {
             return "A network pretrained on many time series reads this window's readings and continues them."

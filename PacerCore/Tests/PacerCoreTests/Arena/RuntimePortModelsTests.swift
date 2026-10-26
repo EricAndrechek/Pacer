@@ -74,6 +74,9 @@ struct RuntimePortModelsTests {
             ArenaModelSpec(name: "five-only", targets: [.meterFiveHour]) { NaiveFlat(context: $0) },
         ])
         #expect(roster.selectableIds == ["naive-flat", "five-only"])
+        #expect(!ArenaRoster.isSelectable(ArenaModelSpec(name: "port-live-meter", targets: [.meterFiveHour]) {
+            NaiveFlat(context: $0)
+        }))
         #expect(roster.specs(for: .meterSevenDay).map(\.name) == ["naive-flat"])
         #expect(roster.registry.count == 6)   // helpers still reachable as children
     }
@@ -116,6 +119,12 @@ struct RuntimePortModelsTests {
             "g1-08-opus-fm": "Pretrained networks, combined",
             "g2-05-sonnet-final": "Several forecasters, blended",
             "port-engine-kalman-trend": "Smoothed trend (Kalman filter)",
+            "g1-10-fable-mix": "Past moments, blended",
+            "g2-07-opus-limit": "Your habits near the limit",
+            "g2-07-opus-pool": "Habits near the limit, blended",
+            "g2-08-fable-burst-mix": "Bursts of use, blended",
+            "g2-01-haiku-weekly-209m-extended": "Pretrained network (209M, two weeks)",
+            "struct-timestral-28m": "Spend forecast, converted (28M)",
         ]
         for (id, name) in expected {
             #expect(BurnTrajectory.displayName(id) == name, "\(id)")
