@@ -94,7 +94,7 @@ API=${PACER_API:-http://127.0.0.1:7223}
 load_conf() {
   local -A def=([EARLY]=2 [STAGGER]=9000 [MIN_SWITCH_GAP]=300 [BRIDGE_MIN_PTS]=6
     [BRIDGE_MIN_MINUTES]=20 [BURN_UNKNOWN]=40 [EXPIRE_WINDOW]=2700 [EXPIRE_MIN_PTS]=8
-    [WEEK_ROOM_MIN]=1 [RESERVE_WEEK_MAX]=97)
+    [WEEK_ROOM_MIN]=1 [RESERVE_WEEK_MAX]=97 [STALE_AFTER]=2100 [STALE_BURN]=8)
   local k bad=""
   for k in "${!def[@]}"; do printf -v "$k" %s "${def[$k]}"; done
   WEEK_MAX=auto; EXCLUDE=""; RESERVE_SLOT=""
@@ -306,6 +306,7 @@ switch_to() {
     say "SWITCH → $slot (${ID[$slot]}) [$why] $out"
     note_left "$act" "$slot"
     last_switch=$(date +%s); last_set=$slot
+    active_since=$last_switch; STALE_SAID=()
   else
     say "ERROR switch to $slot failed [$why]: $out"
   fi
@@ -325,7 +326,12 @@ gap_warn_due() {
   [ "$DRY" = 1 ] || [ $(( $1 - missing_since )) -ge "$GAP_WARN_SECS" ]
 }
 last_status=0; hold_since=0; hold_said=0; hold_burn=0; rsv_err=0
-declare -A PREV_STAT=() LEXP_SAID=() BAD_SINCE=() BAD_SAID=()
+declare -A PREV_STAT=() LEXP_SAID=() BAD_SINCE=() BAD_SAID=() STALE_SAID=()
+# When the active slot last changed (our switch, an adopted external one, or
+# this start), for the stale-login check below. ACTIVE_SINCE_OVERRIDE (dry
+# mode only) is for tests.
+active_since=$(date +%s)
+if [ "$DRY" = 1 ] && [[ ${ACTIVE_SINCE_OVERRIDE:-} =~ ^[0-9]+$ ]]; then active_since=$ACTIVE_SINCE_OVERRIDE; fi
 while :; do
   load_conf
   now=$(date +%s)
@@ -416,6 +422,7 @@ while :; do
     say "EXTERNAL: active $last_set → $act (adopted)"
     note_left "$last_set" "$act"
     last_switch=$now
+    active_since=$now; STALE_SAID=()
   fi
   last_set=$act
 
@@ -573,6 +580,40 @@ while :; do
       say "no switch: $act at ${mine}% < switch point ${at}% (5h resets in $(fmt_left "$myleft"), 7d ${mywk}%), best target ${best:-none}${best:+ at ${bestv}% (room ${bestroom}, $(win_desc "${ID[$best]}"))}$note"
     fi
     if [ "$held" = 0 ] && [ "$hold_said" = 1 ]; then say "hold over: on $(active_slot)"; hold_said=0; hold_burn=0; fi
+  fi
+  # Stale login (2026-10-26): after a /login the default login moved to another
+  # account, but running sessions kept the token they started with and went on
+  # billing the old one, while Pacer (which follows the default login)
+  # credited the new one and every gate said GO toward the wrong limit. The
+  # tell: a slot that is NOT active keeps burning while the active one barely
+  # does. Pacer's recent burn looks back 30 min, so a just-left account still
+  # shows burn until STALE_AFTER has passed. A switch away and back moves the
+  # sessions within ~30 s. Negative burns (Pacer #339) count as 0.
+  ab=${B5[$actid]:-}
+  if [ -n "$ab" ] && [ $(( now - active_since )) -ge "$STALE_AFTER" ]; then
+    [ "$ab" -lt 0 ] && ab=0
+    for s in "${SLOTS[@]}"; do
+      [ "$s" = "$act" ] && continue
+      sid=${ID[$s]}; sb=${B5[$sid]:-}
+      [ -n "$sb" ] || continue
+      [ "$sb" -lt 0 ] && sb=0
+      if [ "$sb" -lt $(( STALE_BURN / 2 )) ]; then STALE_SAID[$s]=""; continue; fi
+      [ "${STAT[$sid]:-?}" = ok ] && [ "$sb" -ge "$STALE_BURN" ] && [ $(( ab * 3 )) -le "$sb" ] || continue
+      [ -z "${STALE_SAID[$s]:-}" ] || continue
+      away=""
+      for o in "${SLOTS[@]}"; do
+        [ "$o" = "$act" ] && continue
+        oid=${ID[$o]}; ov=$(eff5 "$oid"); ow=$(eff7 "$oid")
+        [ "${STAT[$oid]:-?}" = ok ] && [ "$ov" != - ] && [ "$ow" != - ] || continue
+        excluded "$o" && continue
+        [ $(( $(switch_at "$oid") - ov )) -ge 6 ] && [ $(( $(wkmax "$o") - ow )) -ge 1 ] || continue
+        away=$o; break
+      done
+      if [ -n "$away" ]; then hint="cswap switch $away; cswap switch $act"
+      else hint="(no other slot has room right now) cswap switch <a slot with room>; cswap switch $act"; fi
+      say "WARN slot $s (${ID[$s]}) is still burning ${sb}%/h while active $act burns ${ab}%/h for $(( (now - active_since) / 60 ))m: running sessions may hold slot $s's old login, or something off this Mac uses it; re-apply with: $hint"
+      STALE_SAID[$s]=1
+    done
   fi
   [ "$DRY" = 1 ] && exit 0
   sleep 60

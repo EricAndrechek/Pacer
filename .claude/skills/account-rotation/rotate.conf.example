@@ -43,3 +43,12 @@ RESERVE_WEEK_MAX=97
 # active account's 7d burn, rounded up, and never less than WEEK_ROOM_MIN points
 # (one point of weekly room is a few minutes of work, then another switch).
 WEEK_ROOM_MIN=1
+
+# Stale-login check: a slot that is NOT active still burning at least
+# STALE_BURN %/h (5h, Pacer's recent burn) while the active one burns a third
+# of that or less, STALE_AFTER seconds after the active slot last changed
+# (Pacer's recent burn looks back 30 min, so earlier a just-left account still
+# shows burn), logs one WARN: running sessions may hold an old login. A
+# `cswap switch` away and back re-applies it.
+STALE_AFTER=2100
+STALE_BURN=8

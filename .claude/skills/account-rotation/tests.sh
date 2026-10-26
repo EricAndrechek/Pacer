@@ -59,6 +59,8 @@ NOW=$(date +%s)
 t() {
   local name=$1 want=$2 act=$3 accts=$4 conf=${5:-} last=${6:-} also=${7:-}
   local d out line ok=1
+  # ONLY=<name prefix> runs just the scenarios whose name starts with it.
+  [ -n "${ONLY:-}" ] && [[ $name != "$ONLY"* ]] && return
   n=$(( n + 1 )); d=$T/c$n; mkdir -p "$d/state"
   # The cap tests below assert a 90% ceiling; AUTO=1 leaves WEEK_MAX at its
   # default (auto) for the weekly-burn tests.
@@ -267,6 +269,19 @@ API=http://127.0.0.1:$port t "M2 Pacer burn 45: room 15 bridges" 'WOULD SWITCH â
 # old: safe7 = 99, limit 97, need7 = 3.
 AUTO=1 API=http://127.0.0.1:$port t "M3 Pacer 7d burn 9: limit 97, need 3" '^[0-9:]{8} no switch:' \
   1 "1:50:200:88:ok 3:20:250:40:ok $SPENT" "" "" '7d 88% \(lim 97\).*7d burn 9\.000%/h \(pacer\): a target needs 3 points of 7d room'
+# --- stale login: a non-active slot keeps burning while the active one is quiet ---
+cat >"$T/www/metrics" <<'EOF'
+pacer_rate_limit_recent_burn_percent_per_hour{account="acc1acc0-0000",window="five_hour"} 2
+pacer_rate_limit_recent_burn_percent_per_hour{account="acc3acc0-0000",window="five_hour"} 25
+EOF
+ST="1:30:200:40:ok 3:60:150:40:ok 4:10:250:40:ok"
+ACTIVE_SINCE_OVERRIDE=$(( NOW - 2400 )) API=http://127.0.0.1:$port t "S1 slot 3 burns 25, active 2, 40m: WARN" \
+  '^[0-9:]{8} WARN slot 3 \(acc3acc0\) is still burning 25%/h while active 1 burns 2%/h for 40m.*re-apply with: cswap switch [34]; cswap switch 1$' 1 "$ST"
+ACTIVE_SINCE_OVERRIDE=$(( NOW - 600 )) API=http://127.0.0.1:$port t "S2 same, active changed 10m ago: quiet" \
+  '^[0-9:]{8} no switch:' 1 "$ST"
+sed -i '' 's/ 25$/ 5/' "$T/www/metrics"
+ACTIVE_SINCE_OVERRIDE=$(( NOW - 2400 )) API=http://127.0.0.1:$port t "S3 slot 3 burns only 5: quiet" \
+  '^[0-9:]{8} no switch:' 1 "$ST"
 kill "$srv" 2>/dev/null
 
 if [ -e "$T/switched" ]; then

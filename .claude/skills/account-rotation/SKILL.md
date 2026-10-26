@@ -154,6 +154,7 @@ still start it as `watch.sh 150 room` by hand.
 | `stuck:` lines | a main session stopped on a usage limit | if there is room now, nudge it; else wait for `hold over` |
 | `ERROR …` | a switch failed, or the reserve hit its cap | `cswap status`; retry by hand only onto real room; reserve cap -> the owner |
 | `WARN …` | readings failed (for the active account: only after 300 s of no reading; shorter gaps right after a switch are normal and just hold) | `cswap list` by hand, then `rotate.sh status` |
+| `WARN slot S … is still burning X%/h while active A burns Y%/h` | a non-active slot keeps burning (>= `STALE_BURN`) while the active one is quiet, `STALE_AFTER` s after the active slot last changed: running sessions probably hold S's old login | run the `cswap switch <slot with room>; cswap switch A` it names, then check a few minutes later that S's burn fell; if it did not, something off this Mac uses S |
 | `controller NOT running` | it died | `rotate.sh start "restart after …"`, read `state/rotate.out` |
 | `feedback:` lines | an agent ran `pacer feedback` (a Pacer bug or missing flag) | reproduce, fix in a Pacer branch, reply to the reporter if it's a live session |
 | `heartbeat` | nothing happened for the heartbeat | `burn.py 60`; message any new heavy waste pattern; relaunch |
@@ -172,6 +173,14 @@ every `hold over` or `SWITCH`:
 
 `claude agents --json` state `blocked` means a session is waiting on the
 owner's input, not stopped by a limit. Don't nudge it.
+
+### Lesson: `/login` does not move running sessions
+
+`/login` updates the default login, but running sessions keep the token they
+started with, so they go on billing the old account while Pacer (which follows
+the default login) credits the new one and their gates say GO toward the wrong
+limit. `cswap switch` reaches them within ~30 s. The stale-login WARN above
+catches it; a switch away and back re-applies the login.
 
 ## Other sessions
 
