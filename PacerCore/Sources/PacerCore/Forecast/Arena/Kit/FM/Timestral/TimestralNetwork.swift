@@ -417,34 +417,37 @@ public final class TimestralNetwork: @unchecked Sendable {
             return true
         }
         let alpha = 1 / Float(hd).squareRoot()
-        var sc = [Float](repeating: 0, count: rows)
+        let q = ws.buf(.q, rows * hd), k = ws.buf(.k, rows * hd), v = ws.buf(.v, rows * hd)
+        let sc = ws.buf(.scores, rows * rows), o = ws.buf(.o, rows * hd)
         for s in 0..<seq {
-            for r in 0..<rows {
-                let dst = out + (r * seq + s) * d
-                if alone(s, r) {
-                    let src = qkv + (r * seq + s) * 3 * d + 2 * d
+            // A slot where every row reads only itself: each output is its value.
+            if (0..<rows).allSatisfy({ alone(s, $0) }) {
+                for r in 0..<rows {
+                    let src = qkv + (r * seq + s) * 3 * d + 2 * d, dst = out + (r * seq + s) * d
                     for h in 0..<nh { for e in 0..<hd { dst[h * hd + e] = src[e * nh + h] } }
-                    continue
                 }
-                let qsrc = qkv + (r * seq + s) * 3 * d
-                for h in 0..<nh {
-                    var mx = -Float.infinity
-                    for r2 in 0..<rows {
-                        let add = mask?[(s * rows + r) * rows + r2] ?? 0
-                        let ksrc = qkv + (r2 * seq + s) * 3 * d + d
-                        var dot: Float = 0
-                        for e in 0..<hd { dot += qsrc[e * nh + h] * ksrc[e * nh + h] }
-                        sc[r2] = dot * alpha + add
-                        mx = max(mx, sc[r2])
-                    }
-                    var sum: Float = 0
-                    for r2 in 0..<rows { sc[r2] = expf(sc[r2] - mx); sum += sc[r2] }
+                continue
+            }
+            for h in 0..<nh {
+                for r in 0..<rows {
+                    let src = qkv + (r * seq + s) * 3 * d
                     for e in 0..<hd {
-                        var acc: Float = 0
-                        for r2 in 0..<rows { acc += sc[r2] * qkv[(r2 * seq + s) * 3 * d + 2 * d + e * nh + h] }
-                        dst[h * hd + e] = acc / sum
+                        q[r * hd + e] = src[e * nh + h]; k[r * hd + e] = src[d + e * nh + h]; v[r * hd + e] = src[2 * d + e * nh + h]
                     }
                 }
+                Self.gemm(transB: true, m: rows, n: rows, k: hd, alpha: alpha, a: q, lda: hd, b: k, ldb: hd,
+                          beta: 0, c: sc, ldc: rows)
+                if let mask {
+                    mask.withUnsafeBufferPointer { mb in
+                        vDSP_vadd(sc, 1, mb.baseAddress! + s * rows * rows, 1, sc, 1, vDSP_Length(rows * rows))
+                    }
+                }
+                // A row allowed only itself gets weight exactly 1 on itself,
+                // so its output is its value here too.
+                Self.softmaxRows(sc, rows: rows, cols: rows, ws: ws)
+                Self.gemm(transB: false, m: rows, n: hd, k: rows, alpha: 1, a: sc, lda: rows, b: v, ldb: hd,
+                          beta: 0, c: o, ldc: hd)
+                for r in 0..<rows { (out + (r * seq + s) * d + h * hd).update(from: o + r * hd, count: hd) }
             }
         }
         finishAttention(a, xn, out, m, residual: residual, ws: ws)
