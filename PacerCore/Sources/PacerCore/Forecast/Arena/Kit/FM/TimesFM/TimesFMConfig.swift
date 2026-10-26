@@ -1,5 +1,8 @@
 import Foundation
 
+// Ported from Google's TimesFM 2.5 (`timesfm` 3.0.2), Copyright 2025 Google LLC,
+// Apache License 2.0. See THIRD-PARTY-NOTICES.md.
+
 /// `timesfm_2p5_base.TimesFM_2p5_200M_Definition`: TimesFM 2.5's
 /// architecture, from the checkpoint's `config.json` (the Hugging Face
 /// `TimesFmModelForPrediction` keys), falling back to the Definition's
