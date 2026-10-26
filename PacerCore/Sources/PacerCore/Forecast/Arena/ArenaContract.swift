@@ -247,13 +247,17 @@ public final class ArenaMemo: @unchecked Sendable {
     /// `make()` runs outside the lock, so a slow derivation never blocks
     /// another key; two racing callers may both compute it, and the first
     /// stored value wins.
+    ///
+    /// The stored value is unwrapped before the cast: with an Optional `T`,
+    /// `values[key] as? T` succeeds on a missing key (nil casts to any
+    /// Optional), which returned nil and never computed.
     public func value<T>(_ key: String, _ make: () throws -> T) rethrows -> T {
         lock.lock()
-        if let v = values[key] as? T { lock.unlock(); return v }
+        if let stored = values[key], let v = stored as? T { lock.unlock(); return v }
         lock.unlock()
         let v = try make()
         lock.lock(); defer { lock.unlock() }
-        if let existing = values[key] as? T { return existing }
+        if let stored = values[key], let existing = stored as? T { return existing }
         values[key] = v
         return v
     }
@@ -527,7 +531,11 @@ public final class ArenaRunner {
         precondition(history.now == request.now, "a model is asked at the moment it was fitted")
         let key = Self.memoKey(name, history: history, request: request)
         if let hit = memo[key] { return hit }
-        for w in spec.weights where services.weights(w) == nil { throw ArenaError.weightsUnavailable(w) }
+        // Every weights file the model's whole family of children needs, not
+        // just its own: a pool whose network child is still downloading would
+        // otherwise answer as its other child alone, and the engine would
+        // score that under the pool's name and keep the record.
+        for w in requiredWeights(name) where services.weights(w) == nil { throw ArenaError.weightsUnavailable(w) }
         try checkCancelled()
         var fitted: ArenaHistory?
         let ctx = ArenaContext(spec: spec, seed: Self.deriveSeed(seed, name, request.now), services: services,
@@ -541,6 +549,18 @@ public final class ArenaRunner {
         memo[key] = fc
         memoValues += size
         return fc
+    }
+
+    /// The weights `name` and its children (transitively) are pinned to.
+    public func requiredWeights(_ name: String) -> [String] {
+        var seen: Set<String> = [], out: [String] = []
+        func walk(_ n: String) {
+            guard seen.insert(n).inserted, let s = registry[n] else { return }
+            out += s.weights.filter { !out.contains($0) }
+            s.children.forEach(walk)
+        }
+        walk(name)
+        return out
     }
 
     func backtest(child: String, history: ArenaHistory, every: Millis, targets: Set<ArenaTarget>,
