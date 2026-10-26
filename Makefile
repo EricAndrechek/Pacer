@@ -34,7 +34,7 @@ LEGACY_STORE   := $(HOME)/Library/Group Containers/group.com.ericandrechek.pacer
 
 # Mark targets that don't produce a file as PHONY so make doesn't
 # get confused if a file with the same name appears.
-.PHONY: help build vendor prune verify test app install uninstall reinstall \
+.PHONY: help build vendor fetch-weights prune verify test app install uninstall reinstall \
         logs logs-tail widget-log status open clean-data perf-snapshot screenshots verify-data \
         verify-archive test-ingest-parity \
         assign-accounts reassign-account \
@@ -55,8 +55,12 @@ help:  ## Show this help.
 # Build / test
 # ------------------------------------------------------------------
 
-vendor:  ## Make sure Vendor/DuckDB.xcframework is here: cloned from another worktree, else built. Every build target runs it first.
+vendor:  ## Make sure Vendor/DuckDB.xcframework and the bundled forecast weights are here (cloned, copied or fetched). Every build target runs it first.
 	@$(REPO_ROOT)/bin/dev-vendor.sh
+	@$(REPO_ROOT)/bin/fetch-forecast-weights.sh
+
+fetch-weights:  ## Fetch the forecast networks Pacer bundles (Timestral 5M + 28M) into Vendor/ForecastWeights, SHA-256 pinned. `make vendor` runs it.
+	@$(REPO_ROOT)/bin/fetch-forecast-weights.sh --verify
 
 prune:  ## Remove worktrees + branches already merged into main (squash merges included), older than a day. A built worktree is ~1–2 GB.
 	@wt step prune --foreground
