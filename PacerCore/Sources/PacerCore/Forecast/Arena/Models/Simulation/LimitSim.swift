@@ -450,32 +450,13 @@ enum LimitSim {
         var t: [Millis] = [], u: [Double] = [], r: [Millis] = []
         for i in times.indices where active[i] && reset[i] > 0 { t.append(times[i]); u.append(util[i]); r.append(reset[i]) }
         guard !t.isEmpty else { return [] }
-        // Cycles by reset (half a window apart), anchored at each cycle's first
-        // reset in reset order (the Python's stable argsort, then a walk). A
-        // cycle is a run of the sorted resets from its anchor to the next, so
-        // a reading's cycle depends on its reset alone: sort the resets once
-        // (the server's jitter means they are never in order), find the
-        // anchors, and place each reading by binary search, in time order.
-        let rsAll = r.sorted()
-        var anchors = [rsAll[0]]
-        var firstOf = [0]                         // each cycle's first index in rsAll
-        for j in 1..<rsAll.count where Double(rsAll[j] - anchors[anchors.count - 1]) >= Double(duration) / 2 {
-            anchors.append(rsAll[j]); firstOf.append(j)
-        }
-        firstOf.append(rsAll.count)
-        var members = [[Int]](repeating: [], count: anchors.count)
-        for i in r.indices { members[SimArrays.searchRight(anchors, r[i]) - 1].append(i) }   // in time order
         var out: [CycleTop] = []
-        for (k, sel) in members.enumerated() {
+        for (sel, R) in cycleGroups(r, duration: duration) {
             // `sel` is in index order, and the series is in event order, so
             // this stable argsort by time is the identity unless it is not.
             let sorted = zip(sel, sel.dropFirst()).allSatisfy { t[$0] <= t[$1] }
             let ord = sorted ? sel : sel.sorted { (t[$0], $0) < (t[$1], $1) }
             let tk = ord.map { t[$0] }, uk = ord.map { u[$0] }
-            // `int(np.median(resets))`: the truncated median, kept for parity.
-            let rs = rsAll[firstOf[k]..<firstOf[k + 1]]
-            let m = rs.startIndex + rs.count / 2
-            let R = rs.count % 2 == 1 ? rs[m] : Millis((Double(rs[m - 1]) + Double(rs[m])) / 2)
             if R > now { continue }                   // the cycle in progress: not a past outcome
             let top = uk.max() ?? 0
             if top >= 100 {
@@ -498,6 +479,96 @@ enum LimitSim {
                                 parkStart: parked ? tk[i0] : 0, parkEnd: parked ? R : 0, reset: R))
         }
         return out
+    }
+
+    /// `cycle_tops`'s cycles: resets sorted (a stable argsort), then a walk
+    /// that starts a cycle at the first reset half a window or more past the
+    /// current cycle's first. Each cycle's readings (indices into `r`, in
+    /// time order) and its reset, `int(np.median(...))` of its readings'
+    /// resets (the truncated median, kept for parity).
+    ///
+    /// A cycle is a run of the sorted resets, so a reading's cycle depends on
+    /// its reset alone. The server sends one reset per window, jittering by
+    /// milliseconds, so in time order the resets come in clusters: when they
+    /// do (each spans less than half a window, each starts half a window or
+    /// more past the previous one's start and above all of its resets), the
+    /// clusters are the walk's cycles and one pass finds them; otherwise (a
+    /// reading back in an older cycle) every reset is sorted, as the Python
+    /// does. `sortAlways` forces the second way, for tests.
+    static func cycleGroups(_ r: [Millis], duration: Millis, sortAlways: Bool = false) -> [(members: [Int], reset: Millis)] {
+        guard !r.isEmpty else { return [] }
+        let half = Double(duration) / 2
+        func median(_ rs: ArraySlice<Millis>) -> Millis {
+            let m = rs.startIndex + rs.count / 2
+            return rs.count % 2 == 1 ? rs[m] : Millis((Double(rs[m - 1]) + Double(rs[m])) / 2)
+        }
+        if !sortAlways, let cyc = clusters(r, half: half) {
+            var members = [[Int]](repeating: [], count: (cyc.last ?? 0) + 1)
+            for i in r.indices { members[cyc[i]].append(i) }
+            return members.map { sel in
+                var rs = sel.map { r[$0] }
+                return (sel, truncatedMedian(&rs))
+            }
+        }
+        let rsAll = r.sorted()
+        var anchors = [rsAll[0]]
+        var firstOf = [0]                         // each cycle's first index in rsAll
+        for j in 1..<rsAll.count where Double(rsAll[j] - anchors[anchors.count - 1]) >= half {
+            anchors.append(rsAll[j]); firstOf.append(j)
+        }
+        firstOf.append(rsAll.count)
+        var members = [[Int]](repeating: [], count: anchors.count)
+        for i in r.indices { members[SimArrays.searchRight(anchors, r[i]) - 1].append(i) }   // in time order
+        return members.indices.map { k in (members[k], median(rsAll[firstOf[k]..<firstOf[k + 1]])) }
+    }
+
+    /// `int(np.median(xs))` without sorting: the middle order statistic (and,
+    /// for an even count, the largest below it) by selection. Reorders `xs`.
+    static func truncatedMedian(_ xs: inout [Millis]) -> Millis {
+        let n = xs.count
+        let k = n / 2
+        select(&xs, k)
+        if n % 2 == 1 { return xs[k] }
+        let below = xs[..<k].max()!          // everything before k is <= xs[k]
+        return Millis((Double(below) + Double(xs[k])) / 2)
+    }
+
+    /// Quickselect: puts the k-th smallest at `k`, smaller-or-equal before it.
+    private static func select(_ a: inout [Millis], _ k: Int) {
+        var lo = 0, hi = a.count - 1
+        while lo < hi {
+            let pivot = a[(lo + hi) >> 1]
+            var i = lo, j = hi
+            while i <= j {
+                while a[i] < pivot { i += 1 }
+                while a[j] > pivot { j -= 1 }
+                if i <= j { a.swapAt(i, j); i += 1; j -= 1 }
+            }
+            if k <= j { hi = j } else if k >= i { lo = i } else { return }
+        }
+    }
+
+    /// The cluster of each reset in time order, when they form ordered
+    /// clusters (see `cycleGroups`); nil when they do not. A cluster's index
+    /// never decreases along `r`.
+    static func clusters(_ r: [Millis], half: Double) -> [Int]? {
+        var lo: [Millis] = [], hi: [Millis] = []
+        var cyc = [Int](repeating: 0, count: r.count)
+        for (i, v) in r.enumerated() {
+            guard let k = lo.indices.last else { lo.append(v); hi.append(v); continue }
+            if v >= lo[k] && v <= hi[k] {
+                cyc[i] = k
+            } else if v > hi[k] {
+                if Double(v - lo[k]) < half { hi[k] = v; cyc[i] = k } else { lo.append(v); hi.append(v); cyc[i] = k + 1 }
+            } else {
+                // Below the cluster's lowest: still this cluster if the span
+                // stays under half a window and it stays clear of the last one.
+                guard Double(hi[k] - v) < half else { return nil }
+                if k > 0 { guard v > hi[k - 1], Double(v - lo[k - 1]) >= half else { return nil } }
+                lo[k] = v; cyc[i] = k
+            }
+        }
+        return cyc
     }
 
     struct Ceilings {

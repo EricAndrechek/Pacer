@@ -21,6 +21,14 @@ only. The `sim-*.json` files beside this script were made with
 
     uv run python $F/sim-generator.py --multi $F/cases.json $F/sim-cases-multi.json $F/sim-g2-07-opus-limit-multi.json
 
+and the pools, whose Timestral children need the `fm` extra and the
+weights in the local Hugging Face cache:
+
+    HF_HUB_OFFLINE=1 uv run --extra fm python $F/sim-generator.py g2-07-opus-pool $F/cases.json $F/sim-g2-07-opus-pool.json
+    HF_HUB_OFFLINE=1 uv run --extra fm python $F/sim-generator.py g2-07-opus-pool $F/cases-spend.json $F/sim-g2-07-opus-pool-spend.json
+    HF_HUB_OFFLINE=1 uv run --extra fm python $F/sim-generator.py g2-08-fable-burst-mix $F/cases-spend.json $F/sim-g2-08-fable-burst-mix-spend.json
+    HF_HUB_OFFLINE=1 uv run --extra fm python $F/sim-generator.py g2-08-fable-burst-mix $F/cases.json $F/sim-g2-08-fable-burst-mix.json
+
 `detail` holds what the Swift tests check exactly: g2-08's `last_diag`
 (rounded as the model rounds it) and g2-07's intermediates (`g207_detail`).
 """
