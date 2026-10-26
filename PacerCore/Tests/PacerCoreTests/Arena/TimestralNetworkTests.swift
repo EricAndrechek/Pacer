@@ -24,9 +24,22 @@ import Testing
         #expect(net.config.supports_known_covariates)
     }
 
-    @Test func rawOutputMatchesPyTorch() throws {
-        guard let fc = try TimestralTestWeights.forecaster("5m") else { return }
-        let fm = try ArenaFixtures.model("fm-timestral-5m-meter")
+    /// Every fixture: the 5M one from the port spec, and the larger sizes'
+    /// and the extended-context weekly model, made the same way
+    /// (`arena.cli_portfix port-fixtures --snapshot port-fixtures --seed 42
+    /// --cases 20`, synthetic snapshot `arena synth --seed 42`).
+    static let fixtures: [(model: String, size: String)] = [
+        ("fm-timestral-5m-meter", "5m"), ("fm-timestral-28m-meter", "28m"),
+        ("fm-timestral-123m-meter", "123m"), ("fm-timestral-209m-meter", "209m"),
+        ("g2-01-haiku-weekly-209m-extended", "209m"),
+    ]
+
+    @Test(arguments: fixtures)
+    func rawOutputMatchesPyTorch(_ model: String, _ size: String) throws {
+        guard let fc = try TimestralTestWeights.forecaster(size) else {
+            print("\(model): Timestral-\(size) weights not on this Mac, skipped"); return
+        }
+        let fm = try ArenaFixtures.model(model)
         var worst = 0.0, checked = 0
         for out in fm.outputs {
             guard let d = out.detail, let want = Self.rawMatrix(d["raw"]), let ctx = d["context"]?.numbers else { continue }
@@ -37,13 +50,14 @@ import Testing
                 for (g, w) in zip(gr, wr) {
                     let err = abs(g - w) / max(1, abs(w))
                     worst = max(worst, err)
-                    #expect(err <= 1e-3, "case \(out.case): \(g) vs \(w)")
+                    #expect(err <= 1e-3, "\(model) case \(out.case): \(g) vs \(w)")
                 }
             }
             checked += 1
         }
-        #expect(checked == 9)   // the ten five-hour cases, less c06 (at 100: flat, no network call)
-        print("Timestral-5M raw parity: \(checked) cases, worst |Δ|/max(1,|x|) = \(worst)")
+        // The fixtures keep `raw` for five-hour cases only (c06 sits at 100: flat, no network call).
+        #expect(checked == (model.hasPrefix("g2-01") ? 0 : 9))
+        print("\(model) raw parity: \(checked) cases, worst |Δ|/max(1,|x|) = \(worst)")
     }
 
     @Test func meterQuantilesFromTheFixturesRaw() throws {
@@ -72,25 +86,37 @@ import Testing
         print("Timestral meter quantiles from the fixture's raw: worst |Δ| = \(worst)")
     }
 
-    @Test func meterModelEndToEnd() throws {
-        guard TimestralTestWeights.url(TimestralTestWeights.ids["5m"]!) != nil else { return }
+    @Test(arguments: fixtures)
+    func meterModelEndToEnd(_ model: String, _ size: String) throws {
+        guard TimestralTestWeights.url(TimestralTestWeights.ids[size]!) != nil else {
+            print("\(model): Timestral-\(size) weights not on this Mac, skipped"); return
+        }
         let cases = try ArenaFixtures.cases().cases
-        let fm = try ArenaFixtures.model("fm-timestral-5m-meter")
+        let fm = try ArenaFixtures.model(model)
         let runner = ArenaRunner(registry: ArenaRegistry.all, services: TimestralTestWeights.services())
         var worst = 0.0
         for out in fm.outputs {
             let c = try #require(cases.first { $0.id == out.case })
-            let fc = try runner.forecast(model: "fm-timestral-5m-meter", history: ArenaFixtures.history(c),
-                                         request: ArenaFixtures.request(c))
+            let fc = try runner.forecast(model: model, history: ArenaFixtures.history(c), request: ArenaFixtures.request(c))
             let tf = try #require(fc.byKey[c.request.key])
+            // The intermediates first: the context and the meter now.
+            if let d = out.detail, let ctx = d["context"]?.numbers {
+                let wk = c.inputs.window_kind
+                let s = FMSeries.meterSeries(ArenaFixtures.history(c), account: c.inputs.account, windowKind: wk,
+                                             scopeModel: c.inputs.scope_model, now: c.request.now)
+                let step = Millis(d["step_ms"]?.number ?? 0)
+                let grid = FMSeries.regularGrid(now: c.request.now, stepMs: step, n: ctx.count)
+                let mine = FMSeries.resampleLast(times: s.times, values: s.cum, grid: grid)
+                #expect(zip(mine, ctx).allSatisfy { a, b in b.map { abs(a - $0) < 1e-6 } ?? a.isNaN }, "\(model) \(out.case) context")
+            }
             for (li, lv) in Self.outLevels.enumerated() {
                 let got = tf.quantile(lv)
                 for (j, w) in out.quantiles[li].enumerated() {
                     worst = max(worst, abs(got[j] - w))
-                    #expect(abs(got[j] - w) <= 0.02, "case \(out.case) level \(lv) grid \(j): \(got[j]) vs \(w)")
+                    #expect(abs(got[j] - w) <= 0.02, "\(model) case \(out.case) level \(lv) grid \(j): \(got[j]) vs \(w)")
                 }
             }
         }
-        print("fm-timestral-5m-meter end to end: worst |Δ| = \(worst) points")
+        print("\(model) end to end: \(fm.outputs.count) cases, worst |Δ| = \(worst) points")
     }
 }
