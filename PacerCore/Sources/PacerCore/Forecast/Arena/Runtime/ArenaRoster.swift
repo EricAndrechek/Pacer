@@ -165,6 +165,18 @@ public enum ArenaModelNames {
                                              "A pretrained network reads two weeks of this meter and continues it."),
         "port-live-meter": ("The live meter, held",
                             "Your recent spend added to the latest reading, held to the reset."),
+        "g1-08-opus-fm": ("Pretrained network, retuned to you",
+                          "A pretrained network's forecast, corrected by how it did on your past cycles."),
+        "g2-06-opus-fmgate2": ("Pretrained network, paused when idle",
+                               "The retuned network, held at the reading while you're idle or at the limit."),
+        "g2-05-sonnet-final": ("Network and spend, blended",
+                               "A pretrained network blended with your fading recent spend, its low end at the reading."),
+        "g1-05-opus-ens-meter-big": ("Six forecasters, blended",
+                                     "Six forecasters' paths, weighted by how each did on your past cycles."),
+        "g1-01-sonnet-calibrate123": ("Pretrained network (123M), calibrated range",
+                                      "The 123M network's forecast, its range retuned on its own past misses."),
+        "ml-gbm-quantile": ("Boosted trees",
+                            "Trees trained on your past cycles predict how much the meter still rises."),
     ]
 
     public static func displayName(_ id: String) -> String? {

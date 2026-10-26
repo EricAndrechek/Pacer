@@ -115,9 +115,9 @@ struct RuntimePortModelsTests {
             "calib-g1-10-fable-analog": "Past moments like now, calibrated range",
             "g2-08-fable-burst": "Bursts of use, simulated",
             "g2-04-opus-fable-mix": "Several forecasters, blended",
-            "g2-06-opus-fmgate2": "Networks, gated by record",
-            "g1-08-opus-fm": "Pretrained networks, combined",
-            "g2-05-sonnet-final": "Several forecasters, blended",
+            "g2-06-opus-fmgate2": "Pretrained network, paused when idle",
+            "g1-08-opus-fm": "Pretrained network, retuned to you",
+            "g2-05-sonnet-final": "Network and spend, blended",
             "port-engine-kalman-trend": "Smoothed trend (Kalman filter)",
             "g1-10-fable-mix": "Past moments, blended",
             "g2-07-opus-limit": "Your habits near the limit",
@@ -125,11 +125,22 @@ struct RuntimePortModelsTests {
             "g2-08-fable-burst-mix": "Bursts of use, blended",
             "g2-01-haiku-weekly-209m-extended": "Pretrained network (209M, two weeks)",
             "struct-timestral-28m": "Spend forecast, converted (28M)",
+            "g1-01-sonnet-calibrate123": "Pretrained network (123M), calibrated range",
+            "g1-05-opus-ens-meter-big": "Six forecasters, blended",
+            "ml-gbm-quantile": "Boosted trees",
         ]
         for (id, name) in expected {
             #expect(BurnTrajectory.displayName(id) == name, "\(id)")
             #expect(BurnTrajectory.summary(id) != nil, "\(id)")
         }
+        // Every model registered today has a name and a line.
+        for spec in ArenaRegistry.all where !spec.targets.isEmpty {
+            #expect(ArenaModelNames.displayName(spec.name) != nil, "\(spec.name) has no name")
+            #expect(ArenaModelNames.summary(spec.name) != nil, "\(spec.name) has no summary")
+        }
+        // No two models the sheet can list share a name.
+        let names = ArenaRoster.standard.selectable.map { BurnTrajectory.displayName($0.name) }
+        #expect(Set(names).count == names.count, "\(names.sorted())")
         // The engine's own names are untouched.
         #expect(BurnTrajectory.displayName("recent-rate") == "Latest pace, held")
         #expect(BurnTrajectory.howItWorks("recent-rate", windowDuration: 5 * 3600)?.contains("hour") == true)
