@@ -28,8 +28,14 @@ public enum ArenaWeightStore {
     static let licence = PinnedFile(name: "LICENSE",
                                     sha256: "648194727930df730890e9f9affdbcc5c930d406d6829559b25ca3d5a973fc8c", bytes: 1695)
 
-    /// Every weights id a registered model may name, with its files' hashes.
-    public static let pinned: [String: [PinnedFile]] = [
+    /// Every weights id a registered model may name, with its files' hashes:
+    /// each network family pins its own (`timestralPinned` here, the others
+    /// in their own folders), so adding a family never edits another's table.
+    public static let pinned: [String: [PinnedFile]] = timestralPinned
+        .merging(timesfmPinned) { a, _ in a }
+        .merging(chronosPinned) { a, _ in a }
+
+    static let timestralPinned: [String: [PinnedFile]] = [
         "mistralai/Timestral-5M@bdd20cfc15a3fea0e4cb5ccef37f8d3ca7aa335f": [
             PinnedFile(name: "config.json", sha256: "b5f27f61513f8fd1a3aa996f3720d3679cb40bce5bcb08eb3dc320ce726e7c2f", bytes: 904),
             PinnedFile(name: "model.safetensors", sha256: "7ace108c4987e7f2a99a75a445240019d1d31c2117139d1bd05ffdfd25aca738", bytes: 20_843_960),
