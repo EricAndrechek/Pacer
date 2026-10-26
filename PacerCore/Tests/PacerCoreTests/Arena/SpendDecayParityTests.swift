@@ -151,4 +151,38 @@ import Testing
             }
         }
     }
+
+    /// A per-model weekly cap ("Fable"): only that family's spend is
+    /// fitted, the calibration map is the cap's own kind, and both models
+    /// answer the scoped target.
+    @Test func scopedCapCountsItsFamilyOnly() throws {
+        let (store, end) = SpendTimingTests.synthetic(days: 40, scoped: true)
+        let h = ArenaHistory(store: store, now: end - 5 * ArenaTime.hour, accounts: ["S1"])
+        let d = try #require(KitSpend.fitDetails(h, account: "S1", windowKind: "weekly_scoped", scopeModel: "Fable"))
+        #expect(d.rates[0] > 0 && d.rates[1...].allSatisfy { $0 == 0 }, "rates \(d.rates)")
+        #expect(abs(d.rates[0] - 0.4) < 0.05, "the synthetic cap moves 0.4 pt per Fable dollar: \(d.rates[0])")
+        let req = ArenaRunner.request(history: h, targets: [.meterScoped])
+        let tr = try #require(req.targets.first)
+        #expect(tr.cap == "Fable" && tr.key == "meter.scoped:S1:Fable")
+        let runner = ArenaRunner(registry: ArenaRegistry.all)
+        for name in ["spend-decay-6h", "calib-spend-decay-6h"] {
+            let fc = try runner.forecast(model: name, history: h, request: req)
+            let tf = try #require(fc.byKey[tr.key], "\(name)")
+            let m = KitBaselines.meterNow(h, tr)
+            #expect(tf.median.allSatisfy { $0 >= m.latest - 1e-9 && $0 <= 100 }, "\(name)")
+        }
+        #expect(KitCalib.kindOf(.meterScoped, cap: "Fable") == "weekly_scoped:Fable")
+    }
+
+    @Test func refusedDayAndUnfittedModel() throws {
+        let c = try ArenaFixtures.cases("cases-spend").cases[0]
+        let h = ArenaFixtures.history(c)
+        let tomorrow = KitSpend.localDayStart(h) + ArenaTime.day
+        #expect(KitSpend.fitOnDay(h, account: c.inputs.account, windowKind: c.inputs.window_kind, scopeModel: nil,
+                                  dayStart: tomorrow) == nil)
+        let spec = try #require(ArenaRegistry.spec("spend-decay-30m"))
+        let ctx = ArenaContext(spec: spec, seed: 1, services: ArenaServices(), runner: ArenaRunner(registry: []),
+                               history: { nil })
+        #expect(throws: ArenaError.self) { try SpendDecayModel(context: ctx).forecast(ArenaFixtures.request(c)) }
+    }
 }

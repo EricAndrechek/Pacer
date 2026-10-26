@@ -9,7 +9,7 @@ import Testing
 /// report; the bounds only catch a blow-up (debug builds are ~10× slower).
 @Suite(.serialized) struct SpendTimingTests {
     /// A deterministic synthetic history: no real usage in it.
-    static func synthetic(days: Int = 120, tzMin: Int = -240) -> (ArenaHistoryStore, Millis) {
+    static func synthetic(days: Int = 120, tzMin: Int = -240, scoped: Bool = false) -> (ArenaHistoryStore, Millis) {
         var rng = ArenaRNG(seed: 20261026)
         let t0: Millis = 1_780_000_000_000 - (1_780_000_000_000 % ArenaTime.day) - Millis(tzMin) * ArenaTime.minute
         let fams = ["opus", "sonnet", "haiku", "fable"]
@@ -17,7 +17,8 @@ import Testing
         var spend: [ArenaSpendRow] = []
         var five: [ArenaReading] = [], week: [ArenaReading] = []
         var fiveReset: Millis?, fiveUtil = 0.0
-        var weekReset: Millis = t0 + 7 * ArenaTime.day, weekUtil = 0.0
+        var weekReset: Millis = t0 + 7 * ArenaTime.day, weekUtil = 0.0, fableUtil = 0.0
+        var fable: [ArenaReading] = []
         let step = 5 * ArenaTime.minute
         var t = t0
         let end = t0 + Millis(days) * ArenaTime.day
@@ -29,7 +30,7 @@ import Testing
                 activeFrom = t + Millis(startH) * ArenaTime.hour
                 activeTo = activeFrom + Millis(len) * ArenaTime.hour
             }
-            if t >= weekReset { weekReset += 7 * ArenaTime.day; weekUtil = 0 }
+            if t >= weekReset { weekReset += 7 * ArenaTime.day; weekUtil = 0; fableUtil = 0 }
             if let r = fiveReset, t >= r { fiveReset = nil; fiveUtil = 0 }
             let active = t >= activeFrom && t < activeTo
             if active {
@@ -38,6 +39,7 @@ import Testing
                     let usd = (rng.uniform() * 2).rounded(.down) == 0 ? rng.uniform() * 0.8 : rng.uniform() * 3
                     spend.append(ArenaSpendRow(tEvent: t + step - 1, tKnown: t + step - 1, family: fam, costUSD: usd))
                     fiveUtil += usd * k5[f]; weekUtil += usd * k7[f]
+                    if fam == "fable" { fableUtil += usd * 0.4 }
                 }
             }
             // Readings every two minutes while the five-hour window runs,
@@ -53,12 +55,18 @@ import Testing
                 }
                 week.append(ArenaReading(tEvent: ts, tKnown: ts, utilPct: min(100, weekUtil.rounded(.down)),
                                          resetsAt: weekReset + jitter, active: true))
+                if scoped {
+                    fable.append(ArenaReading(tEvent: ts, tKnown: ts, utilPct: min(100, fableUtil.rounded(.down)),
+                                              resetsAt: weekReset + jitter, active: true))
+                }
             }
             t += step
         }
+        var meters = [ArenaMeterID(account: "S1", windowKind: "five_hour"): five,
+                      ArenaMeterID(account: "S1", windowKind: "seven_day"): week]
+        if scoped { meters[ArenaMeterID(account: "S1", windowKind: "weekly_scoped", scopeModel: "Fable")] = fable }
         let store = ArenaHistoryStore(
-            meters: [ArenaMeterID(account: "S1", windowKind: "five_hour"): five,
-                     ArenaMeterID(account: "S1", windowKind: "seven_day"): week],
+            meters: meters,
             spend: ["S1": spend], tzOffsetMin: tzMin, dataStart: t0)
         return (store, end)
     }
