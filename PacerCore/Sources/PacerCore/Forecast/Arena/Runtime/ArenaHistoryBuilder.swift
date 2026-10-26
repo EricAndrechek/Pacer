@@ -417,19 +417,23 @@ public actor ArenaHistoryCache {
     public static let reuseInterval: TimeInterval = 30
 
     private let container: ModelContainer
+    private let pricing: PricingTable.Snapshot?
     private var entries: [String: (built: ArenaHistoryBuilder.Built, fullAt: Date)] = [:]
 
-    public init(container: ModelContainer) { self.container = container }
+    public init(container: ModelContainer, pricing: PricingTable.Snapshot? = nil) {
+        self.container = container; self.pricing = pricing
+    }
 
     /// `account`'s history known at `now`.
     public func built(account: String, now: Date = Date()) -> ArenaHistoryBuilder.Built {
         if let e = entries[account], now.timeIntervalSince(e.fullAt) < Self.fullRebuildInterval {
             if now.timeIntervalSince(e.built.builtThrough) < Self.reuseInterval { return e.built }
-            let next = ArenaHistoryBuilder.extend(e.built, container: container, account: account, now: now)
+            let next = ArenaHistoryBuilder.extend(e.built, container: container, account: account, now: now,
+                                                  pricing: pricing)
             entries[account] = (next, e.fullAt)
             return next
         }
-        let fresh = ArenaHistoryBuilder.build(container: container, account: account, now: now)
+        let fresh = ArenaHistoryBuilder.build(container: container, account: account, now: now, pricing: pricing)
         entries[account] = (fresh, now)
         MemoryHygiene.relieve(minimumInterval: MemoryHygiene.recurringReliefInterval)
         return fresh

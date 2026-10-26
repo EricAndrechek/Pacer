@@ -40,6 +40,7 @@ struct RuntimeRegistryProbe {
         config.dutyCycle = 1
         config.sessionCycleCap = Int(ProcessInfo.processInfo.environment["PACER_ARENA_CAP5H"] ?? "") ?? 28
         config.weeklyCycleCap = 8
+        config.pricing = PricingTable.Snapshot(pricingByModel: RuntimeHistoryBuilderTests.catalog)
         let rt = ArenaRuntime(container: container, roster: .standard, weights: Self.weights(), config: config,
                               onRecordLanded: { _, news in _ = await engine.ingestArenaOutcomes(news) },
                               onLiveLanded: { _ in })

@@ -57,18 +57,24 @@ final class ArenaCancelFlag: @unchecked Sendable {
     func set(_ v: Bool) { lock.lock(); value = v; lock.unlock() }
 }
 
-/// Models log through the runner; during a backfill one model asked
-/// thousands of times would say the same thing thousands of times. Each
-/// distinct line is written once per process.
+/// Models log through the runner, and during a backfill a model is asked
+/// thousands of times: the calibration layer writes two lines a forecast,
+/// each with its own numbers. A model's first few lines are written, then
+/// one saying the rest are not, once per process.
 final class ArenaLogGate: @unchecked Sendable {
+    static let linesPerModel = 3
     private let lock = NSLock()
-    private var seen = Set<String>()
+    private var counts: [String: Int] = [:]
     func write(_ model: String, _ message: String) {
-        let line = "\(model): \(message)"
         lock.lock()
-        let first = seen.count < 500 && seen.insert(line).inserted
+        let n = counts[model, default: 0]
+        counts[model] = n + 1
         lock.unlock()
-        if first { Log.write("Arena", line) }
+        if n < Self.linesPerModel {
+            Log.write("Arena", "\(model): \(message)")
+        } else if n == Self.linesPerModel {
+            Log.write("Arena", "\(model): further lines not logged")
+        }
     }
 }
 
@@ -111,6 +117,9 @@ public actor ArenaRecordScorer {
         /// Cycles a window scores before the next window's turn.
         public var sessionCyclesPerTurn = 4
         public var weeklyCyclesPerTurn = 2
+        /// Prices for the history's spend; nil: the store's ledger, as the
+        /// live meter resolves it (tests and probes pass their own).
+        public var pricing: PricingTable.Snapshot?
         public init() {}
     }
 
@@ -286,7 +295,8 @@ public actor ArenaRecordScorer {
             // like a cut, so a first launch with several accounts doesn't
             // read them all back to back.
             let started = SuspendingClock.now
-            let built = ArenaHistoryBuilder.build(container: container, account: account, now: now, limits: limits)
+            let built = ArenaHistoryBuilder.build(container: container, account: account, now: now, limits: limits,
+                                                  pricing: config.pricing)
             await history.install(built, account: account)
             store = built.store
             let took = SuspendingClock.now - started
@@ -587,7 +597,7 @@ public final class ArenaRuntime: Sendable {
         self.roster = roster
         self.compareLimit = compareLimit
         self.ensureWeights = ensureWeights
-        let history = ArenaHistoryCache(container: container)
+        let history = ArenaHistoryCache(container: container, pricing: config.pricing)
         self.history = history
         let cancel = self.cancel
         let gate = ArenaLogGate()
