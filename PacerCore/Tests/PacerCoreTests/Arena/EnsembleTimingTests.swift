@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import SwiftData
 @testable import PacerCore
 
 /// Wall time of one forecast of each ensemble port, backtests included, on
@@ -31,6 +32,62 @@ struct EnsembleTimingTests {
             }
             if message.contains("failed") || message.contains("cannot") { lines.append("\(model): \(message)") }
         }
+    }
+
+    /// As the record scorer runs them (`RuntimeRegistryProbe.everyRegisteredModel`
+    /// for these three only): the heavy synthetic account, the three latest
+    /// completed cycles per window, the eight cuts of each, one runner per
+    /// cycle, so a cut's backtests reuse the earlier cuts' where the lattice
+    /// agrees. Mean / median / max ms per forecast. Recorded 2026-10-26
+    /// (release, shared Mac): five-hour g1-01 17.8 / 16.3 / 52, g2-05
+    /// 18.3 / 18.3 / 19, g1-05 110 / 54 / 434; weekly g1-01 22 / 24 / 28,
+    /// g2-05 27 / 28 / 33, g1-05 154 / 127 / 553 (the max is a cycle's first
+    /// cut, which pays for every child backtest).
+    @Test func asTheScorerRunsThem() throws {
+        guard TimestralTestWeights.url(FMWeights.timestral123M) != nil else { return }
+        let now = Date(timeIntervalSince1970: (Date().timeIntervalSince1970 / 60).rounded(.down) * 60)
+        let container = try RuntimePerfProbe.heavyStore(days: 120, now: now)
+        let pricing = PricingTable.Snapshot(pricingByModel: RuntimeHistoryBuilderTests.catalog)
+        let built = ArenaHistoryBuilder.build(container: container, account: RuntimePerfProbe.account, now: now,
+                                              mode: .calculate, pricing: pricing)
+        let roster = ArenaRoster.standard
+        let services = TimestralTestWeights.services()
+        let names = ["g1-01-sonnet-calibrate123", "g2-05-sonnet-final", "g1-05-opus-ens-meter-big"]
+        var lines: [String] = []
+        for (target, kind) in [(ArenaTarget.meterFiveHour, "five_hour"), (.meterSevenDay, "seven_day")] {
+            let binding = ArenaWindowBinding(account: RuntimePerfProbe.account, windowKey: kind, target: target, cap: nil)
+            let readings = built.store.meters[ArenaMeterID(account: RuntimePerfProbe.account, windowKind: kind)]!
+            let samples = readings.compactMap { r -> (at: Date, usedPercentage: Double, resetsAt: Date)? in
+                guard let v = r.utilPct, let reset = r.resetsAt else { return nil }
+                return (ArenaTime.date(r.tEvent), v, ArenaTime.date(reset))
+            }
+            let duration: TimeInterval = target == .meterFiveHour ? 5 * 3600 : 7 * 86400
+            let (_, cycles) = BurnTrajectory.segment(samples: samples, duration: duration, now: now)
+            let recent = cycles.filter { $0.resetsAt <= now }.sorted { $0.resetsAt > $1.resetsAt }.prefix(3)
+            for name in names {
+                var times: [Double] = []
+                var declined = 0
+                for cycle in recent {
+                    let runner = ArenaRunner(registry: roster.registry, services: services)
+                    for cf in EngineSelfEval.rlCutFractions {
+                        let cut = ArenaHistory(store: built.store,
+                                               now: ArenaTime.millis(cycle.cycleStart.addingTimeInterval(duration * cf)),
+                                               accounts: [RuntimePerfProbe.account])
+                        let t0 = DispatchTime.now().uptimeNanoseconds
+                        let ok = (try? runner.projection(model: name, binding: binding, history: cut,
+                                                         resetAt: ArenaTime.millis(cycle.resetsAt))) != nil
+                        times.append(Double(DispatchTime.now().uptimeNanoseconds - t0) / 1e6)
+                        if !ok { declined += 1 }
+                    }
+                }
+                let s = times.sorted()
+                guard !s.isEmpty else { continue }
+                lines.append(String(format: "%@ %@: mean %.1f ms, median %.1f ms, max %.1f ms (n=%d, declined %d)",
+                                    kind, name, s.reduce(0, +) / Double(s.count), s[s.count / 2], s.last!, s.count,
+                                    declined))
+            }
+        }
+        print("ensemble timings as the scorer runs them\n" + lines.joined(separator: "\n"))
     }
 
     @Test func timings() throws {
