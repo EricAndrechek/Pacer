@@ -35,6 +35,7 @@ continue: the forecast is the meter now, flat.
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -87,6 +88,17 @@ class MeterModel:
         return int(self.cfg.get("context_steps", {}).get(wk, DEFAULT_CONTEXT[wk]))
 
     def meter(self, readings, now: int, tr, wk: str) -> TargetForecast:
+        if self.cfg.get("paths", "quantiles") == "samples" and hasattr(self.backend, "samples"):
+            return self._meter_samples(readings, now, tr, wk)
+        mq = self.meter_quantiles(readings, now, tr, wk)
+        if mq.levels is None:
+            return TargetForecast.point(mq.q[:, 0], tr.n_paths)
+        paths = to_paths(mq.levels, mq.q, tr.n_paths, "comonotone", rng=self.rng)
+        return TargetForecast(monotone_meter(paths, mq.used))
+
+    def _inputs(self, readings, now: int, tr, wk: str):
+        """(used, ctx_v, step): the meter now, the context the forecaster
+        reads (cumulative burn, resampled, NaN = stale), its step."""
         cap = tr.cap if tr.target is Target.METER_SCOPED else None
         s = meter_series(readings, tr.accounts[0], wk, cap, now)
         used = s.used_now(tr.reset_at) if tr.reset_at is not None else None
@@ -96,7 +108,30 @@ class MeterModel:
         step = self.step_ms(wk)
         ctx_t = regular_grid(now, step, self.context_steps(wk))
         stale = int(self.cfg.get("stale_min", 120)) * MIN_MS
-        ctx_v = resample_last(s.times, s.cum, ctx_t, stale)
+        return used, resample_last(s.times, s.cum, ctx_t, stale), step
+
+    def meter_quantiles(self, readings, now: int, tr, wk: str) -> "MeterQuantiles":
+        """The forecast's quantiles on the request grid, before any path is
+        drawn (deterministic given the forecaster's weights): what the paths
+        are read from, and what a port reproduces (`kit.detq`)."""
+        used, ctx_v, step = self._inputs(readings, now, tr, wk)
+        c_last = ctx_v[-1]
+        grid = np.asarray(tr.grid, dtype=np.int64)
+        if not np.isfinite(c_last) or used >= 100.0:
+            return MeterQuantiles(used, None, np.full((len(grid), 1), min(used, 100.0)), ctx_v, step, 0, None, None)
+        horizon = max(1, int(math.ceil((int(grid[-1]) - now) / step)))
+        t_rel = step * np.arange(0, horizon + 1, dtype=np.float64)
+        g_rel = (grid - now).astype(np.float64)
+        raw_levels, q = self.backend.quantiles(ctx_v[None, None, :], horizon)
+        burn = burn_quantiles(q[0, 0], c_last)                                             # [H, Q]
+        levels, burn = extend_tails(raw_levels, burn)
+        burn = fix_crossing(np.maximum.accumulate(np.maximum(burn, 0.0), axis=0))
+        burn = np.vstack([np.zeros((1, burn.shape[1])), burn])
+        meter_q = np.clip(used + interp_times(t_rel, g_rel, burn), used, 100.0)            # [G, Q]
+        return MeterQuantiles(used, levels, meter_q, ctx_v, step, horizon, raw_levels, q[0, 0])
+
+    def _meter_samples(self, readings, now: int, tr, wk: str) -> TargetForecast:
+        used, ctx_v, step = self._inputs(readings, now, tr, wk)
         c_last = ctx_v[-1]
         grid = np.asarray(tr.grid, dtype=np.int64)
         if not np.isfinite(c_last) or used >= 100.0:
@@ -104,19 +139,27 @@ class MeterModel:
         horizon = max(1, int(math.ceil((int(grid[-1]) - now) / step)))
         t_rel = step * np.arange(0, horizon + 1, dtype=np.float64)
         g_rel = (grid - now).astype(np.float64)
-        if self.cfg.get("paths", "quantiles") == "samples" and hasattr(self.backend, "samples"):
-            smp = self.backend.samples(ctx_v[None, None, :], horizon, step_s=step / 1000.0,
-                                       n_samples=int(self.cfg.get("n_samples", 100)),
-                                       seed=int(self.rng.integers(2 ** 31)))[0, 0]       # [H, S]
-            burn = np.vstack([np.zeros((1, smp.shape[1])), smp - c_last])                 # [H + 1, S]
-            burn = np.maximum(isotonic_paths(burn.T), 0.0)                                 # [S, H + 1]
-            paths = interp_times(t_rel, g_rel, burn.T).T                                   # [S, G]
-            return TargetForecast(monotone_meter(used + paths, used))
-        levels, q = self.backend.quantiles(ctx_v[None, None, :], horizon)
-        burn = burn_quantiles(q[0, 0], c_last)                                             # [H, Q]
-        levels, burn = extend_tails(levels, burn)
-        burn = fix_crossing(np.maximum.accumulate(np.maximum(burn, 0.0), axis=0))
-        burn = np.vstack([np.zeros((1, burn.shape[1])), burn])
-        meter_q = np.clip(used + interp_times(t_rel, g_rel, burn), used, 100.0)            # [G, Q]
-        paths = to_paths(levels, meter_q, tr.n_paths, "comonotone", rng=self.rng)
-        return TargetForecast(monotone_meter(paths, used))
+        smp = self.backend.samples(ctx_v[None, None, :], horizon, step_s=step / 1000.0,
+                                   n_samples=int(self.cfg.get("n_samples", 100)),
+                                   seed=int(self.rng.integers(2 ** 31)))[0, 0]       # [H, S]
+        burn = np.vstack([np.zeros((1, smp.shape[1])), smp - c_last])                 # [H + 1, S]
+        burn = np.maximum(isotonic_paths(burn.T), 0.0)                                 # [S, H + 1]
+        paths = interp_times(t_rel, g_rel, burn.T).T                                   # [S, G]
+        return TargetForecast(monotone_meter(used + paths, used))
+
+
+@dataclass
+class MeterQuantiles:
+    """`q` [G, Q]: the meter at each grid time at `levels` (None: a flat
+    forecast at `used`, one column). `ctx_v`, `step`, `horizon`, `raw_levels`
+    and `raw` ([horizon, Q'], the forecaster's own quantiles of the cumulative
+    burn) are the intermediates a port checks itself against."""
+
+    used: float
+    levels: np.ndarray | None
+    q: np.ndarray
+    ctx_v: np.ndarray
+    step: int
+    horizon: int
+    raw_levels: np.ndarray | None
+    raw: np.ndarray | None
