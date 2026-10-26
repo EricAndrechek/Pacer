@@ -1,10 +1,16 @@
 import Accelerate
 import Foundation
 
-/// `research/arena/kit/fm/backends.py`, the Timestral part: one loaded network
-/// per weights id per process (`weights.cached`), and `quantiles(context [B,
-/// V, T], horizon, past_cov, known_cov) -> (levels, q [B, V, H, Q])`, sorted
-/// along Q.
+/// `research/arena/kit/fm/backends.py`: one adapter per pretrained
+/// forecaster behind one call (`FMBackend.quantiles(context [B, V, T],
+/// horizon, past_cov, known_cov) -> (levels, q [B, V, H, Q])`, sorted along
+/// Q), looked up by the `backend` name a model's config gives
+/// (`get_backend`), loaded once per process per weights id
+/// (`weights.cached`).
+///
+/// Each network family registers its own factory from its own file
+/// (`timestralFactory` in `Timestral/`, `timesfmFactory` in `TimesFM/`,
+/// `chronosFactory` in `Chronos/`), so adding a family never edits another's.
 ///
 /// Loading is a memory map plus a few hundred pointer lookups, so the
 /// network for an id is built once and shared by every model and every
@@ -14,6 +20,57 @@ import Foundation
 public enum FMBackends {
     /// Timestral's context cap in the arena's backend (`max_context`).
     public static let timestralMaxContext = 32_768
+
+    /// Builds a family's backend for a weights id (`BACKENDS[name](spec)`).
+    public typealias Factory = @Sendable (_ weights: String, _ services: ArenaServices) throws -> any FMBackend
+
+    /// `BACKENDS`: every ported backend by its config name.
+    public static let factories: [String: Factory] = timestralFactory
+        .merging(timesfmFactory) { a, _ in a }
+        .merging(chronosFactory) { a, _ in a }
+
+    final class BackendCache: @unchecked Sendable {
+        let lock = NSLock()
+        var byKey: [String: any FMBackend] = [:]
+    }
+
+    static let backends = BackendCache()
+
+    /// `get_backend(name, spec)`: the loaded backend, once per process. The
+    /// lock is held while a network loads so two models naming the same
+    /// weights never load it twice (it is not the Timestral cache's lock,
+    /// which a factory may take).
+    public static func backend(_ name: String, weights: String, services: ArenaServices) throws -> any FMBackend {
+        guard let make = factories[name] else {
+            throw ArenaError.invalid("unknown kit.fm backend \(name); known: \(factories.keys.sorted())")
+        }
+        let key = "\(name)|\(weights)"
+        backends.lock.lock()
+        defer { backends.lock.unlock() }
+        if let b = backends.byKey[key] { return b }
+        let b = try make(weights, services)
+        backends.byKey[key] = b
+        return b
+    }
+
+    /// `Backend.quantiles`' shared preparation for a backend that does not do
+    /// its own: the context (and covariates) cut to `maxContext`, NaN gaps
+    /// filled when the network cannot take them (`fill_gaps`), covariates
+    /// dropped when it cannot use them.
+    public static func prepare(context: [[[Double]]], pastCov: [[[Double]]]?, knownCov: [[[Double]]]?,
+                               maxContext: Int, nanOK: Bool, covariates: Bool)
+        -> (context: [[[Double]]], pastCov: [[[Double]]]?, knownCov: [[[Double]]]?) {
+        var ctx = context
+        var past = pastCov, known = knownCov
+        if let t = ctx.first?.first?.count, t > maxContext {
+            ctx = ctx.map { $0.map { Array($0.suffix(maxContext)) } }
+            past = past?.map { $0.map { Array($0.suffix(maxContext)) } }
+            known = known?.map { $0.map { Array($0.dropFirst(t - maxContext)) } }
+        }
+        if !nanOK { ctx = ctx.map { $0.map(FMSeries.fillGaps) } }
+        if !covariates { past = nil; known = nil }
+        return (ctx, past, known)
+    }
 
     final class Cache: @unchecked Sendable {
         let lock = NSLock()
@@ -90,5 +147,22 @@ public enum FMBackends {
             for k in 0..<nq { values[i * nq + k] = row[k] }
         }
         return Quantiles(levels: fc.quantileLevels, b: out.b, v: out.v, h: out.h, q: nq, values: values)
+    }
+}
+
+/// `kit/fm/backends.py` `Backend`: a pretrained forecaster behind the
+/// arena's one call. Implementations are thread-safe (one instance per
+/// weights id serves every model and thread in the process).
+public protocol FMBackend: AnyObject, Sendable {
+    /// `Backend.quantiles`: `context` `[B][V][T]` (NaN = missing), `pastCov`
+    /// `[B][Cp][T]`, `knownCov` `[B][Ck][T + H]` → levels and `[B][V][H][Q]`,
+    /// sorted along Q (`fix_crossing`).
+    func quantiles(context: [[[Double]]], horizon: Int, pastCov: [[[Double]]]?,
+                   knownCov: [[[Double]]]?) throws -> FMBackends.Quantiles
+}
+
+public extension FMBackend {
+    func quantiles(context: [[[Double]]], horizon: Int) throws -> FMBackends.Quantiles {
+        try quantiles(context: context, horizon: horizon, pastCov: nil, knownCov: nil)
     }
 }
