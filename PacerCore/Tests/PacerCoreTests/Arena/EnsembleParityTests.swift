@@ -147,6 +147,40 @@ import Testing
         }.max() ?? 0
     }
 
+    /// A scoped weekly cap is its own kind (`weekly_scoped:<cap>`), backtested
+    /// on the weekly lattice: the same readings as a weekly case, filed under
+    /// a cap, give the same cells as the weekly meter does.
+    @Test func g105ScopedCapIsItsOwnKind() throws {
+        let c = try Self.caseNamed("c01")
+        let weekly = ArenaFixtures.history(c)
+        let rows = weekly.store.meters.values.first!
+        let id = ArenaMeterID(account: c.inputs.account, windowKind: "weekly_scoped", scopeModel: "Fable")
+        let store = ArenaHistoryStore(meters: [id: rows], spend: [:], tzOffsetMin: c.inputs.tz_offset_min,
+                                      dataStart: c.inputs.history_start)
+        let h = ArenaHistory(store: store, now: c.request.now, accounts: [c.inputs.account], start: c.inputs.history_start)
+        let tr = try #require(ArenaRunner.targetRequest(history: h, meter: id))
+        #expect(tr.key == "meter.scoped:\(c.inputs.account):Fable")
+        let runner = try Self.stubRunner()
+        let spec = runner.registry[Self.g105]!
+        let ctx = ArenaContext(spec: spec, seed: 1, services: ArenaServices(), runner: runner, history: { h })
+        let m = try #require(try spec.make(ctx) as? BandedEnsemble)
+        try m.fit(h)
+        let fc = try m.forecast(ArenaRequest(now: h.now, accounts: [c.inputs.account], targets: [tr]))
+        #expect(fc.byKey[tr.key]?.paths?.count == 200)
+        let kinds = Set(m.cells.keys.map { $0.split(separator: "|")[0] })
+        #expect(kinds == ["weekly_scoped:Fable"])
+        // The weekly meter's own run, for the same cells.
+        let wm = try #require(try spec.make(ArenaContext(spec: spec, seed: 1, services: ArenaServices(), runner: runner,
+                                                         history: { weekly })) as? BandedEnsemble)
+        try wm.fit(weekly)
+        _ = try wm.forecast(ArenaFixtures.request(c))
+        for b in 0..<m.nb {
+            let s = try #require(m.cell("weekly_scoped:Fable", m.children, band: b))
+            let w = try #require(wm.cell("seven_day", wm.children, band: b))
+            #expect(s.n == w.n && s.scale == w.scale && s.w == w.w, "band \(b)")
+        }
+    }
+
     /// With the Python's own cells, everything after the fit (the per-band
     /// pools, the spread factors, the band blend, the nowcast head, the
     /// floor, monotonicity) matches to float precision.
