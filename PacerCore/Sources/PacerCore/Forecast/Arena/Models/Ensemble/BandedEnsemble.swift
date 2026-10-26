@@ -55,6 +55,9 @@ public final class BandedEnsemble: KitMLCombiner {
     let caller: ArenaChildCaller
     public internal(set) var cells: [String: Cell] = [:]
     var cellsAt: [String: Millis] = [:]
+    /// Cells to use in place of fitted ones (parity tests: the Python's own
+    /// weights, to check everything after the fit to float precision).
+    var cellOverride: [String: Cell] = [:]
 
     public required init(context: ArenaContext) throws {
         let cfg = context.config
@@ -80,7 +83,8 @@ public final class BandedEnsemble: KitMLCombiner {
     }
 
     public func cell(_ kind: String, _ children: [String], band: Int) -> Cell? {
-        cells[Self.cellKey(kind, children, band)]
+        let key = Self.cellKey(kind, children, band)
+        return cellOverride[key] ?? cells[key]
     }
 
     // MARK: - Fitting
