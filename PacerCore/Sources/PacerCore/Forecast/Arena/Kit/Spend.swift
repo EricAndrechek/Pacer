@@ -268,7 +268,9 @@ public enum KitSpend {
     /// under an hour apart, that did not fall, with what each family spent
     /// in between: the rows the conversion is fitted on.
     public struct Intervals: Sendable {
-        public var account: [String]
+        /// Runs of rows per account, in row order (the Python's per-row
+        /// `account` labels, without a string per row).
+        public var accountRuns: [(account: String, count: Int)]
         public var t0: [Millis]
         public var t1: [Millis]
         public var rise: [Double]
@@ -277,13 +279,23 @@ public enum KitSpend {
 
         public var count: Int { t1.count }
 
-        public static let empty = Intervals(account: [], t0: [], t1: [], rise: [], spend: [])
+        /// The Python's `account` column, one label per row.
+        public var account: [String] { accountRuns.flatMap { repeatElement($0.account, count: $0.count) } }
 
-        /// `take(m)` for a contiguous range (the span filters are ranges:
-        /// intervals are in reading order, so `t1` ascends).
+        public static let empty = Intervals(accountRuns: [], t0: [], t1: [], rise: [], spend: [])
+
+        /// `take(m)` for a contiguous range of a one-account set (the span
+        /// filters are ranges: intervals are in reading order, so `t1`
+        /// ascends).
         public func slice(_ r: Range<Int>) -> Intervals {
-            Intervals(account: Array(account[r]), t0: Array(t0[r]), t1: Array(t1[r]), rise: Array(rise[r]),
-                      spend: Array(spend[(r.lowerBound * 5)..<(r.upperBound * 5)]))
+            precondition(accountRuns.count <= 1, "slice a one-account set")
+            return Intervals(accountRuns: r.isEmpty ? [] : [(accountRuns[0].account, r.count)], t0: Array(t0[r]),
+                             t1: Array(t1[r]), rise: Array(rise[r]),
+                             spend: Array(spend[(r.lowerBound * 5)..<(r.upperBound * 5)]))
+        }
+
+        public mutating func append(_ o: Intervals) {
+            accountRuns += o.accountRuns; t0 += o.t0; t1 += o.t1; rise += o.rise; spend += o.spend
         }
 
         public func spend(_ i: Int, _ f: Int) -> Double { spend[i * 5 + f] }
@@ -299,14 +311,22 @@ public enum KitSpend {
             let half = Double(windowMs(windowKind)) / 2
             let led = ledger(history, account: account)
             var out = Intervals.empty
+            out.t0.reserveCapacity(r.count); out.t1.reserveCapacity(r.count); out.rise.reserveCapacity(r.count)
+            out.spend.reserveCapacity(r.count * 5)
+            // The ledger's (t0, t1] sums, with the binary search for t0 reused
+            // from the previous interval's t1 (consecutive readings).
+            var lastT: Millis = .min, lastIdx = 0
             for i in 0..<(r.count - 1) {
                 let dt = r.t[i + 1] - r.t[i], rise = r.p[i + 1] - r.p[i]
                 guard r.active[i], r.active[i + 1], abs(Double(r.reset[i + 1] - r.reset[i])) < half,
                       dt > 0, dt < maxPairGapMs, rise >= 0 else { continue }
-                out.account.append(account)
                 out.t0.append(r.t[i]); out.t1.append(r.t[i + 1]); out.rise.append(rise)
-                out.spend.append(contentsOf: led.between(r.t[i], r.t[i + 1]))
+                let i0 = r.t[i] == lastT ? lastIdx : led.upper(r.t[i])
+                let i1 = led.upper(r.t[i + 1])
+                lastT = r.t[i + 1]; lastIdx = i1
+                for f in 0..<5 { out.spend.append(led.cost[i1 * 5 + f] - led.cost[i0 * 5 + f]) }
             }
+            if out.count > 0 { out.accountRuns = [(account, out.count)] }
             return out
         }
     }

@@ -108,7 +108,7 @@ public final class SpendDecayModel: ArenaModel {
         let f = lead.map { min(max($0 / left, 0), 1) }
         let xs = [0.0] + Self.fracs
         out.errors = pick.map { i in
-            let row = [0.0] + (0..<Self.fracs.count).map { j in cases.truth[i][j] - cases.centre[i][tauI][j] }
+            let row = [0.0] + (0..<Self.fracs.count).map { j in cases.truth(i, j) - cases.centre(i, tauI, j) }
             return f.map { KitDetQ.npInterp($0, xs: xs, ys: row) }
         }
         out.picked = pick.count
@@ -127,7 +127,7 @@ public final class SpendDecayModel: ArenaModel {
             for m in [ownSame, same] where m.filter({ $0 }).count >= Self.minCases {
                 let rows = (0..<cases.count).filter { m[$0] }
                 let score: [Double] = (0..<Self.tausH.count).map { t in
-                    let col = rows.map { cases.ae[$0][t] }.filter { !$0.isNaN }
+                    let col = rows.map { cases.ae($0, t) }.filter { !$0.isNaN }
                     if col.isEmpty { return .nan }
                     // np.nanmean down axis 0 adds row by row; np.nanmedian
                     // is the middle (mean of the two middle) value.
@@ -211,19 +211,27 @@ public final class SpendDecayModel: ArenaModel {
         return lead.map { l in min(max(st.nowValue + a * (1.0 - exp(-l / tau)), st.used), 100.0) }
     }
 
-    /// The table `build_cases` returns: one row per past cut.
+    /// The table `build_cases` returns: one row per past cut, the arrays
+    /// flat (row-major) so a table of thousands of cuts is a handful of
+    /// allocations.
     public struct CaseTable: Sendable {
+        public static let nT = SpendDecayModel.tausH.count
+        public static let nF = SpendDecayModel.fracs.count
         public var phase: [Double] = []
         public var half: [Bool] = []
         public var account: [String] = []
         public var active: [Bool] = []
-        /// `[cuts][taus]`: |centre at reset − final|.
-        public var ae: [[Double]] = []
-        /// `[cuts][taus][fracs]`.
-        public var centre: [[[Double]]] = []
-        /// `[cuts][fracs]`.
-        public var truth: [[Double]] = []
+        /// `[cuts × taus]`: |centre at reset − final|.
+        public var ae: [Double] = []
+        /// `[cuts × taus × fracs]`.
+        public var centre: [Double] = []
+        /// `[cuts × fracs]`.
+        public var truth: [Double] = []
         public var count: Int { phase.count }
+
+        public func ae(_ i: Int, _ t: Int) -> Double { ae[i * Self.nT + t] }
+        public func centre(_ i: Int, _ t: Int, _ f: Int) -> Double { centre[(i * Self.nT + t) * Self.nF + f] }
+        public func truth(_ i: Int, _ f: Int) -> Double { truth[i * Self.nF + f] }
 
         mutating func append(_ o: CaseTable) {
             phase += o.phase; half += o.half; account += o.account; active += o.active
@@ -247,6 +255,8 @@ public final class SpendDecayModel: ArenaModel {
         var rates: [Millis: [Double]?] = [:]
         var rows = CaseTable()
         let taus = tausH.map { $0 * 3_600_000 }
+        let nF = fracs.count
+        var leads = [Double](repeating: 0, count: nF)
         for c in cycles {
             guard c.reset >= lo, let lastT = c.t.last, Double(lastT) >= Double(c.reset) - completeBy else {
                 continue                      // too old, or its end was not seen
@@ -267,23 +277,27 @@ public final class SpendDecayModel: ArenaModel {
                 let st = state(h, acct, k, start: c.start, reset: c.reset, tLast: c.t[j], used: used, now: cut,
                                lookback: lookback)
                 let left = Double(c.reset - cut)
-                let leads = fracs.map { $0 * left }
-                var truth = leads.map { l -> Double in
+                for f in 0..<nF {
+                    leads[f] = fracs[f] * left
                     // np.searchsorted(c.t, cut + FRACS·left, "right") − 1,
                     // comparing the int64 times as float64.
-                    let at = Double(cut) + l
-                    let idx = upperBoundD(c.t, at) - 1
-                    return idx >= 0 ? c.util[idx] : used
+                    let idx = upperBoundD(c.t, Double(cut) + leads[f]) - 1
+                    rows.truth.append(f == nF - 1 ? final : (idx >= 0 ? c.util[idx] : used))
                 }
-                truth[truth.count - 1] = final
-                let cen = taus.map { path(st, $0, leads) }
+                let a = st.burn * st.ratio
+                for tau in taus {
+                    let at = a * tau
+                    var last = 0.0
+                    for f in 0..<nF {
+                        last = min(max(st.nowValue + at * (1.0 - exp(-leads[f] / tau)), st.used), 100.0)
+                        rows.centre.append(last)
+                    }
+                    rows.ae.append(abs(last - final))
+                }
                 rows.phase.append(u)
                 rows.half.append(u >= 0.5)
                 rows.account.append(acct)
                 rows.active.append(st.burn > 0)
-                rows.ae.append(cen.map { abs($0[$0.count - 1] - final) })
-                rows.centre.append(cen)
-                rows.truth.append(truth)
             }
         }
         return rows.count == 0 ? nil : rows

@@ -120,4 +120,34 @@ import Testing
         }
         print("timing synthetic 120 d:\n  " + lines.joined(separator: "\n  "))
     }
+
+    /// Where a calibration wrapper's time goes: the child's backtests, then
+    /// the child at now plus the records and the fit, then the map's apply.
+    @Test(arguments: ["calib-spend-decay-30m", "calib-spend-decay-6h"])
+    func calibBreakdown(_ name: String) throws {
+        let (store, end) = Self.synthetic()
+        let five = ArenaMeterID(account: "S1", windowKind: "five_hour")
+        let now = Self.activeNow(store, before: end, meter: five)
+        final class Clock: @unchecked Sendable {
+            var marks: [(UInt64, String)] = []
+            let lock = NSLock()
+            func mark(_ s: String) { lock.lock(); marks.append((DispatchTime.now().uptimeNanoseconds, s)); lock.unlock() }
+        }
+        let clock = Clock()
+        let services = ArenaServices(log: { _, m in clock.mark(m) })
+        let runner = ArenaRunner(registry: ArenaRegistry.all, services: services)
+        let spec = try #require(ArenaRegistry.spec(name))
+        for (label, t) in [("cold", now), ("next cut", now + ArenaTime.hour)] {
+            clock.marks.removeAll()
+            let h = ArenaHistory(store: store, now: t, accounts: ["S1"])
+            let req = ArenaRunner.request(history: h, targets: spec.targets)
+            let t0 = DispatchTime.now().uptimeNanoseconds
+            _ = try runner.forecast(model: name, history: h, request: req)
+            let t1 = DispatchTime.now().uptimeNanoseconds
+            let bt = clock.marks.last { $0.1.hasPrefix("backtest") }?.0 ?? t0
+            let cal = clock.marks.last { $0.1.hasPrefix("calib") }?.0 ?? bt
+            func ms(_ a: UInt64, _ b: UInt64) -> String { String(format: "%.1f", Double(b - a) / 1e6) }
+            print("timing \(name) \(label): backtests \(ms(t0, bt)) ms, child at now + records + fit \(ms(bt, cal)) ms, apply \(ms(cal, t1)) ms, total \(ms(t0, t1)) ms")
+        }
+    }
 }
