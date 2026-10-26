@@ -35,10 +35,13 @@ import Testing
 
     static var weightsHere: Bool { TimestralTestWeights.url(FMWeights.timestral123M) != nil }
 
+    static let priorURL = TimestralTestWeights.repoRoot.appendingPathComponent("research/arena/models/g1-08-opus-fm/model.toml")
+    /// The fixtures with the prior need it from the checkout's research folder.
+    static var priorHere: Bool { FileManager.default.fileExists(atPath: priorURL.path) }
+
     /// `[config.meter.prior]` of models/g1-08-opus-fm/model.toml, parsed.
     static func prior() throws -> ArenaValue {
-        let url = TimestralTestWeights.repoRoot.appendingPathComponent("research/arena/models/g1-08-opus-fm/model.toml")
-        let text = try String(contentsOf: url, encoding: .utf8)
+        let text = try String(contentsOf: priorURL, encoding: .utf8)
         var section: [String] = []
         var inside = false
         for line in text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init) {
@@ -190,7 +193,7 @@ import Testing
     /// rationing (the fixtures' det mode).
     @Test(arguments: [false, true])
     func g108DeterministicMatchesPython(relative: Bool) throws {
-        guard Self.weightsHere else { print("g1-08: Timestral-123M weights not on this Mac, skipped"); return }
+        guard Self.weightsHere, Self.priorHere else { print("g1-08: Timestral-123M weights not on this Mac, skipped"); return }
         let cases = try Self.cases()
         let fm = try ArenaFixtures.model("comb-g1-08-opus-fm")
         let spec = try Self.g108Spec(ration: false)
@@ -310,7 +313,7 @@ import Testing
     /// g2-06's shrink and rounding over the same deterministic paths, on the
     /// weekly cases (its weekly gate is off, so nothing else draws).
     @Test func g206WeeklyDeterministicMatchesPython() throws {
-        guard Self.weightsHere else { return }
+        guard Self.weightsHere, Self.priorHere else { return }
         let cases = try Self.cases()
         let fm = try ArenaFixtures.model("comb-g2-06-opus-fmgate2")
         let spec = try Self.g108Spec(ration: false)
@@ -354,7 +357,7 @@ import Testing
     /// still finds every cut whose context it holds whole; and g2-06 asked
     /// on g1-08's history cut computes nothing.
     @Test func cutMemoSurvivesASlidingStart() throws {
-        guard Self.weightsHere else { return }
+        guard Self.weightsHere, Self.priorHere else { return }
         let c = try #require(try Self.cases()["s01"])
         let spec = try Self.g108Spec()
         let runner = ArenaRunner(registry: [spec], services: TimestralTestWeights.services())
@@ -425,7 +428,7 @@ import Testing
     }
 
     @Test func scopedCapMatchesPython() throws {
-        guard Self.weightsHere else { return }
+        guard Self.weightsHere, Self.priorHere else { return }
         let cases = try Self.cases()
         let doc = try JSONDecoder().decode(ScopedDoc.self, from: Data(contentsOf: ArenaFixtures.url("comb-scoped")))
         var worstDet = 0.0, outside = 0, outsideEnv = 0, total = 0
@@ -538,7 +541,7 @@ import Testing
     }
 
     @Test func g108MonteCarloMatchesPython() throws {
-        guard Self.weightsHere else { return }
+        guard Self.weightsHere, Self.priorHere else { return }
         let r = try Self.mcCompare("comb-g1-08-opus-fm", spec: try Self.g108Spec())
         print("g1-08 as is (4000 paths): \(r.outside) of \(r.total) points outside the MC bounds, \(r.outsideEnvelope) outside the 8-seed envelope, worst |Δ| \(r.worst)\n"
               + r.lines.joined(separator: "\n"))
@@ -550,7 +553,7 @@ import Testing
     }
 
     @Test func g206MonteCarloMatchesPython() throws {
-        guard Self.weightsHere else { return }
+        guard Self.weightsHere, Self.priorHere else { return }
         let r = try Self.mcCompare("comb-g2-06-opus-fmgate2", spec: try Self.g206Spec())
         print("g2-06 as is (4000 paths): \(r.outside) of \(r.total) points outside the MC bounds, \(r.outsideEnvelope) outside the 8-seed envelope, worst |Δ| \(r.worst)\n"
               + r.lines.joined(separator: "\n"))
