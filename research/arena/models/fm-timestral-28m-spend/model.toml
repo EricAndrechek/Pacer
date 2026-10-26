@@ -1,0 +1,21 @@
+name = "fm-timestral-28m-spend"
+description = "Timestral-28M (Mistral AI), zero-shot, on hourly API-equivalent spend and tokens (priced as of now), with covariates; AR(1)-copula paths."
+targets = ["spend.hourly", "tokens.hourly"]
+children = []
+deps = ["torch==2.10.0", "safetensors>=0.4", "huggingface_hub>=0.28"]
+weights = ["mistralai/Timestral-28M@49b26409ac87b5935539a5d8ffe7f397b720db47"]
+
+[config]
+backend = "timestral"
+weights = "mistralai/Timestral-28M@49b26409ac87b5935539a5d8ffe7f397b720db47"
+threads = 4
+context_hours = 336
+# Visible tier: all four covariates beat none and calendar alone on the real
+# snapshot (Timestral-28M and Chronos-2; within noise on synth); companion
+# variates (accounts, families) were within noise, so none by default.
+covariates = ["calendar", "meter", "sessions", "prompts"]
+multivariate = "none"
+max_variates = 5
+rho = 0.8
+transform = "none"
+cap_factor = 1.5

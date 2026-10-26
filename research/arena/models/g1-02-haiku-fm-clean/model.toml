@@ -1,0 +1,8 @@
+name = "g1-02-haiku-fm-clean"
+description = "Clean median ensemble: equal-weight quantile median of Timestral-209M, Chronos2, Moirai2 for simplicity and robustness."
+targets = ["meter.five_hour", "meter.seven_day", "meter.scoped"]
+children = ["fm-timestral-209m-meter", "fm-chronos2-meter", "fm-moirai2-meter"]
+
+[config]
+children = ["fm-timestral-209m-meter", "fm-chronos2-meter", "fm-moirai2-meter"]
+pool = "median"

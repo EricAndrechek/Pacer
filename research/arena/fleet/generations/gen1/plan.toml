@@ -1,0 +1,94 @@
+[fleet]
+max_parallel = 5
+eval_budget = 20
+eval_episodes = 24
+
+[[agent]]
+name = "g1-01-sonnet"
+niche = "machine-learning"
+model = "claude-sonnet-4-6"
+effort = "low"
+max_turns = 250
+budget_usd = 12
+task = "Beat the current models on as many targets as you can: whole forecast paths (not just the value at reset), honest ranges (calibration is scored), the next reading, limit calls. Develop on the visible tier with `arena test`; spend arena-eval calls deliberately. You may build several models, including ones that call existing models or each other as children, as many layers deep as helps."
+
+[[agent]]
+name = "g1-02-haiku"
+niche = "foundation-model"
+model = "claude-haiku-4-5"
+effort = "high"
+max_turns = 250
+budget_usd = 8
+task = "Beat the current models on as many targets as you can: whole forecast paths (not just the value at reset), honest ranges (calibration is scored), the next reading, limit calls. Develop on the visible tier with `arena test`; spend arena-eval calls deliberately. You may build several models, including ones that call existing models or each other as children, as many layers deep as helps."
+
+[[agent]]
+name = "g1-03-sonnet"
+niche = "structural"
+model = "claude-sonnet-4-6"
+effort = "high"
+max_turns = 250
+budget_usd = 15
+task = "Beat the current models on as many targets as you can: whole forecast paths (not just the value at reset), honest ranges (calibration is scored), the next reading, limit calls. Develop on the visible tier with `arena test`; spend arena-eval calls deliberately. You may build several models, including ones that call existing models or each other as children, as many layers deep as helps."
+
+[[agent]]
+name = "g1-04-opus"
+niche = "machine-learning"
+model = "claude-opus-4-6"
+effort = "high"
+max_turns = 250
+budget_usd = 30
+task = "Beat the current models on as many targets as you can: whole forecast paths (not just the value at reset), honest ranges (calibration is scored), the next reading, limit calls. Develop on the visible tier with `arena test`; spend arena-eval calls deliberately. You may build several models, including ones that call existing models or each other as children, as many layers deep as helps."
+
+[[agent]]
+name = "g1-05-opus"
+niche = "ensemble"
+model = "claude-opus-5"
+effort = "medium"
+max_turns = 250
+budget_usd = 30
+task = "Beat the current models on as many targets as you can: whole forecast paths (not just the value at reset), honest ranges (calibration is scored), the next reading, limit calls. Develop on the visible tier with `arena test`; spend arena-eval calls deliberately. You may build several models, including ones that call existing models or each other as children, as many layers deep as helps."
+
+[[agent]]
+name = "g1-06-sonnet"
+niche = "structural"
+model = "claude-sonnet-5-5"
+effort = "medium"
+max_turns = 250
+budget_usd = 15
+task = "Beat the current models on as many targets as you can: whole forecast paths (not just the value at reset), honest ranges (calibration is scored), the next reading, limit calls. Develop on the visible tier with `arena test`; spend arena-eval calls deliberately. You may build several models, including ones that call existing models or each other as children, as many layers deep as helps."
+
+[[agent]]
+name = "g1-07-sonnet"
+niche = "statistical"
+model = "claude-sonnet-5-5"
+effort = "xhigh"
+max_turns = 250
+budget_usd = 20
+task = "Beat the current models on as many targets as you can: whole forecast paths (not just the value at reset), honest ranges (calibration is scored), the next reading, limit calls. Develop on the visible tier with `arena test`; spend arena-eval calls deliberately. You may build several models, including ones that call existing models or each other as children, as many layers deep as helps."
+
+[[agent]]
+name = "g1-08-opus"
+niche = "foundation-model"
+model = "claude-opus-5-5"
+effort = "high"
+max_turns = 250
+budget_usd = 30
+task = "Beat the current models on as many targets as you can: whole forecast paths (not just the value at reset), honest ranges (calibration is scored), the next reading, limit calls. Develop on the visible tier with `arena test`; spend arena-eval calls deliberately. You may build several models, including ones that call existing models or each other as children, as many layers deep as helps."
+
+[[agent]]
+name = "g1-09-opus"
+niche = "ensemble"
+model = "claude-opus-5-5"
+effort = "xhigh"
+max_turns = 250
+budget_usd = 35
+task = "Beat the current models on as many targets as you can: whole forecast paths (not just the value at reset), honest ranges (calibration is scored), the next reading, limit calls. Develop on the visible tier with `arena test`; spend arena-eval calls deliberately. You may build several models, including ones that call existing models or each other as children, as many layers deep as helps."
+
+[[agent]]
+name = "g1-10-fable"
+niche = "statistical"
+model = "claude-fable-5-1"
+effort = "high"
+max_turns = 250
+budget_usd = 40
+task = "Beat the current models on as many targets as you can: whole forecast paths (not just the value at reset), honest ranges (calibration is scored), the next reading, limit calls. Develop on the visible tier with `arena test`; spend arena-eval calls deliberately. You may build several models, including ones that call existing models or each other as children, as many layers deep as helps."

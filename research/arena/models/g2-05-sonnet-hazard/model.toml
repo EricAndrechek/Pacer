@@ -1,0 +1,22 @@
+name = "g2-05-sonnet-hazard"
+description = "Zero-mass calibration layer: an empirical, regime-adaptive estimate of the chance the meter has not moved by each lead (kernel on time since last rise, recent rate, hour) pins the low quantiles of an FM child at the current level and stretches the rest."
+targets = ["meter.five_hour", "meter.seven_day", "meter.scoped"]
+children = ["fm-timestral-123m-meter"]
+deps = ["torch==2.10.0", "safetensors>=0.4", "huggingface_hub>=0.28"]
+weights = ["mistralai/Timestral-123M@5a147287addda85f6acd8da3fb8858fe9af7e8f7"]
+
+[config]
+tau_d = 14.0          # recency half-life scale (days) of the samples
+h_since = 0.8         # kernel width on log(1+minutes since last rise)
+h_rate = 0.8          # kernel width on log(1+rise over the last hour)
+tod_h = 0.0           # hour-of-day kernel width (0 = off)
+n0 = 3.0              # prior pseudo-count toward the pooled flat share
+max_samples = 6000
+passthrough = ["five_hour"]  # the layer cost 5h crps on the visible tier (3.20 -> 3.27)
+delta = 0.5
+pi_scale = 1.0
+stale_min = 120
+[config.child]
+five_hour = "fm-timestral-123m-meter"
+seven_day = "fm-timestral-123m-meter"
+weekly_scoped = "fm-timestral-123m-meter"

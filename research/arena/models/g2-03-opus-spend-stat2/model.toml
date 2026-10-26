@@ -1,0 +1,14 @@
+name = "g2-03-opus-spend-stat2"
+description = "Stat model v2: surprise paths for heavy tails, same core as stat."
+targets = ["spend.hourly", "tokens.hourly"]
+children = []
+deps = []
+
+[config]
+context_hours = 672
+rho = 0.85
+recency_halflife_h = 168
+kappa_hour = 2.0
+kappa_dow = 1.5
+surprise_frac = 0.15
+surprise_factor = 2.0

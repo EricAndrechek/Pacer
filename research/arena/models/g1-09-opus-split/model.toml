@@ -1,0 +1,12 @@
+name = "g1-09-opus-split"
+description = "split.accounts: a two-state (mine / another account's) switching chain fitted to the group's recent hourly spend, started from the latest activation or active hour, shares drawn from each state's own past hours."
+targets = ["split.accounts"]
+children = []
+
+[config]
+lookback_h = 504        # three weeks of the group's hours
+half_life_h = 168       # recency weighting of those hours
+prior_rate = 0.0417     # a switch a day, as a weak prior on each state's leaving rate
+prior_weight = 2.0
+min_spend = 1e-6
+recent_mix = 0.45      # share of paths flat at the recent (last day / week) share

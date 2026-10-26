@@ -1,0 +1,11 @@
+# Usage data, results and caches never go in git (public repo).
+data/
+# ...but not vendored code that happens to be called data (Toto's data.util).
+!kit/fm/_vendor/toto/data/
+results/
+.cache/
+*.parquet
+*.duckdb
+*.duckdb.wal
+.venv/
+__pycache__/

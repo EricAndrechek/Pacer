@@ -1,0 +1,12 @@
+name = "struct-timestral-28m"
+description = "Structural: Timestral-28M (Mistral AI) spend paths (child fm-timestral-28m-spend) through the account's spend-to-meter conversion (kit.spend), from the live value, capped at 100."
+targets = ["meter.five_hour", "meter.seven_day", "meter.scoped"]
+children = ["fm-timestral-28m-spend"]
+
+[config]
+child = "fm-timestral-28m-spend"
+child_paths = 200
+start = "live"
+spend_by = "total"
+weak = "ratio"
+family_dependence = "comonotone"

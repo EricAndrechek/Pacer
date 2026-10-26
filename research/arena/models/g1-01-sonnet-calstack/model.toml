@@ -1,0 +1,13 @@
+name = "g1-01-sonnet-calstack"
+description = "Stack of calibrated-timestral-123m (via g1-01-sonnet-calibrate123) and fm-timesfm25-meter. The calibration layer narrows timestral-123m's over-wide intervals, and stacking with timesfm25 (a different model family) reduces variance further."
+targets = ["meter.five_hour", "meter.seven_day", "meter.scoped"]
+children = ["g1-01-sonnet-calibrate123", "fm-timesfm25-meter"]
+
+[config]
+children = ["g1-01-sonnet-calibrate123", "fm-timesfm25-meter"]
+pool = "mixture"
+shrink = 0.15
+half_life_n = 24
+backtest_every_h = { five_hour = 3, seven_day = 12, weekly_scoped = 12 }
+backtest_n = 4
+max_evals = 16

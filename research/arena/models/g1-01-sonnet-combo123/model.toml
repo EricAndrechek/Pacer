@@ -1,0 +1,13 @@
+name = "g1-01-sonnet-combo123"
+description = "Exponentially weighted combination of the two best FM meter models (timestral-123m and timestral-209m), updated online as meter readings arrive."
+targets = ["meter.five_hour", "meter.seven_day", "meter.scoped"]
+children = ["fm-timestral-123m-meter", "fm-timestral-209m-meter"]
+
+[config]
+children = ["fm-timestral-123m-meter", "fm-timestral-209m-meter"]
+pool = "mixture"
+eta = 0.3
+half_life_n = 16
+backtest_every_h = { five_hour = 3, seven_day = 12, weekly_scoped = 12 }
+backtest_n = 4
+max_evals = 16

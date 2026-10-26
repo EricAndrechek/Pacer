@@ -1,0 +1,13 @@
+name = "g1-01-sonnet-stack123"
+description = "Simplex-weighted stacking of the two best meter FM models: fm-timestral-123m-meter and fm-timesfm25-meter. Weights are fitted to minimize combined CRPS on backtest forecasts."
+targets = ["meter.five_hour", "meter.seven_day", "meter.scoped"]
+children = ["fm-timestral-123m-meter", "fm-timesfm25-meter"]
+
+[config]
+children = ["fm-timestral-123m-meter", "fm-timesfm25-meter"]
+pool = "mixture"
+shrink = 0.1
+half_life_n = 24
+backtest_every_h = { five_hour = 3, seven_day = 12, weekly_scoped = 12 }
+backtest_n = 4
+max_evals = 16

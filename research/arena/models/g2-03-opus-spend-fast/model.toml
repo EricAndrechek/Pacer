@@ -1,0 +1,18 @@
+name = "g2-03-opus-spend-fast"
+description = "Hybrid: weighted quantile + analog + surprise paths. No wrapping, no children."
+targets = ["spend.hourly", "tokens.hourly"]
+children = []
+deps = []
+
+[config]
+context_hours = 504
+rho = 0.85
+recency_halflife_h = 168
+kappa_hour = 2.0
+kappa_dow = 1.5
+analog_fraction = 0.5
+analog_bandwidths = [0.6, 0.5, 0.4]
+analog_half_life_days = 21.0
+analog_jitter = 0.05
+surprise_frac = 0.15
+surprise_factor = 2.0

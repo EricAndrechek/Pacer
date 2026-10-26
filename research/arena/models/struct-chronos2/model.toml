@@ -1,0 +1,12 @@
+name = "struct-chronos2"
+description = "Structural: Chronos-2 (Amazon, 120M) spend paths (child fm-chronos2-spend) through the account's spend-to-meter conversion (kit.spend), from the live value, capped at 100."
+targets = ["meter.five_hour", "meter.seven_day", "meter.scoped"]
+children = ["fm-chronos2-spend"]
+
+[config]
+child = "fm-chronos2-spend"
+child_paths = 200
+start = "live"
+spend_by = "total"
+weak = "ratio"
+family_dependence = "comonotone"

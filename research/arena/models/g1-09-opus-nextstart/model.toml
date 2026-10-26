@@ -1,0 +1,20 @@
+name = "g1-09-opus-nextstart"
+description = "cycle.next_start: a weighted analog ensemble of the account's own past idle moments (idle so far, hour, weekday, other accounts busy, recency), smoothed, with a weak prior when analogs are few."
+targets = ["cycle.next_start"]
+children = []
+
+[config]
+# Tuned offline on the 66 next_start cells of the 42-episode visible set
+# (CRPS 1.83 -> ~1.25; hedged toward the middle of the good region).
+lattice_min = 10          # analog moments every 10 min of the account's past
+lookback_days = 120
+half_life_days = 45.0     # recency: an analog's say halves every 45 days
+bw_log_idle = 0.9         # kernel width on log(1 + idle/30 min)
+kappa_hour = 6.0          # von Mises concentration on the local hour (~1.6 h)
+weekend_mismatch = 0.3
+busy_mismatch = 0.4       # another account busy in the last hour, matched
+prior_n = 3.0             # effective analog-hours the prior counts as
+jitter = 0.15             # log-scale smoothing of analog outcomes
+never_mix = 0.05          # always: a little mass on "no start"
+never_mix_away = 0.5      # more when idle here > away_idle_h and another account busy in the last day
+away_idle_h = 6.0

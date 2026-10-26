@@ -1,0 +1,7 @@
+name = "naive-split"
+description = "Each account's share of the group's spend over the last day (else week; else equal), flat."
+targets = ["split.accounts"]
+children = []
+
+[config]
+hours = [24, 168]   # lookbacks tried in turn until the group spent something

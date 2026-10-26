@@ -1,0 +1,32 @@
+name = "g2-08-fable-burst"
+description = "Five-hour meter as a simulated burst process: active/idle 5-min bins with age- and hour-of-day-dependent hazards estimated from the account's own turn log (with weak priors), a per-path burn rate anchored on the recent rate and the account's typical rate, integer floor like the server, live-meter start from converted spend since the last reading."
+targets = ["meter.five_hour"]
+children = []
+deps = []
+
+[config]
+bin_min = 5                 # simulation step (minutes); the grid's regular step
+sigma_rate = 0.45           # lognormal sd of the per-path rate multiplier
+sigma_n = 1.5               # extra rate sd per sqrt(active bins of recent evidence): sd = sqrt(sigma_rate^2 + sigma_n^2 / n)
+rate_mult = 1.0             # multiplier on the blended rate
+gamma_shape = 1.0           # per-bin burn noise (gamma shape; mean 1): active 5-min bins burn 0 about 40% of the time, CV^2 about 2
+recent_windows = [30, 90]   # windows (minutes) for the recent burn rate; their log-estimates are averaged
+k_recent = 3.0              # active bins of recent evidence that outweigh the long-run rate
+prior_weight = 0.5          # weight (fraction of exposure) given to the prior hazards: pseudo-exposure = prior_weight * 288 bins (a day)
+hod_shrink_bins = 2000      # pseudo-exposure under which the hour-of-day modulation shrinks to flat
+rate_floor = 0.3            # minimum rate per active bin (points per 5 min) used as a lower anchor
+frailty_sd = 0.0            # lognormal sd of a per-path factor on the hazards (busy futures vs quiet ones)
+analog_share = 0.7          # share of paths whose future activity is copied from the account's own past (analogs of the state now)
+min_analogs = 20            # candidates needed before the analog tolerances stop widening
+p_regime = 0.15             # share of paths whose rate is drawn around the long-run rate instead of the recent one
+tail_p = 0.08               # share of paths in a burst regime
+tail_mult = 4.0             # their rate multiplier
+reset_tol_min = 15          # readings whose reset differs by more than this from the latest start a new cycle
+hod_off = true              # hour-of-day modulation of the active->idle hazard
+live_spend = true           # start the paths from the latest reading plus converted spend since it
+
+# Prior hazards per 5-minute bin by age bucket (bins already spent in the state):
+# buckets [1,2) [2,3) [3,4) [4,6) [6,9) [9,12) [12,18) [18,24) [24,36) [36,48) [48,72) [72,inf)
+age_edges = [1, 2, 3, 4, 6, 9, 12, 18, 24, 36, 48, 72]
+prior_h_on  = [0.38, 0.26, 0.19, 0.16, 0.085, 0.06, 0.04, 0.026, 0.01, 0.012, 0.008, 0.004]
+prior_h_off = [0.27, 0.22, 0.14, 0.13, 0.10, 0.085, 0.062, 0.058, 0.054, 0.045, 0.046, 0.044]

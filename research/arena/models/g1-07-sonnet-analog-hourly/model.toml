@@ -1,0 +1,20 @@
+name = "g1-07-sonnet-analog-hourly"
+description = "Analog block-bootstrap of the group's own hourly spend/tokens: time-of-day, weekday and recent-state matched 24 h blocks, chained to the horizon."
+targets = ["spend.hourly", "tokens.hourly"]
+children = []
+
+[config]
+block_h = 24
+margin_min = 30
+cand_step_min = 30
+max_dev_h = 3.0
+sigma_tod_h = 1.5
+half_life_days = 35.0
+sigma_state = [1.0, 0.9, 0.7, 0.6]
+w_dow = [1.0, 0.3, 0.1]
+level_gamma = 0.5
+jitter = 0.4
+block_sigma = 0.5
+ess_min = 25
+sigma_level = 40
+sigma_ttr = 1.0

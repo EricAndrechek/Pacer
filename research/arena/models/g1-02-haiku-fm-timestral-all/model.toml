@@ -1,0 +1,13 @@
+name = "g1-02-haiku-fm-timestral-all"
+description = "Learned stacking of all Timestral variants (209M, 123M, 28M, 5M) to capture benefits across model scales."
+targets = ["meter.five_hour", "meter.seven_day", "meter.scoped"]
+children = ["fm-timestral-209m-meter", "fm-timestral-123m-meter", "fm-timestral-28m-meter", "fm-timestral-5m-meter"]
+
+[config]
+children = ["fm-timestral-209m-meter", "fm-timestral-123m-meter", "fm-timestral-28m-meter", "fm-timestral-5m-meter"]
+pool = "mixture"
+shrink = 0.05
+half_life_n = 48
+backtest_every_h = { five_hour = 3, seven_day = 12, weekly_scoped = 12 }
+backtest_n = 4
+max_evals = 16

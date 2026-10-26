@@ -1,0 +1,18 @@
+name = "g1-05-opus-ens-hourly"
+description = "Self-scoring ensemble of hourly spend/token children: simplex weights and a spread factor fitted on the children's own past forecasts against the realised hours."
+targets = ["spend.hourly", "tokens.hourly"]
+children = ["fm-timestral-28m-spend", "naive-diurnal-spend", "naive-seasonal-week", "naive-flat"]
+deps = []
+
+[config]
+children = ["fm-timestral-28m-spend", "naive-diurnal-spend", "naive-seasonal-week", "naive-flat"]
+shrink = 0.05
+scale_shrink = 0.25
+scales = [0.5, 0.65, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5]
+zero_inflate = [0.0, 0.05, 0.1, 0.2, 0.3, 0.4]   # share of the pooled samples replaced by an idle hour
+half_life_n = 24
+min_points = 24
+m_fit = 40
+lookback_h = 336
+backtest_every_h = 8
+backtest_n = 4

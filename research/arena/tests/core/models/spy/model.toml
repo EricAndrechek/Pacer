@@ -1,0 +1,4 @@
+name = "spy"
+description = "Checks the as-of rule from inside the worker, and prints to stdout (which must not corrupt the protocol)."
+targets = ["meter.five_hour", "meter.seven_day", "meter.scoped", "spend.hourly", "tokens.hourly", "split.accounts", "cycle.next_start"]
+children = []

@@ -1,0 +1,7 @@
+name = "naive-diurnal-spend"
+description = "Hour-of-week spend profile from history only: each hour is the same hour of the week in every past week (one path per week)."
+targets = ["spend.hourly"]
+children = []
+
+[config]
+weeks = 0        # past weeks used, newest first; 0 = every whole week the history holds

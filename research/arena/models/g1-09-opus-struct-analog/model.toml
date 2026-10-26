@@ -1,0 +1,12 @@
+name = "g1-09-opus-struct-analog"
+description = "Structural meter model (kit.fm.struct_model) on the cheap analog spend child g1-09-opus-analog-spend instead of a pretrained spend forecaster: spend trajectories from the account's own past through its spend-to-meter conversion."
+targets = ["meter.five_hour", "meter.seven_day", "meter.scoped"]
+children = ["g1-09-opus-analog-spend"]
+
+[config]
+child = "g1-09-opus-analog-spend"
+child_paths = 200
+start = "live"
+spend_by = "total"
+weak = "ratio"
+family_dependence = "comonotone"

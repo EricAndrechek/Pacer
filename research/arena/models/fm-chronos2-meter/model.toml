@@ -1,0 +1,23 @@
+name = "fm-chronos2-meter"
+description = "Chronos-2 (Amazon, 120M), zero-shot, on the meter's cumulative burn (this cycle after the previous ones), resampled; quantiles to the reset as meter paths."
+targets = ["meter.five_hour", "meter.seven_day", "meter.scoped"]
+children = []
+deps = ["torch==2.10.0", "chronos-forecasting==2.3.2", "transformers==5.20.2", "accelerate==1.15.0"]
+weights = ["amazon/chronos-2@29ec3766d36d6f73f0696f85560a422f50e8498c"]
+
+[config]
+backend = "chronos2"
+weights = "amazon/chronos-2@29ec3766d36d6f73f0696f85560a422f50e8498c"
+threads = 4
+stale_min = 120
+
+[config.step_min]
+five_hour = 5
+seven_day = 15
+weekly_scoped = 15
+
+[config.context_steps]
+# The lab's default context, 1 day / 1 week (not tuned here).
+five_hour = 288
+seven_day = 672
+weekly_scoped = 672

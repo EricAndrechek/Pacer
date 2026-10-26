@@ -1,0 +1,25 @@
+name = "fm-toto-meter"
+description = "Toto Open Base 1.0 (Datadog, 151M), zero-shot, on the meter's cumulative burn (this cycle after the previous ones), resampled; quantiles to the reset as meter paths."
+targets = ["meter.five_hour", "meter.seven_day", "meter.scoped"]
+children = []
+deps = ["torch==2.10.0", "einops>=0.7", "jaxtyping>=0.2.29", "rotary-embedding-torch==0.8.6", "safetensors>=0.4", "huggingface_hub>=0.28"]
+weights = ["Datadog/Toto-Open-Base-1.0@0411ceb27bdf7fc3e4892e99edc8ad08192dc3c5"]
+
+[config]
+backend = "toto"
+weights = "Datadog/Toto-Open-Base-1.0@0411ceb27bdf7fc3e4892e99edc8ad08192dc3c5"
+threads = 4
+stale_min = 120
+paths = "samples"          # Toto samples: its own paths, not quantiles
+n_samples = 100
+
+[config.step_min]
+five_hour = 5
+seven_day = 15
+weekly_scoped = 15
+
+[config.context_steps]
+# The lab's default context, 1 day / 1 week (not tuned here).
+five_hour = 288
+seven_day = 672
+weekly_scoped = 672

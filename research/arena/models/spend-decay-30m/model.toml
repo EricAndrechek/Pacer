@@ -1,0 +1,14 @@
+name = "spend-decay-30m"
+description = "The lab's tokm-decay-30m: live value plus the last 30 min of converted burn, in-cycle calibrated, fading with a τ learned walk-forward per account and half of the window; paths from past errors at the same phase."
+targets = ["meter.five_hour"]
+children = []
+
+[config]
+lookback_min = 30       # burn measured over the last 30 minutes (at most the cycle so far)
+case_days = 60          # past cycles cut for τ and the error paths, newest first
+phase_band = 0.10       # past cuts within this share of the window lend their errors
+
+[config.default_tau_h]  # τ when there are fewer than 16 past cuts to learn it from
+five_hour = 2.0
+seven_day = 16.0
+weekly_scoped = 16.0

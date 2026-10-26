@@ -1,0 +1,13 @@
+name = "g2-01-haiku-weekly-blend"
+description = "EWA ensemble of Timestral variants optimized for seven_day: 209m > 123m > 28m."
+targets = ["meter.seven_day"]
+children = ["g2-01-haiku-weekly-209m", "g2-01-haiku-weekly-base", "g2-01-haiku-weekly-28m"]
+
+[config]
+children = ["g2-01-haiku-weekly-209m", "g2-01-haiku-weekly-base", "g2-01-haiku-weekly-28m"]
+pool = "mixture"
+eta = 0.2
+half_life_n = 12
+backtest_every_h = {seven_day = 12}
+backtest_n = 4
+max_evals = 12

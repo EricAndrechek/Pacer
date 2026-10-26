@@ -1,0 +1,16 @@
+name = "g2-05-sonnet-stack"
+description = "CRPS-stack (mixture pool) of fm-timestral-123m-meter and spend-decay-6h, weights learned from the user's own resolved backtests; for 7-day and scoped meters."
+targets = ["meter.five_hour", "meter.seven_day", "meter.scoped"]
+children = ["fm-timestral-123m-meter", "spend-decay-6h"]
+deps = ["torch==2.10.0", "safetensors>=0.4", "huggingface_hub>=0.28"]
+weights = ["mistralai/Timestral-123M@5a147287addda85f6acd8da3fb8858fe9af7e8f7"]
+
+[config]
+children = ["fm-timestral-123m-meter", "spend-decay-6h"]
+pool = "mixture"
+backtest = false      # backtests refit the FM at many origins: too slow for the scorer; the ledger fills from live calls
+shrink = 0.1
+half_life_n = 24
+backtest_every_h = { five_hour = 3, seven_day = 12, weekly_scoped = 12 }
+backtest_n = 6
+max_evals = 16

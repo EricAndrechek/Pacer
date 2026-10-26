@@ -1,0 +1,8 @@
+name = "g2-07-opus-limit"
+description = "Meters for the limit call: the account's own burn resampled in time-of-day blocks, with its learned behaviour near 100 (parking, rationing) and re-base hazard, simulated to the reset."
+targets = ["meter.five_hour", "meter.seven_day", "meter.scoped"]
+children = []
+deps = []
+weights = []
+
+[config]

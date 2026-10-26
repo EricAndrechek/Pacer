@@ -1,0 +1,13 @@
+name = "g1-09-opus-analog-spend"
+description = "spend.hourly / tokens.hourly: whole future trajectories drawn from the group's own past hours whose state (last hour, 3 h, day; local hour; weekday; recency) looks like now's."
+targets = ["spend.hourly", "tokens.hourly"]
+children = []
+
+[config]
+lookback_days = 90
+min_ahead_h = 24
+bandwidths = [0.6, 0.5, 0.4]   # kernel widths on log1p(level/mean busy hour): last 1 h, 3 h, 24 h
+kappa_hour = 2.0
+weekend_mismatch = 0.5
+half_life_days = 21.0
+jitter = 0.1

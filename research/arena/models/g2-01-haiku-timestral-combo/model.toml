@@ -1,0 +1,9 @@
+name = "g2-01-haiku-timestral-combo"
+description = "Combines multiple Timestral variants via simple weighted averaging, focused on seven_day."
+targets = ["meter.seven_day"]
+children = ["fm-timestral-123m-meter", "fm-timestral-209m-meter", "fm-timestral-28m-meter"]
+deps = []
+
+[config]
+# Fixed weights favoring the best performer (123m)
+weights = [0.5, 0.3, 0.2]

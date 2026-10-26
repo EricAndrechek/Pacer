@@ -1,0 +1,8 @@
+name = "combo-median"
+description = "The combination-puzzle baseline: at every grid time and quantile level, the median of the children's quantiles, equal weight, nothing learned."
+targets = ["meter.five_hour", "meter.seven_day", "meter.scoped"]
+children = ["port-engine-rule", "spend-decay-30m", "struct-timestral-28m"]
+
+[config]
+children = ["port-engine-rule", "spend-decay-30m", "struct-timestral-28m"]
+pool = "median"

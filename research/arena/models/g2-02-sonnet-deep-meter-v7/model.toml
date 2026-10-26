@@ -1,0 +1,22 @@
+name = "g2-02-sonnet-deep-meter-v7"
+description = "Selective deep ensemble v7. five_hour: calibrate123+timesfm25 stack (two best architecturally-diverse models, 209m excluded). seven_day: calibrate123=1.0 (0.745 leaderboard, timesfm25 too weak at 1.010). scoped: decay-1d=1.0 (0.500 leaderboard, best single model)."
+targets = ["meter.five_hour", "meter.seven_day", "meter.scoped"]
+children = [
+  "g1-01-sonnet-calibrate123",
+  "fm-timesfm25-meter",
+  "spend-decay-1d",
+]
+deps = []
+
+[config]
+children = [
+  "g1-01-sonnet-calibrate123",
+  "fm-timesfm25-meter",
+  "spend-decay-1d",
+]
+pool = "mixture"
+shrink = 0.10
+half_life_n = { five_hour = 24, seven_day = 48, weekly_scoped = 48 }
+backtest_every_h = { five_hour = 4, seven_day = 12, weekly_scoped = 12 }
+backtest_n = 4
+max_evals = 12

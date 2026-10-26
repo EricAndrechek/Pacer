@@ -1,0 +1,19 @@
+name = "g2-01-haiku-weekly-context-336"
+description = "Weekly-focused Timestral-123M with extended context for seven_day."
+targets = ["meter.seven_day"]
+children = []
+deps = ["torch==2.10.0", "safetensors>=0.4", "huggingface_hub>=0.28"]
+weights = ["mistralai/Timestral-123M@5a147287addda85f6acd8da3fb8858fe9af7e8f7"]
+
+[config]
+backend = "timestral"
+weights = "mistralai/Timestral-123M@5a147287addda85f6acd8da3fb8858fe9af7e8f7"
+threads = 4
+stale_min = 120
+
+[config.step_min]
+seven_day = 15
+
+[config.context_steps]
+# Extended context for weekly: 672 15-minute steps = 1 week of history
+seven_day = 336

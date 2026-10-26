@@ -1,0 +1,13 @@
+[
+  {"name": "Oracle (a model handed the true future)", "status": "pass", "detail": "Scores ≈ perfect: CRPS ≈ 0, Brier 0, 80% coverage 1. A truth shifted by 30 minutes scores strictly worse. Run on synthetic data, Docker workers included."},
+  {"name": "Known answers", "status": "pass", "detail": "Constant, last-value and straight-line models reproduce hand-computed scores on a tiny synthetic world."},
+  {"name": "Determinism", "status": "pass", "detail": "Same seed gives byte-identical score rows across two runs, across in-process vs subprocess workers, and for any --jobs N."},
+  {"name": "Leak probes", "status": "pass", "detail": "Models that try every way to see the future (files, environment, stack, history internals, the child cache, state carried between test cases, network, timing) gain nothing over a constant forecast inside Docker workers. On host workers a probe CAN read snapshot files, so host workers run trusted models only; every agent model is scored in Docker."},
+  {"name": "Leak control", "status": "pass", "detail": "With the null-slot scrub switched off, the probe does see hidden values, so the probe is real."},
+  {"name": "Synthetic recovery", "status": "pass", "detail": "On synthetic data, a model built from the true generating process beats every simple model (5-hour CRPS 0.27 vs about 4.3)."},
+  {"name": "Calibration sanity", "status": "pass", "detail": "Paths drawn from the true process give 80% coverage of about 0.82 and a roughly flat PIT."},
+  {"name": "Snapshot checks (frozen-2026-10-24)", "status": "pass", "detail": "All 9 gates: store matches raw transcripts exactly, store matches the archive, Claude Code's own counters match, readings, cycles, prices, point-in-time slicing, byte-identical rebuild, leak scan."},
+  {"name": "Docker isolation", "status": "pass", "detail": "A probe model inside a scoring container finds no ARENA_HOME, no snapshot, no data file anywhere and no network; the same probe on the host does read the snapshot."},
+  {"name": "Replay parity with the app", "status": "pass", "detail": "The Python port of the shipping engine reproduces 1,278 of 1,278 predictions the current app recorded (largest gap 0.00002 points), and 97.8% of 28,870 including older engine versions."},
+  {"name": "Leaks found and closed by the self-tests", "status": "pass", "detail": "1) masked columns still carried their hidden values in the Arrow buffer under null slots (fixed: every served table is rebuilt; the as-of assertion refuses a null slot with a value). 2) Scoring between checkpoints made run time reveal how many future readings existed (fixed: scoring waits until the model's process has closed)."}
+]

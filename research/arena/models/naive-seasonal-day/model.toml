@@ -1,0 +1,7 @@
+name = "naive-seasonal-day"
+description = "Seasonal naive: each hour's spend or tokens is the same hour one day earlier (24 h), repeating the last day beyond it."
+targets = ["spend.hourly", "tokens.hourly"]
+children = []
+
+[config]
+period_h = 24

@@ -1,0 +1,7 @@
+name = "selftest-walk-truth"
+description = "Self-test: paths are draws from the true generating process (needs truth/, so synthetic snapshots only)."
+targets = ["meter.five_hour", "meter.seven_day"]
+children = []
+
+[config]
+truth_dir = ""     # the snapshot's truth/ folder (synthetic); the self-test sets it

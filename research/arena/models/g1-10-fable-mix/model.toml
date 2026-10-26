@@ -1,0 +1,32 @@
+name = "g1-10-fable-mix"
+description = "Path-pool mixture: the analog ensemble's paths pooled with a complementary child's per target (fixed shares, nothing learned)."
+targets = ["meter.five_hour", "meter.seven_day", "meter.scoped", "cycle.next_start", "spend.hourly", "tokens.hourly", "split.accounts"]
+children = ["g1-10-fable-analog", "port-engine-recent-rate", "spend-decay-1d"]
+deps = []
+weights = []
+
+[config]
+# per target: child -> share of the paths (renormalised over the children that answered)
+[config.shares."meter.five_hour"]
+g1-10-fable-analog = 0.7
+port-engine-recent-rate = 0.3
+
+[config.shares."meter.seven_day"]
+g1-10-fable-analog = 0.5
+spend-decay-1d = 0.5
+
+[config.shares."meter.scoped"]
+g1-10-fable-analog = 0.5
+spend-decay-1d = 0.5
+
+[config.shares."cycle.next_start"]
+g1-10-fable-analog = 1.0
+
+[config.shares."spend.hourly"]
+g1-10-fable-analog = 1.0
+
+[config.shares."tokens.hourly"]
+g1-10-fable-analog = 1.0
+
+[config.shares."split.accounts"]
+g1-10-fable-analog = 1.0

@@ -1,0 +1,10 @@
+name = "g1-07-sonnet-pool-five"
+description = "Linear pool of the analog meter bootstrap with spend-decay-30m (live value + converted burn) for meter.five_hour; the spend-decay model carries most of the weight."
+targets = ["meter.five_hour"]
+children = ["g1-07-sonnet-analog-meter", "spend-decay-30m"]
+
+[config]
+
+[config.weights.five_hour]
+g1-07-sonnet-analog-meter = 0.3
+spend-decay-30m = 0.7

@@ -1,0 +1,9 @@
+name = "g1-07-sonnet-split-markov"
+description = "split.accounts as a two-state persistence chain over the dominant account, flip hazards estimated (and shrunk) from the group's own hourly history; mixed hours drawn from the empirical mixed-share pool."
+targets = ["split.accounts"]
+children = []
+
+[config]
+prior_hazard = 0.08
+prior_hours = 48.0
+mix_prior = 0.15

@@ -1,0 +1,15 @@
+name = "g1-06-sonnet-decay"
+description = "The lab's weekly tokm-decay-6h: live value plus the last 6 hours of converted burn, in-cycle calibrated, fading with a τ learned walk-forward (mean error at reset) per account and half of the window; paths from past errors at the same phase."
+targets = ["meter.seven_day", "meter.scoped"]
+children = []
+
+[config]
+lookback_min = 360
+case_days = 120
+phase_band = 0.10
+spread_mult = 1.5
+
+[config.default_tau_h]
+five_hour = 2.0
+seven_day = 16.0
+weekly_scoped = 16.0

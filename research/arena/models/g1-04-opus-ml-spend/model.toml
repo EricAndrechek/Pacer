@@ -1,0 +1,22 @@
+name = "g1-04-opus-ml-spend"
+description = "LightGBM quantile regression for hourly spend and tokens: lag features, hour-of-week profile, and recent activity indicators, with AR(1) correlated paths."
+targets = ["spend.hourly", "tokens.hourly"]
+children = []
+deps = ["lightgbm>=4.5"]
+
+[config]
+spend_context_hours = 672
+tokens_context_hours = 336
+levels = [0.02, 0.05, 0.1, 0.2, 0.35, 0.5, 0.65, 0.8, 0.9, 0.95, 0.98]
+n_estimators = 120
+learning_rate = 0.04
+num_leaves = 10
+min_child_samples = 25
+rho = 0.6
+train_hours = 5000
+spend_cap_factor = 3.0
+tokens_cap_factor = 3.0
+spend_spread_mult = 2.0
+tokens_spread_mult = 1.8
+tail_lo_mult = 0.5
+tail_hi_mult = 2.0

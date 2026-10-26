@@ -1,0 +1,9 @@
+name = "g2-08-fable-burst-mix"
+description = "Mixture of the burst-process five-hour model (g2-08-fable-burst) with a pretrained forecaster on the cumulative burn (fm-timestral-123m-meter): paths pooled by weight, the burst model's integer start kept for the dense head."
+targets = ["meter.five_hour"]
+children = ["g2-08-fable-burst", "fm-timestral-123m-meter"]
+deps = []
+
+[config]
+weights = { "g2-08-fable-burst" = 0.5, "fm-timestral-123m-meter" = 0.5 }
+head_min = 3          # within this lead (minutes) every path follows the burst model's start (the next reading)

@@ -1,0 +1,4 @@
+name = "selftest-spy"
+description = "Self-test child: reports what it was handed (`arena selftest`, child probe)."
+targets = ["meter.five_hour", "meter.seven_day", "meter.scoped", "spend.hourly", "tokens.hourly"]
+children = []

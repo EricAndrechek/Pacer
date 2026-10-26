@@ -1,0 +1,13 @@
+name = "g1-02-haiku-fm-split"
+description = "Account split forecasting: ensemble of foundation model spend forecasters as base for computing account shares of group spending."
+targets = ["split.accounts"]
+children = ["fm-timestral-209m-spend", "fm-timestral-28m-spend"]
+
+[config]
+children = ["fm-timestral-209m-spend", "fm-timestral-28m-spend"]
+pool = "mixture"
+shrink = 0.05
+half_life_n = 48
+backtest_every_h = { default = 6 }
+backtest_n = 4
+max_evals = 16

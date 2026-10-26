@@ -1,0 +1,7 @@
+name = "port-engine-saturating"
+description = "The app's saturating burn-trajectory method alone, with its own stratified conformal residuals as the spread."
+targets = ["meter.five_hour", "meter.seven_day", "meter.scoped"]
+children = []
+
+[config]
+method = "saturating"

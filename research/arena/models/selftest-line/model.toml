@@ -1,0 +1,4 @@
+name = "selftest-line"
+description = "Self-test straight line through every reading of the current cycle (`arena selftest`)."
+targets = ["meter.five_hour", "meter.seven_day", "meter.scoped"]
+children = []

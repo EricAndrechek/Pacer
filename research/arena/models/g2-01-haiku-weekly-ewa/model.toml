@@ -1,0 +1,13 @@
+name = "g2-01-haiku-weekly-ewa"
+description = "EWA combination of best Timestral variants for weekly (seven_day) forecasts, tuned parameters for weekly horizon."
+targets = ["meter.seven_day"]
+children = ["fm-timestral-123m-meter", "fm-timestral-209m-meter", "fm-timestral-28m-meter"]
+
+[config]
+children = ["fm-timestral-123m-meter", "fm-timestral-209m-meter", "fm-timestral-28m-meter"]
+pool = "mixture"
+eta = 0.15
+half_life_n = 12
+backtest_every_h = {seven_day = 24}
+backtest_n = 3
+max_evals = 8

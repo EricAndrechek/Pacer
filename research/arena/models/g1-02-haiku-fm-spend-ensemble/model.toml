@@ -1,0 +1,8 @@
+name = "g1-02-haiku-fm-spend-ensemble"
+description = "Median ensemble of foundation model spend forecasters (Timestral 209M/28M/5M) for hourly spend and tokens targets."
+targets = ["spend.hourly", "tokens.hourly"]
+children = ["fm-timestral-209m-spend", "fm-timestral-28m-spend", "fm-timestral-5m-spend"]
+
+[config]
+children = ["fm-timestral-209m-spend", "fm-timestral-28m-spend", "fm-timestral-5m-spend"]
+pool = "median"

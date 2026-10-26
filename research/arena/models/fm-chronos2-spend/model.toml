@@ -1,0 +1,21 @@
+name = "fm-chronos2-spend"
+description = "Chronos-2 (Amazon, 120M), zero-shot, on hourly API-equivalent spend and tokens (priced as of now), with covariates; AR(1)-copula paths."
+targets = ["spend.hourly", "tokens.hourly"]
+children = []
+deps = ["torch==2.10.0", "chronos-forecasting==2.3.2", "transformers==5.20.2", "accelerate==1.15.0"]
+weights = ["amazon/chronos-2@29ec3766d36d6f73f0696f85560a422f50e8498c"]
+
+[config]
+backend = "chronos2"
+weights = "amazon/chronos-2@29ec3766d36d6f73f0696f85560a422f50e8498c"
+threads = 4
+context_hours = 336
+# Visible tier: all four covariates beat none and calendar alone on the real
+# snapshot (Timestral-28M and Chronos-2; within noise on synth); companion
+# variates (accounts, families) were within noise, so none by default.
+covariates = ["calendar", "meter", "sessions", "prompts"]
+multivariate = "none"
+max_variates = 5
+rho = 0.8
+transform = "none"
+cap_factor = 1.5

@@ -1,0 +1,24 @@
+name = "g2-02-sonnet-deep-meter-v6"
+description = "3-layer stack v6. five_hour+seven_day: calibrate123+timesfm25 only (209m excluded from both — scope_only bias causes 0.79+ weight despite worse leaderboard CRPS). scoped: spend-decay-1d=1.0 (best at 0.500)."
+targets = ["meter.five_hour", "meter.seven_day", "meter.scoped"]
+children = [
+  "g1-01-sonnet-calibrate123",
+  "fm-timesfm25-meter",
+  "fm-timestral-209m-meter",
+  "spend-decay-1d",
+]
+deps = []
+
+[config]
+children = [
+  "g1-01-sonnet-calibrate123",
+  "fm-timesfm25-meter",
+  "fm-timestral-209m-meter",
+  "spend-decay-1d",
+]
+pool = "mixture"
+shrink = 0.10
+half_life_n = { five_hour = 24, seven_day = 48, weekly_scoped = 48 }
+backtest_every_h = { five_hour = 4, seven_day = 12, weekly_scoped = 12 }
+backtest_n = 4
+max_evals = 12

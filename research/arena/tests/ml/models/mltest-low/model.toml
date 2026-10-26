@@ -1,0 +1,8 @@
+name = "mltest-low"
+description = "Test child: the latest reading minus 30 points (at least 0), flat. A meter never falls within a cycle, so this is never better than mltest-flat."
+targets = ["meter.five_hour", "meter.seven_day", "meter.scoped"]
+children = []
+
+[config]
+offset = -30.0
+spread = 1.0

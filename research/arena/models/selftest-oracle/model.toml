@@ -1,0 +1,7 @@
+name = "selftest-oracle"
+description = "Self-test oracle: forecasts the truth it is handed (only `arena selftest` can hand it any)."
+targets = ["meter.five_hour", "meter.seven_day", "meter.scoped", "cycle.next_start", "spend.hourly", "tokens.hourly", "split.accounts"]
+children = []
+
+[config]
+shift_ms = 0     # control: move the truth this much later, to show misalignment is seen

@@ -1,0 +1,16 @@
+name = "g2-07-opus-pool"
+description = "Limit calls by pooling: the account-habit limit simulator (g2-07-opus-limit) and Timestral-5M on the meter's burn, paths pooled per meter."
+targets = ["meter.five_hour", "meter.seven_day", "meter.scoped"]
+children = ["g2-07-opus-limit", "fm-timestral-5m-meter"]
+deps = []
+weights = []
+
+[config]
+sim = "g2-07-opus-limit"
+fm = "fm-timestral-5m-meter"
+
+# Share of each target's paths taken from the pretrained model.
+[config.fm_weight]
+five_hour = 0.5
+seven_day = 0.5
+weekly_scoped = 0.6
