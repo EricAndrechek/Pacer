@@ -8,6 +8,8 @@
 # confuse Xcode. keys/ holds release credentials and must never be fanned out
 # across worktrees.
 Vendor/DuckDB.xcframework/
+# The forecast networks the app bundles (bin/fetch-forecast-weights.sh), ~132 MB.
+Vendor/ForecastWeights/
 # The checkout's local Claude Code permission rules (gitignored by `.claude/*`).
 # Without it, a session moved into a worktree loses every allow rule it had and
 # gets blocked on commands it was already permitted to run. Permission rules

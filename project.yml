@@ -93,6 +93,15 @@ targets:
       - path: Skills
         type: folder
         buildPhase: resources
+      # The forecast networks Pacer ships (Timestral 5M and 28M, Mistral AI,
+      # with their licence), copied verbatim into Resources/ForecastWeights/
+      # where ArenaWeightStore looks first. Gitignored and fetched by
+      # `make vendor` (bin/fetch-forecast-weights.sh) or prepare-build in CI.
+      # The App target only: PacerCore's resource bundle is copied into the
+      # widget extension too, which must not carry 132 MB of weights.
+      - path: Vendor/ForecastWeights
+        type: folder
+        buildPhase: resources
     # Hand-managed Info.plist (vs GENERATE_INFOPLIST_FILE) so we can
     # carry Sparkle's keys (SUFeedURL, SUPublicEDKey, SUEnableAutomaticChecks).
     # Xcode's auto-generation only knows about the INFOPLIST_KEY_* aliases
