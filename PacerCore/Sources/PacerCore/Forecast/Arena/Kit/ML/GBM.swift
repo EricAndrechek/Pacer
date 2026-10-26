@@ -37,10 +37,15 @@ import Foundation
 //   it derives from `seed`, Bernoulli bagging per row in blocks of 1024 rows
 //   with one generator each, `Random::Sample` for the per-tree features.
 //
-// What is left is float noise (none was found against LightGBM 4.7 on the
-// fixtures: see `GBMParityTests`). Training cost is dominated by histogram
-// building over the in-bag rows, once per tree for the smaller child of each
-// split (the larger is the parent minus it, exactly, in integers).
+// Not reproduced: exclusive feature bundling (LightGBM's `enable_bundle`,
+// on by default), a speed-up that packs features into shared bins. It is
+// meant to be lossless and on most training sets here it is (the trees are
+// LightGBM's to the last bit, `GBMParityTests`, `MLParityTests`); on some
+// it is not: on one five-hour set LightGBM scores a split at 12.5 whose gain
+// on the rows themselves is 5.7, with or without its sparse handling. Against
+// LightGBM with bundling off, every set matches. Training cost is dominated
+// by histogram building over the in-bag rows, once per tree for the smaller
+// child of each split (the larger is the parent minus it, exactly).
 
 public enum KitMLGBM {
     /// LightGBM's `kEpsilon` (a float literal) and `kZeroThreshold`.
@@ -521,13 +526,6 @@ public enum KitMLGBM {
 
     /// One quantile booster on `ds` (labels `y`, one per row).
     public static func trainQuantile(_ ds: Dataset, y: [Double], alpha: Double, params p: Params) -> Booster {
-        trainQuantile(ds, y: y, alpha: alpha, params: p, trace: nil)
-    }
-
-    /// `trace(iter, leaf, rows, features tried, best split)` after every
-    /// split search below the root (tests only).
-    static func trainQuantile(_ ds: Dataset, y: [Double], alpha: Double, params p: Params,
-                              trace: ((Int, Int, Int, [Bool], SplitInfo, [UInt64], Double, Double) -> Void)?) -> Booster {
         let n = ds.n
         precondition(y.count == n)
         let alphaF = Float(alpha)
@@ -657,7 +655,6 @@ public enum KitMLGBM {
                         best[l] = findBestSplit(ds, hist: hists[l], mfbH: mfbH[l], sumG: leafG[l], sumH: leafH[l],
                                                 count: leafCount[l],
                                                 used: allowed, splittable: &splittable[l], gPos: gPos, gNeg: gNeg, p: p)
-                        trace?(iter, l, leafCount[l], allowed, best[l], hists[l], leafG[l], leafH[l])
                     }
                 }
             }
