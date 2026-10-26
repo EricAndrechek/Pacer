@@ -464,11 +464,32 @@ public enum KitMLGBM {
         if n <= 1 { return v.first ?? 0 }
         let floatPos = (1.0 - Double(alpha)) * Double(n - 1)
         let pos = Int(floatPos)
-        v.sort(by: >)
-        if pos >= n - 1 { return v[n - 1] }
+        if pos >= n - 1 { return v.min()! }
         let bias = floatPos - Double(pos)
-        let v1 = v[pos], v2 = v[pos + 1]
+        // The two order statistics by selection (LightGBM's ArgMaxAtK), not a
+        // sort: the same values, in linear time.
+        let v1 = selectDescending(&v, pos)
+        var v2 = -Double.infinity
+        for i in (pos + 1)..<n where v[i] > v2 { v2 = v[i] }
         return v1 - (v1 - v2) * bias
+    }
+
+    /// The (k+1)-th largest value; afterwards everything after index k is
+    /// no larger than it (Hoare partitioning, median-of-three pivot).
+    static func selectDescending(_ v: inout [Double], _ k: Int) -> Double {
+        var lo = 0, hi = v.count - 1
+        while lo < hi {
+            let a = v[lo], b = v[(lo + hi) / 2], c = v[hi]
+            let pivot = max(min(a, b), min(max(a, b), c))
+            var i = lo, j = hi
+            while i <= j {
+                while v[i] > pivot { i += 1 }
+                while v[j] < pivot { j -= 1 }
+                if i <= j { v.swapAt(i, j); i += 1; j -= 1 }
+            }
+            if k <= j { hi = j } else if k >= i { lo = i } else { return v[k] }
+        }
+        return v[k]
     }
 
     /// The same on float32 labels (`BoostFromScore`), rounded as LightGBM
