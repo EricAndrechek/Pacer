@@ -23,6 +23,12 @@ extension ArenaRegistry {
                     "default_scale": [1.2, 1.2, 1.1, 1.0, 1.3, 1.7, 2.0],
                     "prior_cycles": 10,         // weight of the prior, in cycles
                     "min_cycles": 4,            // fewer cycles to learn from: the burn fallback
+                    // Swift-only (see KitMLLearnedMeterModel): train at the start of
+                    // each retrain_h bucket and reuse it for every cut in it, the
+                    // Python's update rule as a function of the cut; 0 trains at the
+                    // cut. Keep the last train_cache_buckets buckets per meter.
+                    "train_align_h": 24,
+                    "train_cache_buckets": 8,
                 ],
                 complexity: 4
             ) { try MLGBMQuantileModel(context: $0) },

@@ -139,6 +139,15 @@ import Testing
         return h
     }
 
+    /// The registered model trained at the cut itself (`train_align_h` 0, as
+    /// the Python per episode), its boosters fitted in parallel (tests only).
+    static var exactSpec: ArenaModelSpec {
+        var s = ArenaRegistry.spec("ml-gbm-quantile")!
+        s.config.values["train_align_h"] = 0
+        s.config.values["parallel"] = true
+        return s
+    }
+
     static func cut(_ store: ArenaHistoryStore, _ hist: History, _ now: Int64) -> ArenaHistory {
         ArenaHistory(store: store, now: now, accounts: hist.accounts, start: hist.start)
     }
@@ -251,7 +260,7 @@ import Testing
             let fold = r.map { rank[ts.cycle[$0]] * 3 / nCyc }
             let tr = fold.indices.filter { fold[$0] != 0 }, te = fold.indices.filter { fold[$0] == 0 }
             #expect(tr.count == lgb.n_train && te.count == lgb.n_test)
-            let spec = ArenaRegistry.spec("ml-gbm-quantile")!
+            let spec = Self.exactSpec
             let runner = ArenaRunner(registry: [spec])
             let model = try MLGBMQuantileModel(context: ArenaContext(spec: spec, seed: ref.seed, services: ArenaServices(),
                                                                      runner: runner, history: { h }))
@@ -293,7 +302,7 @@ import Testing
     @Test func endToEndQuantilesMatchThePython() throws {
         let (store, hist) = try Self.store()
         let ref = try Self.ref(), nb = try Self.refNB()
-        guard let spec = ArenaRegistry.spec("ml-gbm-quantile") else { Issue.record("not registered"); return }
+        let spec = Self.exactSpec
         var report: [String] = []
         for (pi, p) in ref.probes.enumerated() {
             let h = Self.cut(store, hist, p.now)

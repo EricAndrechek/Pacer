@@ -25,6 +25,11 @@ import Foundation
 /// Python's comonotone paths are drawn from).
 public final class MLGBMQuantileModel: KitMLLearnedMeterModel {
     public override class var modelName: String { "ml-gbm-quantile" }
+
+    public required init(context: ArenaContext) throws {
+        parallel = context.config.bool("parallel", false)
+        try super.init(context: context)
+    }
     /// `SCALES = np.linspace(0.5, 4.0, 36)` (numpy: 0.5 + i·0.1, the last exactly 4).
     public static let scales: [Double] = (0..<36).map { (i: Int) -> Double in
         let step: Double = 3.5 / 35.0
@@ -39,9 +44,11 @@ public final class MLGBMQuantileModel: KitMLLearnedMeterModel {
         public var scale: [Double]
     }
 
-    /// Fit the boosters of every fold and level at once, in parallel. Each
-    /// is independent and deterministic, so the result is the same either way.
-    public var parallel = true
+    /// Fit the boosters of every fold and level at once, in parallel (config
+    /// `parallel`, off in the registered model: a background scorer must not
+    /// fan out over every core from inside one model). Each booster is
+    /// independent and deterministic, so the result is the same either way.
+    public var parallel: Bool
 
     /// `pinball`: mean pinball loss of `q` at level `a` (numpy's mean).
     static func pinball(_ y: [Double], _ q: [Double], _ a: Double) -> Double {
@@ -61,7 +68,7 @@ public final class MLGBMQuantileModel: KitMLLearnedMeterModel {
         p.minDataInLeaf = cfg.int(weekly ? "weekly_min_child_samples" : "min_child_samples", weekly ? 10 : 20)
         p.baggingFraction = 0.8; p.baggingFreq = 1; p.featureFraction = 0.8; p.lambdaL2 = 1.0
         p.maxBin = 63
-        p.seed = Int(ctx.seed % (1 << 31))
+        p.seed = Int(trainingSeed % (1 << 31))
         return p
     }
 

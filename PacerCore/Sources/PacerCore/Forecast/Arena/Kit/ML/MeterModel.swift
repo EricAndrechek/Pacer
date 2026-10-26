@@ -12,11 +12,21 @@ import Foundation
 // predicts (`rise_paths`); the port answers with those quantiles
 // (`KitMLPaths.riseForecast`), the distribution the draws sample.
 //
-// Trained state is memoized on the history cut (`history.memo`), so a
-// runner that asks the model several times on one cut trains once; the
-// Python keeps it in `ctx.scratch` per episode the same way. `update` keeps
-// a state until `retrain_h` hours of new data have arrived, as the Python's
-// does (it only matters to a runner that calls `update`).
+// When training happens (`train_align_h`, a Swift-only setting):
+// - 0: at the cut itself, memoized on that cut (`history.memo`), so several
+//   asks on one cut train once. What the Python does per episode, and what
+//   the parity tests run.
+// - h > 0 (the registered model, h = `retrain_h`): at the start of the
+//   cut's h-hour bucket, `b = ⌊t / h⌋·h`, on `history.asOf(b)`, memoized on
+//   the store (`history.store.memo`) for every cut in that bucket. That is
+//   the Python's `update` rule (a model fitted at a cutoff keeps
+//   forecasting from fresh features until `retrain_h` of new data have
+//   arrived) made a function of the cut alone, so the app's backfill (eight
+//   cuts of every past cycle) trains once per bucket instead of once per
+//   cut, and it cannot leak: `b <= t`, and the training sees only what was
+//   known at `b`. The seed is the bucket's (`bucketSeed`), so the model does
+//   not depend on which cut asked first. The store keeps the most recent
+//   `train_cache_buckets` buckets per meter (`KitMLStateCache`).
 
 public enum KitMLMeterModel {
     /// Where the model reads its rise distribution at forecast time.
@@ -52,14 +62,18 @@ open class KitMLLearnedMeterModel: ArenaModel {
     public private(set) var data: KitMLData.AsOfData?
     public private(set) var history: ArenaHistory?
     var historyStart: Millis?
-    struct StateKey: Hashable { var kind: String; var cap: String? }
+    struct StateKey: Hashable { var kind: String; var cap: String?; var bucket: Millis? = nil }
     /// (trained at, state); state nil: the fallback.
     var states: [StateKey: (Millis, Any?)] = [:]
+    /// The seed the current training draws from (`random_state`): the
+    /// context's at the cut, the bucket's when aligned.
+    public internal(set) var trainingSeed: UInt64
     var builders: [String: KitMLFeatures.FeatureBuilder] = [:]
 
     public required init(context: ArenaContext) throws {
         ctx = context
         cfg = context.config
+        trainingSeed = context.seed
     }
 
     // contract ------------------------------------------------------------
@@ -120,38 +134,79 @@ open class KitMLLearnedMeterModel: ArenaModel {
         return predict(state, row: row, leadX: leadX, fracs: anchors, gridFracs: g, used: st.used)
     }
 
+    /// `train_align_h` for a kind, in ms (a number, or `{kind: hours}`); 0:
+    /// train at the cut.
+    func alignMs(_ kind: String) -> Millis {
+        let h = cfgKind("train_align_h", kind, unit: KitMLData.hourMs)
+            ?? Millis(cfg.double("train_align_h", 0) * Double(KitMLData.hourMs))
+        return max(h, 0)
+    }
+
     /// The trained state for a kind (and cap): the instance's, else the
-    /// cut's memo, else trained now (nil: too little to learn from).
+    /// memo's (the cut's, or the store's for the cut's bucket), else trained
+    /// now (nil: too little to learn from).
     func state(_ kind: String, _ cap: String?) throws -> Any? {
+        guard let data, let history else { throw ArenaError.invalid("\(Self.modelName): state before fit") }
+        let align = alignMs(kind)
+        if align > 0 {
+            let b = KitMLData.floorDiv(data.now, align) * align
+            let key = StateKey(kind: kind, cap: cap, bucket: b)
+            if let s = states[key] { return s.1 }
+            let cache = KitMLStateCache.of(history.store, capacity: max(cfg.int("train_cache_buckets", 8), 1))
+            let meter = "\(Self.modelName)|\(configSalt)|\(history.accounts.joined(separator: "+"))|"
+                + "\(historyStart.map(String.init) ?? "-")|\(kind)|\(cap ?? "")"
+            let state = try cache.value(meter, bucket: b) {
+                // Leak-free by construction: the training sees the history as
+                // known at the bucket's start, never the cut's later rows.
+                let hb = history.asOf(b)
+                let saved = trainingSeed
+                trainingSeed = Self.bucketSeed(Self.modelName, b)
+                defer { trainingSeed = saved }
+                let db = KitMLData.AsOfData.of(hb)
+                return try trainState(data: db, builder: KitMLFeatures.FeatureBuilder(data: db, kind: kind),
+                                      kind: kind, cap: cap)
+            }
+            states[key] = (b, state)
+            return state
+        }
         let key = StateKey(kind: kind, cap: cap)
         if let s = states[key] { return s.1 }
-        guard let data, let history else { throw ArenaError.invalid("\(Self.modelName): state before fit") }
         let memoKey = "kitml.state|\(Self.modelName)|\(memoSalt)|\(kind)|\(cap ?? "")|\(historyStart.map(String.init) ?? "-")"
         let boxed: KitBox<Any?> = try history.memo.value(memoKey) {
-            KitBox(try self.trainState(data: data, kind: kind, cap: cap))
+            KitBox(try self.trainState(data: data, builder: builder(kind), kind: kind, cap: cap))
         }
         states[key] = (data.now, boxed.value)
         return boxed.value
     }
 
     /// What distinguishes two trainings on one cut: the seed and the config.
-    var memoSalt: String {
-        let c = cfg.values.keys.sorted().map { "\($0)=\(cfg.values[$0]!)" }.joined(separator: ";")
-        return "\(ctx.seed)|\(c)"
+    var memoSalt: String { "\(ctx.seed)|\(configSalt)" }
+
+    var configSalt: String {
+        cfg.values.keys.sorted().map { "\($0)=\(cfg.values[$0]!)" }.joined(separator: ";")
     }
 
-    func trainState(data: KitMLData.AsOfData, kind: String, cap: String?) throws -> Any? {
+    /// A bucket's seed: FNV-1a of "model|bucket start", the same whichever
+    /// cut trains it.
+    static func bucketSeed(_ name: String, _ b: Millis) -> UInt64 {
+        var h: UInt64 = 0xCBF2_9CE4_8422_2325
+        for c in "\(name)|\(b)".utf8 { h = (h ^ UInt64(c)) &* 0x0000_0100_0000_01B3 }
+        return h
+    }
+
+    func trainState(data: KitMLData.AsOfData, builder: KitMLFeatures.FeatureBuilder, kind: String,
+                    cap: String?) throws -> Any? {
         let t0 = Date()
         let ts = try KitMLWalkforward.buildTrainset(
-            data, builder(kind), kind: kind, cap: cap, now: data.now, start: historyStart,
+            data, builder, kind: kind, cap: cap, now: data.now, start: historyStart,
             step: cfgKind("step_min", kind, unit: KitMLData.minMs), maxDays: cfgKind("max_days", kind, unit: 1),
             maxRows: cfg.int("max_rows", 4000), checkCancelled: { try ctx.checkCancelled() })
         let nCyc = ts.count > 0 ? (ts.cycle.max() ?? -1) + 1 : 0
         let enough = ts.count >= cfg.int("min_rows", 60) && nCyc >= cfg.int("min_cycles", 4)
         let state = enough ? try train(ts, kind: kind) : nil
-        ctx.log(String(format: "%@ %@%@: %d rows, %d cycles, %@ in %.2fs", Self.modelName, kind,
+        ctx.log(String(format: "%@ %@%@: %d rows, %d cycles, %@ in %.2fs (data to %lld)", Self.modelName, kind,
                        cap.map { ":" + $0 } ?? "", ts.count, nCyc, state != nil ? "trained" : "fallback",
-                       Date().timeIntervalSince(t0)))
+                       Date().timeIntervalSince(t0), data.now))
         return state
     }
 
@@ -170,4 +225,59 @@ open class KitMLLearnedMeterModel: ArenaModel {
                       used: Double) -> ArenaTargetForecast {
         fatalError("subclass")
     }
+}
+
+/// The store's trained states, by meter and bucket, the most recent
+/// `capacity` buckets per meter (least recently used out). Lives in
+/// `ArenaHistoryStore.memo` under one key, which has no eviction of its own.
+final class KitMLStateCache: @unchecked Sendable {
+    let capacity: Int
+    private let lock = NSLock()
+    private var entries: [String: [(bucket: Millis, state: KitBox<Any?>, used: Int)]] = [:]
+    private var tick = 0
+
+    init(capacity: Int) { self.capacity = capacity }
+
+    static func of(_ store: ArenaHistoryStore, capacity: Int) -> KitMLStateCache {
+        store.memo.value("kitml.statecache|\(capacity)") { KitMLStateCache(capacity: capacity) }
+    }
+
+    /// The meter's state for `bucket`, trained by `make` (outside the lock:
+    /// another meter's training never waits on it) when not held.
+    func value(_ meter: String, bucket: Millis, _ make: () throws -> Any?) rethrows -> Any? {
+        if let hit = lookup(meter, bucket) { return hit.value }
+        let v = try make()
+        lock.lock(); defer { lock.unlock() }
+        tick += 1
+        var list = entries[meter] ?? []
+        if let i = list.firstIndex(where: { $0.bucket == bucket }) {      // raced: the first stored wins
+            list[i].used = tick
+            entries[meter] = list
+            return list[i].state.value
+        }
+        list.append((bucket, KitBox(v), tick))
+        while list.count > capacity {
+            let oldest = list.indices.min { list[$0].used < list[$1].used }!
+            list.remove(at: oldest)
+        }
+        entries[meter] = list
+        return v
+    }
+
+    private func lookup(_ meter: String, _ bucket: Millis) -> KitBox<Any?>? {
+        lock.lock(); defer { lock.unlock() }
+        guard var list = entries[meter], let i = list.firstIndex(where: { $0.bucket == bucket }) else { return nil }
+        tick += 1
+        list[i].used = tick
+        entries[meter] = list
+        return list[i].state
+    }
+
+    /// The buckets held for a meter, oldest first (tests).
+    func buckets(_ meter: String) -> [Millis] {
+        lock.lock(); defer { lock.unlock() }
+        return (entries[meter] ?? []).map(\.bucket).sorted()
+    }
+
+    var meters: [String] { lock.lock(); defer { lock.unlock() }; return entries.keys.sorted() }
 }

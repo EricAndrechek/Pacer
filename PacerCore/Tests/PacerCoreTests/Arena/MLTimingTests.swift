@@ -88,7 +88,7 @@ struct MLTimingTests {
     }
 
     func time(_ store: ArenaHistoryStore, accounts: [String], now: Millis, parallel: Bool) throws -> [String] {
-        let spec = ArenaRegistry.spec("ml-gbm-quantile")!
+        let spec = MLParityTests.exactSpec
         var lines: [String] = []
         for (kind, target) in [("five_hour", ArenaTarget.meterFiveHour), ("seven_day", .meterSevenDay)] {
             let h = ArenaHistory(store: store, now: now, accounts: accounts)

@@ -24,9 +24,8 @@ import Testing
         var trained: Int { lock.lock(); defer { lock.unlock() }; return lines.filter { $0.contains(" in ") }.count }
     }
 
-    static func model(_ h: ArenaHistory, seed: UInt64 = 42, log: Log? = nil, cancelled: @escaping @Sendable () -> Bool = { false })
-        throws -> (MLGBMQuantileModel, ArenaRunner) {
-        let spec = ArenaRegistry.spec("ml-gbm-quantile")!
+    static func model(_ h: ArenaHistory, seed: UInt64 = 42, log: Log? = nil, spec: ArenaModelSpec = MLParityTests.exactSpec,
+                      cancelled: @escaping @Sendable () -> Bool = { false }) throws -> (MLGBMQuantileModel, ArenaRunner) {
         let runner = ArenaRunner(registry: [spec])
         let services = ArenaServices(log: { _, m in log?.add(m) }, isCancelled: cancelled)
         let ctx = ArenaContext(spec: spec, seed: seed, services: services, runner: runner, history: { h })
@@ -52,6 +51,13 @@ import Testing
             #expect(c.int(k, -1) == v, "\(k)")
         }
         #expect(c.double("learning_rate", 0) == 0.05)
+        // Swift-only: train once per retrain_h bucket, serially.
+        #expect(c.double("train_align_h", 0) == c.double("retrain_h", -1))
+        #expect(c.int("train_cache_buckets", 0) == 8)
+        let h = ArenaHistory(store: ArenaHistoryStore(meters: [:], spend: [:], tzOffsetMin: 0), now: 0, accounts: [])
+        let (m, r) = try Self.model(h, spec: spec)
+        _ = r
+        #expect(!m.parallel)
     }
 
     @Test func burnFallbackMatchesThePython() throws {
