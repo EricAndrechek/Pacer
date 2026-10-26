@@ -298,8 +298,9 @@ public enum KitMLGBM {
         let numBin: [Int]
         /// `bins[k * n + i]`: inner feature k of row i.
         let bins: [UInt8]
-        /// Per inner feature, its first slot in a leaf histogram (2 per bin:
-        /// rows, rows below their label).
+        /// Per inner feature, its first slot in a leaf histogram: one UInt64
+        /// per bin, rows in the low 32 bits and rows below their label in the
+        /// high 32 (one add per row and feature builds both).
         let histOffset: [Int]
         let histSize: Int
         /// LightGBM's `most_freq_bin_`: the fullest bin when it holds at
@@ -331,7 +332,7 @@ public enum KitMLGBM {
             self.used = used; self.bounds = bounds
             numBin = bounds.map(\.count)
             var off: [Int] = [], s = 0
-            for nb in numBin { off.append(s); s += 2 * nb }
+            for nb in numBin { off.append(s); s += nb }
             histOffset = off; histSize = s
             var bins = [UInt8](repeating: 0, count: used.count * n)
             for (k, f) in used.enumerated() {
@@ -430,6 +431,13 @@ public enum KitMLGBM {
             }
         }
 
+        /// One row at `x[0..<nFeatures]`.
+        @inline(__always) public func predict(_ x: UnsafePointer<Double>) -> Double {
+            var s = 0.0
+            for t in trees { s += t.leafValue[t.leaf(row: x)] }
+            return s
+        }
+
         /// Row-major `n × nFeatures`.
         public func predict(rows x: [Double]) -> [Double] {
             let n = nFeatures == 0 ? 0 : x.count / nFeatures
@@ -492,6 +500,13 @@ public enum KitMLGBM {
 
     /// One quantile booster on `ds` (labels `y`, one per row).
     public static func trainQuantile(_ ds: Dataset, y: [Double], alpha: Double, params p: Params) -> Booster {
+        trainQuantile(ds, y: y, alpha: alpha, params: p, trace: nil)
+    }
+
+    /// `trace(iter, leaf, rows, features tried, best split)` after every
+    /// split search below the root (tests only).
+    static func trainQuantile(_ ds: Dataset, y: [Double], alpha: Double, params p: Params,
+                              trace: ((Int, Int, Int, [Bool], SplitInfo, [UInt64], Double, Double) -> Void)?) -> Booster {
         let n = ds.n
         precondition(y.count == n)
         let alphaF = Float(alpha)
@@ -526,7 +541,7 @@ public enum KitMLGBM {
         var below = [UInt8](repeating: 0, count: n)
         var indices = [Int32](repeating: 0, count: n)
         var scratch = [Int32](repeating: 0, count: n)
-        var hists = [[Int32]](repeating: [Int32](repeating: 0, count: ds.histSize), count: max(p.numLeaves, 1))
+        var hists = [[UInt64]](repeating: [UInt64](repeating: 0, count: ds.histSize), count: max(p.numLeaves, 1))
         var leafBegin = [Int](repeating: 0, count: p.numLeaves), leafCount = [Int](repeating: 0, count: p.numLeaves)
         var leafG = [Double](repeating: 0, count: p.numLeaves), leafH = [Double](repeating: 0, count: p.numLeaves)
         var best = [SplitInfo](repeating: SplitInfo(), count: p.numLeaves)
@@ -543,7 +558,7 @@ public enum KitMLGBM {
             for k in 0..<nInner where used[k] && ds.mostFreqBin[k] > 0 {
                 let off = ds.histOffset[k], mf = ds.mostFreqBin[k]
                 var h = sumH
-                for b in 0..<ds.numBin[k] where b != mf { h -= Double(hists[leaf][off + 2 * b]) }
+                for b in 0..<ds.numBin[k] where b != mf { h -= Double(hists[leaf][off + b] & 0xFFFF_FFFF) }
                 mfbH[leaf][k] = h
             }
         }
@@ -621,6 +636,7 @@ public enum KitMLGBM {
                         best[l] = findBestSplit(ds, hist: hists[l], mfbH: mfbH[l], sumG: leafG[l], sumH: leafH[l],
                                                 count: leafCount[l],
                                                 used: allowed, splittable: &splittable[l], gPos: gPos, gNeg: gNeg, p: p)
+                        trace?(iter, l, leafCount[l], allowed, best[l], hists[l], leafG[l], leafH[l])
                     }
                 }
             }
@@ -668,22 +684,20 @@ public enum KitMLGBM {
     }
 
     static func buildHistogram(_ ds: Dataset, indices: [Int32], begin: Int, count: Int, below: [UInt8], used: [Bool],
-                               into hist: inout [Int32]) {
+                               into hist: inout [UInt64]) {
         let n = ds.n
         hist.withUnsafeMutableBufferPointer { h in
             ds.bins.withUnsafeBufferPointer { bins in
                 indices.withUnsafeBufferPointer { idx in
                     below.withUnsafeBufferPointer { bl in
                         for k in 0..<ds.used.count where used[k] {
-                            let off = ds.histOffset[k]
-                            let hp = h.baseAddress! + off
-                            for b in 0..<(2 * ds.numBin[k]) { hp[b] = 0 }
+                            let hp = h.baseAddress! + ds.histOffset[k]
+                            hp.update(repeating: 0, count: ds.numBin[k])
                             let col = bins.baseAddress! + k * n
+                            let ix = idx.baseAddress!, b = bl.baseAddress!
                             for j in begin..<(begin + count) {
-                                let r = Int(idx[j])
-                                let slot = 2 * Int(col[r])
-                                hp[slot] &+= 1
-                                hp[slot + 1] &+= Int32(bl[r])
+                                let r = Int(ix[j])
+                                hp[Int(col[r])] &+= 1 &+ (UInt64(b[r]) << 32)
                             }
                         }
                     }
@@ -692,10 +706,14 @@ public enum KitMLGBM {
         }
     }
 
-    static func subtract(_ a: inout [Int32], _ b: [Int32], ds: Dataset, used: [Bool]) {
-        for k in 0..<ds.used.count where used[k] {
-            let off = ds.histOffset[k]
-            for s in off..<(off + 2 * ds.numBin[k]) { a[s] &-= b[s] }
+    static func subtract(_ a: inout [UInt64], _ b: [UInt64], ds: Dataset, used: [Bool]) {
+        a.withUnsafeMutableBufferPointer { ap in
+            b.withUnsafeBufferPointer { bp in
+                for k in 0..<ds.used.count where used[k] {
+                    let off = ds.histOffset[k]
+                    for s in off..<(off + ds.numBin[k]) { ap[s] &-= bp[s] }
+                }
+            }
         }
     }
 
@@ -703,7 +721,7 @@ public enum KitMLGBM {
     /// (`FindBestThresholdSequentially`, reverse scan, no missing values).
     /// `splittable[k]` is set for every feature tried: whether any of its
     /// thresholds had positive gain. Features not tried keep their flag.
-    static func findBestSplit(_ ds: Dataset, hist: [Int32], mfbH: [Double], sumG: Double, sumH leafH: Double,
+    static func findBestSplit(_ ds: Dataset, hist: [UInt64], mfbH: [Double], sumG: Double, sumH leafH: Double,
                               count: Int, used: [Bool],
                               splittable: inout [Bool], gPos: Double, gNeg: Double, p: Params) -> SplitInfo {
         var out = SplitInfo()
@@ -724,7 +742,8 @@ public enum KitMLGBM {
             var bin = ds.numBin[k] - 1
             while bin >= 1 {
                 defer { bin -= 1 }
-                let c = Int(hist[off + 2 * bin]), nb = Int(hist[off + 2 * bin + 1])
+                let hv = hist[off + bin]
+                let c = Int(hv & 0xFFFF_FFFF), nb = Int(hv >> 32)
                 sumRG += Double(nb) * gNeg + Double(c - nb) * gPos
                 sumRH += bin == mf ? mfbH[k] : Double(c)
                 rc += c
