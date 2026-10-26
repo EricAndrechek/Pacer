@@ -185,4 +185,24 @@ import Testing
                                history: { nil })
         #expect(throws: ArenaError.self) { try SpendDecayModel(context: ctx).forecast(ArenaFixtures.request(c)) }
     }
+
+    /// What a memoized forecast holds: equal quantile rows share storage.
+    @Test func equalRowsShareStorage() throws {
+        var report: [String] = []
+        for c in try ArenaFixtures.cases("cases-spend").cases {
+            let name = c.inputs.window_kind == "five_hour" ? "spend-decay-30m" : "spend-decay-6h"
+            let runner = ArenaRunner(registry: ArenaRegistry.all)
+            let req = ArenaFixtures.request(c)
+            let tf = try #require(try runner.forecast(model: name, history: ArenaFixtures.history(c), request: req)
+                .byKey[req.targets[0].key])
+            guard let q = tf.quantiles else { continue }
+            var buffers = Set<UInt>()
+            for row in q { row.withUnsafeBufferPointer { buffers.insert(UInt(bitPattern: $0.baseAddress)) } }
+            var distinct = 1
+            for i in q.indices.dropFirst() where q[i] != q[i - 1] { distinct += 1 }
+            #expect(buffers.count == distinct, "case \(c.id)")
+            report.append("\(c.id) \(buffers.count)/\(q.count)")
+        }
+        print("stored quantile rows per forecast: " + report.joined(separator: ", "))
+    }
 }
