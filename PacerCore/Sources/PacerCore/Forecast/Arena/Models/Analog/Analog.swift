@@ -142,6 +142,9 @@ enum Analog {
         let dow: [Int]
         /// The increment at fractions k/M of the time left, k = 1…M.
         let D: [Double]
+        /// The least and greatest of `D` (bounds for the quantiles' histogram).
+        let minD: Double
+        let maxD: Double
     }
 
     /// `MeterTable`: every row of every usable past cycle, as blocks (one
@@ -206,7 +209,7 @@ enum Analog {
             }
         }
         return CycleCuts(account: account, reset: reset, count: es.count, e: es, u0: u0s, rates: rates,
-                         hour: hours, dow: dows, D: D)
+                         hour: hours, dow: dows, D: D, minD: D.min() ?? 0, maxD: D.max() ?? 0)
     }
 
     /// `build_meter_table`: every usable cycle among each account's latest
@@ -341,8 +344,12 @@ enum Analog {
     @inline(__always)
     static func wholeIncrement(_ b: CycleCuts, _ r: Int, M: Int, pos: Int, a: Double, s: Double) -> Double {
         let base = r * M
-        let d0 = (pos == 0 ? 0.0 : b.D[base + pos - 1]) * s
-        let d1 = b.D[base + pos] * s
+        return whole((pos == 0 ? 0.0 : b.D[base + pos - 1]) * s, b.D[base + pos] * s, a)
+    }
+
+    /// `inc = D'[pos]·(1 − a) + D'[pos+1]·a`, kept whole.
+    @inline(__always)
+    static func whole(_ d0: Double, _ d1: Double, _ a: Double) -> Double {
         let inc = d0 * (1 - a) + d1 * a
         return inc >= 0 ? (inc + 1e-9).rounded(.down) : (inc - 1e-9).rounded(.up)
     }
@@ -380,59 +387,92 @@ enum Analog {
     ///
     /// Every path value is `clip(u + inc)` with `inc` a whole number, which
     /// is non-decreasing in `inc`; so the quantile is read off a weight
-    /// histogram of the increments, one pass over the rows per grid time,
-    /// rather than a sort. The cumulative weights are the same sums in a
-    /// different order: they can differ from numpy's in the last bit, which
-    /// moves a level only when its cumulative weight lands within ~1e-16 of
-    /// a jump (port-spec open question 5).
+    /// histogram of the increments per grid time rather than a sort, filled
+    /// in one pass over the rows (each row's trajectory is contiguous). The
+    /// cumulative weights are the same sums in a different order: they can
+    /// differ from numpy's in the last bit, which moves a level only when
+    /// its cumulative weight lands within ~1e-16 of a jump (port-spec open
+    /// question 5).
     static func weightedType1(_ T: MeterTable, _ q: MeterQuery, _ grid: [Millis], w: [Double],
                               levels: [Double], _ cfg: ArenaConfig) -> [[Double]] {
-        let n = T.count
+        let n = T.count, G = grid.count, M = T.M
         precondition(w.count == n)
         var total = 0.0
         for x in w { total += x }
         let p = w.map { $0 / total }
-        let gp = gridPositions(grid, q, M: T.M)
+        let gp = gridPositions(grid, q, M: M)
         let scaling = PaceScaling(T, q, cfg)
         let L = T.lags.count
-        var scales: [Double]? = nil
+        var scales: [Double] = []
         if let scaling {
-            var s: [Double] = []
-            s.reserveCapacity(n)
-            for b in T.blocks { for r in 0..<b.count { s.append(scaling.s(b, r, nLags: L)) } }
-            scales = s
+            scales.reserveCapacity(n)
+            for b in T.blocks { for r in 0..<b.count { scales.append(scaling.s(b, r, nLags: L)) } }
         }
-        let order = levels.indices.sorted { levels[$0] < levels[$1] }
-        var out = [[Double]](repeating: [Double](repeating: 0, count: grid.count), count: levels.count)
-        var inc = [Int](repeating: 0, count: n)
-        var hist: [Double] = []
-        var present: [Bool] = []
-        for j in 0..<grid.count {
-            let pos = gp.pos[j], a = gp.a[j]
-            var lo = Int.max, hi = Int.min
+        // Bounds on every whole increment. Unscaled, each is a convex
+        // combination of two of D' = [0, D…], kept whole, so within
+        // [floor(min), ceil(max)] (one more either side absorbs rounding);
+        // scaled, a first pass finds them.
+        var lo: Int, hi: Int
+        if scales.isEmpty {
+            let mn = T.blocks.map(\.minD).min() ?? 0, mx = T.blocks.map(\.maxD).max() ?? 0
+            lo = Int(min(mn, 0).rounded(.down)) - 1
+            hi = Int(max(mx, 0).rounded(.up)) + 1
+        } else {
+            lo = .max; hi = .min
             var i = 0
             for b in T.blocks {
                 for r in 0..<b.count {
-                    let v = Int(wholeIncrement(b, r, M: T.M, pos: pos, a: a, s: scales?[i] ?? 1))
-                    inc[i] = v
-                    if v < lo { lo = v }
-                    if v > hi { hi = v }
+                    for j in 0..<G {
+                        let v = Int(wholeIncrement(b, r, M: M, pos: gp.pos[j], a: gp.a[j], s: scales[i]))
+                        lo = min(lo, v); hi = max(hi, v)
+                    }
                     i += 1
                 }
             }
-            let nb = hi - lo + 1
-            if hist.count < nb { hist = [Double](repeating: 0, count: nb); present = [Bool](repeating: false, count: nb) }
-            for k in 0..<nb { hist[k] = 0; present[k] = false }
-            for i in 0..<n { hist[inc[i] - lo] += p[i]; present[inc[i] - lo] = true }
+        }
+        guard n > 0, G > 0, lo <= hi else { return levels.map { _ in [Double](repeating: q.u, count: G) } }
+        let nb = hi - lo + 1
+        var hist = [Double](repeating: 0, count: G * nb)
+        var colMin = [Int](repeating: .max, count: G), colMax = [Int](repeating: .min, count: G)
+        hist.withUnsafeMutableBufferPointer { H in
+            colMin.withUnsafeMutableBufferPointer { CMin in
+                colMax.withUnsafeMutableBufferPointer { CMax in
+                    gp.pos.withUnsafeBufferPointer { pos in
+                        gp.a.withUnsafeBufferPointer { av in
+                            var i = 0
+                            for b in T.blocks {
+                                b.D.withUnsafeBufferPointer { D in
+                                    for r in 0..<b.count {
+                                        let pi = p[i], sc = scales.isEmpty ? 1.0 : scales[i]
+                                        let base = r * M
+                                        for j in 0..<G {
+                                            let k = pos[j]
+                                            let v = Int(whole((k == 0 ? 0.0 : D[base + k - 1]) * sc, D[base + k] * sc, av[j]))
+                                            H[j * nb + v - lo] += pi
+                                            if v < CMin[j] { CMin[j] = v }
+                                            if v > CMax[j] { CMax[j] = v }
+                                        }
+                                        i += 1
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let order = levels.indices.sorted { levels[$0] < levels[$1] }
+        var out = [[Double]](repeating: [Double](repeating: 0, count: G), count: levels.count)
+        for j in 0..<G {
+            let row = j * nb
             // The largest value is the answer when no cumulative weight
             // reaches a level (`min(searchsorted(...), n - 1)`).
-            var last = nb - 1
-            while last > 0 && !present[last] { last -= 1 }
-            var k = 0
-            var cum = hist[0]
+            let last = colMax[j] - lo
+            var k = colMin[j] - lo
+            var cum = hist[row + k]
             for li in order {
                 let target = levels[li] - KitDetQ.type1Tol
-                while cum < target && k < last { k += 1; cum += hist[k] }
+                while cum < target && k < last { k += 1; cum += hist[row + k] }
                 out[li][j] = level(q.u, Double(lo + k))
             }
         }

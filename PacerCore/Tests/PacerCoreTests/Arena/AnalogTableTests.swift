@@ -133,6 +133,22 @@ import Testing
             weekTotal += try clock.measure { _ = try runner.forecast(model: AnalogTests.name, history: h, request: req) }
             n7 += 1
         }
+        // Scoped weekly cap forecasts (an analog table at 30-minute cuts, M = 168, ~340 grid times).
+        var scopedTotal = Duration.zero, nS = 0, scopedRows = 0
+        let meter = ArenaMeterID(account: "A1", windowKind: "weekly_scoped", scopeModel: "Fable")
+        for t in cuts.suffix(160).enumerated().filter({ $0.offset % 8 == 0 }).map(\.element) {
+            let h = top.asOf(t)
+            guard let tr = ArenaRunner.targetRequest(history: h, meter: meter) else { continue }
+            let req = ArenaRequest(now: t, accounts: ["A1"], targets: [tr])
+            let runner = ArenaRunner(registry: [ArenaRegistry.fableAnalog])
+            var fc: ArenaForecast?
+            scopedTotal += try clock.measure { fc = try runner.forecast(model: AnalogTests.name, history: h, request: req) }
+            nS += 1
+            if let e = fc?.byKey[tr.key]?.extras["ess"] { #expect(e > 0) }
+            scopedRows = max(scopedRows, tr.grid.count)
+        }
+        print(String(format: "analog scoped weekly forecast %.2f ms (n=%d, %d grid times)",
+                     ms(scopedTotal) / Double(max(nS, 1)), nS, scopedRows))
         let readings = store.meters.values.map(\.count).reduce(0, +)
         print(String(format: "analog timings, 120 days (%d readings, %d cycles, table %d rows): index build %.1f ms once; "
                      + "five-hour forecast %.2f ms (n=%d); per-cut table build alone %.2f ms (n=%d); weekly forecast %.2f ms (n=%d)",
@@ -193,6 +209,31 @@ import Testing
             #expect(paths.allSatisfy { $0.count == tr.grid.count && $0.allSatisfy { $0 >= 0 && $0 <= 100 && $0 == $0.rounded() } })
         }
         #expect(simulated > 0)
+    }
+
+    /// The histogram quantiles are the sort-based ones (`KitDetQ.weightedType1`
+    /// over every row's trajectory), with and without the pace scaling.
+    @Test(arguments: [0.0, 0.5])
+    func histogramQuantilesAreTheSortedOnes(scaleAlpha: Double) throws {
+        let store = AnalogSynthetic.store(days: 40)
+        var cfg = Self.five
+        cfg.values["scale_alpha"] = .double(scaleAlpha)
+        var checked = 0
+        for t in AnalogSynthetic.cuts(store).suffix(40).enumerated().filter({ $0.offset % 5 == 0 }).map(\.element) {
+            let h = ArenaHistory(store: store, now: t, accounts: ["A1"], start: AnalogSynthetic.t0)
+            let req = ArenaRunner.request(history: h, targets: [.meterFiveHour])
+            guard let tr = req.targets.first else { continue }
+            let m = AnalogTests.fitted(h)
+            let Q = m.query(h, tr)
+            let T = m.table(h, kind: Q.kind, cap: Q.cap, accounts: Q.accounts, tz: Q.tz, cfg)
+            let (w, _, _) = Analog.meterWeights(T, Q.q, cfg)
+            let fast = Analog.weightedType1(T, Q.q, tr.grid, w: w, levels: KitDetQ.forecastLevels, cfg)
+            let paths = Analog.trajectories(T, Q.q, tr.grid, rows: Array(0..<T.count), cfg)
+            let sorted = KitDetQ.weightedType1(paths, weights: w, levels: KitDetQ.forecastLevels)
+            #expect(fast == sorted, "cut \(t)")
+            checked += 1
+        }
+        #expect(checked >= 6)
     }
 
     /// A fixture case, end to end through the runner.
