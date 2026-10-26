@@ -155,6 +155,21 @@ import Testing
         }
     }
 
+    @Test func hourlySeriesSumsTheLastHours() throws {
+        for c in try ArenaFixtures.cases("cases-spend").cases {
+            let h = ArenaFixtures.history(c)
+            let (ends, v) = KitSpend.hourlySeries(h, accounts: [c.inputs.account], hours: 48)
+            #expect(ends.count == 48 && ends.last == h.now && ends[0] == h.now - 47 * ArenaTime.hour)
+            let rows = h.spend(account: c.inputs.account)
+            for (i, e) in ends.enumerated() {
+                let direct = rows.filter { $0.tEvent > e - ArenaTime.hour && $0.tEvent <= e }.reduce(0) { $0 + ($1.costUSD ?? 0) }
+                #expect(abs(v[i] - direct) < 1e-9)
+            }
+            let opus = KitSpend.hourlySeries(h, accounts: [c.inputs.account], hours: 48, family: "opus").values
+            #expect(zip(opus, v).allSatisfy { $0 <= $1 + 1e-12 })
+        }
+    }
+
     @Test func localDayStartIsLocalMidnight() throws {
         for c in try ArenaFixtures.cases("cases-spend").cases {
             let h = ArenaFixtures.history(c)

@@ -60,7 +60,7 @@ public enum KitSpend {
 
     /// `FAMILIES.index`, with anything unknown counted as "other".
     @inline(__always)
-    static func familyIndex(_ family: String) -> Int {
+    public static func familyIndex(_ family: String) -> Int {
         switch family {
         case "fable": 0
         case "opus": 1
@@ -74,14 +74,14 @@ public enum KitSpend {
     /// (`SpendMeterFitter.capCounts`): the Fable weekly cap arrives as
     /// "Fable" and only Fable spend moves it. Nil when the cap names no
     /// family we know (every family counts).
-    static func capFamily(_ scopeModel: String?) -> String? {
+    public static func capFamily(_ scopeModel: String?) -> String? {
         guard let s0 = scopeModel, !s0.isEmpty else { return nil }
         let s = s0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         return families.dropLast().first { s.contains($0) }
     }
 
     /// `_counted`: which family columns can move this meter.
-    static func counted(_ scopeModel: String?) -> [Bool] {
+    public static func counted(_ scopeModel: String?) -> [Bool] {
         guard let fam = capFamily(scopeModel) else { return Array(repeating: true, count: families.count) }
         return families.map { $0 == fam }
     }
@@ -156,6 +156,29 @@ public enum KitSpend {
             }
             return Ledger(t: t, cost: C, tokens: K, fam: fam, unitCost: unit)
         }
+    }
+
+    /// `hourly_series`: the last `hours` whole hours before now: (hour
+    /// ends, values), spend in USD or tokens, optionally one model family.
+    /// Hours with no spend are 0. The hours end at `now − k h` (k = hours−1
+    /// … 0), so the last one is (now − 1 h, now]; rows are bucketed by
+    /// `tEvent`. Tokens are what the rows' `tokens` count.
+    public static func hourlySeries(_ history: ArenaHistory, accounts: [String], hours: Int, what: String = "spend",
+                                    family: String? = nil) -> (ends: [Millis], values: [Double]) {
+        precondition(what == "spend" || what == "tokens", "what must be spend or tokens, not \(what)")
+        let ends = (0..<hours).map { history.now - hourMs * Millis(hours - 1 - $0) }
+        var vals = [Double](repeating: 0, count: hours)
+        let fam = family.map(familyIndex)
+        for a in accounts {
+            let led = ledger(history, account: a)
+            if led.t.isEmpty { continue }
+            for (i, e) in ends.enumerated() {
+                let per = led.between(e - hourMs, e, what: what)
+                // per.sum(axis=1): five terms, added in order.
+                vals[i] += fam.map { per[$0] } ?? ((((per[0] + per[1]) + per[2]) + per[3]) + per[4])
+            }
+        }
+        return (ends, vals)
     }
 
     /// `spent_between`: USD (or tokens) per family over (t0, t1], by
@@ -439,7 +462,7 @@ public enum KitSpend {
     }
 
     @inline(__always)
-    static func floorDiv(_ a: Millis, _ b: Millis) -> Millis {
+    public static func floorDiv(_ a: Millis, _ b: Millis) -> Millis {
         let q = a / b
         return (a % b != 0 && (a < 0) != (b < 0)) ? q - 1 : q
     }

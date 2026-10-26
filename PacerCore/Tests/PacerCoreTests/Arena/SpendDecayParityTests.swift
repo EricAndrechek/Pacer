@@ -197,7 +197,7 @@ import Testing
                 .byKey[req.targets[0].key])
             guard let q = tf.quantiles else { continue }
             var buffers = Set<UInt>()
-            for row in q { row.withUnsafeBufferPointer { buffers.insert(UInt(bitPattern: $0.baseAddress)) } }
+            for row in q { _ = row.withUnsafeBufferPointer { buffers.insert(UInt(bitPattern: $0.baseAddress)) } }
             var distinct = 1
             for i in q.indices.dropFirst() where q[i] != q[i - 1] { distinct += 1 }
             #expect(buffers.count == distinct, "case \(c.id)")
