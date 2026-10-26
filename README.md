@@ -304,4 +304,5 @@ checklist.
 ## License
 
 [MIT](LICENSE). Pacer reads data from Anthropic's Claude Code product but is not
-affiliated with or endorsed by Anthropic.
+affiliated with or endorsed by Anthropic. Forecasting models ported or downloaded
+from Mistral AI, Amazon and Google: [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).

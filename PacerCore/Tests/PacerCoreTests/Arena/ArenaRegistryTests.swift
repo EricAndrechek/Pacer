@@ -6,9 +6,11 @@ import Testing
 /// its own slice, so check the whole for the mistakes a merge can introduce.
 @Suite("ArenaRegistry")
 struct ArenaRegistryTests {
-    /// Children that arrive from branches not merged yet; a spec naming one
-    /// still registers, and the runner drops it (a mix renormalises).
-    static let allowedMissing: Set<String> = ["port-engine-recent-rate", "port-engine-kalman-trend", "naive-flat"]
+    /// Children that arrive from branches not merged yet. Empty: every child
+    /// resolves. When the TimesFM branch registers `g1-01-sonnet-calstack`,
+    /// its child `fm-timesfm25-meter` is registered by the same branch, so
+    /// nothing is allowed missing then either.
+    static let allowedMissing: Set<String> = []
 
     @Test func namesAreUnique() {
         let names = ArenaRegistry.all.map(\.name)
