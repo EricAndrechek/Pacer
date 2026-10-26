@@ -108,3 +108,33 @@ import Testing
         #expect(paths.allSatisfy { $0[0] >= 0 && $0[0] <= 2 && $0[1] >= 10 && $0[1] <= 30 })
     }
 }
+
+@Suite struct ArenaContractMemoTests {
+    @Test func optionalValuesAreComputedOnce() {
+        let memo = ArenaMemo()
+        var calls = 0
+        let a: Int? = memo.value("k") { calls += 1; return nil }
+        let b: Int? = memo.value("k") { calls += 1; return 5 }
+        #expect(a == nil && b == nil && calls == 1)
+        let c: Int? = memo.value("j") { 3 }
+        #expect(c == 3)
+    }
+
+    final class Stub: ArenaModel {
+        init(context: ArenaContext) {}
+        func fit(_ history: ArenaHistory) {}
+        func forecast(_ request: ArenaRequest) -> ArenaForecast { ArenaForecast(byKey: [:]) }
+    }
+
+    @Test func aParentNeedsItsChildrensWeights() throws {
+        let c = try ArenaFixtures.cases().cases[0]
+        let runner = ArenaRunner(registry: [
+            ArenaModelSpec(name: "net", targets: [.meterFiveHour], weights: ["org/net@1"]) { Stub(context: $0) },
+            ArenaModelSpec(name: "pool", targets: [.meterFiveHour], children: ["net"]) { Stub(context: $0) },
+        ], services: ArenaServices(weights: { _ in nil }))
+        #expect(runner.requiredWeights("pool") == ["org/net@1"])
+        #expect(throws: ArenaError.weightsUnavailable("org/net@1")) {
+            try runner.forecast(model: "pool", history: ArenaFixtures.history(c), request: ArenaFixtures.request(c))
+        }
+    }
+}

@@ -81,4 +81,50 @@ import Testing
         #expect(n == 1)
         #expect(w <= 1e-9)
     }
+
+    /// Two accounts in view, one with too few intervals of its own: the fit
+    /// pools both (own false), and the hour buckets still match the rows,
+    /// R² grouped by (account, hour).
+    @Test func pooledAcrossAccounts() throws {
+        let (a, end) = SpendTimingTests.synthetic(days: 30)
+        // A second account: three days of the first's rows, renamed and shifted.
+        let five = ArenaMeterID(account: "S1", windowKind: "five_hour")
+        let cut = end - 3 * ArenaTime.day
+        // Every 20th reading (40 minutes apart): under 100 intervals of its own.
+        let otherReadings = a.meters[five]!.filter { $0.tEvent >= cut }.enumerated().filter { $0.offset % 20 == 0 }
+            .map(\.element)
+        let otherSpend = a.spend["S1"]!.filter { $0.tEvent >= cut }
+        var meters = a.meters
+        meters[ArenaMeterID(account: "S0", windowKind: "five_hour")] = otherReadings
+        let store = ArenaHistoryStore(meters: meters, spend: ["S1": a.spend["S1"]!, "S0": otherSpend],
+                                      tzOffsetMin: a.tzOffsetMin, dataStart: a.dataStart)
+        let h = ArenaHistory(store: store, now: end - ArenaTime.hour, accounts: ["S0", "S1"])
+        let today = KitSpend.localDayStart(h)
+        let (n, w) = Self.compare(h, account: "S0", kind: "five_hour", days: [today, today - ArenaTime.day])
+        #expect(n == 2 && w <= 1e-9)
+        let d = try #require(KitSpend.fitDetails(h, account: "S0", windowKind: "five_hour"))
+        #expect(!d.own)
+        #expect(KitSpend.fitDetails(h, account: "S1", windowKind: "five_hour")?.own == true)
+    }
+
+    /// No spend at all: no conversion, so spend-decay is the reading, flat;
+    /// the calibration wrapper passes that through; port-live-meter too.
+    @Test func noSpendIsFlat() throws {
+        let (a, end) = SpendTimingTests.synthetic(days: 20)
+        let store = ArenaHistoryStore(meters: a.meters, spend: [:], tzOffsetMin: a.tzOffsetMin, dataStart: a.dataStart)
+        let five = ArenaMeterID(account: "S1", windowKind: "five_hour")
+        let now = SpendTimingTests.activeNow(store, before: end, meter: five)
+        let h = ArenaHistory(store: store, now: now, accounts: ["S1"])
+        let req = ArenaRunner.request(history: h, targets: [.meterFiveHour, .meterSevenDay])
+        let runner = ArenaRunner(registry: ArenaRegistry.all)
+        for name in ["spend-decay-30m", "calib-spend-decay-30m", "port-live-meter"] {
+            let fc = try runner.forecast(model: name, history: h, request: req)
+            for tr in req.targets where ArenaRegistry.spec(name)!.targets.contains(tr.target) {
+                let tf = try #require(fc.byKey[tr.key], "\(name)")
+                let latest = KitBaselines.meterNow(h, tr).latest
+                #expect(tf.quantile(0.05).allSatisfy { $0 == latest } && tf.quantile(0.95).allSatisfy { $0 == latest },
+                        "\(name) \(tr.key)")
+            }
+        }
+    }
 }

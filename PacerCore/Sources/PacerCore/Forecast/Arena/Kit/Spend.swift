@@ -60,7 +60,7 @@ public enum KitSpend {
 
     /// `FAMILIES.index`, with anything unknown counted as "other".
     @inline(__always)
-    static func familyIndex(_ family: String) -> Int {
+    public static func familyIndex(_ family: String) -> Int {
         switch family {
         case "fable": 0
         case "opus": 1
@@ -74,14 +74,14 @@ public enum KitSpend {
     /// (`SpendMeterFitter.capCounts`): the Fable weekly cap arrives as
     /// "Fable" and only Fable spend moves it. Nil when the cap names no
     /// family we know (every family counts).
-    static func capFamily(_ scopeModel: String?) -> String? {
+    public static func capFamily(_ scopeModel: String?) -> String? {
         guard let s0 = scopeModel, !s0.isEmpty else { return nil }
         let s = s0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         return families.dropLast().first { s.contains($0) }
     }
 
     /// `_counted`: which family columns can move this meter.
-    static func counted(_ scopeModel: String?) -> [Bool] {
+    public static func counted(_ scopeModel: String?) -> [Bool] {
         guard let fam = capFamily(scopeModel) else { return Array(repeating: true, count: families.count) }
         return families.map { $0 == fam }
     }
@@ -158,6 +158,29 @@ public enum KitSpend {
         }
     }
 
+    /// `hourly_series`: the last `hours` whole hours before now: (hour
+    /// ends, values), spend in USD or tokens, optionally one model family.
+    /// Hours with no spend are 0. The hours end at `now − k h` (k = hours−1
+    /// … 0), so the last one is (now − 1 h, now]; rows are bucketed by
+    /// `tEvent`. Tokens are what the rows' `tokens` count.
+    public static func hourlySeries(_ history: ArenaHistory, accounts: [String], hours: Int, what: String = "spend",
+                                    family: String? = nil) -> (ends: [Millis], values: [Double]) {
+        precondition(what == "spend" || what == "tokens", "what must be spend or tokens, not \(what)")
+        let ends = (0..<hours).map { history.now - hourMs * Millis(hours - 1 - $0) }
+        var vals = [Double](repeating: 0, count: hours)
+        let fam = family.map(familyIndex)
+        for a in accounts {
+            let led = ledger(history, account: a)
+            if led.t.isEmpty { continue }
+            for (i, e) in ends.enumerated() {
+                let per = led.between(e - hourMs, e, what: what)
+                // per.sum(axis=1): five terms, added in order.
+                vals[i] += fam.map { per[$0] } ?? ((((per[0] + per[1]) + per[2]) + per[3]) + per[4])
+            }
+        }
+        return (ends, vals)
+    }
+
     /// `spent_between`: USD (or tokens) per family over (t0, t1], by
     /// `tEvent`: `[families]`. O(log n).
     public static func spentBetween(_ history: ArenaHistory, account: String, _ t0: Millis, _ t1: Millis,
@@ -225,31 +248,117 @@ public enum KitSpend {
     public static func pastCycles(_ history: ArenaHistory, account: String, windowKind: String,
                                   scopeModel: String? = nil) -> [PastCycle] {
         history.memo.value("kit.spend.past_cycles|\(account)|\(windowKind)|\(scopeModel ?? "")") {
-            let r = readings(history, account: account, windowKind: windowKind, scopeModel: scopeModel)
-            var t = [Millis](), p = [Double](), reset = [Millis]()
-            for i in 0..<r.count where r.active[i] { t.append(r.t[i]); p.append(r.p[i]); reset.append(r.reset[i]) }
-            if t.isEmpty { return [] }
-            let dur = windowMs(windowKind)
-            let half = Double(dur) / 2
-            // np.argsort(reset, kind="stable"), split where consecutive
-            // resets differ by half a window or more.
-            let o = reset.indices.sorted { reset[$0] != reset[$1] ? reset[$0] < reset[$1] : $0 < $1 }
-            var groups: [[Int]] = [[o[0]]]
-            for j in 1..<o.count {
-                if Double(reset[o[j]] - reset[o[j - 1]]) >= half { groups.append([o[j]]) } else { groups[groups.count - 1].append(o[j]) }
-            }
-            var out: [PastCycle] = []
-            for g in groups {
-                let res = truncatedMedian(g.map { reset[$0] })
-                if res > history.now { continue }
-                // Stable by t within the group (ties keep reset order).
-                let gi = g.indices.sorted { t[g[$0]] != t[g[$1]] ? t[g[$0]] < t[g[$1]] : $0 < $1 }.map { g[$0] }
-                out.append(PastCycle(reset: res, start: res - dur, t: gi.map { t[$0] }, util: gi.map { p[$0] }))
-            }
-            // Python's sorted() is stable too.
-            return out.enumerated().sorted { $0.element.reset != $1.element.reset ? $0.element.reset < $1.element.reset : $0.offset < $1.offset }
-                .map(\.element)
+            pastCyclesFast(readings(history, account: account, windowKind: windowKind, scopeModel: scopeModel),
+                           windowKind: windowKind, now: history.now)
         }
+    }
+
+    /// The Python's algorithm as written (argsort every active reading by
+    /// reset, split at gaps of half a window, sort each group by time): the
+    /// reference `pastCyclesFast` is checked against.
+    static func pastCyclesBySort(_ r: MeterSeries, windowKind: String, now: Millis) -> [PastCycle] {
+        var t = [Millis](), p = [Double](), reset = [Millis]()
+        for i in 0..<r.count where r.active[i] { t.append(r.t[i]); p.append(r.p[i]); reset.append(r.reset[i]) }
+        if t.isEmpty { return [] }
+        let dur = windowMs(windowKind)
+        let half = Double(dur) / 2
+        // np.argsort(reset, kind="stable"), split where consecutive
+        // resets differ by half a window or more.
+        let o = reset.indices.sorted { reset[$0] != reset[$1] ? reset[$0] < reset[$1] : $0 < $1 }
+        var groups: [[Int]] = [[o[0]]]
+        for j in 1..<o.count {
+            if Double(reset[o[j]] - reset[o[j - 1]]) >= half { groups.append([o[j]]) } else { groups[groups.count - 1].append(o[j]) }
+        }
+        var out: [PastCycle] = []
+        for g in groups {
+            let res = truncatedMedian(g.map { reset[$0] })
+            if res > now { continue }
+            // Stable by t within the group (ties keep reset order).
+            let gi = g.indices.sorted { t[g[$0]] != t[g[$1]] ? t[g[$0]] < t[g[$1]] : $0 < $1 }.map { g[$0] }
+            out.append(PastCycle(reset: res, start: res - dur, t: gi.map { t[$0] }, util: gi.map { p[$0] }))
+        }
+        // Python's sorted() is stable too.
+        return out.enumerated().sorted { $0.element.reset != $1.element.reset ? $0.element.reset < $1.element.reset : $0.offset < $1.offset }
+            .map(\.element)
+    }
+
+    /// `past_cycles` without sorting every reading by reset, the same
+    /// cycles. A cycle's readings arrive in time order with resets that
+    /// jitter by milliseconds, so one pass collects runs of nearby resets
+    /// (within a minute of the run's first), and only the runs are sorted
+    /// and merged: runs whose resets come within half a window of the
+    /// group's largest are one cycle, exactly where the sorted resets have
+    /// no gap of half a window. The median is a selection, not a sort.
+    static func pastCyclesFast(_ r: MeterSeries, windowKind: String, now: Millis) -> [PastCycle] {
+        let dur = windowMs(windowKind)
+        let half = Double(dur) / 2
+        let tol: Millis = min(ArenaTime.minute, dur / 4)
+        struct Run { var lo: Millis; var hi: Millis; let anchor: Millis; var members: [Int] }
+        var runs: [Run] = []
+        for i in 0..<r.count where r.active[i] {
+            let x = r.reset[i]
+            if let last = runs.indices.last, abs(x - runs[last].anchor) < tol {
+                runs[last].lo = min(runs[last].lo, x); runs[last].hi = max(runs[last].hi, x)
+                runs[last].members.append(i)
+            } else {
+                runs.append(Run(lo: x, hi: x, anchor: x, members: [i]))
+            }
+        }
+        if runs.isEmpty { return [] }
+        let order = runs.indices.sorted { runs[$0].lo != runs[$1].lo ? runs[$0].lo < runs[$1].lo : $0 < $1 }
+        var groups: [[Int]] = []
+        var maxSoFar = Millis.min
+        for k in order {
+            if groups.isEmpty || Double(runs[k].lo - maxSoFar) >= half {
+                groups.append([k]); maxSoFar = runs[k].hi
+            } else {
+                groups[groups.count - 1].append(k); maxSoFar = max(maxSoFar, runs[k].hi)
+            }
+        }
+        var out: [PastCycle] = []
+        out.reserveCapacity(groups.count)
+        for g in groups {
+            var members = g.count == 1 ? runs[g[0]].members : g.flatMap { runs[$0].members }
+            var resets = members.map { r.reset[$0] }
+            let res = selectMedian(&resets)
+            if res > now { continue }
+            // The Python's order: by time, ties by reset, then by position.
+            var inOrder = true
+            for j in 1..<max(members.count, 1) where r.t[members[j]] <= r.t[members[j - 1]] { inOrder = false; break }
+            if !inOrder {
+                members.sort { a, b in
+                    r.t[a] != r.t[b] ? r.t[a] < r.t[b] : (r.reset[a] != r.reset[b] ? r.reset[a] < r.reset[b] : a < b)
+                }
+            }
+            out.append(PastCycle(reset: res, start: res - dur, t: members.map { r.t[$0] }, util: members.map { r.p[$0] }))
+        }
+        return out
+    }
+
+    /// `int(np.median(xs))` by selection (quickselect), reordering `xs`.
+    static func selectMedian(_ xs: inout [Millis]) -> Millis {
+        let n = xs.count
+        func select(_ k: Int) -> Millis {
+            var lo = 0, hi = n - 1
+            while lo < hi {
+                let pivot = xs[(lo + hi) >> 1]
+                var i = lo, j = hi
+                while i <= j {
+                    while xs[i] < pivot { i += 1 }
+                    while xs[j] > pivot { j -= 1 }
+                    if i <= j { xs.swapAt(i, j); i += 1; j -= 1 }
+                }
+                if k <= j { hi = j } else if k >= i { lo = i } else { return xs[k] }
+            }
+            return xs[k]
+        }
+        let upper = select(n / 2)
+        if n % 2 == 1 { return upper }
+        // The largest of the lower half: after selecting n/2, everything
+        // left of it is <= it.
+        var lowerMax = xs[0]
+        for i in 0..<(n / 2) where xs[i] > lowerMax { lowerMax = xs[i] }
+        return Millis((Double(lowerMax) + Double(upper)) / 2)
     }
 
     /// `int(np.median(xs))` for int64 epoch ms: the middle value, or the
@@ -353,7 +462,7 @@ public enum KitSpend {
     }
 
     @inline(__always)
-    static func floorDiv(_ a: Millis, _ b: Millis) -> Millis {
+    public static func floorDiv(_ a: Millis, _ b: Millis) -> Millis {
         let q = a / b
         return (a % b != 0 && (a < 0) != (b < 0)) ? q - 1 : q
     }

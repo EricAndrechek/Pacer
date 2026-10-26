@@ -24,7 +24,7 @@ from arena.runner import RunConfig, Runner, Timeouts, parse_command, summarize
 from arena.snapshot.views import SnapshotData
 
 EXTENSIONS = ("cli_export", "cli_synth", "cli_board", "cli_report", "cli_fleet", "cli_selftest",
-              "cli_leakcheck", "cli_provenance", "cli_weights", "cli_runs")
+              "cli_leakcheck", "cli_provenance", "cli_weights", "cli_runs", "cli_portfix")
 DEFAULT_MODELS = Path(__file__).resolve().parent.parent / "models"
 
 

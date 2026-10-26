@@ -119,4 +119,28 @@ import Testing
         }
         print("\(model) end to end: \(fm.outputs.count) cases, worst |Δ| = \(worst) points")
     }
+
+    /// Two decode blocks (a horizon of 1100 steps, past the 32-patch block):
+    /// the median fed back as context and the refine frames over 35 patches,
+    /// against the Python on two fixture contexts (`timestral-5m-multiblock.json`,
+    /// `TimestralForecaster.forecast(..., prediction_length=1100)`, every 10th step).
+    @Test func multiBlockDecodeMatchesPyTorch() throws {
+        guard let fc = try TimestralTestWeights.forecaster("5m") else { return }
+        struct Ref: Decodable { let cases: [C]; struct C: Decodable { let `case`: String; let horizon: Int; let every: Int; let raw: [[Double]] } }
+        let ref = try JSONDecoder().decode(Ref.self, from: Data(contentsOf: ArenaFixtures.url("timestral-5m-multiblock")))
+        let fm = try ArenaFixtures.model("fm-timestral-5m-meter")
+        var worst = 0.0
+        for rc in ref.cases {
+            let ctx = try #require(fm.outputs.first { $0.case == rc.case }?.detail?["context"]?.numbers)
+            let got = try fc.forecast(context: [[ctx.map { Float($0 ?? .nan) }]], predictionLength: rc.horizon).curve(0, 0)
+            for (i, want) in rc.raw.enumerated() {
+                for (g, w) in zip(got[i * rc.every], want) {
+                    let err = abs(Double(g) - w) / max(1, abs(w))
+                    worst = max(worst, err)
+                    #expect(err <= 1e-3, "\(rc.case) step \(i * rc.every): \(g) vs \(w)")
+                }
+            }
+        }
+        print("Timestral-5M two-block decode: worst |Δ|/max(1,|x|) = \(worst)")
+    }
 }

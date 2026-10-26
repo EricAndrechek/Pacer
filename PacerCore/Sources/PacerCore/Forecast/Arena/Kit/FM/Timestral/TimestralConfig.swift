@@ -1,10 +1,21 @@
 import Foundation
 
-// Timestral (Mistral AI's time-series forecaster, Apache-2.0 inference code,
-// vendored in `research/arena/kit/fm/_vendor/timestral/` at commit
-// `a534bdbd`), ported to Swift with Accelerate. The weights are Mistral AI's,
-// under their Modified MIT licence (see `TimestralLicense`), loaded from the
-// pinned `model.safetensors` + `config.json` the arena scored.
+// Timestral (Mistral AI's time-series forecaster), ported to Swift with
+// Accelerate from its inference code: https://github.com/mistralai/timestral
+// at commit a534bdbd244d64f3d9d743f46c7bf6fc330ed4ff (`src/timestral/`),
+// vendored unchanged in `research/arena/kit/fm/_vendor/timestral/`.
+//
+//   Copyright Mistral AI. Licensed under the Apache License, Version 2.0
+//   (research/arena/kit/fm/_vendor/timestral/LICENSE). This port is a
+//   translation of that code into Swift: same computation, same names; the
+//   attention masks are built directly rather than with torch ops, the two
+//   symmetric-averaging passes run as one batch, and categorical covariates
+//   are left out.
+//
+// The weights are Mistral AI's, under their Modified MIT licence, which must
+// travel with every copy: `ArenaWeightStore` keeps the pinned `LICENSE`
+// beside each `model.safetensors` + `config.json` (in the app bundle and in
+// downloads alike).
 //
 // File by file: `config.py` → `TimestralConfig`; `layers.py`, `masks.py`,
 // `model.py` → `TimestralNetwork`; `scaler.py` → `TimestralScaler`;

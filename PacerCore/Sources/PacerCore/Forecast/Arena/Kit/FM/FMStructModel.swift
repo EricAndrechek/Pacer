@@ -64,10 +64,9 @@ public final class FMStructModel: ArenaModel {
     func ratio(_ history: ArenaHistory, account: String, wk: String, cap: String?) -> [String?: Double] {
         let hi = FMSeries.floorDiv(history.now, FMSeries.dayMs) * FMSeries.dayMs
         let lo = hi - Self.fitDays * FMSeries.dayMs
-        let s = FMSeries.meterSeries(history, account: account, windowKind: wk, scopeModel: cap, now: hi)
-        guard s.count >= 2 else { return [:] }
-        let xs = s.times.map(Double.init)
-        let rise = ArenaMath.interp(Double(hi), xs: xs, ys: s.cum) - ArenaMath.interp(Double(lo), xs: xs, ys: s.cum)
+        let (s, k) = FMSeries.meterSeriesPrefix(history, account: account, windowKind: wk, scopeModel: cap, now: hi)
+        guard k >= 2 else { return [:] }
+        let rise = Self.interp(Double(hi), s.times, s.cum, k) - Self.interp(Double(lo), s.times, s.cum, k)
         // The turns known at the real now, in the 14 days before `hi` (`_AsOf`).
         let tf = FMSeries.TurnFrame(history, hours: Int(Self.fitDays) * 24, accounts: [account], now: hi)
         let fams: [String]
@@ -76,6 +75,16 @@ public final class FMStructModel: ArenaModel {
         let spend = fams.reduce(0.0) { $0 + tf.hourly([account], family: $1).reduce(0, +) }
         guard rise > 0, spend > 0 else { return [:] }
         return Dictionary(uniqueKeysWithValues: fams.map { (Optional($0), rise / spend) })
+    }
+
+    /// `np.interp(x, times[:k], cum[:k])`, without copying either.
+    static func interp(_ x: Double, _ times: [Millis], _ ys: [Double], _ k: Int) -> Double {
+        if x <= Double(times[0]) { return ys[0] }
+        if x >= Double(times[k - 1]) { return ys[k - 1] }
+        var lo = 0, hi = k - 1
+        while hi - lo > 1 { let mid = (lo + hi) / 2; if Double(times[mid]) <= x { lo = mid } else { hi = mid } }
+        let span = Double(times[hi] - times[lo])
+        return span == 0 ? ys[lo] : ys[lo] + (x - Double(times[lo])) / span * (ys[hi] - ys[lo])
     }
 
     struct Plan {
@@ -95,8 +104,8 @@ public final class FMStructModel: ArenaModel {
             try ctx.checkCancelled()
             let acct = tr.accounts[0]
             let cap = tr.target == .meterScoped ? tr.cap : nil
-            let s = FMSeries.meterSeries(history, account: acct, windowKind: wk, scopeModel: cap, now: now)
-            let used = tr.resetAt.flatMap { s.usedNow($0) } ?? s.lastActiveUtil ?? 0
+            let (s, k) = FMSeries.meterSeriesPrefix(history, account: acct, windowKind: wk, scopeModel: cap, now: now)
+            let used = tr.resetAt.flatMap { s.usedNow($0, count: k) } ?? s.lastActiveUtil(count: k) ?? 0
             let (c, fitted) = conversion(history, account: acct, wk: wk, cap: cap)
             var rates = fitted
             var start: Double?

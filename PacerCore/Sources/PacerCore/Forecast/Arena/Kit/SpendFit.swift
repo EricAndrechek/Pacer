@@ -121,8 +121,9 @@ extension KitSpend {
     /// after now's day began is refused (its span would end after now).
     public static func fitOnDay(_ history: ArenaHistory, account: String, windowKind: String, scopeModel: String?,
                                 dayStart: Millis) -> FitDetails? {
-        precondition(dayStart <= localDayStart(history, account: account),
-                     "a fit's span must end by the start of now's day")
+        // The Python raises here; a forecaster running in the app's
+        // background must not trap, and "refused" reads as no conversion.
+        guard dayStart <= localDayStart(history, account: account) else { return nil }
         return history.memo.value("kit.spend.fit|\(account)|\(windowKind)|\(scopeModel ?? "")|\(dayStart)") {
             let off = tzOffsetMs(history, account: account)
             // A local midnight is a whole number of hours from the epoch in

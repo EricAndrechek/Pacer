@@ -1,0 +1,7 @@
+name = "caltest-wide"
+description = "Test child for the calibration layer: the latest reading of the cycle plus the cycle's pace so far, with a much too wide normal spread around that median (whole points, in [0, 100]). The layer should narrow it."
+targets = ["meter.five_hour", "meter.seven_day"]
+children = []
+
+[config]
+spread = 25.0

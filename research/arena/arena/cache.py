@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from collections import OrderedDict
 import tempfile
 from pathlib import Path
 
@@ -49,7 +50,7 @@ class ChildCache:
         self.enabled = enabled
         self.hits = 0
         self.misses = 0
-        self._mem: dict[str, Forecast] = {}
+        self._mem: OrderedDict[str, Forecast] = OrderedDict()
 
     def _path(self, key: str) -> Path:
         return self.root / key[:2] / f"{key}.npz"
@@ -59,6 +60,7 @@ class ChildCache:
             return None
         if key in self._mem:
             self.hits += 1
+            self._mem.move_to_end(key)
             return self._mem[key]
         p = self._path(key)
         if p.is_file():
@@ -67,16 +69,24 @@ class ChildCache:
             except (OSError, ValueError, KeyError):
                 fc = None
             if fc is not None:
-                self._mem[key] = fc
+                self._remember(key, fc)
                 self.hits += 1
                 return fc
         self.misses += 1
         return None
 
+    MEM_ENTRIES = 4096  # LRU bound: an unbounded dict grew with every child call
+
+    def _remember(self, key: str, fc: Forecast) -> None:
+        self._mem[key] = fc
+        self._mem.move_to_end(key)
+        while len(self._mem) > self.MEM_ENTRIES:
+            self._mem.popitem(last=False)
+
     def put(self, key: str, fc: Forecast) -> None:
         if not self.enabled:
             return
-        self._mem[key] = fc
+        self._remember(key, fc)
         if not self.writable:
             return
         try:
