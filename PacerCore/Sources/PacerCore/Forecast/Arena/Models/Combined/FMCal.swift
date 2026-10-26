@@ -244,6 +244,7 @@ public enum FMCal {
         /// `refresh` for a fresh instance: every candidate cut, its network
         /// call answered by `cache` when an identical context was forecast
         /// before (any cut, any forecast, this process).
+        ///
         /// `relative`: hand the network each cut's context relative to its
         /// latest value (`FMCal.relativeContext`, the default in the app) or
         /// raw, as the Python does.

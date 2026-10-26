@@ -387,6 +387,106 @@ import Testing
         #expect(cache.hits == before.0 && cache.misses == before.1, "g2-06 reused g1-08's backtest on the same cut")
     }
 
+    // MARK: - A scoped cap
+
+    struct ScopedDoc: Decodable {
+        struct Row: Decodable {
+            let `case`: String
+            let model: String
+            let det_out_cols: [[Double]]
+            let gate: Gate?
+            let levels: [Double]
+            let quantiles: [[Double]]
+            let mc_bounds: ArenaFixtures.Bounds
+        }
+        struct Gate: Decodable { let u0: Double?; let n_turns: Int; let idle_ms: Double?; let blocked_until: Int64; let n_kept: Int? }
+        let outputs: [Row]
+    }
+
+    /// A weekly case relabelled as the scoped cap "Fable", its pseudo-turns
+    /// split between families by the rule the fixture used (`fable` when
+    /// `(t_event / 1000) % 3 == 0`, else `opus`): `comb-scoped.json`.
+    static func scopedHistory(_ c: ArenaFixtures.Case) -> (ArenaHistory, ArenaRequest) {
+        let base = ArenaFixtures.history(c)
+        let acct = c.inputs.account
+        let spend = base.spend(account: acct).map { r in
+            ArenaSpendRow(tEvent: r.tEvent, tKnown: r.tKnown, family: (r.tEvent / 1000) % 3 == 0 ? "fable" : "opus",
+                          costUSD: r.costUSD)
+        }
+        let id = ArenaMeterID(account: acct, windowKind: "weekly_scoped", scopeModel: "Fable")
+        let store = ArenaHistoryStore(meters: [id: base.readings(account: acct, windowKind: "seven_day")],
+                                      spend: [acct: spend], tzOffsetMin: c.inputs.tz_offset_min,
+                                      dataStart: c.inputs.history_start)
+        let h = ArenaHistory(store: store, now: c.request.now, accounts: [acct], start: c.inputs.history_start)
+        let tr = ArenaTargetRequest(key: ArenaTarget.meterScoped.key(account: acct, cap: "Fable"), target: .meterScoped,
+                                    accounts: [acct], grid: c.request.grid, cap: "Fable", resetAt: c.request.reset_at)
+        return (h, ArenaRequest(now: c.request.now, accounts: [acct], targets: [tr]))
+    }
+
+    @Test func scopedCapMatchesPython() throws {
+        guard Self.weightsHere else { return }
+        let cases = try Self.cases()
+        let doc = try JSONDecoder().decode(ScopedDoc.self, from: Data(contentsOf: ArenaFixtures.url("comb-scoped")))
+        var worstDet = 0.0, outside = 0, outsideEnv = 0, total = 0
+        var lines: [String] = []
+        for row in doc.outputs {
+            let c = try #require(cases[row.case])
+            let (h, req) = Self.scopedHistory(c)
+            let tr = req.targets[0]
+            let now = c.request.now
+            if row.model == "g1-08-opus-fm" {
+                // Deterministic mode, raw contexts as the Python.
+                let spec = try Self.g108Spec(ration: false)
+                let runner = ArenaRunner(registry: [spec], services: TimestralTestWeights.services())
+                let m = try Self.instance(spec, runner: runner, history: h)
+                m.meters.tieU01 = 0.5
+                m.meters.relativeNetwork = false
+                let out = try #require(try m.meters.levels(h, now: now, tr).out)
+                for (k, a) in [0, 9, 19, 49, 99, 100, 149, 179, 189, 199].enumerated() {
+                    for j in 0..<out.count { worstDet = max(worstDet, abs(out[j][a] - row.det_out_cols[k][j])) }
+                }
+            }
+            if let g = row.gate {
+                let book = PacerCore.Gate.TurnBook(h)
+                let T = book.times(c.inputs.account, family: PacerCore.Gate.capFamily("Fable")).filter { $0 <= now }
+                #expect(T.count == g.n_turns, "\(row.case) scoped turns")
+                let d = PacerCore.Gate.idleMs(T, now)
+                #expect(g.idle_ms.map { $0 == d } ?? d.isInfinite, "\(row.case) idle")
+                #expect(try PacerCore.Gate.blockedUntil(h, account: c.inputs.account, now: now) == g.blocked_until)
+                #expect(KitBaselines.meterNow(h, tr).util.last == g.u0)
+            }
+            // As is: 4000 paths, bounds and an 8-seed envelope.
+            let spec = row.model == "g1-08-opus-fm" ? try Self.g108Spec() : try Self.g206Spec()
+            var runs: [[[Double]]] = []
+            var r4 = req
+            r4.targets[0].nPaths = 4000
+            for k in 0..<8 {
+                let runner = ArenaRunner(registry: [spec], services: TimestralTestWeights.services(), seed: UInt64(42 + k))
+                let fc = try runner.forecast(model: spec.name, history: h, request: r4)
+                let paths = try #require(fc.byKey[tr.key]?.paths)
+                let sorted = (0..<tr.grid.count).map { j in paths.map { $0[j] }.sorted() }
+                runs.append(Self.outLevels.map { lv in sorted.map { KitDetQ.readSorted($0, lv) } })
+            }
+            var o = 0, oe = 0
+            for li in Self.outLevels.indices {
+                for j in 0..<tr.grid.count {
+                    let v = runs[0][li][j], w = row.quantiles[li][j]
+                    total += 1
+                    guard v < row.mc_bounds.lo[li][j] - 1e-9 || v > row.mc_bounds.hi[li][j] + 1e-9 else { continue }
+                    o += 1
+                    let half = max(w - row.mc_bounds.lo[li][j], row.mc_bounds.hi[li][j] - w)
+                    if w < runs.map({ $0[li][j] }).min()! - half - 1e-9 || w > runs.map({ $0[li][j] }).max()! + half + 1e-9 { oe += 1 }
+                }
+            }
+            outside += o; outsideEnv += oe
+            lines.append("\(row.case) \(row.model): \(o) outside the bounds, \(oe) outside the seed envelope")
+        }
+        print("scoped cap: det worst |Δ| \(worstDet) points; \(outside) of \(total) outside the MC bounds, \(outsideEnv) outside the envelope\n"
+              + lines.joined(separator: "\n"))
+        #expect(worstDet <= 0.01)
+        #expect(Double(outsideEnv) <= 0.005 * Double(total))
+    }
+
     // MARK: - As is, Monte-Carlo
 
     /// The Swift estimate (4000 paths, seed 42) against the Python's bounds;
