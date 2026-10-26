@@ -26,6 +26,42 @@ struct RuntimeRegistryProbe {
         }
     }
 
+    /// The scorer itself over the registry: a pass on the heavy account with
+    /// small caps, each model's cost per forecast as the scorer sees it (one
+    /// runner per turn), the memory it leaves, and the engine's pick after.
+    @Test func aScorerPassOverTheRegistry() async throws {
+        let now = Date(timeIntervalSince1970: (Date().timeIntervalSince1970 / 60).rounded(.down) * 60)
+        let container = try RuntimePerfProbe.heavyStore(days: 120, now: now)
+        let engine = UsageIntelligenceEngine(modelContainer: container)
+        await engine.adopt(scope: .account(RuntimePerfProbe.account))
+        await engine.recompute(now: now)
+        _ = await engine.backfillRateLimitRecordIfNeeded(now: now, pause: .zero)
+        var config = ArenaRecordScorer.Config()
+        config.dutyCycle = 1
+        config.sessionCycleCap = Int(ProcessInfo.processInfo.environment["PACER_ARENA_CAP5H"] ?? "") ?? 28
+        config.weeklyCycleCap = 8
+        let rt = ArenaRuntime(container: container, roster: .standard, weights: Self.weights(), config: config,
+                              onRecordLanded: { _, news in _ = await engine.ingestArenaOutcomes(news) },
+                              onLiveLanded: { _ in })
+        await engine.adopt(arena: rt.link)
+        let clock = ContinuousClock()
+        let t0 = clock.now
+        let r = await rt.scorer.pass(accounts: [RuntimePerfProbe.account], now: now)
+        print(String(format: "[perf] scorer pass: %d cycles, %d forecasts, %d declined, %.1f s wall, %.1f s busy",
+                     r.cycles, r.forecasts, r.declined, RuntimePerfProbe.seconds(clock.now - t0), r.busySeconds))
+        for (id, sec) in r.modelSeconds.sorted(by: { $0.value > $1.value }) {
+            print(String(format: "[perf]   %@: %.1f ms/forecast over %d", id,
+                         sec * 1000 / Double(max(1, r.modelForecasts[id] ?? 1)), r.modelForecasts[id] ?? 0))
+        }
+        print("[perf] memory after the pass: \(ProcessMemory.current().summary)")
+        await engine.recompute(now: now)
+        for key in ["five_hour", "seven_day"] {
+            let m = await engine.resolvedMethod(windowKey: key)
+            let arenaIds = await engine.arenaModelIds(windowKey: key)
+            print("[perf] \(key): picked \(m.selected ?? "-"), drawn \(m.resolved ?? "-"), sheet lists \(arenaIds)")
+        }
+    }
+
     @Test func everyRegisteredModel() async throws {
         let now = Date(timeIntervalSince1970: (Date().timeIntervalSince1970 / 60).rounded(.down) * 60)
         let container = try RuntimePerfProbe.heavyStore(days: 120, now: now)
