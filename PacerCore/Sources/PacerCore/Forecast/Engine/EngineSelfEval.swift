@@ -447,3 +447,40 @@ public enum EngineSelfEval {
         return xs.reduce(0, +) / Double(xs.count)
     }
 }
+
+// MARK: - Arena models in the record
+
+extension EngineSelfEval {
+
+    /// Cycles an arena model needs behind it before it can be picked.
+    static func arenaMinPeriods(weekly: Bool) -> Int { weekly ? 3 : 8 }
+
+    /// The records selection compares, once arena models compete.
+    ///
+    /// The engine's methods are scored over every cycle the store holds; the
+    /// arena models are scored by a background pass, newest cycle first, that
+    /// can take hours on a first launch, and only over the last few months
+    /// (`ArenaRecordScorer.Config`). Ranking a model's error over the last 20
+    /// cycles against another's over the last 300 would reward whichever
+    /// stretch was easier, so every method is compared over the same span:
+    /// the cycles from the latest first cycle of the arena models that can be
+    /// picked. A model with fewer than `arenaMinPeriods` cycles behind it is
+    /// left out until it has them. With no arena model in the record this is
+    /// the identity, which keeps selection exactly as it was.
+    public static func arenaComparable(_ records: [Record], arenaIds: Set<String>, weekly: Bool) -> [Record] {
+        guard !arenaIds.isEmpty else { return records }
+        var periods: [String: Set<String>] = [:]
+        for r in records where arenaIds.contains(r.method) { periods[r.method, default: []].insert(r.periodKey) }
+        guard !periods.isEmpty else { return records }
+        let floor = arenaMinPeriods(weekly: weekly)
+        let eligible = periods.filter { $0.value.count >= floor }
+        // periodKeys are ISO 8601 instants, so their order is time order.
+        guard let start = eligible.values.compactMap({ $0.min() }).max() else {
+            return records.filter { !arenaIds.contains($0.method) }
+        }
+        return records.filter { r in
+            guard r.periodKey >= start else { return false }
+            return !arenaIds.contains(r.method) || eligible[r.method] != nil
+        }
+    }
+}
