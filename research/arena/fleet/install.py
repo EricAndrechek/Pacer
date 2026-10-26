@@ -16,7 +16,9 @@ from fleet.paths import FleetPaths, check_agent_name
 
 PYTHON_CANDIDATES = (
     "/opt/homebrew/bin/python3.12", "/opt/homebrew/bin/python3.13", "/opt/homebrew/bin/python3.14",
-    "/usr/local/bin/python3.12", "/usr/local/bin/python3.13",
+    "/usr/local/bin/python3.12", "/usr/local/bin/python3.13", "/usr/local/bin/python3.14",
+    # Linux distributions (e.g. the CI runner) ship it here.
+    "/usr/bin/python3.12", "/usr/bin/python3.13", "/usr/bin/python3.14", "/usr/bin/python3",
 )
 
 
@@ -26,10 +28,13 @@ def find_gate_python() -> str:
     for c in PYTHON_CANDIDATES:
         if Path(c).exists() and _version_ok(c):
             return c
-    r = subprocess.run(["uv", "python", "find", "3.12"], capture_output=True, text=True)
-    c = r.stdout.strip()
-    if r.returncode == 0 and c and _version_ok(c) and ".venv" not in c:
-        return c
+    # Otherwise ask uv for an interpreter that isn't this project's venv:
+    # `--no-project` keeps it from answering with the venv it is run from.
+    for args in (["--system", "3.12"], ["--no-project", "3.12"]):
+        r = subprocess.run(["uv", "python", "find", *args], capture_output=True, text=True)
+        c = r.stdout.strip()
+        if r.returncode == 0 and c and _version_ok(c) and ".venv" not in c:
+            return c
     raise RuntimeError("no Python >= 3.11 found for the eval gate")
 
 
