@@ -128,6 +128,18 @@ struct RuntimeBudgetTests {
         #expect(abs(script.slept - 8 * ArenaCPUBudget.sleepStep) < 1e-9)
     }
 
+    /// Urgent work that never ends does not starve the others: after
+    /// `maxUrgentYield` a checkpoint takes its turn.
+    @Test func theScorerTakesItsTurnAfterAWhile() {
+        let script = Script()
+        let budget = ArenaCPUBudget(rate: 1, burst: 100, clock: script.clock)
+        budget.mark()
+        budget.beginUrgent()
+        budget.checkpoint()
+        #expect(abs(script.slept - ArenaCPUBudget.maxUrgentYield) < 1e-9)
+        budget.endUrgent()
+    }
+
     @Test func cancellingStopsTheWait() {
         let script = Script()
         let budget = ArenaCPUBudget(rate: 0.01, burst: 0, clock: script.clock)

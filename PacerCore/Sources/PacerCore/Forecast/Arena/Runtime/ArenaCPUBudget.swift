@@ -23,7 +23,8 @@ import Foundation
 /// One budget is shared by every arena lane, so the scorer and the live
 /// forecaster together stay within `rate`. The live forecaster is urgent (the
 /// dashboard waits on it): while it works the scorer waits at its next
-/// checkpoint, so the live answers get the budget first.
+/// checkpoint (up to `maxUrgentYield` at a time), so the live answers get the
+/// budget first.
 public final class ArenaCPUBudget: @unchecked Sendable {
 
     /// Where time comes from: the system's clocks in the app, a script in tests.
@@ -56,6 +57,11 @@ public final class ArenaCPUBudget: @unchecked Sendable {
     /// The longest single sleep, so cancellation and an urgent lane are seen
     /// promptly.
     static let sleepStep = 0.25
+    /// The longest a non-urgent checkpoint waits for urgent work before it
+    /// takes its turn anyway (still within the rate): in an unoptimised
+    /// build one round of live projections can outlast the five minutes
+    /// between refits, and the scorer must not starve behind it forever.
+    static let maxUrgentYield = 5.0
 
     private let clock: Clock
     private let lock = NSLock()
@@ -109,11 +115,13 @@ public final class ArenaCPUBudget: @unchecked Sendable {
         }
         marks[id] = cpu
         lock.unlock()
+        var yielded = 0.0
         while !cancelled() {
-            let wait = needed(urgent: isUrgent)
+            let wait = needed(yieldToUrgent: !isUrgent && yielded < Self.maxUrgentYield)
             guard wait > 0 else { break }
             let step = min(Self.sleepStep, wait)
             clock.sleep(step)
+            yielded += step
             lock.lock(); sleptTotal += step; lock.unlock()
         }
         // What the thread did while it slept was nothing; start from here.
@@ -121,13 +129,13 @@ public final class ArenaCPUBudget: @unchecked Sendable {
     }
 
     /// How long to wait before the next step may run: zero when the bucket is
-    /// in credit (and no urgent lane is working, for a non-urgent caller).
-    private func needed(urgent isUrgent: Bool) -> Double {
+    /// in credit (and, when yielding, no urgent lane is working).
+    private func needed(yieldToUrgent: Bool) -> Double {
         lock.lock(); defer { lock.unlock() }
         let now = clock.wall()
         tokens = min(burst, tokens + max(0, now - refilledAt) * rate)
         refilledAt = now
-        if !isUrgent, urgent > 0 { return Self.sleepStep }
+        if yieldToUrgent, urgent > 0 { return Self.sleepStep }
         // Under a millisecond owed is paid: a wait the clock can't resolve
         // would never end.
         let wait = -tokens / rate

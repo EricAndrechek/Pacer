@@ -735,8 +735,9 @@ final class AppBackgroundService {
     /// Start back-computing the arena models over every account's history,
     /// once per launch, two minutes after the first refit: the first pass
     /// reads months of limits and turns, and launch has enough to do. At
-    /// background priority and a quarter of one core (`ArenaRecordScorer`),
-    /// newest cycles first, resuming after whatever an earlier launch saved.
+    /// background priority and a fifth of one core in CPU time, live
+    /// projections included (`ArenaCPUBudget`), newest cycles first, resuming
+    /// after whatever an earlier launch saved.
     private func startArena() {
         guard !arenaStarted else { return }
         arenaStarted = true

@@ -123,8 +123,10 @@ public actor ArenaRecordScorer {
 
     public struct Config: Sendable {
         /// Share of one core the arena may use, in CPU time, scorer and live
-        /// projections together (`ArenaCPUBudget`).
-        public var dutyCycle: Double = 0.25
+        /// projections together (`ArenaCPUBudget`). A fifth: with the refits,
+        /// scans and views on top, the app as a whole stays near a quarter
+        /// to a third of one core while a backfill runs.
+        public var dutyCycle: Double = 0.2
         /// New outcomes are saved and handed to the engines in batches, at
         /// most this often (or at `flushOutcomes`), and at the end of a pass:
         /// a save per cycle was hundreds of saves on a first pass, each a
@@ -383,16 +385,18 @@ public actor ArenaRecordScorer {
 
     /// The windows of `account` there is something to score in.
     private func streams(account: String, now: Date, full: Bool) async -> [Stream] {
+        // All of this is the scorer's work, charged to the budget: the reads,
+        // the build, segmenting and the record below.
+        let budget = self.budget, cancel = self.cancel
+        budget.mark()
         let days = full ? ArenaHistoryBuilder.depthDays : config.incrementalDays
         let limits = ArenaHistoryBuilder.readLimits(
             container: container, account: account, since: now.addingTimeInterval(-Double(days) * 86400))
-        guard limits.count > 0 else { return [] }
+        guard limits.count > 0 else { budget.checkpoint(cancelled: { cancel.isSet }); return [] }
         let store: ArenaHistoryStore
         if full {
             // Months of turns, priced: the pass's one burst of reading,
             // paced by the budget a day at a time.
-            let budget = self.budget, cancel = self.cancel
-            budget.mark()
             let built = ArenaHistoryBuilder.build(container: container, account: account, now: now, limits: limits,
                                                   pricing: config.pricing,
                                                   pace: { budget.checkpoint(cancelled: { cancel.isSet }) })
@@ -400,8 +404,12 @@ public actor ArenaRecordScorer {
             await history.install(built, account: account)
             store = built.store
         } else {
+            budget.checkpoint(cancelled: { cancel.isSet })
             store = await history.store(account: account, now: now)
         }
+        // A suspension may have moved this to another thread.
+        budget.mark()
+        defer { budget.checkpoint(cancelled: { cancel.isSet }) }
         // The engine's own windows and cycles, from the same rows: what the
         // arena models are scored on is exactly what the curve fits are.
         let f = EngineFeatures.build(now: now, calendar: calendar, daily: [], hourly: [],
@@ -713,6 +721,12 @@ public final class ArenaRuntime: Sendable {
         self.compareLimit = compareLimit
         self.ensureWeights = ensureWeights
         self.weights = weights
+        // One thread per BLAS call, process-wide (only the arena uses BLAS),
+        // from before the first live forecast: Accelerate otherwise spreads
+        // each matrix product over every core, so a quarter of a core by the
+        // calling thread's clock could be the whole machine by the process's,
+        // and the budget counts the calling thread.
+        FMBackends.setBLASThreading(singleThreaded: true)
         let cancel = self.cancel
         let budget = ArenaCPUBudget(rate: config.dutyCycle)
         self.budget = budget
@@ -755,12 +769,6 @@ public final class ArenaRuntime: Sendable {
     /// in the same process (`ArenaWeightStore` backs off between tries).
     public func start(accounts: @escaping @Sendable () async -> [String]) {
         guard !roster.isEmpty else { return }
-        // One thread per BLAS call, process-wide (only the arena uses BLAS):
-        // Accelerate otherwise spreads each matrix product over every core,
-        // so a quarter of a core by the calling thread's clock could be the
-        // whole machine by the process's, and the budget counts the calling
-        // thread.
-        FMBackends.setBLASThreading(singleThreaded: true)
         // What the models that can be picked need, children included.
         let runner = ArenaRunner(registry: roster.registry)
         let ids = Array(Set(roster.selectable.flatMap { runner.requiredWeights($0.name) })).sorted()
