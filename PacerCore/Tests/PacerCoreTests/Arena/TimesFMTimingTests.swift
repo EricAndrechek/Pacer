@@ -11,9 +11,15 @@ import Testing
 /// and meaningful only in a release build (`swift test -c release
 /// -Xswiftc -enable-testing`).
 ///
-/// Measured 2026-10-26 on Apple silicon, the machine shared with four other
-/// builds: see the MERGE NOTES of feat/fm-timesfm for the numbers.
-@Suite(.enabled(if: ProcessInfo.processInfo.environment["PACER_TIMESFM_BENCH"] != nil))
+/// Measured 2026-10-26 on an M4 Pro shared with four other builds (load
+/// 40–80), ms per forecast, both flip passes, one thread / default: the
+/// network 24 / 24 five-hour, 145 / 140–210 weekly; the model on the
+/// 120-day history 24 five-hour, 114 weekly. (PyTorch on the same machine:
+/// 60 and 140–670.) Weight streaming bounds it: 786 MB of layer weights per
+/// pass at ~37 GB/s is 20 ms, whatever the batch; a weekly forecast is six
+/// passes (prefill, five autoregressive steps). Splitting the GEMMs across
+/// threads by hand bought at most 20 % under that load, so it is not done.
+@Suite(.serialized, .enabled(if: ProcessInfo.processInfo.environment["PACER_TIMESFM_BENCH"] != nil))
 struct TimesFMTimingTests {
     @Test func networkTimings() throws {
         guard let be = try TimesFMNetworkTests.backend() else { return }
