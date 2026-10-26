@@ -602,7 +602,9 @@ while :; do
       [ -z "${STALE_SAID[$s]:-}" ] || continue
       away=""
       for o in "${SLOTS[@]}"; do
-        [ "$o" = "$act" ] && continue
+        # Not the burning slot either: if the switch back failed, sessions
+        # would be left on the account that is filling up.
+        [ "$o" = "$act" ] || [ "$o" = "$s" ] && continue
         oid=${ID[$o]}; ov=$(eff5 "$oid"); ow=$(eff7 "$oid")
         [ "${STAT[$oid]:-?}" = ok ] && [ "$ov" != - ] && [ "$ow" != - ] || continue
         excluded "$o" && continue

@@ -275,9 +275,11 @@ pacer_rate_limit_recent_burn_percent_per_hour{account="acc1acc0-0000",window="fi
 pacer_rate_limit_recent_burn_percent_per_hour{account="acc3acc0-0000",window="five_hour"} 25
 EOF
 ST="1:30:200:40:ok 3:60:150:40:ok 4:10:250:40:ok"
-ACTIVE_SINCE_OVERRIDE=$(( NOW - 2400 )) API=http://127.0.0.1:$port t "S1 slot 3 burns 25, active 2, 40m: WARN" \
-  '^[0-9:]{8} WARN slot 3 \(acc3acc0\) is still burning 25%/h while active 1 burns 2%/h for 40m.*re-apply with: cswap switch [34]; cswap switch 1$' 1 "$ST"
-ACTIVE_SINCE_OVERRIDE=$(( NOW - 600 )) API=http://127.0.0.1:$port t "S2 same, active changed 10m ago: quiet" \
+# The detour is never the burning slot (3); minutes are a range because a slow
+# machine can run this minutes after NOW was taken.
+ACTIVE_SINCE_OVERRIDE=$(( $(date +%s) - 2400 )) API=http://127.0.0.1:$port t "S1 slot 3 burns 25, active 2, 40m: WARN" \
+  '^[0-9:]{8} WARN slot 3 \(acc3acc0\) is still burning 25%/h while active 1 burns 2%/h for 4[0-9]m.*re-apply with: cswap switch 4; cswap switch 1$' 1 "$ST"
+ACTIVE_SINCE_OVERRIDE=$(( $(date +%s) - 600 )) API=http://127.0.0.1:$port t "S2 same, active changed 10m ago: quiet" \
   '^[0-9:]{8} no switch:' 1 "$ST"
 sed -i '' 's/ 25$/ 5/' "$T/www/metrics"
 ACTIVE_SINCE_OVERRIDE=$(( NOW - 2400 )) API=http://127.0.0.1:$port t "S3 slot 3 burns only 5: quiet" \
