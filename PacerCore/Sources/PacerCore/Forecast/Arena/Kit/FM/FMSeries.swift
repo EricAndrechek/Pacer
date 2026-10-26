@@ -80,6 +80,26 @@ public enum FMSeries {
             guard let t = times.last, let c = cum.last else { return nil }
             return (t, c)
         }
+
+        /// The first `k` rows.
+        public func prefix(_ k: Int) -> MeterSeries {
+            MeterSeries(times: Array(times.prefix(k)), cum: Array(cum.prefix(k)), cycleUtil: Array(cycleUtil.prefix(k)),
+                        reset: Array(reset.prefix(k)), active: Array(active.prefix(k)), duration: duration)
+        }
+
+        /// `usedNow` over the first `k` rows.
+        public func usedNow(_ resetAt: Millis, count k: Int) -> Double? {
+            var i = min(k, count) - 1
+            while i >= 0 { if inCycle(i, resetAt: resetAt) { return cycleUtil[i] }; i -= 1 }
+            return nil
+        }
+
+        /// `lastActiveUtil` over the first `k` rows.
+        public func lastActiveUtil(count k: Int) -> Double? {
+            var i = min(k, count) - 1
+            while i >= 0 { if active[i] { return cycleUtil[i] }; i -= 1 }
+            return nil
+        }
     }
 
     /// `meter_series` over one meter's readings (already the meter's own,
@@ -128,20 +148,108 @@ public enum FMSeries {
     /// one cut shares it).
     public static func meterSeries(_ history: ArenaHistory, account: String, windowKind: String,
                                    scopeModel: String? = nil, now: Millis? = nil) -> MeterSeries {
-        let id = ArenaMeterID(account: account, windowKind: windowKind, scopeModel: scopeModel)
         let key = "fm.meterSeries|\(account)|\(windowKind)|\(scopeModel ?? "")|\(now.map(String.init) ?? "-")"
-        return history.memo.value(key) { meterSeries(history.readings(id), windowKind: windowKind, now: now) }
+        return history.memo.value(key) {
+            let (s, k) = meterSeriesPrefix(history, account: account, windowKind: windowKind, scopeModel: scopeModel,
+                                           now: now)
+            return k == s.count ? s : s.prefix(k)
+        }
     }
+
+    /// The cut's series without copying it: its rows are the first `count`
+    /// of `series`. When the store's rows of this meter are known in event
+    /// order (the app writes a reading when it reads it), every cut's series
+    /// is a prefix of one series over all of the store's rows, because the
+    /// cumulative burn is causal; that one is built once per store and
+    /// shared by every cut, so a backfill over thousands of cuts derives it
+    /// once, not once per cut. Otherwise the cut's own series.
+    public static func meterSeriesPrefix(_ history: ArenaHistory, account: String, windowKind: String,
+                                         scopeModel: String? = nil, now: Millis? = nil) -> (series: MeterSeries, count: Int) {
+        let id = ArenaMeterID(account: account, windowKind: windowKind, scopeModel: scopeModel)
+        guard history.accounts.contains(account) else {
+            let s = meterSeries([], windowKind: windowKind)
+            return (s, 0)
+        }
+        if storeSeriesEnabled, history.store.metersKnownInOrder[id] == true,
+           let ss = storeSeriesCache.series(history.store, id, start: history.historyStart, windowKind: windowKind) {
+            // Rows known at the cut's now, and (of those) events up to `now`:
+            // both prefixes, since both clocks are non-decreasing here.
+            let kKnown = upperBound(ss.tKnown, history.now)
+            let kEvent = now.map { upperBound(ss.series.times, $0) } ?? kKnown
+            return (ss.series, min(kKnown, kEvent))
+        }
+        let key = "fm.meterSeriesRows|\(account)|\(windowKind)|\(scopeModel ?? "")|\(now.map(String.init) ?? "-")"
+        let s = history.memo.value(key) { meterSeries(history.readings(id), windowKind: windowKind, now: now) }
+        return (s, s.count)
+    }
+
+    /// Off only to measure what the shared store series saves.
+    nonisolated(unsafe) static var storeSeriesEnabled = true
+
+    /// Number of leading elements `<= x` of an ascending array.
+    static func upperBound(_ xs: [Millis], _ x: Millis) -> Int {
+        var lo = 0, hi = xs.count
+        while lo < hi { let mid = (lo + hi) / 2; if xs[mid] <= x { lo = mid + 1 } else { hi = mid } }
+        return lo
+    }
+
+    /// One meter's series over every row a store holds from a history start.
+    final class StoreSeries: @unchecked Sendable {
+        weak var store: ArenaHistoryStore?
+        let series: MeterSeries
+        /// Each series row's `tKnown`.
+        let tKnown: [Millis]
+        init(store: ArenaHistoryStore, series: MeterSeries, tKnown: [Millis]) {
+            self.store = store; self.series = series; self.tKnown = tKnown
+        }
+    }
+
+    /// A few store series, keyed by store identity (checked against a weak
+    /// reference, so a freed store's address is never mistaken for a new
+    /// one), meter and history start.
+    final class StoreSeriesCache: @unchecked Sendable {
+        struct Key: Hashable { let store: ObjectIdentifier; let id: ArenaMeterID; let start: Millis }
+        private let lock = NSLock()
+        private var entries: [Key: StoreSeries] = [:]
+        private var order: [Key] = []
+        static let capacity = 12
+
+        func series(_ store: ArenaHistoryStore, _ id: ArenaMeterID, start: Millis, windowKind: String) -> StoreSeries? {
+            let key = Key(store: ObjectIdentifier(store), id: id, start: start)
+            lock.lock()
+            if let e = entries[key], e.store === store { lock.unlock(); return e }
+            lock.unlock()
+            guard let all = store.meters[id] else { return nil }
+            // Rows from the history start (the store is sorted by event time).
+            var first = 0, hi = all.count
+            while first < hi { let mid = (first + hi) / 2; if all[mid].tEvent < start { first = mid + 1 } else { hi = mid } }
+            let rows = Array(all[first...])
+            let s = FMSeries.meterSeries(rows, windowKind: windowKind)
+            let known = rows.filter { r in r.utilPct.map { !$0.isNaN } ?? false }.map(\.tKnown)
+            guard known.count == s.count else { return nil }
+            let e = StoreSeries(store: store, series: s, tKnown: known)
+            lock.lock(); defer { lock.unlock() }
+            entries = entries.filter { $0.value.store != nil }
+            order = order.filter { entries[$0] != nil }
+            if entries[key] == nil { order.append(key) }
+            entries[key] = e
+            while order.count > Self.capacity { entries[order.removeFirst()] = nil }
+            return e
+        }
+    }
+
+    static let storeSeriesCache = StoreSeriesCache()
 
     /// Each grid time takes the last value at or before it; NaN when there is
     /// none, or it is older than `staleMs`. `times` ascending.
     public static func resampleLast(times: [Millis], values: [Double], grid: [Millis],
-                                    staleMs: Millis = FMSeries.staleMs) -> [Double] {
+                                    staleMs: Millis = FMSeries.staleMs, count: Int? = nil) -> [Double] {
         var out = [Double](repeating: .nan, count: grid.count)
-        guard !times.isEmpty else { return out }
+        let n = min(count ?? times.count, times.count)
+        guard n > 0 else { return out }
         for (j, g) in grid.enumerated() {
-            // searchsorted(times, g, side="right") - 1
-            var lo = 0, hi = times.count
+            // searchsorted(times[:n], g, side="right") - 1
+            var lo = 0, hi = n
             while lo < hi { let mid = (lo + hi) / 2; if times[mid] <= g { lo = mid + 1 } else { hi = mid } }
             let i = lo - 1
             if i >= 0 && g - times[i] <= staleMs { out[j] = values[i] }
@@ -215,9 +323,15 @@ public enum FMSeries {
             let since = now - Millis(hours) * hourMs
             var t: [Millis] = [], a: [String] = [], f: [String] = [], c: [Double] = [], k: [Double] = []
             for acct in accounts ?? history.accounts {
-                for row in history.spend(account: acct) where row.tEvent > since && row.tEvent <= now {
+                // Rows are in event order: start at the window, stop past now.
+                let rows = history.spend(account: acct)
+                var i = 0, hi = rows.count
+                while i < hi { let mid = (i + hi) / 2; if rows[mid].tEvent <= since { i = mid + 1 } else { hi = mid } }
+                while i < rows.count && rows[i].tEvent <= now {
+                    let row = rows[i]
                     t.append(row.tEvent); a.append(acct); f.append(row.family)
                     c.append(row.costUSD ?? 0); k.append(Double(row.tokens))
+                    i += 1
                 }
             }
             tMs = t; account = a; family = f; cost = c; tokens = k
@@ -273,7 +387,10 @@ public enum FMSeries {
         var out = [Double](repeating: .nan, count: hours)
         for a in accounts {
             for id in history.meters(account: a) where id.windowKind == windowKind {
-                let rows = history.readings(id).filter { $0.tEvent > since }
+                let all = history.readings(id)
+                var lo = 0, hi = all.count
+                while lo < hi { let mid = (lo + hi) / 2; if all[mid].tEvent <= since { lo = mid + 1 } else { hi = mid } }
+                let rows = all[lo...]
                 guard !rows.isEmpty else { continue }
                 let t = rows.map(\.tEvent)
                 let u = rows.map { ($0.active && $0.resetsAt != nil) ? ($0.utilPct ?? 0) : 0 }

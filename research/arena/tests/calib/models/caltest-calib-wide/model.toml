@@ -1,0 +1,18 @@
+name = "caltest-calib-wide"
+description = "Test: the calibration layer over caltest-wide."
+targets = ["meter.five_hour", "meter.seven_day"]
+children = ["caltest-wide"]
+
+[config]
+child = "caltest-wide"
+method = "scale"
+n0 = 4.0
+n0_bin = 4.0
+
+[config.backtest_every_h]
+five_hour = 1
+seven_day = 6
+
+[config.backtest_n]
+five_hour = 8
+seven_day = 8

@@ -94,6 +94,17 @@ import Testing
         print("spend-decay-6h parity: detail max |Δ| \(r.detailMax), quantile max |Δ| \(r.quantileMax)")
     }
 
+    /// The other two variants, from reference files of our own made the
+    /// way `arena port-fixtures` makes them (`spend-decay-1h.json`,
+    /// `spend-decay-1d.json`; the generator, which reproduces the committed
+    /// -30m and -6h files exactly, is at the end of this file).
+    @Test func otherVariantsMatchThePython() throws {
+        let r1h = try check("spend-decay-1h")
+        let r1d = try check("spend-decay-1d")
+        #expect(r1h.checked == 6 && r1d.checked == 6)
+        print("spend-decay-1h parity: detail \(r1h.detailMax), quantiles \(r1h.quantileMax); spend-decay-1d: detail \(r1d.detailMax), quantiles \(r1d.quantileMax)")
+    }
+
     @Test func ndtriIsScipys() {
         // scipy.special.ndtri at these levels (printed with repr).
         #expect(abs(KitDetQ.ndtri(0.05) - -1.6448536269514729) < 1e-14)
@@ -149,10 +160,124 @@ import Testing
                 let lo = tf.quantile(0.05), md = tf.median, hi = tf.quantile(0.95)
                 for j in 0..<tr.grid.count {
                     #expect(lo[j] <= md[j] + 1e-12 && md[j] <= hi[j] + 1e-12, "\(spec.name) \(c.id) levels cross")
-                    #expect(lo[j] >= latest - 1e-9 && hi[j] <= max(100, latest) + 1e-9, "\(spec.name) \(c.id) range")
+                    // The analog's trajectories can fall (a past cycle's
+                    // re-base), so its wrapper may forecast below the reading.
+                    let floor = spec.children.contains("g1-10-fable-analog") ? 0 : latest
+                    #expect(lo[j] >= floor - 1e-9 && hi[j] <= max(100, latest) + 1e-9, "\(spec.name) \(c.id) range")
                 }
                 #expect(zip(md, md.dropFirst()).allSatisfy { $0 <= $1 + 1e-12 }, "\(spec.name) \(c.id) median falls")
             }
         }
     }
+
+    /// A per-model weekly cap ("Fable"): only that family's spend is
+    /// fitted, the calibration map is the cap's own kind, and both models
+    /// answer the scoped target.
+    @Test func scopedCapCountsItsFamilyOnly() throws {
+        let (store, end) = SpendTimingTests.synthetic(days: 40, scoped: true)
+        let h = ArenaHistory(store: store, now: end - 5 * ArenaTime.hour, accounts: ["S1"])
+        let d = try #require(KitSpend.fitDetails(h, account: "S1", windowKind: "weekly_scoped", scopeModel: "Fable"))
+        #expect(d.rates[0] > 0 && d.rates[1...].allSatisfy { $0 == 0 }, "rates \(d.rates)")
+        #expect(abs(d.rates[0] - 0.4) < 0.05, "the synthetic cap moves 0.4 pt per Fable dollar: \(d.rates[0])")
+        let req = ArenaRunner.request(history: h, targets: [.meterScoped])
+        let tr = try #require(req.targets.first)
+        #expect(tr.cap == "Fable" && tr.key == "meter.scoped:S1:Fable")
+        let runner = ArenaRunner(registry: ArenaRegistry.all)
+        for name in ["spend-decay-6h", "calib-spend-decay-6h"] {
+            let fc = try runner.forecast(model: name, history: h, request: req)
+            let tf = try #require(fc.byKey[tr.key], "\(name)")
+            let m = KitBaselines.meterNow(h, tr)
+            #expect(tf.median.allSatisfy { $0 >= m.latest - 1e-9 && $0 <= 100 }, "\(name)")
+        }
+        #expect(KitCalib.kindOf(.meterScoped, cap: "Fable") == "weekly_scoped:Fable")
+    }
+
+    @Test func refusedDayAndUnfittedModel() throws {
+        let c = try ArenaFixtures.cases("cases-spend").cases[0]
+        let h = ArenaFixtures.history(c)
+        let tomorrow = KitSpend.localDayStart(h) + ArenaTime.day
+        #expect(KitSpend.fitOnDay(h, account: c.inputs.account, windowKind: c.inputs.window_kind, scopeModel: nil,
+                                  dayStart: tomorrow) == nil)
+        let spec = try #require(ArenaRegistry.spec("spend-decay-30m"))
+        let ctx = ArenaContext(spec: spec, seed: 1, services: ArenaServices(), runner: ArenaRunner(registry: []),
+                               history: { nil })
+        #expect(throws: ArenaError.self) { try SpendDecayModel(context: ctx).forecast(ArenaFixtures.request(c)) }
+    }
+
+    /// What a memoized forecast holds: equal quantile rows share storage.
+    @Test func equalRowsShareStorage() throws {
+        var report: [String] = []
+        for c in try ArenaFixtures.cases("cases-spend").cases {
+            let name = c.inputs.window_kind == "five_hour" ? "spend-decay-30m" : "spend-decay-6h"
+            let runner = ArenaRunner(registry: ArenaRegistry.all)
+            let req = ArenaFixtures.request(c)
+            let tf = try #require(try runner.forecast(model: name, history: ArenaFixtures.history(c), request: req)
+                .byKey[req.targets[0].key])
+            guard let q = tf.quantiles else { continue }
+            var buffers = Set<UInt>()
+            for row in q { _ = row.withUnsafeBufferPointer { buffers.insert(UInt(bitPattern: $0.baseAddress)) } }
+            var distinct = 1
+            for i in q.indices.dropFirst() where q[i] != q[i - 1] { distinct += 1 }
+            #expect(buffers.count == distinct, "case \(c.id)")
+            report.append("\(c.id) \(buffers.count)/\(q.count)")
+        }
+        print("stored quantile rows per forecast: " + report.joined(separator: ", "))
+    }
 }
+
+/* How ArenaFixtures/spend-decay-1h.json and spend-decay-1d.json were made
+   (synthetic cases only), from research/arena:
+   uv run python -I variants_fixture.py cases-spend.json <out-dir>
+
+"""spend-decay-1h (five-hour cases) and spend-decay-1d (weekly cases) through
+kit.detq on the SYNTHETIC spend fixture cases, as `arena port-fixtures`
+writes them (same levels, same detail), without touching any snapshot.
+
+Usage (from research/arena): uv run python -I <this> <cases-spend.json> <out-dir>
+"""
+import json
+import sys
+from pathlib import Path
+
+import numpy as np
+
+from arena.cli_portfix import (MODELS_DIR, Local, _arr, detail_json, fixture_pricing, snapshot_from_case)
+from arena.episodes import target_key
+from arena.registry import Registry
+from arena.types import Request, Scope, Target, TargetRequest
+from kit import detq
+
+
+def main(src, out_dir):
+    cases = json.load(open(src))["cases"]
+    reg = Registry([MODELS_DIR])
+    for name, kind in (("spend-decay-1h", "five_hour"), ("spend-decay-1d", "seven_day")):
+        info = reg.load(name)
+        outs = []
+        for c in cases:
+            inp, rq = c["inputs"], c["request"]
+            if inp["window_kind"] != kind:
+                continue
+            acct = inp["account"]
+            target = Target(rq["target"])
+            small = snapshot_from_case(c)
+            local = Local(small, tz_offset_min=inp["tz_offset_min"])
+            grid = np.asarray(rq["grid"], dtype=np.int64)
+            key = target_key(target, (acct,))
+            req = Request(rq["now"], Scope((acct,), "scope_only"),
+                          (TargetRequest(key, target, (acct,), grid, "pct", 200, None, None, rq["reset_at"]),))
+            view = small.view(req.scope, "current_code", inp["history_start"])
+            with fixture_pricing():
+                model = local.instance(info, view, rq["now"])
+                det = detq.quantiles(model, req, detq.LEVELS_OUT)[key]
+            outs.append({"case": c["id"], "levels": list(detq.LEVELS_OUT), "quantiles": _arr(det.q),
+                         "median": _arr(det.median), "exact": bool(det.exact), "mc_paths": int(det.mc_paths),
+                         "detail": detail_json(dict(det.detail))})
+        json.dump({"format": "pacer-arena-port-fixture/1", "spec": "docs/port-spec.md#parity", "model": name,
+                   "snapshot": "cases-spend.json (synthetic, seed 42)", "seed": 42, "outputs": outs},
+                  open(Path(out_dir) / f"{name}.json", "w"))
+
+
+if __name__ == "__main__":
+    main(sys.argv[1], sys.argv[2])
+*/

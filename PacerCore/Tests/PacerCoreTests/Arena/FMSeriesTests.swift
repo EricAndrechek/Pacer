@@ -112,3 +112,29 @@ import Testing
         #expect(us.allSatisfy { $0.count == 3 && $0.allSatisfy { $0 > 0 && $0 < 1 } })
     }
 }
+
+/// The shared store series: every cut's prefix of it is exactly the series
+/// built from the cut's own rows (a 30-day synthetic history, cuts every
+/// few hours, including one whose `now` argument is before the cut's).
+@Suite struct FMStoreSeriesTests {
+    @Test func prefixEqualsTheCutsOwnSeries() {
+        let store = TimestralSyntheticHistory.store(days: 30, seed: 5)
+        let last = store.meters.values.compactMap { $0.last?.tEvent }.max()!
+        for wk in ["five_hour", "seven_day"] {
+            for i in 0..<40 {
+                let now = last - Millis(i) * 17 * ArenaTime.hour - 13 * ArenaTime.minute
+                let h = ArenaHistory(store: store, now: now, accounts: ["A1"])
+                for arg in [now, now - 3 * ArenaTime.day] {
+                    let (s, k) = FMSeries.meterSeriesPrefix(h, account: "A1", windowKind: wk, now: arg)
+                    let own = FMSeries.meterSeries(h.readings(account: "A1", windowKind: wk), windowKind: wk, now: arg)
+                    #expect(k == own.count, "\(wk) cut \(i)")
+                    #expect(Array(s.times.prefix(k)) == own.times && Array(s.cum.prefix(k)) == own.cum, "\(wk) cut \(i)")
+                    #expect(Array(s.cycleUtil.prefix(k)) == own.cycleUtil && Array(s.active.prefix(k)) == own.active)
+                }
+            }
+        }
+        // A cut that does not see the account sees nothing.
+        let h = ArenaHistory(store: store, now: last, accounts: ["B"])
+        #expect(FMSeries.meterSeriesPrefix(h, account: "A1", windowKind: "five_hour").count == 0)
+    }
+}

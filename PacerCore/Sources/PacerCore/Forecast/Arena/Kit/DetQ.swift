@@ -57,6 +57,16 @@ public enum KitDetQ {
                 out[li][j] = values[order[min(lo, n - 1)]][j]
             }
         }
+        return sharingEqualRows(out)
+    }
+
+    /// Rows equal to the one before share its storage (copy-on-write), so
+    /// a forecast whose quantiles step between a few dozen past cuts holds
+    /// a few dozen rows, not 207. The runner memoizes forecasts by the
+    /// thousand in a backfill; this is most of their memory.
+    public static func sharingEqualRows(_ rows: [[Double]]) -> [[Double]] {
+        var out = rows
+        for i in out.indices.dropFirst() where out[i] == out[i - 1] { out[i] = out[i - 1] }
         return out
     }
 

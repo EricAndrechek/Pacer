@@ -265,7 +265,17 @@ struct ProjectionDetailView: View {
         "diurnal-rate": .teal,
         "recent-rate": .indigo,
     ]
-    private func color(_ id: String) -> Color { Self.palette[id] ?? .gray }
+    private func color(_ id: String) -> Color { Self.palette[id] ?? Self.arenaColor(id) }
+
+    /// A ported arena model's colour: picked from its id with a hash that is
+    /// the same on every launch (`hashValue` is seeded per process), so a
+    /// model keeps its colour, and from hues the engine's models don't use.
+    private static let arenaPalette: [Color] = [.cyan, .mint, .brown, .red, .yellow,
+                                                Color(red: 0.55, green: 0.45, blue: 0.85)]
+    private static func arenaColor(_ id: String) -> Color {
+        let h = id.unicodeScalars.reduce(5381) { ($0 &* 33 &+ Int($1.value)) & 0x7fff_ffff }
+        return arenaPalette[h % arenaPalette.count]
+    }
 
     /// The models with a line this cycle. The chart, its domain and spread are
     /// built from these; the table lists every model (#307).
@@ -778,7 +788,11 @@ struct ModelInfoGallery: View {
     @State private var accuracy: EngineSelfEval.Accuracy?
 
     var body: some View {
-        let ids = BurnTrajectory.defaultModels.map(\.id) + ["diurnal-rate"]
+        // The engine's methods, then any arena model this window's record
+        // holds (`RateLimitRoster`): the gallery shows what the sheet can.
+        let arenaIds = ArenaRoster.standard.selectableIds
+        let ids = RateLimitRoster.engineIds
+            + (accuracy?.methods.map(\.method).filter { arenaIds.contains($0) }.sorted() ?? [])
         LazyVGrid(columns: [GridItem(.adaptive(minimum: 300, maximum: 330), alignment: .top)],
                   alignment: .leading, spacing: 12) {
             ForEach(ids, id: \.self) { id in

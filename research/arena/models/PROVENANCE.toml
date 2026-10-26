@@ -6,6 +6,30 @@
 # Claude model, effort, niche and the earlier models it copied or adapted).
 # `arena provenance check` verifies every folder is listed.
 
+[models.calib-fm-timestral-5m-meter]
+kind = "port"            # the calibration layer (kit/calib.py) over fm-timestral-5m-meter; written by the coordinator, no generation
+
+[models.calib-g1-08-opus-fm]
+kind = "port"            # the calibration layer (kit/calib.py) over g1-08-opus-fm; written by the coordinator, no generation
+
+[models.calib-g1-10-fable-analog]
+kind = "port"            # the calibration layer (kit/calib.py) over g1-10-fable-analog; written by the coordinator, no generation
+
+[models.calib-g2-01-haiku-weekly-209m-extended]
+kind = "port"            # the calibration layer (kit/calib.py) over g2-01-haiku-weekly-209m-extended; written by the coordinator, no generation
+
+[models.calib-g2-06-opus-fmgate2]
+kind = "port"            # the calibration layer (kit/calib.py) over g2-06-opus-fmgate2; written by the coordinator, no generation
+
+[models.calib-g2-08-fable-burst]
+kind = "port"            # the calibration layer (kit/calib.py) over g2-08-fable-burst; written by the coordinator, no generation
+
+[models.calib-spend-decay-30m]
+kind = "port"            # the calibration layer (kit/calib.py) over spend-decay-30m; written by the coordinator, no generation
+
+[models.calib-spend-decay-6h]
+kind = "port"            # the calibration layer (kit/calib.py) over spend-decay-6h; written by the coordinator, no generation
+
 [models.combo-ewa]
 kind = "port"
 

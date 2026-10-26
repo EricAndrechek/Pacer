@@ -1,0 +1,26 @@
+name = "calib-spend-decay-6h"
+description = "spend-decay-6h with its meter ranges recalibrated around its own median (kit/calib.py), learned from its own out-of-sample backtests: per window and lead bin, shrunk toward no change."
+targets = ["meter.seven_day", "meter.scoped"]
+children = ["spend-decay-6h"]
+deps = []
+weights = []
+
+[config]
+child = "spend-decay-6h"
+method = "scale"           # scale | crps | pit | both (kit/calib.py)
+n0 = 8.0                   # forecast origins at which the pooled fit gets half its weight
+n0_bin = 8.0               # ... and a lead bin's own fit, toward the pooled one
+s_max = 3.0                # scale factors stay in [1 / s_max, s_max]
+min_origins = 3
+per_bin = 8                # truth readings per forecast and lead bin
+round = true               # whole points when the child's paths are whole
+
+[config.backtest_every_h]
+five_hour = 2
+seven_day = 8
+weekly_scoped = 8
+
+[config.backtest_n]        # latest origins per cadence, each a fresh fit of the child
+five_hour = 24
+seven_day = 24
+weekly_scoped = 24

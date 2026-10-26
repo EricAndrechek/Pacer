@@ -137,6 +137,11 @@ public final class ArenaHistoryStore: Sendable {
     public let tzOffsetMin: Int?
     /// The earliest row anything may see (`SnapshotData.data_start`).
     public let dataStart: Millis
+    /// A memo for the store's lifetime: what is built once from every row and
+    /// then read at many cuts (the analog model's table of past cycles, a
+    /// loaded network's buffers keyed by the store). Per-cut values belong in
+    /// `ArenaHistory.memo` instead, which cannot leak a later cut's rows.
+    public let memo = ArenaMemo()
     /// True when every row's `tKnown` is non-decreasing in event order (the
     /// app: a row is known when it is written), so "known at t" is a prefix.
     let metersKnownInOrder: [ArenaMeterID: Bool]
@@ -242,13 +247,17 @@ public final class ArenaMemo: @unchecked Sendable {
     /// `make()` runs outside the lock, so a slow derivation never blocks
     /// another key; two racing callers may both compute it, and the first
     /// stored value wins.
+    ///
+    /// The stored value is unwrapped before the cast: with an Optional `T`,
+    /// `values[key] as? T` succeeds on a missing key (nil casts to any
+    /// Optional), which returned nil and never computed.
     public func value<T>(_ key: String, _ make: () throws -> T) rethrows -> T {
         lock.lock()
-        if let v = values[key] as? T { lock.unlock(); return v }
+        if let stored = values[key], let v = stored as? T { lock.unlock(); return v }
         lock.unlock()
         let v = try make()
         lock.lock(); defer { lock.unlock() }
-        if let existing = values[key] as? T { return existing }
+        if let stored = values[key], let existing = stored as? T { return existing }
         values[key] = v
         return v
     }
@@ -314,6 +323,11 @@ public struct ArenaTargetForecast: Sendable {
     }
 
     public var gridCount: Int { paths?.first?.count ?? quantiles?.first?.count ?? 0 }
+
+    /// How many doubles this forecast holds (for memory bounds).
+    public var valueCount: Int {
+        (paths?.reduce(0) { $0 + $1.count } ?? 0) + (quantiles?.reduce(0) { $0 + $1.count } ?? 0)
+    }
 
     /// The value at quantile `q` at every grid time: linear between the
     /// model's levels (held flat beyond the outermost), or numpy's default
@@ -497,9 +511,12 @@ public final class ArenaRunner {
     public var maxBacktestPoints: Int
     public var nPaths: Int
     /// Memoized forecasts, keyed by model, history cut and request. Cleared
-    /// whole when it passes `memoLimit`, which bounds a long backfill's memory.
+    /// whole when it holds more than `memoLimitValues` doubles (64 MB by
+    /// default): a weekly forecast as paths is ~200 × 340 values, so a count
+    /// of entries alone let a long backfill's memo reach gigabytes.
     private var memo: [String: ArenaForecast] = [:]
-    public var memoLimit = 4_096
+    private var memoValues = 0
+    public var memoLimitValues = 8_000_000
 
     public init(registry: [ArenaModelSpec], services: ArenaServices = ArenaServices(), seed: UInt64 = 42,
                 maxBacktestPoints: Int = 48, nPaths: Int = 200) {
@@ -514,7 +531,11 @@ public final class ArenaRunner {
         precondition(history.now == request.now, "a model is asked at the moment it was fitted")
         let key = Self.memoKey(name, history: history, request: request)
         if let hit = memo[key] { return hit }
-        for w in spec.weights where services.weights(w) == nil { throw ArenaError.weightsUnavailable(w) }
+        // Every weights file the model's whole family of children needs, not
+        // just its own: a pool whose network child is still downloading would
+        // otherwise answer as its other child alone, and the engine would
+        // score that under the pool's name and keep the record.
+        for w in requiredWeights(name) where services.weights(w) == nil { throw ArenaError.weightsUnavailable(w) }
         try checkCancelled()
         var fitted: ArenaHistory?
         let ctx = ArenaContext(spec: spec, seed: Self.deriveSeed(seed, name, request.now), services: services,
@@ -523,9 +544,23 @@ public final class ArenaRunner {
         try instance.fit(history)
         fitted = history
         let fc = try instance.forecast(request)
-        if memo.count >= memoLimit { memo.removeAll(keepingCapacity: true) }
+        let size = fc.byKey.values.reduce(0) { $0 + $1.valueCount }
+        if memoValues + size > memoLimitValues { memo.removeAll(keepingCapacity: false); memoValues = 0 }
         memo[key] = fc
+        memoValues += size
         return fc
+    }
+
+    /// The weights `name` and its children (transitively) are pinned to.
+    public func requiredWeights(_ name: String) -> [String] {
+        var seen: Set<String> = [], out: [String] = []
+        func walk(_ n: String) {
+            guard seen.insert(n).inserted, let s = registry[n] else { return }
+            out += s.weights.filter { !out.contains($0) }
+            s.children.forEach(walk)
+        }
+        walk(name)
+        return out
     }
 
     func backtest(child: String, history: ArenaHistory, every: Millis, targets: Set<ArenaTarget>,
@@ -732,7 +767,7 @@ public enum ArenaMath {
 public enum ArenaRegistry {
     public static var all: [ArenaModelSpec] {
         portModels + spendModels + fmModels + analogModels + simulationModels + combinedModels
-            + ensembleModels + mlModels
+            + ensembleModels + mlModels + timesfmModels + chronosModels
     }
 
     public static func spec(_ name: String) -> ArenaModelSpec? { all.first { $0.name == name } }

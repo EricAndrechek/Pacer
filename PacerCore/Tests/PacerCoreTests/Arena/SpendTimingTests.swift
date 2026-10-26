@@ -9,7 +9,7 @@ import Testing
 /// report; the bounds only catch a blow-up (debug builds are ~10× slower).
 @Suite(.serialized) struct SpendTimingTests {
     /// A deterministic synthetic history: no real usage in it.
-    static func synthetic(days: Int = 120, tzMin: Int = -240) -> (ArenaHistoryStore, Millis) {
+    static func synthetic(days: Int = 120, tzMin: Int = -240, scoped: Bool = false) -> (ArenaHistoryStore, Millis) {
         var rng = ArenaRNG(seed: 20261026)
         let t0: Millis = 1_780_000_000_000 - (1_780_000_000_000 % ArenaTime.day) - Millis(tzMin) * ArenaTime.minute
         let fams = ["opus", "sonnet", "haiku", "fable"]
@@ -17,7 +17,8 @@ import Testing
         var spend: [ArenaSpendRow] = []
         var five: [ArenaReading] = [], week: [ArenaReading] = []
         var fiveReset: Millis?, fiveUtil = 0.0
-        var weekReset: Millis = t0 + 7 * ArenaTime.day, weekUtil = 0.0
+        var weekReset: Millis = t0 + 7 * ArenaTime.day, weekUtil = 0.0, fableUtil = 0.0
+        var fable: [ArenaReading] = []
         let step = 5 * ArenaTime.minute
         var t = t0
         let end = t0 + Millis(days) * ArenaTime.day
@@ -29,7 +30,7 @@ import Testing
                 activeFrom = t + Millis(startH) * ArenaTime.hour
                 activeTo = activeFrom + Millis(len) * ArenaTime.hour
             }
-            if t >= weekReset { weekReset += 7 * ArenaTime.day; weekUtil = 0 }
+            if t >= weekReset { weekReset += 7 * ArenaTime.day; weekUtil = 0; fableUtil = 0 }
             if let r = fiveReset, t >= r { fiveReset = nil; fiveUtil = 0 }
             let active = t >= activeFrom && t < activeTo
             if active {
@@ -38,6 +39,7 @@ import Testing
                     let usd = (rng.uniform() * 2).rounded(.down) == 0 ? rng.uniform() * 0.8 : rng.uniform() * 3
                     spend.append(ArenaSpendRow(tEvent: t + step - 1, tKnown: t + step - 1, family: fam, costUSD: usd))
                     fiveUtil += usd * k5[f]; weekUtil += usd * k7[f]
+                    if fam == "fable" { fableUtil += usd * 0.4 }
                 }
             }
             // Readings every two minutes while the five-hour window runs,
@@ -53,12 +55,18 @@ import Testing
                 }
                 week.append(ArenaReading(tEvent: ts, tKnown: ts, utilPct: min(100, weekUtil.rounded(.down)),
                                          resetsAt: weekReset + jitter, active: true))
+                if scoped {
+                    fable.append(ArenaReading(tEvent: ts, tKnown: ts, utilPct: min(100, fableUtil.rounded(.down)),
+                                              resetsAt: weekReset + jitter, active: true))
+                }
             }
             t += step
         }
+        var meters = [ArenaMeterID(account: "S1", windowKind: "five_hour"): five,
+                      ArenaMeterID(account: "S1", windowKind: "seven_day"): week]
+        if scoped { meters[ArenaMeterID(account: "S1", windowKind: "weekly_scoped", scopeModel: "Fable")] = fable }
         let store = ArenaHistoryStore(
-            meters: [ArenaMeterID(account: "S1", windowKind: "five_hour"): five,
-                     ArenaMeterID(account: "S1", windowKind: "seven_day"): week],
+            meters: meters,
             spend: ["S1": spend], tzOffsetMin: tzMin, dataStart: t0)
         return (store, end)
     }
@@ -119,6 +127,34 @@ import Testing
             lines.append("\(name): cold \(String(format: "%.1f", cold)) ms, next cut \(String(format: "%.1f", warm)) ms")
         }
         print("timing synthetic 120 d:\n  " + lines.joined(separator: "\n  "))
+    }
+
+    /// Where spend-decay's time goes on a fresh cut, kit step by kit step
+    /// (each step memoized on the cut, so each later one pays only its own).
+    @Test(arguments: ["five_hour", "seven_day"])
+    func kitBreakdown(_ kind: String) throws {
+        let (store, end) = Self.synthetic()
+        let five = ArenaMeterID(account: "S1", windowKind: "five_hour")
+        let now = Self.activeNow(store, before: end, meter: five)
+        let h = ArenaHistory(store: store, now: now, accounts: ["S1"])
+        var parts: [String] = []
+        func step(_ label: String, _ body: () -> Void) {
+            parts.append("\(label) \(String(format: "%.2f", Self.time(body)))")
+        }
+        step("readings") { _ = h.readings(account: "S1", windowKind: kind) }
+        step("series") { _ = KitSpend.meterSeries(h, account: "S1", windowKind: kind) }
+        step("ledger") { _ = KitSpend.ledger(h, account: "S1") }
+        step("pastCycles") { _ = KitSpend.pastCycles(h, account: "S1", windowKind: kind) }
+        step("intervals") { _ = KitSpend.intervals(h, account: "S1", windowKind: kind) }
+        step("fitDetails") { _ = KitSpend.fitDetails(h, account: "S1", windowKind: kind) }
+        let lookback: Millis = kind == "five_hour" ? 30 * ArenaTime.minute : 360 * ArenaTime.minute
+        let days = kind == "five_hour" ? 60 : 120
+        step("buildCases") { _ = SpendDecayModel.buildCases(h, "S1", kind, nil, lookback: lookback, maxDays: days) }
+        let name = kind == "five_hour" ? "spend-decay-30m" : "spend-decay-6h"
+        let req = ArenaRunner.request(history: h, targets: [kind == "five_hour" ? .meterFiveHour : .meterSevenDay])
+        let runner = ArenaRunner(registry: ArenaRegistry.all)
+        step("forecast (rest)") { _ = try? runner.forecast(model: name, history: h, request: req) }
+        print("timing kit \(kind) ms: " + parts.joined(separator: ", "))
     }
 
     /// Where a calibration wrapper's time goes: the child's backtests, then

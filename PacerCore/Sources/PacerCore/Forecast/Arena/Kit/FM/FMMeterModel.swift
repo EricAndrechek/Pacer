@@ -22,7 +22,8 @@ import Foundation
 /// The arena draws comonotone paths from these quantiles (one level per path
 /// at every time); the port hands back the quantiles themselves
 /// (`ArenaTargetForecast(levels:quantiles:)`), whose `samplePaths` are the
-/// same comonotone reading. Only `backend = "timestral"` is ported.
+/// same comonotone reading. The forecaster is the config's `backend`, any
+/// of `FMBackends.factories` (the samples mode, Toto's, is not ported).
 public final class FMMeterModel: ArenaModel {
     public static let windowFor: [ArenaTarget: String] = [
         .meterFiveHour: "five_hour", .meterSevenDay: "seven_day", .meterScoped: "weekly_scoped",
@@ -33,19 +34,22 @@ public final class FMMeterModel: ArenaModel {
     let ctx: ArenaContext
     let cfg: ArenaConfig
     var history: ArenaHistory?
-    private var _backend: TimestralForecaster?
+    let backendName: String
+    private var _backend: (any FMBackend)?
 
     public init(context: ArenaContext) throws {
         ctx = context
         cfg = context.config
-        let backend = cfg.string("backend", "timestral")
-        guard backend == "timestral" else { throw ArenaError.invalid("kit.fm backend \(backend) is not ported") }
+        backendName = cfg.string("backend", "timestral")
+        guard FMBackends.factories[backendName] != nil else {
+            throw ArenaError.invalid("kit.fm backend \(backendName) is not ported")
+        }
     }
 
-    var backend: TimestralForecaster {
+    var backend: any FMBackend {
         get throws {
             if let b = _backend { return b }
-            let b = try FMBackends.timestral(cfg.string("weights", ""), services: ctx.services)
+            let b = try FMBackends.backend(backendName, weights: cfg.string("weights", ""), services: ctx.services)
             _backend = b
             return b
         }
@@ -87,13 +91,14 @@ public final class FMMeterModel: ArenaModel {
     func inputs(_ history: ArenaHistory, now: Millis, _ tr: ArenaTargetRequest, _ wk: String)
         -> (used: Double, ctxV: [Double], step: Millis) {
         let cap = tr.target == .meterScoped ? tr.cap : nil
-        let s = FMSeries.meterSeries(history, account: tr.accounts[0], windowKind: wk, scopeModel: cap, now: now)
+        // The cut's rows are the first `k` of `s` (no copy: see meterSeriesPrefix).
+        let (s, k) = FMSeries.meterSeriesPrefix(history, account: tr.accounts[0], windowKind: wk, scopeModel: cap, now: now)
         // No reading of this cycle known: the latest active reading, else 0.
-        let used = tr.resetAt.flatMap { s.usedNow($0) } ?? s.lastActiveUtil ?? 0
+        let used = tr.resetAt.flatMap { s.usedNow($0, count: k) } ?? s.lastActiveUtil(count: k) ?? 0
         let step = stepMs(wk)
         let ctxT = FMSeries.regularGrid(now: now, stepMs: step, n: contextSteps(wk))
         let stale = Millis(cfg.int("stale_min", 120)) * FMSeries.minMs
-        return (used, FMSeries.resampleLast(times: s.times, values: s.cum, grid: ctxT, staleMs: stale), step)
+        return (used, FMSeries.resampleLast(times: s.times, values: s.cum, grid: ctxT, staleMs: stale, count: k), step)
     }
 
     /// `MeterQuantiles`: `q` `[G][Q]`, the meter at each grid time at `levels`
@@ -122,7 +127,7 @@ public final class FMMeterModel: ArenaModel {
                                   step: step, horizon: 0, rawLevels: nil, raw: nil)
         }
         let horizon = Self.horizonSteps(now: now, last: gLast, step: step)
-        let out = try FMBackends.quantiles(try backend, context: [[ctxV]], horizon: horizon)
+        let out = try backend.quantiles(context: [[ctxV]], horizon: horizon)
         let raw = out.curve()
         let (levels, q) = Self.meterQuantiles(raw: raw, rawLevels: out.levels, used: used, cLast: cLast, step: step,
                                               horizon: horizon, now: now, grid: grid)

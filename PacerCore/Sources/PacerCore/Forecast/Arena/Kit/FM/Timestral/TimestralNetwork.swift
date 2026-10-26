@@ -204,14 +204,32 @@ public final class TimestralNetwork: @unchecked Sendable {
 
         let obsPerPatch = Self.obsPerPatch(observed, rows: rows, n: n, ps: ps)
         let keyValid = Self.encKeyValidity(obsPerPatch, rows: rows, n: n, attendMissing: c.attend_missing_patches)
-        let timeMask = Self.twoStreamTimeMask(minContext: ll, n: n, blockSize: c.block_size, keyValid: keyValid,
+        let fullMask = Self.twoStreamTimeMask(minContext: ll, n: n, blockSize: c.block_size, keyValid: keyValid,
                                               rows: rows, bidirectionalRows: knownRows)
-        let variateMask = Self.twoStreamVariateMask(groupIds: groupIds, encKeyValid: keyValid, rows: rows, nEnc: n,
+        let fullVariate = Self.twoStreamVariateMask(groupIds: groupIds, encKeyValid: keyValid, rows: rows, nEnc: n,
                                                     nDec: n, targetRows: targetRows, bidirectionalRows: knownRows)
         let firstObs = Self.groupFirstObservedPatch(obsPerPatch, rows: rows, n: n, groupIds: groupIds)
-        let s = 2 * n
+        // The Python runs a decoder token for every patch of the window, but
+        // only the horizon's `h` are active: an inactive one attends only to
+        // itself, no active token or encoder token attends to it (the time
+        // mask needs both decoder ends active; the variate mask mixes one
+        // slot, whose tokens are all inactive or all active), and the head
+        // reads only the horizon's. So they are left out: the same outputs,
+        // bit for bit in exact arithmetic, for n + h tokens instead of 2n.
+        let full = 2 * n
+        let keep = Array(0..<n) + Array((n + ll)..<full)
+        let s = keep.count
+        var timeMask = [Float](repeating: Self.blocked, count: rows * s * s)
+        for r in 0..<rows {
+            for (i, ki) in keep.enumerated() {
+                for (j, kj) in keep.enumerated() { timeMask[(r * s + i) * s + j] = fullMask[(r * full + ki) * full + kj] }
+            }
+        }
+        let variateMask = fullVariate.map { fv in
+            keep.flatMap { k in fv[(k * rows * rows)..<((k + 1) * rows * rows)] }
+        }
         var positions = [Int](repeating: 0, count: rows * s)
-        for r in 0..<rows { for p in 0..<n { positions[r * s + p] = p - firstObs[r]; positions[r * s + n + p] = p - firstObs[r] } }
+        for r in 0..<rows { for (i, k) in keep.enumerated() { positions[r * s + i] = (k < n ? k : k - n) - firstObs[r] } }
 
         return pool.with { ws in
             let d = c.d_model
@@ -221,8 +239,7 @@ public final class TimestralNetwork: @unchecked Sendable {
                 for p in n..<s { (x + (r * s + p) * d).update(from: forecastQuery, count: d) }
             }
             transformer(x, rows: rows, seq: s, timeMask: timeMask, variateMask: variateMask, positions: positions, ws: ws)
-            // The head is per token: run it on the horizon's decoder tokens only.
-            return headQuantiles(x, rows: rows, seq: s, decFrom: n + ll, decCount: h, ws: ws) { r in
+            return headQuantiles(x, rows: rows, seq: s, decFrom: n, decCount: h, ws: ws) { r in
                 (loc[r * w + (ll - 1) * ps], scale[r * w + (ll - 1) * ps])
             }
         }
@@ -400,34 +417,37 @@ public final class TimestralNetwork: @unchecked Sendable {
             return true
         }
         let alpha = 1 / Float(hd).squareRoot()
-        var sc = [Float](repeating: 0, count: rows)
+        let q = ws.buf(.q, rows * hd), k = ws.buf(.k, rows * hd), v = ws.buf(.v, rows * hd)
+        let sc = ws.buf(.scores, rows * rows), o = ws.buf(.o, rows * hd)
         for s in 0..<seq {
-            for r in 0..<rows {
-                let dst = out + (r * seq + s) * d
-                if alone(s, r) {
-                    let src = qkv + (r * seq + s) * 3 * d + 2 * d
+            // A slot where every row reads only itself: each output is its value.
+            if (0..<rows).allSatisfy({ alone(s, $0) }) {
+                for r in 0..<rows {
+                    let src = qkv + (r * seq + s) * 3 * d + 2 * d, dst = out + (r * seq + s) * d
                     for h in 0..<nh { for e in 0..<hd { dst[h * hd + e] = src[e * nh + h] } }
-                    continue
                 }
-                let qsrc = qkv + (r * seq + s) * 3 * d
-                for h in 0..<nh {
-                    var mx = -Float.infinity
-                    for r2 in 0..<rows {
-                        let add = mask?[(s * rows + r) * rows + r2] ?? 0
-                        let ksrc = qkv + (r2 * seq + s) * 3 * d + d
-                        var dot: Float = 0
-                        for e in 0..<hd { dot += qsrc[e * nh + h] * ksrc[e * nh + h] }
-                        sc[r2] = dot * alpha + add
-                        mx = max(mx, sc[r2])
-                    }
-                    var sum: Float = 0
-                    for r2 in 0..<rows { sc[r2] = expf(sc[r2] - mx); sum += sc[r2] }
+                continue
+            }
+            for h in 0..<nh {
+                for r in 0..<rows {
+                    let src = qkv + (r * seq + s) * 3 * d
                     for e in 0..<hd {
-                        var acc: Float = 0
-                        for r2 in 0..<rows { acc += sc[r2] * qkv[(r2 * seq + s) * 3 * d + 2 * d + e * nh + h] }
-                        dst[h * hd + e] = acc / sum
+                        q[r * hd + e] = src[e * nh + h]; k[r * hd + e] = src[d + e * nh + h]; v[r * hd + e] = src[2 * d + e * nh + h]
                     }
                 }
+                Self.gemm(transB: true, m: rows, n: rows, k: hd, alpha: alpha, a: q, lda: hd, b: k, ldb: hd,
+                          beta: 0, c: sc, ldc: rows)
+                if let mask {
+                    mask.withUnsafeBufferPointer { mb in
+                        vDSP_vadd(sc, 1, mb.baseAddress! + s * rows * rows, 1, sc, 1, vDSP_Length(rows * rows))
+                    }
+                }
+                // A row allowed only itself gets weight exactly 1 on itself,
+                // so its output is its value here too.
+                Self.softmaxRows(sc, rows: rows, cols: rows, ws: ws)
+                Self.gemm(transB: false, m: rows, n: hd, k: rows, alpha: 1, a: sc, lda: rows, b: v, ldb: hd,
+                          beta: 0, c: o, ldc: hd)
+                for r in 0..<rows { (out + (r * seq + s) * d + h * hd).update(from: o + r * hd, count: hd) }
             }
         }
         finishAttention(a, xn, out, m, residual: residual, ws: ws)
