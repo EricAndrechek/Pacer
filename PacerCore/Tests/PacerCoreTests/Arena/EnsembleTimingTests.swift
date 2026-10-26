@@ -10,6 +10,13 @@ import Testing
 /// Timestral-123M weights; opt-in (`PACER_ENSEMBLE_BENCH=1`), and
 /// meaningful in a release build
 /// (`swift test -c release -Xswiftc -enable-testing --filter EnsembleTimingTests`).
+///
+/// Recorded 2026-10-26, release, M-series Mac shared with seven other
+/// builds (so ±2×), all six g1-05 children registered: g1-01 17 ms (both
+/// windows); g2-05 20-48 ms five-hour, 29-65 ms weekly; g1-05 five-hour cold
+/// 90-125 ms (6 child backtest forecasts on this quiet history; a busy one
+/// has up to 42), warm 43-120 ms; g1-05 weekly cold 344-707 ms (42 child
+/// backtest forecasts), warm 39-92 ms.
 @Suite(.serialized, .enabled(if: ProcessInfo.processInfo.environment["PACER_ENSEMBLE_BENCH"] != nil))
 struct EnsembleTimingTests {
     final class Counter: @unchecked Sendable {
@@ -64,7 +71,7 @@ struct EnsembleTimingTests {
                 let cold = try ask(now)
                 let coldOrigins = counter.origins
                 let warm = try ask(now + 5 * ArenaTime.minute)
-                out.append(String(format: "%@ %@: cold %.0f ms (%d backtest origins), warm %.0f ms (%d more)",
+                out.append(String(format: "%@ %@: cold %.0f ms (%d child backtest forecasts), warm %.0f ms (%d more asked, memoized)",
                                   name, label, cold, coldOrigins, warm, counter.origins - coldOrigins))
                 out += counter.lines.prefix(3).map { "    " + $0 }
             }
