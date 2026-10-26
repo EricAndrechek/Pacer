@@ -26,11 +26,16 @@ import Foundation
 ///
 /// In the app the turn log is `ArenaSpendRow`s, one per family per 5-minute
 /// bucket, exactly like the port fixtures' pseudo-turns: each row is one
-/// "turn" at the bucket's last `tEvent`. The 5-minute epoch bins the model
-/// reads (activity, hazards, hour-of-day, analogs, active-bin counts) and
-/// the time of the last turn are unchanged by that bucketing; only the
-/// length of a spell in progress (counted in bins ending at now, not at the
-/// epoch) can come out up to a bin or so shorter. See `activity`.
+/// "turn" at the bucket's last `tEvent`. At a cut on a 5-minute boundary
+/// (or live, the current bucket built from the turns known now) the
+/// 5-minute epoch bins the model reads (activity, hazards, hour-of-day,
+/// analogs, active-bin counts), the time of the last turn and so the state
+/// now are unchanged by that bucketing; only the length of a spell in
+/// progress (counted in bins ending at now, not at the epoch) can come out
+/// shorter. At a cut inside a bucket that bucket's row is not known yet
+/// (it is known at its last turn), so up to 5 minutes of the latest
+/// activity is missing and the state now can flip from active to idle:
+/// backfill cuts belong on 5-minute boundaries. `SimulationBucketingTests`.
 final class G208FableBurst: ArenaModel {
     static let name = "g2-08-fable-burst"
     static let minMs: Millis = 60_000
