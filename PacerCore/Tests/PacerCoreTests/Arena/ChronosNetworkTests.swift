@@ -98,13 +98,24 @@ enum ChronosTestWeights {
         let ref = try Self.raw()
         #expect(ref.levels == p.quantileLevels)
         var worst = 0.0
+        var perCase: [String] = []
         for w in ref.weekly {
             let out = try #require(fm.outputs.first { $0.case == w.case })
             let ctx = try #require(Self.context(out))
             #expect(ctx.count == 672)
             let curve = try Chronos2Backend(p).quantiles(context: [[ctx]], horizon: w.horizon).curve()
-            Self.check(w.steps.map { curve[$0] }, w.raw, "weekly \(w.case)", worst: &worst)
+            var mine = 0.0
+            let got = w.steps.map { curve[$0] }
+            Self.check(got, w.raw, "weekly \(w.case)", worst: &mine)
+            // Where it is worst: which step and level, and the value there.
+            var at = (0, 0, 0.0, 0.0)
+            for (i, (gr, wr)) in zip(got, w.raw).enumerated() {
+                for (k, (g, x)) in zip(gr, wr).enumerated() where abs(g - x) / max(1, abs(x)) >= mine { at = (w.steps[i], k, g, x) }
+            }
+            perCase.append(String(format: "%@ %.1e (step %d level %d: %.4f vs %.4f)", w.case, mine, at.0, at.1, at.2, at.3))
+            worst = max(worst, mine)
         }
+        print("Chronos-2 weekly raw parity by case: " + perCase.joined(separator: ", "))
         #expect(ref.weekly.count == 10)
         print("Chronos-2 weekly raw parity: \(ref.weekly.count) cases, worst |Δ|/max(1,|x|) = \(worst)")
     }

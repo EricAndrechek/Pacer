@@ -271,24 +271,13 @@ public final class ChronosNetwork: @unchecked Sendable {
     private func timeAttention(_ a: Attention, _ xn: UnsafePointer<Float>, rows: Int, seq: Int, mask: [Float],
                                cos: UnsafePointer<Float>, sin: UnsafePointer<Float>,
                                residual: UnsafeMutablePointer<Float>, ws: Workspace) {
-        let c = config, inner = c.inner_dim, nh = c.num_heads, dk = c.d_kv, half = dk / 2
+        let c = config, inner = c.inner_dim, nh = c.num_heads, dk = c.d_kv
         let m = rows * seq
         let q = ws.buf(.q, m * inner), k = ws.buf(.k, m * inner), v = ws.buf(.v, m * inner)
         Self.linear(a.q, xn, m, q); Self.linear(a.k, xn, m, k); Self.linear(a.v, xn, m, v)
         // apply_rotary_pos_emb: x·cos + rotate_half(x)·sin, per head ("b s (h d)").
-        for i in 0..<m {
-            let cs = cos + (i % seq) * half, sn = sin + (i % seq) * half
-            for buf in [q, k] {
-                for h in 0..<nh {
-                    let p = buf + i * inner + h * dk
-                    for e in 0..<half {
-                        let x1 = p[e], x2 = p[e + half]
-                        p[e] = x1 * cs[e] + (-x2) * sn[e]
-                        p[e + half] = x2 * cs[e] + x1 * sn[e]
-                    }
-                }
-            }
-        }
+        Self.rope(q, tokens: m, seq: seq, heads: nh, dk: dk, cos: cos, sin: sin)
+        Self.rope(k, tokens: m, seq: seq, heads: nh, dk: dk, cos: cos, sin: sin)
         let out = ws.buf(.attn, m * inner)
         let sc = ws.buf(.scores, seq * seq)
         mask.withUnsafeBufferPointer { mb in
@@ -375,6 +364,25 @@ public final class ChronosNetwork: @unchecked Sendable {
 
     /// `torch.finfo(float32).min`, the inverted masks' fill.
     static let maskMin = -Float.greatestFiniteMagnitude
+
+    /// RoPE in place on `(tokens, heads · dk)`, token `i` at position
+    /// `i % seq`: `emb = cat(freqs, freqs)`, so both halves share one angle;
+    /// `x·cos + rotate_half(x)·sin` with `rotate_half(x) = (-x2, x1)`.
+    static func rope(_ buf: UnsafeMutablePointer<Float>, tokens m: Int, seq: Int, heads nh: Int, dk: Int,
+                     cos: UnsafePointer<Float>, sin: UnsafePointer<Float>) {
+        let half = dk / 2, inner = nh * dk
+        for i in 0..<m {
+            let cs = cos + (i % seq) * half, sn = sin + (i % seq) * half
+            for h in 0..<nh {
+                let p = buf + i * inner + h * dk
+                for e in 0..<half {
+                    let x1 = p[e], x2 = p[e + half]
+                    p[e] = x1 * cs[e] + (-x2) * sn[e]
+                    p[e + half] = x2 * cs[e] + x1 * sn[e]
+                }
+            }
+        }
+    }
 
     /// `Chronos2LayerNorm` (T5's: no mean, no bias): `w · x · rsqrt(mean(x²) + eps)`.
     static func rmsNorm(_ x: UnsafePointer<Float>, _ m: Int, _ w: UnsafePointer<Float>, _ y: UnsafeMutablePointer<Float>,
