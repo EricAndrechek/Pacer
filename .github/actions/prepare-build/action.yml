@@ -19,6 +19,14 @@ inputs:
       this off for jobs that never build the app target.
     required: false
     default: "true"
+  forecast-weights:
+    description: >-
+      Restore or fetch the forecast networks the app target bundles
+      (Vendor/ForecastWeights, bin/fetch-forecast-weights.sh). The app's
+      resources name the folder, so every job that builds the app target
+      needs it; only turn it off for jobs that never do.
+    required: false
+    default: "true"
 
 runs:
   using: composite
@@ -85,6 +93,24 @@ runs:
       if: inputs.duckdb == 'true' && steps.duckdb-cache.outputs.cache-hit != 'true'
       shell: bash
       run: bin/build-duckdb-xcframework.sh
+
+    # ---- Forecast weights -------------------------------------------------
+    # Timestral 5M + 28M (~132 MB), bundled into Pacer.app. Never committed
+    # (the 28M file is over GitHub's 100 MB limit); pinned by revision and
+    # SHA-256 in the fetch script, which is the cache key, so a re-pin
+    # refetches and nothing else does. One cache entry, reused by every run,
+    # rather than a download from Hugging Face per run.
+    - name: Cache forecast weights
+      if: inputs.forecast-weights == 'true'
+      uses: actions/cache@v6
+      with:
+        path: Vendor/ForecastWeights
+        key: forecast-weights-${{ hashFiles('bin/fetch-forecast-weights.sh') }}
+
+    - name: Fetch forecast weights
+      if: inputs.forecast-weights == 'true'
+      shell: bash
+      run: bin/fetch-forecast-weights.sh --verify
 
     - name: Generate Xcode project
       if: inputs.generate-project == 'true'

@@ -2,10 +2,16 @@ import Foundation
 @testable import PacerCore
 
 /// Where the tests find Timestral weights: the store's places first (the
-/// app's bundled copy, then Application Support), then a local Hugging Face
+/// app's bundled copy, then Application Support), then this checkout's
+/// `Vendor/ForecastWeights` (`make fetch-weights`), then a local Hugging Face
 /// cache (`~/.cache/huggingface/hub`, where the arena's Python keeps them).
 /// Tests that need a network skip when none of these holds it.
 enum TimestralTestWeights {
+    /// The repository root, from this file's path.
+    static let repoRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        .deletingLastPathComponent().deletingLastPathComponent()
+
     static let ids: [String: String] = [
         "5m": "mistralai/Timestral-5M@bdd20cfc15a3fea0e4cb5ccef37f8d3ca7aa335f",
         "28m": "mistralai/Timestral-28M@49b26409ac87b5935539a5d8ffe7f397b720db47",
@@ -16,6 +22,10 @@ enum TimestralTestWeights {
     static func url(_ id: String) -> URL? {
         if let u = ArenaWeightStore.localURL(for: id) { return u }
         guard let (repo, rev) = ArenaWeightStore.parse(id) else { return nil }
+        let vendored = repoRoot.appendingPathComponent("Vendor/ForecastWeights/\(id)")
+        if FileManager.default.fileExists(atPath: vendored.appendingPathComponent("model.safetensors").path) {
+            return vendored
+        }
         let parts = repo.split(separator: "/")
         guard parts.count == 2 else { return nil }
         let home = FileManager.default.homeDirectoryForCurrentUser
