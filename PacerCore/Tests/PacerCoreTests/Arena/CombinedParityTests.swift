@@ -268,6 +268,44 @@ import Testing
         #expect(pitMoved <= (relative ? 5 : 0))
     }
 
+    /// The registered config's path: no offline prior, so a lead with too
+    /// few PITs takes the nearest shorter lead's map (`comb-g1-08-opus-fm-
+    /// noprior.json`: the Python with `prior` removed, deterministic mode).
+    @Test(arguments: [false, true])
+    func g108WithoutPriorMatchesPython(relative: Bool) throws {
+        guard Self.weightsHere else { return }
+        let cases = try Self.cases()
+        let fm = try ArenaFixtures.model("comb-g1-08-opus-fm-noprior")
+        var spec = ArenaRegistry.spec("g1-08-opus-fm")!
+        guard case .table(var t) = ArenaRegistry.g108MeterConfig else { fatalError() }
+        t["ration"] = false
+        spec.config = ["meter": .table(t)]
+        let runner = ArenaRunner(registry: [spec], services: TimestralTestWeights.services())
+        var worstOut = 0.0, worstMap = 0.0, worstN = 0.0
+        for out in fm.outputs {
+            let c = try #require(cases[out.case])
+            let det = try #require(out.detail?["det"])
+            let h = ArenaFixtures.history(c)
+            let tr = Self.request(c, nPaths: 200).targets[0]
+            let model = try Self.instance(spec, runner: runner, history: h)
+            model.meters.tieU01 = 0.5
+            model.meters.relativeNetwork = relative
+            let L = try model.meters.levels(h, now: c.request.now, tr)
+            let cols = (det["cols"]?.numbers ?? []).map { Int($0 ?? 0) }
+            let cal = try #require(L.calibration)
+            for (i, row) in Self.matrix(det["cal_maps"]).enumerated() {
+                for (k, a) in cols.enumerated() { worstMap = max(worstMap, abs(cal.maps[i][a] - row[k])) }
+            }
+            for (a, b) in zip(cal.n, det["cal_n"]?.numbers ?? []) { worstN = max(worstN, abs(a - (b ?? .nan))) }
+            let got = try #require(L.out)
+            let want = Self.matrix(det["out_cols"])
+            for (k, a) in cols.enumerated() { for j in 0..<got.count { worstOut = max(worstOut, abs(got[j][a] - want[k][j])) } }
+        }
+        print(String(format: "g1-08 without prior, %@ contexts: worst |Δ| map %.3g, n %.3g, quantiles %.4g points",
+                     relative ? "relative" : "raw", worstMap, worstN, worstOut))
+        #expect(worstOut <= (relative ? 0.1 : 0.01))
+    }
+
     /// g2-06's shrink and rounding over the same deterministic paths, on the
     /// weekly cases (its weekly gate is off, so nothing else draws).
     @Test func g206WeeklyDeterministicMatchesPython() throws {
