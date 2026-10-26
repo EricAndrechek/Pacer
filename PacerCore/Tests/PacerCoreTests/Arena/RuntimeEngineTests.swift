@@ -395,6 +395,47 @@ struct RuntimeEngineTests {
         #expect(Set(out.map(\.periodKey)).count == 24)
     }
 
+    /// A per-model weekly cap goes through the same loop as the fixed
+    /// windows: its readings become the arena's scoped meter (named as the
+    /// exporter names it), the scorer scores it under the cap's identity,
+    /// and the engine picks for that window.
+    @Test func aScopedWeeklyCapIsScoredAndPickedUnderItsIdentity() async throws {
+        let container = try PacerStore.makeInMemoryContainer()
+        let ctx = ModelContext(container)
+        ctx.insert(Account(id: Self.account, organizationId: Self.account, displayName: "Test", isActive: true,
+                           firstSeenAt: Self.now.addingTimeInterval(-90 * 86400), lastSeenAt: Self.now))
+        let identity = "weekly_scoped|claude-fable|"
+        let week: TimeInterval = 7 * 86400
+        let liveStart = Self.now.addingTimeInterval(-2 * 86400)
+        for c in 0...5 {
+            let start = liveStart.addingTimeInterval(-Double(5 - c) * week)
+            let reset = start.addingTimeInterval(week)
+            var t = start.addingTimeInterval(3600)
+            while t < reset && t <= Self.now {
+                let d = t.timeIntervalSince(start) / 86400
+                let pct = d < 6 ? d * 4 : 24 + (d - 6) * Double(40 + c * 5)
+                ctx.insert(UsageLimitSample(sampledAt: t, identity: identity, kind: "weekly_scoped", group: "weekly",
+                                            label: "Fable", percent: pct.rounded(), resetsAt: reset, severity: "ok",
+                                            isActive: false, modelId: "claude-fable", modelDisplayName: "Fable",
+                                            source: "oauth", accountId: Self.account))
+                t = t.addingTimeInterval(4 * 3600)
+            }
+        }
+        try ctx.save()
+        let engine = await Self.engine(container)
+        let rt = Self.runtime(container, roster: [Self.oracle], engine: engine)
+        await engine.adopt(arena: rt.link)
+        await engine.recompute(now: Self.now)
+        _ = await engine.backfillRateLimitRecordIfNeeded(now: Self.now, pause: .zero)
+        let report = await rt.scorer.pass(accounts: [Self.account], now: Self.now)
+        #expect(report.cycles == 5)
+        let rows = try Self.arenaRows(container, method: "test-oracle")
+        #expect(Set(rows.map(\.surface)) == ["rl-\(identity)#\(Self.account)"])
+        await engine.recompute(now: Self.now)
+        #expect(await engine.resolvedMethod(windowKey: identity).selected == "test-oracle")
+        #expect(await engine.arenaModelIds(windowKey: identity) == ["test-oracle"])
+    }
+
     @Test func comparableRecordsShareOneSpan() {
         func r(_ m: String, _ p: String, _ err: Double) -> EngineSelfEval.Record {
             .init(method: m, bucket: "cut=0.50|v2", periodKey: p, predicted: 50 + err, truth: 50)

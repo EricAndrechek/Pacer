@@ -270,9 +270,15 @@ public actor ArenaRecordScorer {
         guard limits.count > 0 else { return [] }
         let store: ArenaHistoryStore
         if full {
+            // Months of turns, priced: the pass's one burst of reading. Paced
+            // like a cut, so a first launch with several accounts doesn't
+            // read them all back to back.
+            let started = SuspendingClock.now
             let built = ArenaHistoryBuilder.build(container: container, account: account, now: now, limits: limits)
             await history.install(built, account: account)
             store = built.store
+            let took = SuspendingClock.now - started
+            await pace(Double(took.components.seconds) + Double(took.components.attoseconds) * 1e-18)
         } else {
             store = await history.store(account: account, now: now)
         }
@@ -450,6 +456,9 @@ public actor ArenaLiveForecaster {
     private let landed: @Sendable (Set<String>) async -> Void
     private var pending: [String: ArenaLiveRequest] = [:]
     private var draining = false
+    /// Failures already logged, so a model that can't forecast a window
+    /// says so once, not every refit.
+    private var logged = Set<String>()
 
     init(roster: ArenaRoster, history: ArenaHistoryCache, cache: ArenaLiveCache, services: ArenaServices,
          cancel: ArenaCancelFlag, landed: @escaping @Sendable (Set<String>) async -> Void) {
@@ -512,6 +521,9 @@ public actor ArenaLiveForecaster {
                 return any
             } catch {
                 cache.fail(key, reason: "no forecast this cycle")
+                if logged.insert("\(model)|\(r.binding.windowKey)").inserted {
+                    Log.write("Arena", "live \(model) on \(r.binding.windowKey) …\(r.binding.account.suffix(4)): \(error)")
+                }
             }
         }
         return any

@@ -744,8 +744,10 @@ final class AppBackgroundService {
         let container = self.container
         Task.detached(priority: .background) {
             try? await Task.sleep(for: .seconds(120))
+            // The active login first: its windows are the ones on screen.
             runtime.start(accounts: {
-                ((try? ModelContext(container).fetch(FetchDescriptor<Account>())) ?? []).map(\.id)
+                ((try? ModelContext(container).fetch(FetchDescriptor<Account>())) ?? [])
+                    .sorted { $0.isActive && !$1.isActive }.map(\.id)
             })
         }
     }
