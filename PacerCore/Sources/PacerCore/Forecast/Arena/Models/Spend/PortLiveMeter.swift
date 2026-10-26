@@ -28,6 +28,7 @@ public final class PortLiveMeterModel: ArenaModel {
     public func fit(_ history: ArenaHistory) { self.history = history }
 
     public func forecast(_ request: ArenaRequest) throws -> ArenaForecast {
+        guard history != nil else { throw ArenaError.invalid("port-live-meter asked before fit") }
         var out: [String: ArenaTargetForecast] = [:]
         for tr in request.targets {
             try ctx.checkCancelled()

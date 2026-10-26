@@ -743,6 +743,6 @@ extension KitCalib {
             col.sort()
             for (li, lv) in levels.enumerated() { out[li][j] = KitDetQ.readSorted(col, lv) }
         }
-        return out
+        return KitDetQ.sharingEqualRows(out)
     }
 }
