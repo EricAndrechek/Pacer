@@ -143,3 +143,67 @@ import Testing
         #expect(throws: ArenaError.cancelled) { _ = try m.forecast(req) }
     }
 }
+
+/// The model at many cuts of the parity history, as the app's backfill asks
+/// it (`ArenaRunner`, every meter the cut has a cycle for): every answer is
+/// a quantile forecast on the grid, finite, non-decreasing across levels and
+/// along the grid, within [the meter now, 100]. The light run covers the
+/// first days (the fallback, then the first trainings); `PACER_ML_BENCH=1`
+/// sweeps the whole history (release build) and reports the time per cut.
+@Suite struct MLSweepTests {
+    static func check(_ fc: ArenaTargetForecast, grid: Int, label: String) -> [String] {
+        guard let lv = fc.levels, let q = fc.quantiles else { return ["\(label): no quantiles"] }
+        var bad: [String] = []
+        if q.count != lv.count || q.contains(where: { $0.count != grid }) { bad.append("\(label): shape") }
+        for row in q where row.contains(where: { !$0.isFinite || $0 < -1e-9 || $0 > 100 + 1e-9 }) { bad.append("\(label): range"); break }
+        for i in 1..<q.count where zip(q[i], q[i - 1]).contains(where: { $0 < $1 - 1e-9 }) { bad.append("\(label): crossing"); break }
+        for row in q where zip(row.dropFirst(), row).contains(where: { $0 < $1 - 1e-9 }) { bad.append("\(label): falls"); break }
+        return bad
+    }
+
+    func sweep(every: Millis, until: Millis?) throws -> (cuts: Int, answers: Int, seconds: Double, bad: [String]) {
+        let (store, hist) = try MLParityTests.store()
+        let spec = ArenaRegistry.spec("ml-gbm-quantile")!
+        let runner = ArenaRunner(registry: [spec])
+        let full = ArenaHistory(store: store, now: hist.now, accounts: hist.accounts, start: hist.start)
+        var t = hist.start + 6 * ArenaTime.hour
+        let end = until.map { min($0, hist.now) } ?? hist.now
+        var cuts = 0, answers = 0, bad: [String] = []
+        let t0 = Date()
+        while t <= end {
+            let cut = full.asOf(t)
+            let req = ArenaRunner.request(history: cut, targets: spec.targets)
+            if !req.targets.isEmpty {
+                let fc = try runner.forecast(model: spec.name, history: cut, request: req)
+                for tr in req.targets {
+                    guard let f = fc.byKey[tr.key] else { bad.append("\(tr.key) at \(t): missing"); continue }
+                    answers += 1
+                    bad += Self.check(f, grid: tr.grid.count, label: "\(tr.key) at \(t)")
+                    if let used = KitMLData.AsOfData.of(cut).meter(tr.account, tr.target.windowKind, tr.cap)?
+                        .stateAt(t, reset: tr.resetAt)?.used,
+                       let q = f.quantiles, q.contains(where: { $0.contains { $0 < used - 1e-9 } }) {
+                        bad.append("\(tr.key) at \(t): below the meter now")
+                    }
+                }
+                cuts += 1
+            }
+            t += every
+        }
+        return (cuts, answers, Date().timeIntervalSince(t0), bad)
+    }
+
+    @Test func earlyCutsAreWellFormed() throws {
+        let (_, hist) = try MLParityTests.store()
+        let r = try sweep(every: 5 * ArenaTime.hour + 7 * ArenaTime.minute, until: hist.start + 4 * ArenaTime.day)
+        #expect(r.bad.isEmpty, "\(r.bad.prefix(5))")
+        #expect(r.answers > 10)
+    }
+
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["PACER_ML_BENCH"] != nil))
+    func wholeHistoryIsWellFormed() throws {
+        let r = try sweep(every: 7 * ArenaTime.hour + 13 * ArenaTime.minute, until: nil)
+        #expect(r.bad.isEmpty, "\(r.bad.prefix(5))")
+        print(String(format: "ml-gbm-quantile sweep: %d cuts, %d answers, %.1f s (%.2f s per cut, training included)",
+                     r.cuts, r.answers, r.seconds, r.seconds / Double(max(r.cuts, 1))))
+    }
+}
