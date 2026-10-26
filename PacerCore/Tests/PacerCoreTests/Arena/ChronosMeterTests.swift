@@ -121,6 +121,14 @@ import Testing
 /// the runner on a 120-day synthetic history (what a backfill does).
 /// Opt-in (`PACER_CHRONOS_BENCH=1`), and meaningful only in a release build
 /// (`swift test -c release -Xswiftc -enable-testing`).
+///
+/// Measured 2026-10-26 on Apple silicon, the machine shared with other
+/// builds (load average 40-75; ms per forecast, one thread / default):
+/// five-hour 13.5 / 13.0, weekly 23.6 / 18.0; through the runner on the
+/// 120-day history 12.8 five-hour, 16.3 weekly. The encoder's matrix
+/// products alone, timed back to back at the same shapes, took 10 and 18:
+/// the rest of the forward pass is a few milliseconds. The heaviest load
+/// seen tripled every number (36 and 49 single-threaded).
 @Suite(.enabled(if: ProcessInfo.processInfo.environment["PACER_CHRONOS_BENCH"] != nil))
 struct ChronosTimingTests {
     @Test func timings() throws {
