@@ -160,7 +160,10 @@ import Testing
                 let lo = tf.quantile(0.05), md = tf.median, hi = tf.quantile(0.95)
                 for j in 0..<tr.grid.count {
                     #expect(lo[j] <= md[j] + 1e-12 && md[j] <= hi[j] + 1e-12, "\(spec.name) \(c.id) levels cross")
-                    #expect(lo[j] >= latest - 1e-9 && hi[j] <= max(100, latest) + 1e-9, "\(spec.name) \(c.id) range")
+                    // The analog's trajectories can fall (a past cycle's
+                    // re-base), so its wrapper may forecast below the reading.
+                    let floor = spec.children.contains("g1-10-fable-analog") ? 0 : latest
+                    #expect(lo[j] >= floor - 1e-9 && hi[j] <= max(100, latest) + 1e-9, "\(spec.name) \(c.id) range")
                 }
                 #expect(zip(md, md.dropFirst()).allSatisfy { $0 <= $1 + 1e-12 }, "\(spec.name) \(c.id) median falls")
             }
