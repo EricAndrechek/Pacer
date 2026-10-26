@@ -2,11 +2,11 @@ import Foundation
 
 // Pooled and combined meters over other models (g2-05-sonnet-final, g1-05-opus-ens-meter-big, g1-01-sonnet-calibrate123), on kit/ml/combine.
 //
-// Each entry transcribes `research/arena/models/<name>/model.toml`. A model
-// whose child needs pinned weights lists them too (as `struct-timestral-*`
-// does), so the runner never runs it before they are on the Mac: without
-// them the Python would run a different model (g1-05 without its foundation
-// child, g1-01 not at all).
+// Each entry transcribes `research/arena/models/<name>/model.toml`. g1-05
+// and g1-01 pin no weights of their own, as in their model.toml: the runner
+// waits for every weights file a model's children need
+// (`ArenaRunner.requiredWeights`), so neither runs as a different model
+// (g1-05 without its foundation child) while Timestral-123M downloads.
 extension ArenaRegistry {
     static var ensembleModels: [ArenaModelSpec] {
         let meters: Set<ArenaTarget> = [.meterFiveHour, .meterSevenDay, .meterScoped]
@@ -58,7 +58,7 @@ extension ArenaRegistry {
                     "backtest_every_h": ["five_hour": 3, "seven_day": 12, "weekly_scoped": 12],
                     "backtest_n": 6,
                 ],
-                weights: [FMWeights.timestral123M], complexity: 5
+                complexity: 5
             ) { try BandedEnsemble(context: $0) },
             // models/g1-01-sonnet-calibrate123/model.toml: Timestral-123M's
             // paths pulled toward its median by a fixed 0.6.
@@ -69,7 +69,7 @@ extension ArenaRegistry {
                     "backtest_every_h": ["five_hour": 3, "seven_day": 12, "weekly_scoped": 12],
                     "scale": 0.60,
                 ],
-                weights: [FMWeights.timestral123M], complexity: 4
+                complexity: 4
             ) { Calibrate123Model(context: $0) },
         ]
     }

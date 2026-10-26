@@ -147,6 +147,39 @@ import Testing
         }.max() ?? 0
     }
 
+    /// The registered g1-05 over its real children (those registered on this
+    /// branch; Timestral-123M needed, skipped without it), on a five-hour
+    /// spend case: it answers 200 finite paths, never falling, from the live
+    /// level to 100, with its cells fitted on the children that answered.
+    @Test func g105RunsOnItsRealChildren() throws {
+        guard TimestralTestWeights.url(FMWeights.timestral123M) != nil else {
+            print("g1-05 real children: Timestral-123M weights not on this Mac, skipped")
+            return
+        }
+        let c = try #require(try ArenaFixtures.cases("cases-spend").cases.first { $0.id == "s04" })
+        let h = ArenaFixtures.history(c)
+        let runner = ArenaRunner(registry: ArenaRegistry.all, services: TimestralTestWeights.services())
+        let spec = runner.registry[Self.g105]!
+        let ctx = ArenaContext(spec: spec, seed: 1, services: TimestralTestWeights.services(), runner: runner,
+                               history: { h })
+        let m = try #require(try spec.make(ctx) as? BandedEnsemble)
+        try m.fit(h)
+        let t0 = DispatchTime.now().uptimeNanoseconds
+        let fc = try m.forecast(ArenaFixtures.request(c))
+        let ms = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1e6
+        let p = try #require(fc.byKey[c.request.key]?.paths)
+        let level = KitMLCombine.levelAt(h.readings(account: c.inputs.account, windowKind: "five_hour"), asof: h.now)
+        #expect(p.count == 200)
+        #expect(p.allSatisfy { row in row.allSatisfy { $0.isFinite && $0 >= level - 1e-9 && $0 <= 100 } })
+        #expect(p.allSatisfy { row in zip(row, row.dropFirst()).allSatisfy { $0 <= $1 } })
+        let present = spec.children.filter { ArenaRegistry.spec($0) != nil }
+        let cells = (0..<m.nb).compactMap { m.cell("five_hour", present, band: $0) }
+        #expect(cells.count == m.nb)
+        print(String(format: "g1-05 on its real children (%@), case s04: %.0f ms; ", present.joined(separator: ","), ms)
+              + cells.map { "n=\($0.n) s=\($0.scale) w=" + $0.w.map { String(format: "%.2f", $0) }.joined(separator: "/") }
+                .joined(separator: "; "))
+    }
+
     /// A scoped weekly cap is its own kind (`weekly_scoped:<cap>`), backtested
     /// on the weekly lattice: the same readings as a weekly case, filed under
     /// a cap, give the same cells as the weekly meter does.
