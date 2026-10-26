@@ -389,52 +389,72 @@ import Testing
 
     // MARK: - As is, Monte-Carlo
 
-    static func mcCompare(_ model: String, spec: ArenaModelSpec, nPaths: Int = 4000) throws -> (outside: Int, total: Int, worst: Double, lines: [String]) {
+    /// The Swift estimate (4000 paths, seed 42) against the Python's bounds;
+    /// and, since one calibration is shared by every path of a forecast,
+    /// against the spread of the forecast itself over `seeds` seeds: a point
+    /// outside the bounds is a parity miss only when the Python's value is
+    /// also outside what the Swift model gives over those seeds (± the MC
+    /// half-width).
+    static func mcCompare(_ model: String, spec: ArenaModelSpec, nPaths: Int = 4000, seeds: Int = 8) throws
+        -> (outside: Int, outsideEnvelope: Int, total: Int, worst: Double, lines: [String]) {
         let cases = try Self.cases()
         let fm = try ArenaFixtures.model(model)
-        let runner = ArenaRunner(registry: [spec], services: TimestralTestWeights.services(), nPaths: nPaths)
-        var outside = 0, total = 0, worst = 0.0
+        var outside = 0, outsideEnv = 0, total = 0, worst = 0.0
         var lines: [String] = []
         for out in fm.outputs {
             let c = try #require(cases[out.case])
             let req = Self.request(c, nPaths: nPaths)
-            let fc = try runner.forecast(model: spec.name, history: ArenaFixtures.history(c), request: req)
-            let paths = try #require(fc.byKey[c.request.key]?.paths)
             let G = c.request.grid.count
-            let sorted = (0..<G).map { j in paths.map { $0[j] }.sorted() }
+            var runs: [[[Double]]] = []                                     // [seed][level][G]
+            for k in 0..<seeds {
+                let runner = ArenaRunner(registry: [spec], services: TimestralTestWeights.services(), seed: UInt64(42 + k),
+                                         nPaths: nPaths)
+                let fc = try runner.forecast(model: spec.name, history: ArenaFixtures.history(c), request: req)
+                let paths = try #require(fc.byKey[c.request.key]?.paths)
+                let sorted = (0..<G).map { j in paths.map { $0[j] }.sorted() }
+                runs.append(Self.outLevels.map { lv in (0..<G).map { KitDetQ.readSorted(sorted[$0], lv) } })
+            }
             let bounds = try #require(out.mc_bounds)
-            var o = 0, cw = 0.0
-            for (li, lv) in Self.outLevels.enumerated() {
+            var o = 0, oe = 0, cw = 0.0
+            for li in Self.outLevels.indices {
                 for j in 0..<G {
-                    let v = KitDetQ.readSorted(sorted[j], lv)
+                    let v = runs[0][li][j], w = out.quantiles[li][j]
                     total += 1
-                    cw = max(cw, abs(v - out.quantiles[li][j]))
-                    if v < bounds.lo[li][j] - 1e-9 || v > bounds.hi[li][j] + 1e-9 { o += 1 }
+                    cw = max(cw, abs(v - w))
+                    guard v < bounds.lo[li][j] - 1e-9 || v > bounds.hi[li][j] + 1e-9 else { continue }
+                    o += 1
+                    let half = max(w - bounds.lo[li][j], bounds.hi[li][j] - w)
+                    let lo = runs.map { $0[li][j] }.min()! - half, hi = runs.map { $0[li][j] }.max()! + half
+                    if w < lo - 1e-9 || w > hi + 1e-9 { oe += 1 }
                 }
             }
             outside += o
+            outsideEnv += oe
             worst = max(worst, cw)
-            lines.append("\(out.case) \(c.inputs.window_kind): \(o) of \(Self.outLevels.count * G) outside, worst |Δ| \(String(format: "%.3g", cw))")
+            lines.append("\(out.case) \(c.inputs.window_kind): \(o) of \(Self.outLevels.count * G) outside the bounds, \(oe) outside the seed envelope, worst |Δ| \(String(format: "%.3g", cw))")
         }
-        return (outside, total, worst, lines)
+        return (outside, outsideEnv, total, worst, lines)
     }
 
     @Test func g108MonteCarloMatchesPython() throws {
         guard Self.weightsHere else { return }
         let r = try Self.mcCompare("comb-g1-08-opus-fm", spec: try Self.g108Spec())
-        print("g1-08 as is (4000 paths): \(r.outside) of \(r.total) points outside the MC bounds, worst |Δ| \(r.worst)\n"
+        print("g1-08 as is (4000 paths): \(r.outside) of \(r.total) points outside the MC bounds, \(r.outsideEnvelope) outside the 8-seed envelope, worst |Δ| \(r.worst)\n"
               + r.lines.joined(separator: "\n"))
-        // Bounds assume independent paths; the shared random calibration widens the true spread.
-        #expect(Double(r.outside) <= 0.25 * Double(r.total))
+        // Bounds assume independent paths; the shared random calibration widens the true spread,
+        // so the strict check is the seed envelope (the spec's 0.5 % allowance).
+        #expect(Double(r.outside) <= 0.05 * Double(r.total))
+        #expect(Double(r.outsideEnvelope) <= 0.005 * Double(r.total))
         #expect(r.worst <= 6)
     }
 
     @Test func g206MonteCarloMatchesPython() throws {
         guard Self.weightsHere else { return }
         let r = try Self.mcCompare("comb-g2-06-opus-fmgate2", spec: try Self.g206Spec())
-        print("g2-06 as is (4000 paths): \(r.outside) of \(r.total) points outside the MC bounds, worst |Δ| \(r.worst)\n"
+        print("g2-06 as is (4000 paths): \(r.outside) of \(r.total) points outside the MC bounds, \(r.outsideEnvelope) outside the 8-seed envelope, worst |Δ| \(r.worst)\n"
               + r.lines.joined(separator: "\n"))
-        #expect(Double(r.outside) <= 0.25 * Double(r.total))
+        #expect(Double(r.outside) <= 0.05 * Double(r.total))
+        #expect(Double(r.outsideEnvelope) <= 0.005 * Double(r.total))
         #expect(r.worst <= 6)
     }
 }
