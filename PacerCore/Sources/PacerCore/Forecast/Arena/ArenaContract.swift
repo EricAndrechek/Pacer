@@ -732,6 +732,7 @@ public enum ArenaMath {
 public enum ArenaRegistry {
     public static var all: [ArenaModelSpec] {
         portModels + spendModels + fmModels + analogModels + simulationModels + combinedModels
+            + ensembleModels + mlModels
     }
 
     public static func spec(_ name: String) -> ArenaModelSpec? { all.first { $0.name == name } }
