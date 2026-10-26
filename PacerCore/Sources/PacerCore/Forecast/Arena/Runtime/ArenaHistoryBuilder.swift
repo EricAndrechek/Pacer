@@ -25,7 +25,7 @@ import SwiftData
 /// Bounded: `depthDays` of history (120, the deepest any port reads: the
 /// analog model), limit reads through raw SQLite where the store has a file
 /// (`RawLimitReader`, as the engine does) and SwiftData otherwise, and turns
-/// paged through fresh contexts (`ModelWalk`), never `enumerate`.
+/// read a day at a time through fresh contexts, never `enumerate`.
 public enum ArenaHistoryBuilder {
 
     public static let depthDays = 120
@@ -229,19 +229,30 @@ public enum ArenaHistoryBuilder {
     /// The account's turns in `(after, through]`, priced and bucketed.
     static func readSpend(container: ModelContainer, account: String, after: Date, through: Date,
                           pricing: PricingTable.Snapshot, mode: CostMode) -> [ArenaSpendRow] {
-        var d = FetchDescriptor<TokenSample>(
-            predicate: #Predicate { $0.accountId == account && $0.sampledAt > after && $0.sampledAt <= through },
-            sortBy: [SortDescriptor(\.sampledAt)])
-        d.propertiesToFetch = [\.sampledAt, \.model, \.inputTokens, \.outputTokens, \.cacheReadTokens,
-                               \.cacheCreation5mTokens, \.cacheCreation1hTokens, \.sourceCostUSD,
-                               \.speed, \.inferenceGeo]
+        // A day at a time, each through a context of its own and dropped:
+        // memory is one day's turns, never the walk's (#337). Not `ModelWalk`:
+        // its offset pages assume nothing writes the table mid-walk, and this
+        // runs beside the scan, which does. A window is one query, so a turn
+        // written meanwhile is in it or not, never counted twice.
         var turns: [Turn] = []
-        try? ModelWalk.forEach(d, in: container) { s in
-            guard s.model != "<synthetic>" else { return }
-            turns.append(Turn(at: ArenaTime.millis(s.sampledAt), family: family(s.model),
-                              costUSD: cost(s, pricing: pricing, mode: mode),
-                              tokens: Int(s.inputTokens + s.outputTokens + s.cacheReadTokens
-                                          + s.cacheCreation5mTokens + s.cacheCreation1hTokens)))
+        var from = after
+        while from < through {
+            let to = min(through, from.addingTimeInterval(86400))
+            let lo = from, hi = to
+            var d = FetchDescriptor<TokenSample>(
+                predicate: #Predicate { $0.accountId == account && $0.sampledAt > lo && $0.sampledAt <= hi })
+            d.propertiesToFetch = [\.sampledAt, \.model, \.inputTokens, \.outputTokens, \.cacheReadTokens,
+                                   \.cacheCreation5mTokens, \.cacheCreation1hTokens, \.sourceCostUSD,
+                                   \.speed, \.inferenceGeo]
+            autoreleasepool {
+                for s in (try? ModelContext(container).fetch(d)) ?? [] where s.model != "<synthetic>" {
+                    turns.append(Turn(at: ArenaTime.millis(s.sampledAt), family: family(s.model),
+                                      costUSD: cost(s, pricing: pricing, mode: mode),
+                                      tokens: Int(s.inputTokens + s.outputTokens + s.cacheReadTokens
+                                                  + s.cacheCreation5mTokens + s.cacheCreation1hTokens)))
+                }
+            }
+            from = to
         }
         return spendRows(turns)
     }
