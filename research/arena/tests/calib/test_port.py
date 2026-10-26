@@ -4,6 +4,7 @@ model's own sampled paths within Monte-Carlo error, a fixture's outputs are
 reproduced from its inputs alone, and real snapshots are refused."""
 from __future__ import annotations
 
+import importlib.util
 import json
 from pathlib import Path
 
@@ -91,6 +92,7 @@ def test_analog_quantiles_agree_with_its_paths(calib_data, calib_registry, cases
 
 
 @needs_timestral
+@pytest.mark.skipif(importlib.util.find_spec('torch') is None, reason='needs the fm extra (torch)')
 def test_timestral_quantiles_agree_with_its_paths(calib_data, calib_registry, cases):
     info = calib_registry.load("fm-timestral-5m-meter")
     for case in cases:
@@ -111,6 +113,7 @@ def test_timestral_quantiles_agree_with_its_paths(calib_data, calib_registry, ca
 
 
 @needs_timestral
+@pytest.mark.skipif(importlib.util.find_spec('torch') is None, reason='needs the fm extra (torch)')
 def test_calibrated_quantiles_agree_with_calibrated_paths(calib_data, calib_registry, cases):
     """The layer applied to the child's exact quantile curves gives what it
     gives applied to the child's paths, within Monte-Carlo error."""
