@@ -199,6 +199,30 @@ public enum KitDetQ {
                                    quantiles: spendDecayQuantiles(p, gridCount: g, levels: forecastLevels))
     }
 
+    /// `tf.quantile(level)` for many levels at once, `[levels][G]`: the
+    /// same values (linear between the model's levels, flat beyond; numpy's
+    /// type 7 over paths), without re-gathering a column per level.
+    public static func quantileRows(_ tf: ArenaTargetForecast, levels: [Double]) -> [[Double]] {
+        let g = tf.gridCount
+        if let lv = tf.levels, let q = tf.quantiles, let first = lv.first, let last = lv.last {
+            return levels.map { x -> [Double] in
+                if x <= first { return q[0] }
+                if x >= last { return q[q.count - 1] }
+                var lo = 0, hi = lv.count - 1
+                while hi - lo > 1 { let mid = (lo + hi) >> 1; if lv[mid] <= x { lo = mid } else { hi = mid } }
+                let span = lv[hi] - lv[lo]
+                if span == 0 { return q[lo] }
+                let a = (x - lv[lo]) / span
+                if a == 0 { return q[lo] }
+                return (0..<g).map { j in q[lo][j] + a * (q[hi][j] - q[lo][j]) }
+            }
+        }
+        guard let paths = tf.paths, !paths.isEmpty else { return levels.map { _ in [] } }
+        var cols = [[Double]](repeating: [], count: g)
+        for j in 0..<g { cols[j] = paths.map { $0[j] }.sorted() }
+        return levels.map { x in (0..<g).map { ArenaMath.quantile(cols[$0], x) } }
+    }
+
     /// `np.maximum.accumulate` along a path.
     @inline(__always)
     public static func runningMax(_ xs: [Double]) -> [Double] {

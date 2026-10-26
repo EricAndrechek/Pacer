@@ -134,7 +134,11 @@ import Testing
             let req = ArenaFixtures.request(c)
             let tr = req.targets[0]
             let latest = KitBaselines.meterNow(h, tr).latest
-            for spec in ArenaRegistry.spendModels where spec.targets.contains(tr.target) {
+            // A wrapper whose child is another port's runs once that port
+            // is merged in.
+            let known = Set(ArenaRegistry.all.map(\.name))
+            for spec in ArenaRegistry.spendModels
+            where spec.targets.contains(tr.target) && spec.children.allSatisfy(known.contains) {
                 let fc = try runner.forecast(model: spec.name, history: h, request: req)
                 let tf = try #require(fc.byKey[tr.key], "\(spec.name) \(c.id)")
                 #expect(tf.gridCount == tr.grid.count)
