@@ -1,3 +1,4 @@
+import Accelerate
 import Foundation
 
 /// `research/arena/kit/fm/backends.py`, the Timestral part: one loaded network
@@ -39,6 +40,15 @@ public enum FMBackends {
         if let hit { return hit }
         guard let dir = services.weights(id) else { throw ArenaError.weightsUnavailable(id) }
         return try timestral(id, directory: dir)
+    }
+
+    /// Accelerate's BLAS threading, process-wide (`BLASSetThreading`): the
+    /// arena pins torch to a few threads; a background backfill may want one
+    /// thread so it never competes with the app's foreground for cores.
+    /// Returns false when the call was refused.
+    @discardableResult
+    public static func setBLASThreading(singleThreaded: Bool) -> Bool {
+        BLASSetThreading(singleThreaded ? BLAS_THREADING_SINGLE_THREADED : BLAS_THREADING_MULTI_THREADED) == 0
     }
 
     /// `B × V × H × Q` quantiles in Double, sorted along Q (`fix_crossing`).

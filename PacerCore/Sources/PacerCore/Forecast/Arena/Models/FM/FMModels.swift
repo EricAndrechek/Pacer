@@ -40,6 +40,36 @@ extension ArenaRegistry {
                 ],
                 weights: [s.weights], complexity: s.complexity
             ) { try FMMeterModel(context: $0) })
+            // models/fm-timestral-<size>-spend/model.toml: hourly spend, the
+            // structural models' child. Its arena targets (spend.hourly,
+            // tokens.hourly) are not meters, so it registers none: only
+            // `struct-timestral-<size>` asks it, through `FMSpendModel.hourly`.
+            specs.append(ArenaModelSpec(
+                name: "fm-timestral-\(s.tag)-spend",
+                targets: [],
+                config: [
+                    "backend": "timestral", "weights": .string(s.weights), "threads": 4, "context_hours": 336,
+                    // Visible tier: all four covariates beat none and calendar alone on the real
+                    // snapshot; companion variates were within noise, so none by default.
+                    "covariates": ["calendar", "meter", "sessions", "prompts"],
+                    "multivariate": "none", "max_variates": 5, "rho": 0.8, "transform": "none", "cap_factor": 1.5,
+                ],
+                weights: [s.weights], complexity: s.complexity
+            ) { try FMSpendModel(context: $0) })
+            // models/struct-timestral-<size>/model.toml: the child's spend paths
+            // through the account's spend-to-meter conversion. It lists the
+            // child's weights (the model.toml has none of its own) so the runner
+            // never runs it before they are on the Mac.
+            specs.append(ArenaModelSpec(
+                name: "struct-timestral-\(s.tag)",
+                targets: [.meterFiveHour, .meterSevenDay, .meterScoped],
+                children: ["fm-timestral-\(s.tag)-spend"],
+                config: [
+                    "child": .string("fm-timestral-\(s.tag)-spend"), "child_paths": 200, "start": "live",
+                    "spend_by": "total", "weak": "ratio", "family_dependence": "comonotone",
+                ],
+                weights: [s.weights], complexity: 5
+            ) { try FMStructModel(context: $0) })
         }
         // models/g2-01-haiku-weekly-209m-extended/model.toml: Timestral-209M
         // with 14 days of context (1344 steps of 15 min) for the weekly meter.
