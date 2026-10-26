@@ -455,6 +455,35 @@ struct RuntimeEngineTests {
         #expect(EngineSelfEval.arenaLosers(engine + few, arenaIds: ["m1", "m2", "m3", "m4"], weekly: false).isEmpty)
     }
 
+    /// Records the instant every cut it is asked at.
+    final class Clocked: ArenaModel {
+        nonisolated(unsafe) static var cuts: [Millis] = []
+        static let lock = NSLock()
+        init(context: ArenaContext) {}
+        func fit(_ history: ArenaHistory) { Self.lock.lock(); Self.cuts.append(history.now); Self.lock.unlock() }
+        func forecast(_ request: ArenaRequest) throws -> ArenaForecast {
+            ArenaForecast(byKey: Dictionary(uniqueKeysWithValues: request.targets.map {
+                ($0.key, ArenaTargetForecast.point(Array(repeating: 10, count: $0.grid.count)))
+            }))
+        }
+    }
+
+    /// Every arena cut, scored and live, is on a five-minute boundary, so no
+    /// spend bucket is cut in half (`ArenaCut`).
+    @Test func cutsFallOnFiveMinuteBoundaries() async throws {
+        Clocked.cuts = []
+        let container = try Self.seeded()
+        let clocked = ArenaModelSpec(name: "test-clocked", targets: Self.meters) { Clocked(context: $0) }
+        let rt = Self.runtime(container, roster: [clocked])
+        _ = await rt.scorer.pass(accounts: [Self.account], now: Self.now)
+        let binding = ArenaWindowBinding(account: Self.account, windowKey: "five_hour", target: .meterFiveHour, cap: nil)
+        await rt.live.submit([ArenaLiveRequest(binding: binding, resetsAt: Self.now.addingTimeInterval(3 * 3600),
+                                               latestReadingAt: Self.now, models: ["test-clocked"])])
+        await rt.live.settle()
+        #expect(Clocked.cuts.count == 96 + 1)
+        #expect(Clocked.cuts.allSatisfy { $0 % (5 * ArenaTime.minute) == 0 })
+    }
+
     @Test func comparableRecordsShareOneSpan() {
         func r(_ m: String, _ p: String, _ err: Double) -> EngineSelfEval.Record {
             .init(method: m, bucket: "cut=0.50|v2", periodKey: p, predicted: 50 + err, truth: 50)

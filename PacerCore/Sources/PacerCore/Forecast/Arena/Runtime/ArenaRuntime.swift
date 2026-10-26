@@ -101,19 +101,15 @@ public actor ArenaRecordScorer {
         /// What an incremental pass reads, as the engine's refit does.
         public var incrementalDays = 32
         public var cuts = EngineSelfEval.rlCutFractions
-        /// Child forecasts a window's runner keeps (`ArenaRunner.memoLimit`).
-        /// A parent's backtests at successive cuts of a cycle mostly repeat
-        /// (their times are aligned to the history's start), so the memo is
-        /// what makes ensembles affordable: the calibration layer backtests
-        /// its child at 24 origins on a fixed lattice (2 h apart on five-hour
-        /// windows), so neighbouring cuts and cycles share nearly all of them.
-        /// A turn adds ~25 entries a cut with today's roster. Bounded by
-        /// memory: a Monte-Carlo forecast keeps 200 paths over its grid,
-        /// ~100 KB on a five-hour grid and ~550 KB on a weekly one, so the
-        /// worst case (every entry paths) is about 100 MB, for the one window
-        /// being scored.
-        public var sessionMemoLimit = 1024
-        public var weeklyMemoLimit = 192
+        /// What each account's runner keeps (`ArenaRunner.memoLimitValues`,
+        /// in doubles). One runner serves an account for the whole pass, so a
+        /// parent's child backtests, made on a fixed lattice (the calibration
+        /// layer's: 24 origins 2 h apart on five-hour windows, 8 h on weekly
+        /// ones), are made once and read at every later cut and cycle: a calib
+        /// forecast costs 12–25 ms on a reused runner against 86–232 ms on a
+        /// fresh one. Every account in the pass has one, so the bound is per
+        /// account: 3 M doubles, 24 MB.
+        public var memoLimitValues = 3_000_000
         /// Cycles a window scores before the next window's turn.
         public var sessionCyclesPerTurn = 4
         public var weeklyCyclesPerTurn = 2
@@ -202,9 +198,6 @@ public actor ArenaRecordScorer {
         var records: [EngineSelfEval.Record]
         let store: ArenaHistoryStore
         let surface: String
-        /// Live only during the stream's turn (`pass`), so one window's memo
-        /// is held at a time.
-        var runner: ArenaRunner?
         var queue: [BurnTrajectory.Cycle]       // newest first
         var existing: Set<String>
     }
@@ -231,23 +224,28 @@ public actor ArenaRecordScorer {
                   + String(format: "%.0f%% of a core", config.dutyCycle * 100))
 
         // Each window in turn, newest cycles first, a few cycles a turn, so
-        // every window's selection has something to go on early. A turn's
-        // cycles share one runner: a parent's backtests over neighbouring
-        // cycles mostly repeat, and its memo answers them; dropping it at the
-        // end of the turn keeps one window's memo in memory at a time.
+        // every window's selection has something to go on early. One runner
+        // per account for the whole pass: a parent's child backtests over
+        // neighbouring cuts and cycles mostly repeat, and its memo answers
+        // them.
+        var runners: [String: ArenaRunner] = [:]
         var lastLog = SuspendingClock.now
         while streams.contains(where: { !$0.queue.isEmpty }) {
             for i in streams.indices where !streams[i].queue.isEmpty {
                 let weekly = streams[i].window.isWeeklyScale
-                let runner = ArenaRunner(registry: roster.registry, services: services)
-                runner.memoLimit = weekly ? config.weeklyMemoLimit : config.sessionMemoLimit
-                streams[i].runner = runner
-                defer { streams[i].runner = nil; prune(&streams[i]) }
+                let account = streams[i].account
+                let runner = runners[account] ?? {
+                    let r = ArenaRunner(registry: roster.registry, services: services)
+                    r.memoLimitValues = config.memoLimitValues
+                    return r
+                }()
+                runners[account] = runner
+                defer { prune(&streams[i]) }
                 for _ in 0..<(weekly ? config.weeklyCyclesPerTurn : config.sessionCyclesPerTurn) {
                     guard !cancel.isSet else { return report }
                     guard !streams[i].queue.isEmpty else { break }
                     let cycle = streams[i].queue.removeFirst()
-                    let news = await score(cycle, in: &streams[i], report: &report)
+                    let news = await score(cycle, in: &streams[i], runner: runner, report: &report)
                     report.cycles += 1
                     if !news.isEmpty {
                         persist(news, surface: streams[i].surface)
@@ -342,14 +340,15 @@ public actor ArenaRecordScorer {
             }
             guard !queue.isEmpty else { continue }
             out.append(Stream(account: account, window: window, binding: binding, models: models, records: records,
-                              store: store, surface: surface, runner: nil, queue: Array(queue), existing: existing))
+                              store: store, surface: surface, queue: Array(queue), existing: existing))
         }
         return out
     }
 
     /// Every cut of one completed cycle, every model still missing at it:
     /// cuts outer, models inner, one history cut shared by the models.
-    private func score(_ cycle: BurnTrajectory.Cycle, in s: inout Stream, report: inout Report) async
+    private func score(_ cycle: BurnTrajectory.Cycle, in s: inout Stream, runner: ArenaRunner,
+                       report: inout Report) async
         -> [EngineSelfEval.NewOutcome] {
         guard let truth = cycle.samples.map(\.usedPercentage).max(), truth > 0 else { return [] }
         let duration = cycle.resetsAt.timeIntervalSince(cycle.cycleStart)
@@ -371,11 +370,10 @@ public actor ArenaRecordScorer {
             guard !missing.isEmpty else { continue }
             let partial = BurnTrajectory.PartialCycle(samples: seen, now: cutNow, cycleStart: cycle.cycleStart,
                                                       resetsAt: cycle.resetsAt)
-            let cut = ArenaHistory(store: s.store, now: ArenaTime.millis(cutNow), accounts: [s.account])
+            let cut = ArenaHistory(store: s.store, now: ArenaCut.millis(cutNow), accounts: [s.account])
             let busyStart = SuspendingClock.now
             for spec in missing {
                 let k = Self.key(s.surface, spec.name, cf, period)
-                guard let runner = s.runner else { return out }
                 report.forecasts += 1
                 let modelStart = SuspendingClock.now
                 defer {
@@ -460,14 +458,10 @@ public actor ArenaRecordScorer {
     }
 
     /// Whether every pinned weight `spec` and its children need is on this
-    /// Mac. A model missing one would only throw at every cut.
-    static func weightsPresent(_ spec: ArenaModelSpec, roster: ArenaRoster, services: ArenaServices,
-                               depth: Int = 0) -> Bool {
-        guard depth < 8 else { return true }
-        guard spec.weights.allSatisfy({ services.weights($0) != nil }) else { return false }
-        return spec.children.allSatisfy { name in
-            roster.spec(name).map { weightsPresent($0, roster: roster, services: services, depth: depth + 1) } ?? false
-        }
+    /// Mac (`ArenaRunner.requiredWeights`, transitive). A model missing one
+    /// throws `weightsUnavailable` at every cut, so it is not offered.
+    static func weightsPresent(_ spec: ArenaModelSpec, roster: ArenaRoster, services: ArenaServices) -> Bool {
+        ArenaRunner(registry: roster.registry).requiredWeights(spec.name).allSatisfy { services.weights($0) != nil }
     }
 }
 
@@ -485,6 +479,12 @@ public actor ArenaLiveForecaster {
     private let landed: @Sendable (Set<String>) async -> Void
     private var pending: [String: ArenaLiveRequest] = [:]
     private var draining = false
+    /// One runner per account, kept across refits for as long as the history
+    /// it ran on is the same full build: the calibration layer's child
+    /// backtests sit on a fixed lattice, so a later cut reuses all but the
+    /// newest (12–25 ms a calib forecast warm, 86–232 ms cold).
+    private var runners: [String: (generation: UUID, runner: ArenaRunner)] = [:]
+    static let liveMemoLimitValues = 2_000_000
     /// Failures already logged, so a model that can't forecast a window
     /// says so once, not every refit.
     private var logged = Set<String>()
@@ -517,8 +517,19 @@ public actor ArenaLiveForecaster {
             var changed = Set<String>()
             for (account, requests) in Dictionary(grouping: batch, by: { $0.binding.account }) {
                 let built = await history.built(account: account)
-                let cut = ArenaHistory(store: built.store, now: ArenaTime.millis(built.builtThrough), accounts: [account])
-                for r in requests where make(r, cut: cut, asOf: built.builtThrough) { changed.insert(account) }
+                let cutMs = ArenaCut.millis(built.builtThrough)
+                let cut = ArenaHistory(store: built.store, now: cutMs, accounts: [account])
+                let runner: ArenaRunner
+                if let kept = runners[account], kept.generation == built.generation {
+                    runner = kept.runner
+                } else {
+                    runner = ArenaRunner(registry: roster.registry, services: services)
+                    runner.memoLimitValues = Self.liveMemoLimitValues
+                    runners[account] = (built.generation, runner)
+                }
+                for r in requests where make(r, cut: cut, asOf: ArenaTime.date(cutMs), runner: runner) {
+                    changed.insert(account)
+                }
             }
             if !changed.isEmpty { await landed(changed) }
         }
@@ -526,17 +537,15 @@ public actor ArenaLiveForecaster {
     }
 
     /// Returns whether anything new landed.
-    private func make(_ r: ArenaLiveRequest, cut: ArenaHistory, asOf: Date) -> Bool {
-        let runner = ArenaRunner(registry: roster.registry, services: services)
+    private func make(_ r: ArenaLiveRequest, cut: ArenaHistory, asOf: Date, runner: ArenaRunner) -> Bool {
         let duration = TimeInterval(r.binding.target.windowMillis) / 1000
         var any = false
         for model in r.models {
             guard !cancel.isSet else { return any }
             let key = ArenaLiveCache.Key(account: r.binding.account, windowKey: r.binding.windowKey, model: model)
-            if let e = cache.entry(key),
-               RateLimitCycle.contains(sampleReset: e.resetsAt, resets: r.resetsAt, duration: duration),
-               e.asOf >= r.latestReadingAt,
-               asOf.timeIntervalSince(e.asOf) < ArenaLiveCache.maxAge(duration: duration) / 2 {
+            // Already made at this cut, for this cycle: the same answer.
+            if let e = cache.entry(key), e.asOf >= asOf,
+               RateLimitCycle.contains(sampleReset: e.resetsAt, resets: r.resetsAt, duration: duration) {
                 continue
             }
             do {
@@ -573,12 +582,12 @@ public final class ArenaRuntime: Sendable {
     private let ensureWeights: @Sendable ([String]) async -> Void
     public let compareLimit: Int
 
-    // MERGE (builder C, `Forecast/Arena/Kit/FM/`): the two wiring points for
-    // pretrained weights. Replace the bodies with
-    //   `ArenaWeightStore.localURL(for: id)` and
-    //   `await ArenaWeightStore.ensureAvailable(ids)`.
-    // Until then no model that pins weights runs (it is simply not
-    // selectable), and nothing is downloaded.
+    // MERGE (feat/fm-timestral, `Forecast/Arena/Kit/FM/ArenaWeightStore`):
+    // the two wiring points for pretrained weights. Replace the bodies with
+    //   `ArenaWeightStore.services` (the folder holding a pinned network) and
+    //   `{ ids in await ArenaWeightStore.ensureAvailable(ids) }`.
+    // Until then no model that pins weights, itself or through a child, is
+    // offered or scored, and nothing is downloaded.
     public static let defaultWeights: @Sendable (String) -> URL? = { _ in nil }
     public static let defaultEnsureWeights: @Sendable ([String]) async -> Void = { _ in }
 
@@ -620,7 +629,9 @@ public final class ArenaRuntime: Sendable {
     /// missing are skipped until a later pass finds them).
     public func start(accounts: @escaping @Sendable () async -> [String]) {
         guard !roster.isEmpty else { return }
-        let ids = Array(Set(roster.registry.flatMap(\.weights))).sorted()
+        // What the models that can be picked need, children included.
+        let runner = ArenaRunner(registry: roster.registry)
+        let ids = Array(Set(roster.selectable.flatMap { runner.requiredWeights($0.name) })).sorted()
         if !ids.isEmpty {
             let ensure = ensureWeights
             Task.detached(priority: .background) { await ensure(ids) }

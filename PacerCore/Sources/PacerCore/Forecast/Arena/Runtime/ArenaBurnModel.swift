@@ -1,5 +1,19 @@
 import Foundation
 
+/// Where the runtime cuts an arena history: `now` floored to a five-minute
+/// boundary, in backtest cuts and live alike. A spend bucket's row is known
+/// only at its last turn (`ArenaHistoryBuilder.spendRows`), so a cut inside a
+/// bucket would hide up to five minutes of the latest activity and could flip
+/// a model's active/idle read; at a boundary every bucket before it is whole,
+/// which is what the per-turn arena saw (the simulation port found no
+/// difference over 53 aligned cuts). Flooring sees less, so it cannot leak.
+public enum ArenaCut {
+    public static let step: Millis = ArenaHistoryBuilder.spendBucketMillis
+    public static func millis(_ date: Date) -> Millis {
+        ArenaHistoryBuilder.floorDiv(ArenaTime.millis(date), step) * step
+    }
+}
+
 /// An arena forecast as the engine draws it: the median path on the request's
 /// grid, linear in between, held at the first grid value before it and at the
 /// last after it.
@@ -53,8 +67,9 @@ extension ArenaRunner {
 /// A registered arena model as a `BurnTrajectory.Model`: what the engine's
 /// scoring and selection read every forecaster through.
 ///
-/// `fit` cuts the history at the partial cycle's `now` (rows known later are
-/// not seen: this is how backtest cuts stay honest), asks the model for that
+/// `fit` cuts the history at the partial cycle's `now`, floored to five
+/// minutes (`ArenaCut`; rows known later are not seen: this is how backtest
+/// cuts stay honest), asks the model for that
 /// cycle's meter on the runner's grid and returns its median path. Any error
 /// is a decline (nil), as a curve fit declines a cycle it can't fit.
 ///
@@ -78,7 +93,7 @@ public struct ArenaBurnModel: BurnTrajectory.Model {
     public var complexity: Int { spec.complexity }
 
     public func fit(_ cycle: BurnTrajectory.PartialCycle) -> (@Sendable (Date) -> Double)? {
-        let cut = ArenaHistory(store: store, now: ArenaTime.millis(cycle.now), accounts: [binding.account])
+        let cut = ArenaHistory(store: store, now: ArenaCut.millis(cycle.now), accounts: [binding.account])
         let runner = ArenaRunner(registry: registry, services: services)
         return (try? runner.projection(model: spec.name, binding: binding, history: cut,
                                        resetAt: ArenaTime.millis(cycle.resetsAt)))?.closure

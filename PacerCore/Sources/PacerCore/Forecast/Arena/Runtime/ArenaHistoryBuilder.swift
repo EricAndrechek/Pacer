@@ -285,6 +285,12 @@ public enum ArenaHistoryBuilder {
     public struct Built: Sendable {
         public let store: ArenaHistoryStore
         public let builtThrough: Date
+        /// Which full build this is; an extension keeps it. A runner's memo
+        /// is good for as long as it holds (`ArenaLiveForecaster`): an
+        /// extension only appends rows after every earlier cut, and keeps
+        /// the history's start, so a child forecast made at a past cut is
+        /// still the one it would make now.
+        public let generation: UUID
         let meters: [ArenaMeterID: [ArenaReading]]
         let spend: [ArenaSpendRow]
     }
@@ -311,7 +317,7 @@ public enum ArenaHistoryBuilder {
                               pricing: pricing ?? Self.pricing(container: container),
                               mode: mode ?? PacerPreferences.costMode())
         let store = makeStore(account: account, meters: meters, spend: spend, now: now, since: since)
-        return Built(store: store, builtThrough: now, meters: meters, spend: spend)
+        return Built(store: store, builtThrough: now, generation: UUID(), meters: meters, spend: spend)
     }
 
     static func makeStore(account: String, meters: [ArenaMeterID: [ArenaReading]], spend: [ArenaSpendRow],
@@ -329,8 +335,11 @@ public enum ArenaHistoryBuilder {
                               depthDays: Int = depthDays, mode: CostMode? = nil,
                               pricing: PricingTable.Snapshot? = nil) -> Built {
         guard now > built.builtThrough else { return built }
-        let since = now.addingTimeInterval(-Double(depthDays) * 86400)
-        let sinceMs = ArenaTime.millis(since)
+        // The start stays where the full build put it, so memo keys (which
+        // name it) and backtest lattices hold until the next full build; the
+        // depth grows by at most the six hours between full builds.
+        let sinceMs = built.store.dataStart
+        let since = ArenaTime.date(sinceMs)
         // Live rows from a little before the last build, so a row written in
         // the same second as the build is not missed; duplicates drop below.
         let fresh = readLiveLimits(container: container, account: account,
@@ -360,7 +369,7 @@ public enum ArenaHistoryBuilder {
                                mode: mode ?? PacerPreferences.costMode())
         let spend = kept + reread
         return Built(store: makeStore(account: account, meters: meters, spend: spend, now: now, since: since),
-                     builtThrough: now, meters: meters, spend: spend)
+                     builtThrough: now, generation: built.generation, meters: meters, spend: spend)
     }
 
     /// The live tables only (new rows never land in the archive).
