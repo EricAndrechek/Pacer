@@ -204,14 +204,32 @@ public final class TimestralNetwork: @unchecked Sendable {
 
         let obsPerPatch = Self.obsPerPatch(observed, rows: rows, n: n, ps: ps)
         let keyValid = Self.encKeyValidity(obsPerPatch, rows: rows, n: n, attendMissing: c.attend_missing_patches)
-        let timeMask = Self.twoStreamTimeMask(minContext: ll, n: n, blockSize: c.block_size, keyValid: keyValid,
+        let fullMask = Self.twoStreamTimeMask(minContext: ll, n: n, blockSize: c.block_size, keyValid: keyValid,
                                               rows: rows, bidirectionalRows: knownRows)
-        let variateMask = Self.twoStreamVariateMask(groupIds: groupIds, encKeyValid: keyValid, rows: rows, nEnc: n,
+        let fullVariate = Self.twoStreamVariateMask(groupIds: groupIds, encKeyValid: keyValid, rows: rows, nEnc: n,
                                                     nDec: n, targetRows: targetRows, bidirectionalRows: knownRows)
         let firstObs = Self.groupFirstObservedPatch(obsPerPatch, rows: rows, n: n, groupIds: groupIds)
-        let s = 2 * n
+        // The Python runs a decoder token for every patch of the window, but
+        // only the horizon's `h` are active: an inactive one attends only to
+        // itself, no active token or encoder token attends to it (the time
+        // mask needs both decoder ends active; the variate mask mixes one
+        // slot, whose tokens are all inactive or all active), and the head
+        // reads only the horizon's. So they are left out: the same outputs,
+        // bit for bit in exact arithmetic, for n + h tokens instead of 2n.
+        let full = 2 * n
+        let keep = Array(0..<n) + Array((n + ll)..<full)
+        let s = keep.count
+        var timeMask = [Float](repeating: Self.blocked, count: rows * s * s)
+        for r in 0..<rows {
+            for (i, ki) in keep.enumerated() {
+                for (j, kj) in keep.enumerated() { timeMask[(r * s + i) * s + j] = fullMask[(r * full + ki) * full + kj] }
+            }
+        }
+        let variateMask = fullVariate.map { fv in
+            keep.flatMap { k in fv[(k * rows * rows)..<((k + 1) * rows * rows)] }
+        }
         var positions = [Int](repeating: 0, count: rows * s)
-        for r in 0..<rows { for p in 0..<n { positions[r * s + p] = p - firstObs[r]; positions[r * s + n + p] = p - firstObs[r] } }
+        for r in 0..<rows { for (i, k) in keep.enumerated() { positions[r * s + i] = (k < n ? k : k - n) - firstObs[r] } }
 
         return pool.with { ws in
             let d = c.d_model
@@ -221,8 +239,7 @@ public final class TimestralNetwork: @unchecked Sendable {
                 for p in n..<s { (x + (r * s + p) * d).update(from: forecastQuery, count: d) }
             }
             transformer(x, rows: rows, seq: s, timeMask: timeMask, variateMask: variateMask, positions: positions, ws: ws)
-            // The head is per token: run it on the horizon's decoder tokens only.
-            return headQuantiles(x, rows: rows, seq: s, decFrom: n + ll, decCount: h, ws: ws) { r in
+            return headQuantiles(x, rows: rows, seq: s, decFrom: n, decCount: h, ws: ws) { r in
                 (loc[r * w + (ll - 1) * ps], scale[r * w + (ll - 1) * ps])
             }
         }
