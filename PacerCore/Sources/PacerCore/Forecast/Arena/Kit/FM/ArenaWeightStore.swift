@@ -72,10 +72,14 @@ public enum ArenaWeightStore {
     /// `~/Library/Application Support/Pacer/ForecastWeights` (the same
     /// `Pacer` folder the command-line tool's link lives in).
     public static var downloadRoot: URL {
+        if let o = downloadRootOverride { return o }
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support")
         return base.appendingPathComponent("Pacer/ForecastWeights", isDirectory: true)
     }
+
+    /// Tests only: download somewhere other than Application Support.
+    nonisolated(unsafe) static var downloadRootOverride: URL?
 
     /// The app bundle's `Resources/ForecastWeights` (nil in tests and tools).
     public static var bundledRoot: URL? {
