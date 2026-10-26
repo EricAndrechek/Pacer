@@ -43,6 +43,7 @@ container running.
 """
 from __future__ import annotations
 
+import gc
 import hashlib
 import json
 import os
@@ -479,6 +480,10 @@ class WorkerHandle:
             self._err.close()
         if self.own_scratch:
             shutil.rmtree(self.scratch, ignore_errors=True)
+        # An in-process worker's model and its context reference each other
+        # (`model.log = ctx.log`), so the cycle outlives the worker and kept
+        # ~100 MB per backtest child alive: collect it now.
+        gc.collect()
 
 
 @dataclass
