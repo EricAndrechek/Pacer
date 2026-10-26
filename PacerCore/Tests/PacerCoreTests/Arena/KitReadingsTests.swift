@@ -67,6 +67,62 @@ import Testing
         #expect(total > 50)
     }
 
+    /// The run-merging grouping equals the Python's sort-everything one,
+    /// on every fixture, a synthetic history, and resets that interleave,
+    /// drift and tie in time.
+    @Test func fastPastCyclesEqualTheSortedOnes() throws {
+        func same(_ a: [KitSpend.PastCycle], _ b: [KitSpend.PastCycle]) -> Bool {
+            a.count == b.count && zip(a, b).allSatisfy { $0.reset == $1.reset && $0.t == $1.t && $0.util == $1.util }
+        }
+        var n = 0
+        for c in try Self.allCases() {
+            let h = ArenaFixtures.history(c)
+            let r = KitSpend.meterSeries(h, account: c.inputs.account, windowKind: c.inputs.window_kind)
+            #expect(same(KitSpend.pastCyclesFast(r, windowKind: c.inputs.window_kind, now: h.now),
+                         KitSpend.pastCyclesBySort(r, windowKind: c.inputs.window_kind, now: h.now)), "case \(c.id)")
+            n += 1
+        }
+        let (store, end) = SpendTimingTests.synthetic(days: 30)
+        let h = ArenaHistory(store: store, now: end, accounts: ["S1"])
+        for kind in ["five_hour", "seven_day"] {
+            let r = KitSpend.meterSeries(h, account: "S1", windowKind: kind)
+            #expect(same(KitSpend.pastCyclesFast(r, windowKind: kind, now: h.now),
+                         KitSpend.pastCyclesBySort(r, windowKind: kind, now: h.now)), "synthetic \(kind)")
+        }
+        // Adversarial: two cycles' readings interleaved, a reset that drifts
+        // a minute per reading (one chained group), equal times, odd and
+        // even group sizes.
+        var rng = ArenaRNG(seed: 3)
+        let H = ArenaTime.hour
+        var t: [Millis] = [], p: [Double] = [], reset: [Millis] = [], active: [Bool] = []
+        for i in 0..<400 {
+            let base: Millis = 1_780_000_000_000 + Millis(i / 3) * 60_000
+            t.append(base); p.append(Double(i % 9))
+            switch i % 4 {
+            case 0: reset.append(1_780_000_000_000 + 5 * H + Millis(rng.uniform() * 900))
+            case 1: reset.append(1_780_000_000_000 + 10 * H + Millis(rng.uniform() * 900))
+            case 2: reset.append(1_780_000_000_000 + 20 * H + Millis(i) * 61_000)
+            default: reset.append(1_780_000_000_000 + 5 * H + 2 * H + Millis(rng.uniform() * 3 * Double(H)))
+            }
+            active.append(i % 11 != 0)
+        }
+        let r = KitSpend.MeterSeries(t: t, p: p, reset: reset, active: active)
+        let now: Millis = 1_780_000_000_000 + 100 * H
+        let fast = KitSpend.pastCyclesFast(r, windowKind: "five_hour", now: now)
+        #expect(same(fast, KitSpend.pastCyclesBySort(r, windowKind: "five_hour", now: now)))
+        #expect(fast.count >= 2)
+        #expect(n == 32)
+    }
+
+    @Test func selectMedianIsTheTruncatedMedian() {
+        var rng = ArenaRNG(seed: 9)
+        for n in [1, 2, 3, 4, 7, 10, 101, 1000] {
+            var xs = (0..<n).map { _ in Millis(rng.uniform() * 1e6) + (rng.uniform() < 0.3 ? 0 : 1_780_000_000_000) }
+            let want = KitSpend.truncatedMedian(xs)
+            #expect(KitSpend.selectMedian(&xs) == want, "n \(n)")
+        }
+    }
+
     @Test func truncatedMedianIsNumpys() {
         #expect(KitSpend.truncatedMedian([5]) == 5)
         #expect(KitSpend.truncatedMedian([1, 4]) == 2)              // 2.5 → 2

@@ -121,6 +121,34 @@ import Testing
         print("timing synthetic 120 d:\n  " + lines.joined(separator: "\n  "))
     }
 
+    /// Where spend-decay's time goes on a fresh cut, kit step by kit step
+    /// (each step memoized on the cut, so each later one pays only its own).
+    @Test(arguments: ["five_hour", "seven_day"])
+    func kitBreakdown(_ kind: String) throws {
+        let (store, end) = Self.synthetic()
+        let five = ArenaMeterID(account: "S1", windowKind: "five_hour")
+        let now = Self.activeNow(store, before: end, meter: five)
+        let h = ArenaHistory(store: store, now: now, accounts: ["S1"])
+        var parts: [String] = []
+        func step(_ label: String, _ body: () -> Void) {
+            parts.append("\(label) \(String(format: "%.2f", Self.time(body)))")
+        }
+        step("readings") { _ = h.readings(account: "S1", windowKind: kind) }
+        step("series") { _ = KitSpend.meterSeries(h, account: "S1", windowKind: kind) }
+        step("ledger") { _ = KitSpend.ledger(h, account: "S1") }
+        step("pastCycles") { _ = KitSpend.pastCycles(h, account: "S1", windowKind: kind) }
+        step("intervals") { _ = KitSpend.intervals(h, account: "S1", windowKind: kind) }
+        step("fitDetails") { _ = KitSpend.fitDetails(h, account: "S1", windowKind: kind) }
+        let lookback: Millis = kind == "five_hour" ? 30 * ArenaTime.minute : 360 * ArenaTime.minute
+        let days = kind == "five_hour" ? 60 : 120
+        step("buildCases") { _ = SpendDecayModel.buildCases(h, "S1", kind, nil, lookback: lookback, maxDays: days) }
+        let name = kind == "five_hour" ? "spend-decay-30m" : "spend-decay-6h"
+        let req = ArenaRunner.request(history: h, targets: [kind == "five_hour" ? .meterFiveHour : .meterSevenDay])
+        let runner = ArenaRunner(registry: ArenaRegistry.all)
+        step("forecast (rest)") { _ = try? runner.forecast(model: name, history: h, request: req) }
+        print("timing kit \(kind) ms: " + parts.joined(separator: ", "))
+    }
+
     /// Where a calibration wrapper's time goes: the child's backtests, then
     /// the child at now plus the records and the fit, then the map's apply.
     @Test(arguments: ["calib-spend-decay-30m", "calib-spend-decay-6h"])
