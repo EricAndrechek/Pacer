@@ -102,7 +102,7 @@ public final class SafeTensors: @unchecked Sendable {
         case "F16":
             guard e.end - e.begin == 2 * n else { throw ReadError.header("size of \(name)") }
             return widen(name, n) { out in
-                for i in 0..<n { out[i] = Float(Float16(bitPattern: UInt16(littleEndian: p.loadUnaligned(fromByteOffset: 2 * i, as: UInt16.self)))) }
+                for i in 0..<n { out[i] = Self.halfToFloat(UInt16(littleEndian: p.loadUnaligned(fromByteOffset: 2 * i, as: UInt16.self))) }
             }
         case "BF16":
             guard e.end - e.begin == 2 * n else { throw ReadError.header("size of \(name)") }
@@ -115,6 +115,22 @@ public final class SafeTensors: @unchecked Sendable {
         default:
             throw ReadError.dtype(name, e.dtype)
         }
+    }
+
+    /// IEEE 754 binary16 to float32, exactly. By hand rather than through
+    /// `Float16`, which Swift does not offer on Intel Macs (the app's release
+    /// build is universal).
+    static func halfToFloat(_ h: UInt16) -> Float {
+        let sign = UInt32(h & 0x8000) << 16
+        let exp = Int((h >> 10) & 0x1f)
+        let mant = UInt32(h & 0x3ff)
+        if exp == 0 {
+            if mant == 0 { return Float(bitPattern: sign) }
+            let v = Float(mant) * 0x1p-24                    // subnormal: mant · 2^-24
+            return sign != 0 ? -v : v
+        }
+        if exp == 31 { return Float(bitPattern: sign | 0x7f80_0000 | (mant << 13)) }   // inf / NaN
+        return Float(bitPattern: sign | (UInt32(exp + 112) << 23) | (mant << 13))
     }
 
     private func widen(_ name: String, _ n: Int, _ fill: (UnsafeMutablePointer<Float>) -> Void) -> UnsafePointer<Float> {
