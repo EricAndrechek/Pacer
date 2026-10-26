@@ -450,23 +450,31 @@ enum LimitSim {
         var t: [Millis] = [], u: [Double] = [], r: [Millis] = []
         for i in times.indices where active[i] && reset[i] > 0 { t.append(times[i]); u.append(util[i]); r.append(reset[i]) }
         guard !t.isEmpty else { return [] }
-        // Cycles by reset (half a window apart), anchored at each cycle's first reset.
-        let order = r.indices.sorted { (r[$0], $0) < (r[$1], $1) }          // a stable argsort
-        var cycOf = [Int](repeating: 0, count: r.count)
-        var anchor = r[order[0]], c = 0
-        for j in 1..<order.count {
-            if Double(r[order[j]] - anchor) >= Double(duration) / 2 { c += 1; anchor = r[order[j]] }
-            cycOf[order[j]] = c
+        // Cycles by reset (half a window apart), anchored at each cycle's first
+        // reset in reset order (the Python's stable argsort, then a walk). A
+        // cycle is a run of the sorted resets from its anchor to the next, so
+        // a reading's cycle depends on its reset alone: sort the resets once
+        // (the server's jitter means they are never in order), find the
+        // anchors, and place each reading by binary search, in time order.
+        let rsAll = r.sorted()
+        var anchors = [rsAll[0]]
+        var firstOf = [0]                         // each cycle's first index in rsAll
+        for j in 1..<rsAll.count where Double(rsAll[j] - anchors[anchors.count - 1]) >= Double(duration) / 2 {
+            anchors.append(rsAll[j]); firstOf.append(j)
         }
-        var members = [[Int]](repeating: [], count: c + 1)
-        for i in r.indices { members[cycOf[i]].append(i) }          // in time order
+        firstOf.append(rsAll.count)
+        var members = [[Int]](repeating: [], count: anchors.count)
+        for i in r.indices { members[SimArrays.searchRight(anchors, r[i]) - 1].append(i) }   // in time order
         var out: [CycleTop] = []
-        for sel in members {
-            let ord = sel.sorted { (t[$0], $0) < (t[$1], $1) }
+        for (k, sel) in members.enumerated() {
+            // `sel` is in index order, and the series is in event order, so
+            // this stable argsort by time is the identity unless it is not.
+            let sorted = zip(sel, sel.dropFirst()).allSatisfy { t[$0] <= t[$1] }
+            let ord = sorted ? sel : sel.sorted { (t[$0], $0) < (t[$1], $1) }
             let tk = ord.map { t[$0] }, uk = ord.map { u[$0] }
             // `int(np.median(resets))`: the truncated median, kept for parity.
-            let rs = sel.map { r[$0] }.sorted()
-            let m = rs.count / 2
+            let rs = rsAll[firstOf[k]..<firstOf[k + 1]]
+            let m = rs.startIndex + rs.count / 2
             let R = rs.count % 2 == 1 ? rs[m] : Millis((Double(rs[m - 1]) + Double(rs[m])) / 2)
             if R > now { continue }                   // the cycle in progress: not a past outcome
             let top = uk.max() ?? 0

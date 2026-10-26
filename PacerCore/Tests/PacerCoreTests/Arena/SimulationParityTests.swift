@@ -10,8 +10,8 @@ import Testing
 /// `ArenaFixtures/sim-*.json` were made by running each Python model through
 /// the same in-process harness on `snapshot_from_case(case)` with 4000 paths
 /// (`detq.MC_PATHS`), quantiles and `mc_bounds` as `detq.from_sampled` makes
-/// them (the estimate ∓ 4√2 standard errors of an n-path quantile). The
-/// generator is described in the MERGE NOTES of the branch that added them.
+/// them (the estimate ∓ 4√2 standard errors of an n-path quantile), by
+/// `ArenaFixtures/sim-generator.py` (its docstring has the commands).
 ///
 /// Deterministic intermediates (the state now, rates, hazards, ceilings)
 /// must match to the decimals stored; the quantiles, from two independent
