@@ -61,6 +61,54 @@ struct RuntimePerfProbe {
 
     static let meters: Set<ArenaTarget> = [.meterFiveHour, .meterSevenDay, .meterScoped]
 
+    /// What two dozen arena models in the record cost the engine's refit:
+    /// the same store refitted without the runtime, then with 24 arena models
+    /// each scored over 180 five-hour and 18 weekly cycles (fabricated rows,
+    /// the volume a heavy account reaches).
+    @Test func refitWithAFullArenaRecord() async throws {
+        let now = Date(timeIntervalSince1970: (Date().timeIntervalSince1970 / 60).rounded(.down) * 60)
+        let container = try Self.heavyStore(days: 60, now: now)
+        let clock = ContinuousClock()
+        func refit(_ e: UsageIntelligenceEngine) async -> Double {
+            let t = clock.now
+            await e.recompute(now: now)
+            return Self.seconds(clock.now - t) * 1000
+        }
+        let plain = UsageIntelligenceEngine(modelContainer: container)
+        await plain.adopt(scope: .account(Self.account))
+        _ = await refit(plain)
+        _ = await plain.backfillRateLimitRecordIfNeeded(now: now, pause: .zero)
+        let before = [await refit(plain), await refit(plain)]
+
+        let ctx = ModelContext(container)
+        let ids = (0..<24).map { "perf-arena-\($0)" }
+        let five = EngineScope.account(Self.account).qualify(EngineSelfEval.rlSurface("five_hour"))
+        let seven = EngineScope.account(Self.account).qualify(EngineSelfEval.rlSurface("seven_day"))
+        var rng = ArenaRNG(seed: 3)
+        for (surface, cycles, step) in [(five, 180, 6.0 * 3600), (seven, 18, 7.0 * 86400)] {
+            for c in 0..<cycles {
+                let period = EngineSelfEval.periodKeyRL(now.addingTimeInterval(-Double(c + 1) * step))
+                for id in ids {
+                    for cf in EngineSelfEval.rlCutFractions {
+                        ctx.insert(EngineEvalOutcome(surface: surface, method: id, bucket: EngineSelfEval.rlBucket(cf),
+                                                     periodKey: period, predicted: 40 + rng.uniform() * 20, truth: 50))
+                    }
+                }
+            }
+        }
+        try ctx.save()
+        let roster = ArenaRoster(registry: ids.map { id in
+            ArenaModelSpec(name: id, targets: Self.meters) { NaiveFlat(context: $0) }
+        })
+        let linked = UsageIntelligenceEngine(modelContainer: container)
+        await linked.adopt(scope: .account(Self.account))
+        await linked.adopt(arena: ArenaEngineLink(roster: roster, cache: ArenaLiveCache(), requestLive: { _ in }))
+        let first = await refit(linked)
+        let after = [await refit(linked), await refit(linked)]
+        print(String(format: "[perf] refit without arena rows: %.0f, %.0f ms; with %d arena rows: first %.0f ms, then %.0f, %.0f ms",
+                     before[0], before[1], 24 * 8 * (180 + 18), first, after[0], after[1]))
+    }
+
     @Test func heavyAccount() async throws {
         let now = Date(timeIntervalSince1970: (Date().timeIntervalSince1970 / 60).rounded(.down) * 60)
         let clock = ContinuousClock()

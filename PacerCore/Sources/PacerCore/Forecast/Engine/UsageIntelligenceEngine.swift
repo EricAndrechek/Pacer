@@ -286,7 +286,13 @@ public actor UsageIntelligenceEngine {
                            calendar: calendar, now: now)
             }
         }
-        let existing = Set(allRows.map { $0.key })
+        // Only the engine's own methods are scored here, so only their keys
+        // are looked up: the arena models' rows (most of a record once they
+        // compete) would only make this set several times larger every refit.
+        let engineMethods = Self.engineMethodIds
+        let existing = timed("existing") {
+            Set(allRows.lazy.filter { engineMethods.contains($0.record.method) }.map { $0.key })
+        }
         let newEOD = EngineSelfEval.newOutcomesEOD(periods: f.dailyPeriods, calendar: calendar, existingKeys: existing)
         persist(newEOD, now: now)
         // Cycles that completed inside the 32 days just read. Everything older
@@ -334,6 +340,9 @@ public actor UsageIntelligenceEngine {
         // can never pollute the fixed windows' selection.
         var rlSelection: [String: String] = [:]
         let params = EngineParams.current
+        // Timed: with the arena models in the record this is a few times the
+        // engine's own rows, and the phase log should say what it costs.
+        let selectStarted = Date()
         for window in f.windows where fitsRateLimits {
             let surface = EngineSelfEval.rlSurface(window.key)
             // Current-version rows only: v1 graded the raw line, not the value shown.
@@ -360,6 +369,7 @@ public actor UsageIntelligenceEngine {
                 rlSelection[window.key] = pick
             }
         }
+        phase["rlSelect", default: 0] += Int(Date().timeIntervalSince(selectStarted) * 1000)
 
         let rlAccuracy = Dictionary(f.windows.compactMap { w in
             accuracyBySurface[EngineSelfEval.rlSurface(w.key)].map { (w.key, $0) }
@@ -478,6 +488,9 @@ public actor UsageIntelligenceEngine {
     /// Roster complexities for a rate-limit window — so the persisted-scoreboard
     /// pick can break near-ties toward the simpler model. Window-agnostic (every
     /// window shares the one roster), so it takes no window argument.
+    /// Every method the engine scores itself, end of day and rate limit.
+    static let engineMethodIds = Set(RateLimitRoster.engineIds + EngineSelfEval.eodCandidates.map(\.id))
+
     static func rlComplexities(arena: ArenaRoster = .empty) -> [String: Int] {
         RateLimitRoster.complexities(arena: arena)
     }

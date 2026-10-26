@@ -480,49 +480,61 @@ extension EngineSelfEval {
     /// the cycles every judged model was scored on. Both with the statistic
     /// selection ranks by (`typicalError`).
     public static func arenaLosers(_ records: [Record], arenaIds: Set<String>, weekly: Bool) -> Set<String> {
-        var out = arenaLosersToEngine(records, arenaIds: arenaIds, weekly: weekly)
-        out.formUnion(arenaNonContenders(records, arenaIds: arenaIds.subtracting(out), weekly: weekly))
+        guard !arenaIds.isEmpty else { return [] }
+        let index = ErrorIndex(records)
+        var out = arenaLosersToEngine(index, arenaIds: arenaIds, weekly: weekly)
+        out.formUnion(arenaNonContenders(index, arenaIds: arenaIds.subtracting(out), weekly: weekly))
         return out
     }
 
-    static func arenaNonContenders(_ records: [Record], arenaIds: Set<String>, weekly: Bool) -> Set<String> {
+    /// Each method's absolute errors by cycle, built in one pass: the loser
+    /// tests compare methods cycle by cycle, and runs every refit over a
+    /// record that, with the arena models in it, is tens of thousands of rows.
+    struct ErrorIndex {
+        var byMethod: [String: [String: [Double]]] = [:]
+        init(_ records: [Record]) {
+            for r in records { byMethod[r.method, default: [:]][r.periodKey, default: []].append(abs(r.predicted - r.truth)) }
+        }
+        func errors(_ method: String, over periods: some Collection<String>) -> [Double] {
+            guard let m = byMethod[method] else { return [] }
+            var out: [Double] = []
+            for p in periods { if let e = m[p] { out += e } }
+            return out
+        }
+    }
+
+    static func arenaNonContenders(_ index: ErrorIndex, arenaIds: Set<String>, weekly: Bool) -> Set<String> {
         let floor = arenaPruneMinPeriods(weekly: weekly)
-        var byMethod: [String: [Record]] = [:]
-        for r in records where arenaIds.contains(r.method) { byMethod[r.method, default: []].append(r) }
-        let judged = byMethod.filter { Set($0.value.map(\.periodKey)).count >= floor }
+        let judged = arenaIds.compactMap { id -> (String, Set<String>)? in
+            guard let p = index.byMethod[id], p.count >= floor else { return nil }
+            return (id, Set(p.keys))
+        }
         guard judged.count > arenaContenders else { return [] }
         // The cycles every judged model was scored on.
-        var common: Set<String>?
-        for rows in judged.values {
-            let p = Set(rows.map(\.periodKey))
-            common = common.map { $0.intersection(p) } ?? p
-        }
-        guard let common, common.count >= floor else { return [] }
-        let ranked = judged.map { id, rows -> (id: String, err: Double) in
-            (id, typicalError(rows.filter { common.contains($0.periodKey) }.map { abs($0.predicted - $0.truth) },
-                              weekly: weekly))
-        }.sorted { ($0.err, $0.id) < ($1.err, $1.id) }
+        var common = judged[0].1
+        for (_, p) in judged.dropFirst() { common.formIntersection(p) }
+        guard common.count >= floor else { return [] }
+        let ranked = judged.map { id, _ in (id: id, err: typicalError(index.errors(id, over: common), weekly: weekly)) }
+            .sorted { ($0.err, $0.id) < ($1.err, $1.id) }
         guard let best = ranked.first?.err else { return [] }
         return Set(ranked.dropFirst(arenaContenders).filter { $0.err > best * arenaContenderBand }.map(\.id))
     }
 
-    static func arenaLosersToEngine(_ records: [Record], arenaIds: Set<String>, weekly: Bool) -> Set<String> {
-        guard !arenaIds.isEmpty else { return [] }
-        var byMethod: [String: [Record]] = [:]
-        for r in records { byMethod[r.method, default: []].append(r) }
+    static func arenaLosersToEngine(_ index: ErrorIndex, arenaIds: Set<String>, weekly: Bool) -> Set<String> {
         var losers = Set<String>()
+        let engineMethods = index.byMethod.filter { !arenaIds.contains($0.key) }
         for id in arenaIds {
-            guard let rows = byMethod[id] else { continue }
-            let periods = Set(rows.map(\.periodKey))
-            guard periods.count >= arenaPruneMinPeriods(weekly: weekly) else { continue }
-            let own = typicalError(rows.map { abs($0.predicted - $0.truth) }, weekly: weekly)
+            guard let own = index.byMethod[id], own.count >= arenaPruneMinPeriods(weekly: weekly) else { continue }
+            let ownError = typicalError(own.values.flatMap { $0 }, weekly: weekly)
             var best = Double.infinity
-            for (method, all) in byMethod where !arenaIds.contains(method) {
-                let on = all.filter { periods.contains($0.periodKey) }
-                guard Set(on.map(\.periodKey)).count * 2 >= periods.count else { continue }
-                best = min(best, typicalError(on.map { abs($0.predicted - $0.truth) }, weekly: weekly))
+            for (_, byPeriod) in engineMethods {
+                var errs: [Double] = []
+                var covered = 0
+                for p in own.keys { if let e = byPeriod[p] { errs += e; covered += 1 } }
+                guard covered * 2 >= own.count else { continue }
+                best = min(best, typicalError(errs, weekly: weekly))
             }
-            if best.isFinite, own > best * arenaLossRatio + arenaLossMargin { losers.insert(id) }
+            if best.isFinite, ownError > best * arenaLossRatio + arenaLossMargin { losers.insert(id) }
         }
         return losers
     }
