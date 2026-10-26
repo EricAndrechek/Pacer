@@ -50,6 +50,17 @@ import Testing
         #expect(total.detailMismatches.isEmpty, "\(total.detailMismatches)")
     }
 
+    /// Two accounts in view: the other's history pooled into the behaviour
+    /// and the ceilings at half weight, and (m02) an account with no past of
+    /// its own borrowing the other's burn at half scale.
+    @Test func opusLimitMatchesTheArenaWithTwoAccounts() throws {
+        let cov = try SimParity.opusLimit(cases: "sim-cases-multi", reference: "sim-g2-07-opus-limit-multi")
+        print("g2-07-opus-limit (two-account cases): \(cov.summary)")
+        #expect(cov.compared == 4)
+        #expect(cov.fraction <= Self.maxOutside, "\(cov.summary)")
+        #expect(cov.detailMismatches.isEmpty, "\(cov.detailMismatches)")
+    }
+
     /// One seed, one forecast: the runner seeds a model from (seed, name,
     /// now), so a backfill re-run reproduces every path.
     @Test func forecastsAreReproducible() throws {
@@ -173,13 +184,23 @@ enum SimParity {
     // MARK: g2-07
 
     static func opusLimit(cases: String, reference: String) throws -> Coverage {
-        let file = try ArenaFixtures.cases(cases)
+        let multi = cases.hasPrefix("sim-cases-multi")
+        let file = multi ? nil : try ArenaFixtures.cases(cases)
+        let multiFile = multi ? try MultiCases.load(cases) : nil
         let ref = try ArenaFixtures.model(reference)
         var cov = Coverage()
         for out in ref.outputs {
-            let c = try #require(file.cases.first { $0.id == out.case })
-            let h = ArenaFixtures.history(c)
-            let req = request(c, nPaths: ArenaParityConstants.mcPaths)
+            let h: ArenaHistory, req: ArenaRequest, key: String
+            if let multiFile {
+                let c = try #require(multiFile.cases.first { $0.id == out.case })
+                (h, req) = c.historyAndRequest(nPaths: ArenaParityConstants.mcPaths)
+                key = c.request.key
+            } else {
+                let c = try #require(file!.cases.first { $0.id == out.case })
+                h = ArenaFixtures.history(c)
+                req = request(c, nPaths: ArenaParityConstants.mcPaths)
+                key = c.request.key
+            }
             let tr = req.targets[0]
             if let d = out.detail {
                 let L = OpusLimitMeters.learn(h, now: h.now, tr, cfg: [:], memoPrefix: G207OpusLimit.name)
@@ -196,7 +217,8 @@ enum SimParity {
                     "keep": L.keepLearned, "rebase_per_step": [L.beh.rebasePerStep], "n_falls": [Double(L.nFalls)],
                     "n_tops": [Double(L.nTops)], "ceil_hazard": ce.hazard, "leak": [ce.leakPerHour],
                     "leak_late": [ce.leakLatePerHour], "stay_h": [stay],
-                    "idle_h": [OpusLimitMeters.idleHours(L.own, h.now)],
+                    "idle_h": [OpusLimitMeters.idleHours(L.own, h.now)], "n_hists": [Double(L.nHists)],
+                    "borrowed": [L.borrowed ? 1 : 0], "sim_burn_sum": [L.h.burnSum],
                     "post_levels": post.levels.map(Double.init), "post_probs": post.probs,
                 ]
                 for (k, v) in mine {
@@ -209,10 +231,45 @@ enum SimParity {
             let m = instance(G207OpusLimit.name, { G207OpusLimit(context: $0) }, history: h)
             try m.fit(h)
             let fc = try m.forecast(req)
-            let paths = try #require(fc.byKey[c.request.key]?.paths)
+            let paths = try #require(fc.byKey[key]?.paths)
             checkQuantiles(quantiles(paths), out, into: &cov)
         }
         return cov
+    }
+}
+
+/// `ArenaFixtures/sim-cases-multi.json`: two-account cases (see
+/// `sim-generator.py`, `MULTI`), readings per account.
+struct MultiCases: Decodable {
+    struct Case: Decodable {
+        let id: String
+        let accounts: [String]
+        let window_kind: String
+        let history_start: Int64
+        let tz_offset_min: Int?
+        let readings: [String: ArenaFixtures.Readings]
+        let request: ArenaFixtures.Request
+
+        func historyAndRequest(nPaths: Int) -> (ArenaHistory, ArenaRequest) {
+            var meters: [ArenaMeterID: [ArenaReading]] = [:]
+            for (acct, r) in readings {
+                meters[ArenaMeterID(account: acct, windowKind: window_kind)] = r.t_event.indices.map { i in
+                    ArenaReading(tEvent: r.t_event[i], tKnown: r.t_known[i], utilPct: r.util_pct[i],
+                                 resetsAt: r.resets_at[i], active: r.state[i] == "active")
+                }
+            }
+            let store = ArenaHistoryStore(meters: meters, spend: [:], tzOffsetMin: tz_offset_min, dataStart: history_start)
+            let h = ArenaHistory(store: store, now: request.now, accounts: accounts, start: history_start)
+            let tr = ArenaTargetRequest(key: request.key, target: ArenaTarget(rawValue: request.target)!,
+                                        accounts: [request.account], grid: request.grid, nPaths: nPaths,
+                                        resetAt: request.reset_at)
+            return (h, ArenaRequest(now: request.now, accounts: accounts, targets: [tr]))
+        }
+    }
+    let cases: [Case]
+
+    static func load(_ name: String) throws -> MultiCases {
+        try JSONDecoder().decode(MultiCases.self, from: Data(contentsOf: ArenaFixtures.url(name)))
     }
 }
 

@@ -115,6 +115,9 @@ enum OpusLimitMeters {
         let keepLearned: [Double]
         let nFalls: Int
         let nTops: Int
+        /// Histories pooled into the behaviour: the account's own and every
+        /// other account's with 2+ readings.
+        let nHists: Int
         let ceilings: LimitSim.Ceilings?
         /// The history the simulation resamples (own, or a borrowed account's).
         let h: LimitSim.StepHist
@@ -202,7 +205,7 @@ enum OpusLimitMeters {
             let firstTod = Int(SimRandom.pmod(now + step + tzMs, LimitSim.day) / step) % spd
             let prepared = h.count >= 2 && h.burnSum > 0 ? LimitSim.prepare(h, firstTod: firstTod, step: step, cfg: c) : nil
             return Learned(c: c, step: step, tzMs: tzMs, own: own, ownH: ownH, beh: beh, keepLearned: keepLearned,
-                           nFalls: falls[0].count, nTops: nTops, ceilings: ceilings, h: h,
+                           nFalls: falls[0].count, nTops: nTops, nHists: hists.count, ceilings: ceilings, h: h,
                            borrowed: borrowed, prepared: prepared, firstTod: firstTod)
         }
     }
