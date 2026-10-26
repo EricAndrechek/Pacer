@@ -81,6 +81,12 @@ final class AppBackgroundService {
     private var lastEngineRecomputeAt: Date?
     /// The once-per-launch full-history record pass; see `startRecordBackfill`.
     private var recordBackfillTask: Task<Void, Never>?
+    /// The ported arena forecasters (`ArenaRuntime`): scored over every
+    /// account's history in the background and competing for each window's
+    /// forecast through the engine's own record. Made on the first refit,
+    /// scoring from two minutes after it, stopped at quit. See `startArena`.
+    private var arena: ArenaRuntime?
+    private var arenaStarted = false
     /// Bridges `pacerScanCycleDidComplete` notifications to per-kind
     /// `WidgetCenter.reloadTimelines` calls so the WidgetKit extension
     /// — which can't observe SwiftData — refreshes when new data
@@ -198,6 +204,9 @@ final class AppBackgroundService {
     func stop() async {
         guard coordinator != nil else { return }
         Log.write("AppBackground", "stopping")
+        // The arena scorer stops at its next model boundary; its outcomes so
+        // far are saved, and the next launch resumes after them.
+        await arena?.stop()
         if let coord = coordinator {
             await coord.stop()
         }
@@ -691,6 +700,58 @@ final class AppBackgroundService {
         }
     }
 
+    /// The arena runtime, made once. Its scorer hands each saved batch to the
+    /// account's engine (so the next refit selects with it, without a
+    /// re-read), and when live projections land the engines whose pick was
+    /// waiting on one redraw and every card asks again.
+    private func arenaRuntime() -> ArenaRuntime {
+        if let arena { return arena }
+        let engines = self.engines
+        let runtime = ArenaRuntime(
+            container: container,
+            onRecordLanded: { account, news in
+                let engine = await MainActor.run {
+                    engines.all.first { $0.scope == .account(account) }?.engine
+                }
+                _ = await engine?.ingestArenaOutcomes(news)
+            },
+            onLiveLanded: { accounts in
+                let targets = await MainActor.run {
+                    engines.all.filter { $0.scope.accountId.map { accounts.contains($0) } ?? false }.map(\.engine)
+                }
+                var changed = false
+                for engine in targets {
+                    if await engine.refreshArenaResolution() { changed = true }
+                }
+                guard changed else { return }
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .pacerEngineDidRecompute, object: nil)
+                }
+            })
+        arena = runtime
+        return runtime
+    }
+
+    /// Start back-computing the arena models over every account's history,
+    /// once per launch, two minutes after the first refit: the first pass
+    /// reads months of limits and turns, and launch has enough to do. At
+    /// background priority and a quarter of one core (`ArenaRecordScorer`),
+    /// newest cycles first, resuming after whatever an earlier launch saved.
+    private func startArena() {
+        guard !arenaStarted else { return }
+        arenaStarted = true
+        let runtime = arenaRuntime()
+        let container = self.container
+        Task.detached(priority: .background) {
+            try? await Task.sleep(for: .seconds(120))
+            // The active login first: its windows are the ones on screen.
+            runtime.start(accounts: {
+                ((try? ModelContext(container).fetch(FetchDescriptor<Account>())) ?? [])
+                    .sorted { $0.isActive && !$1.isActive }.map(\.id)
+            })
+        }
+    }
+
     private func recomputeEngineIfDue(force: Bool = false,
                                       rateLimitsChanged: Bool = true) async -> Bool {
         let now = Date()
@@ -714,6 +775,10 @@ final class AppBackgroundService {
         let accounts = (try? container.mainContext.fetch(accountIds)) ?? []
         await engines.keepFitted(accounts: accounts.map(\.id),
                                  active: accounts.first(where: \.isActive)?.id)
+        // Every engine competes the arena models it can draw. Adopting is a
+        // property set; an engine made between refits adopts on the next one.
+        let arenaLink = arenaRuntime().link
+        for entry in engines.all { await entry.engine.adopt(arena: arenaLink) }
         let started = Date()
         //
         // Still concurrent, and deliberately so after trying the alternative.
@@ -742,6 +807,7 @@ final class AppBackgroundService {
         await exportEngineSnapshots(live)
         NotificationCenter.default.post(name: .pacerEngineDidRecompute, object: nil)
         startRecordBackfill(live.map { $0.engine })
+        startArena()
 
         // The refit is the most expensive recurring thing Pacer does and it
         // had never been timed — which is how it went unnoticed that it runs
