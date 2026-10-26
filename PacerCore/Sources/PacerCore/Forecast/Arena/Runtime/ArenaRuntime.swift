@@ -62,6 +62,36 @@ final class ArenaCancelFlag: @unchecked Sendable {
     private var value = false
     var isSet: Bool { lock.lock(); defer { lock.unlock() }; return value }
     func set(_ v: Bool) { lock.lock(); value = v; lock.unlock() }
+    /// Read and clear (a one-shot request, like memory relief).
+    func take() -> Bool { lock.lock(); defer { value = false; lock.unlock() }; return value }
+}
+
+/// Drops what the arena keeps that can be made again when macOS reports
+/// memory pressure: the runners' forecast memos (up to 24 MB an account in a
+/// pass, 16 MB an account live) and the calibration layer's network cache.
+/// On a Mac short of memory those pages were what got compressed and swapped,
+/// and touching them again is a page-in on whatever thread asks.
+final class ArenaMemoryRelief: @unchecked Sendable {
+    private let source: DispatchSourceMemoryPressure
+
+    /// - Parameter scorerFlag: read by the scorer between windows.
+    init(live: ArenaLiveForecaster, scorerFlag flag: ArenaCancelFlag) {
+        source = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical],
+                                                         queue: .global(qos: .utility))
+        source.setEventHandler { [source] in
+            let level = source.data.contains(.critical) ? "critical" : "warning"
+            FMCalCutCache.shared.removeAll()
+            flag.set(true)
+            Task.detached(priority: .utility) {
+                await live.dropRunners()
+                MemoryHygiene.relieve()
+                Log.write("Arena", "memory pressure (\(level)): dropped forecast memos and caches")
+            }
+        }
+        source.activate()
+    }
+
+    deinit { source.cancel() }
 }
 
 /// Models log through the runner, and during a backfill a model is asked
@@ -149,6 +179,9 @@ public actor ArenaRecordScorer {
     private let services: ArenaServices
     private let budget: ArenaCPUBudget
     private let cancel: ArenaCancelFlag
+    /// Set on memory pressure: the pass drops its runners (and their memos)
+    /// at the next window's turn.
+    let relief = ArenaCancelFlag()
     private let config: Config
     private let calendar: Calendar
     private let landed: @Sendable (_ account: String, _ outcomes: [EngineSelfEval.NewOutcome]) async -> Void
@@ -262,6 +295,7 @@ public actor ArenaRecordScorer {
         var lastLog = SuspendingClock.now
         while streams.contains(where: { !$0.queue.isEmpty }) {
             for i in streams.indices where !streams[i].queue.isEmpty {
+                if relief.take() { runners.removeAll() }
                 let weekly = streams[i].window.isWeeklyScale
                 let account = streams[i].account
                 let runner = runners[account] ?? {
@@ -561,6 +595,10 @@ public actor ArenaLiveForecaster {
         Task.detached(priority: .utility) { [weak self] in await self?.drain() }
     }
 
+    /// Forget the kept runners and their memos (memory pressure); the next
+    /// request makes fresh ones.
+    func dropRunners() { runners.removeAll() }
+
     /// Wait until everything queued so far has been made (tests).
     public func settle() async {
         while draining || !pending.isEmpty { try? await Task.sleep(for: .milliseconds(5)) }
@@ -643,6 +681,7 @@ public final class ArenaRuntime: Sendable {
     /// The arena's share of the CPU, scorer and live together.
     public let budget: ArenaCPUBudget
     let cancel = ArenaCancelFlag()
+    private let relief: ArenaMemoryRelief
     private let ensureWeights: @Sendable ([String]) async -> Void
     private let weights: @Sendable (String) -> URL?
     public let compareLimit: Int
@@ -699,6 +738,7 @@ public final class ArenaRuntime: Sendable {
                                         landed: onRecordLanded)
         self.live = ArenaLiveForecaster(roster: roster, history: history, cache: cache, services: liveServices,
                                         budget: budget, cancel: cancel, landed: onLiveLanded)
+        self.relief = ArenaMemoryRelief(live: live, scorerFlag: scorer.relief)
     }
 
     /// What every engine adopts.

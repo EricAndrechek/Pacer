@@ -777,8 +777,14 @@ final class AppBackgroundService {
                                  active: accounts.first(where: \.isActive)?.id)
         // Every engine competes the arena models it can draw. Adopting is a
         // property set; an engine made between refits adopts on the next one.
+        // Set from the detached task below, not from here: an engine is a
+        // `@ModelActor`, and hopping onto its executor blocks the calling
+        // thread until the engine is free (SwiftData enqueues with
+        // `performBlockAndWait`), so an adopt sent from the main actor while
+        // a card's ask or an arena batch held the engine stalled the main
+        // thread for as long.
         let arenaLink = arenaRuntime().link
-        for entry in engines.all { await entry.engine.adopt(arena: arenaLink) }
+        let adopting = engines.all.map(\.engine)
         let started = Date()
         //
         // Still concurrent, and deliberately so after trying the alternative.
@@ -797,6 +803,7 @@ final class AppBackgroundService {
         // the fit inline on the main thread.
         let live = engines.live
         await Task.detached(priority: .utility) {
+            for engine in adopting { await engine.adopt(arena: arenaLink) }
             await withTaskGroup(of: Void.self) { group in
                 for entry in live {
                     group.addTask { await entry.engine.recompute(now: now) }
