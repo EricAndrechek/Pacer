@@ -105,16 +105,23 @@ public final class TimesFMNetwork: @unchecked Sendable {
     /// masked and `num_masked` is 0 throughout).
     ///
     /// Returns, renormalized: `pf` `[rows][o][q]`, the last context patch's
-    /// point head; `qs` `[rows][os][q]`, its quantile head; `ar`
+    /// point head; `qs` `[rows][quantileSteps][q]`, the first
+    /// `quantileSteps` (at most `os`) steps of its quantile head; `ar`
     /// `[rows][steps · o][q]`, the autoregressive steps' point heads.
-    func decode(horizon: Int, inputs: [Float], masks: [Bool], rows: Int, context: Int) throws
-        -> (pf: [Float], qs: [Float], ar: [Float], steps: Int) {
+    ///
+    /// The Python computes the whole 1024-step quantile head and reads at
+    /// most `max_horizon` steps of it; each output is its own row of the
+    /// head's last two matrices, so computing only the rows read is the same
+    /// arithmetic, and for a five-hour forecast an eighth of the head's 105 MB.
+    func decode(horizon: Int, inputs: [Float], masks: [Bool], rows: Int, context: Int,
+                quantileSteps qSteps0: Int) throws -> (pf: [Float], qs: [Float], ar: [Float], steps: Int, qSteps: Int) {
         let c = config, p = c.inputPatchLen, o = c.outputPatchLen, nq = c.numOutputs, m = c.patchesPerOutput
         guard context % p == 0, inputs.count == rows * context, masks.count == rows * context else {
             throw ArenaError.invalid("TimesFM decode: context \(context) is not a whole number of patches")
         }
         let steps = (horizon - 1) / o
         let nPatches = context / p
+        let qSteps = max(0, min(qSteps0, c.outputQuantileLen))
         for r in 0..<rows where masks[r * context + p - 1] {
             throw ArenaError.invalid("TimesFM decode: a wholly padded patch (not compiled this way)")
         }
@@ -142,14 +149,14 @@ public final class TimesFMNetwork: @unchecked Sendable {
             let last = forward(tok, rows: rows, tokens: nPatches, cache: cache, ws: ws)   // [rows][d]
             let pfRaw = ws.buf(.point, rows * o * nq)
             residualBlock(pointHead, last, rows, pfRaw, ws: ws)
-            let qsRaw = ws.buf(.quant, rows * c.outputQuantileLen * nq)
-            residualBlock(quantileHead, last, rows, qsRaw, ws: ws)
+            let qn = qSteps * nq
+            let qsRaw = ws.buf(.quant, max(rows * qn, 1))
+            if qn > 0 { residualBlock(quantileHead, last, rows, qsRaw, outputs: qn, ws: ws) }
             var pf = [Float](repeating: 0, count: rows * o * nq)
-            var qs = [Float](repeating: 0, count: rows * c.outputQuantileLen * nq)
+            var qs = [Float](repeating: 0, count: rows * qn)
             for r in 0..<rows {
                 let lm = patchMu[r * nPatches + nPatches - 1], ls = patchSigma[r * nPatches + nPatches - 1]
                 for k in 0..<(o * nq) { pf[r * o * nq + k] = pfRaw[r * o * nq + k] * ls + lm }
-                let qn = c.outputQuantileLen * nq
                 for k in 0..<qn { qs[r * qn + k] = qsRaw[r * qn + k] * ls + lm }
             }
             // Autoregressive decode: the median of the last output patch, as
@@ -180,7 +187,7 @@ public final class TimesFMNetwork: @unchecked Sendable {
                     feed[r] = (0..<o).map { ar[dst + $0 * nq + c.decodeIndex] }
                 }
             }
-            return (pf, qs, ar, steps)
+            return (pf, qs, ar, steps, qSteps)
         }
     }
 
@@ -319,16 +326,20 @@ public final class TimesFMNetwork: @unchecked Sendable {
         }
     }
 
-    /// `ResidualBlock.forward`: `output(swish(hidden(x))) + residual(x)`.
+    /// `ResidualBlock.forward`: `output(swish(hidden(x))) + residual(x)`,
+    /// for the first `outputs` features only when given (`y` `[m][outputs]`).
     private func residualBlock(_ b: ResidualBlock, _ x: UnsafePointer<Float>, _ m: Int,
-                               _ y: UnsafeMutablePointer<Float>, ws: Workspace) {
+                               _ y: UnsafeMutablePointer<Float>, outputs: Int? = nil, ws: Workspace) {
+        let n = min(outputs ?? b.output.out, b.output.out)
+        let output = Linear(w: b.output.w, b: b.output.b, inp: b.output.inp, out: n)
+        let residual = Linear(w: b.residual.w, b: b.residual.b, inp: b.residual.inp, out: n)
         let hid = ws.buf(.resHidden, m * b.hidden.out)
         Self.linear(b.hidden, x, m, hid)
         Self.swish(hid, m * b.hidden.out, ws: ws)
-        Self.linear(b.output, hid, m, y)
-        let r = ws.buf(.resResidual, m * b.residual.out)
-        Self.linear(b.residual, x, m, r)
-        vDSP_vadd(y, 1, r, 1, y, 1, vDSP_Length(m * b.residual.out))
+        Self.linear(output, hid, m, y)
+        let r = ws.buf(.resResidual, m * n)
+        Self.linear(residual, x, m, r)
+        vDSP_vadd(y, 1, r, 1, y, 1, vDSP_Length(m * n))
     }
 
     // MARK: - Kernels

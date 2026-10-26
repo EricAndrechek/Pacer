@@ -116,13 +116,14 @@ public final class TimesFMForecaster: @unchecked Sendable {
         let batch = flip ? x + x.map { -$0 } : x
         let batchMasks = flip ? masks + masks : masks
         let br = flip ? 2 * rows : rows
-        let dec = try network.decode(horizon: fc.maxHorizon, inputs: batch, masks: batchMasks, rows: br, context: context)
-        let o = c.outputPatchLen, os = c.outputQuantileLen
+        let dec = try network.decode(horizon: fc.maxHorizon, inputs: batch, masks: batchMasks, rows: br, context: context,
+                                     quantileSteps: fc.useContinuousQuantileHead ? fc.maxHorizon : 0)
+        let o = c.outputPatchLen, qSteps = dec.qSteps
         let full = o * (1 + dec.steps)                                    // == max_horizon
         func fullAt(_ r: Int, _ t: Int, _ k: Int) -> Float {
             t < o ? dec.pf[(r * o + t) * nq + k] : dec.ar[((r * dec.steps * o) + (t - o)) * nq + k]
         }
-        func qsAt(_ r: Int, _ t: Int, _ k: Int) -> Float { dec.qs[(r * os + t) * nq + k] }
+        func qsAt(_ r: Int, _ t: Int, _ k: Int) -> Float { dec.qs[(r * qSteps + t) * nq + k] }
         // flip_quantile_fn: the mean stays, quantiles 1…9 reverse.
         @inline(__always) func mirrored(_ k: Int) -> Int { k == 0 ? 0 : nq - k }
         var out = [Float](repeating: 0, count: rows * horizon * nq)
@@ -134,7 +135,7 @@ public final class TimesFMForecaster: @unchecked Sendable {
                 }
             }
             if fc.useContinuousQuantileHead {
-                for t in 0..<min(fc.maxHorizon, full) {
+                for t in 0..<min(fc.maxHorizon, full, qSteps) {
                     func qs(_ k: Int) -> Float { flip ? (qsAt(r, t, k) - qsAt(rows + r, t, mirrored(k))) / 2 : qsAt(r, t, k) }
                     let q5 = qs(mid), f5 = ff[t * nq + mid]
                     for k in [1, 2, 3, 4, 6, 7, 8, 9] { ff[t * nq + k] = qs(k) - q5 + f5 }
