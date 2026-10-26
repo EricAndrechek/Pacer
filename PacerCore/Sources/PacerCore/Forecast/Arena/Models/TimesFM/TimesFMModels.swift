@@ -1,6 +1,7 @@
 import Foundation
 
-// TimesFM meter models (fm-timesfm*), on the native TimesFM network in Kit/FM/TimesFM.
+// TimesFM meter models (fm-timesfm*), on the native TimesFM network in Kit/FM/TimesFM,
+// and the stack that uses one (g1-01-sonnet-calstack).
 extension ArenaRegistry {
     static var timesfmModels: [ArenaModelSpec] {
         [
@@ -17,6 +18,22 @@ extension ArenaRegistry {
                 ],
                 weights: [FMWeights.timesfm25], complexity: 5
             ) { try FMMeterModel(context: $0) },
+            // models/g1-01-sonnet-calstack/model.toml: a CRPS stack of the
+            // calibrated Timestral-123M and TimesFM 2.5. No weights of its own,
+            // as in its model.toml: the runner waits for its children's
+            // (`ArenaRunner.requiredWeights`).
+            ArenaModelSpec(
+                name: "g1-01-sonnet-calstack",
+                targets: [.meterFiveHour, .meterSevenDay, .meterScoped],
+                children: ["g1-01-sonnet-calibrate123", "fm-timesfm25-meter"],
+                config: [
+                    "children": ["g1-01-sonnet-calibrate123", "fm-timesfm25-meter"],
+                    "pool": "mixture", "shrink": 0.15, "half_life_n": 24,
+                    "backtest_every_h": ["five_hour": 3, "seven_day": 12, "weekly_scoped": 12],
+                    "backtest_n": 4, "max_evals": 16,
+                ],
+                complexity: 5
+            ) { try CalstackModel(context: $0) },
         ]
     }
 }
