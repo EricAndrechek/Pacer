@@ -172,6 +172,14 @@ public enum KitCalib {
         r.q.withUnsafeBufferPointer { qb in
             for i in 0..<n { meds[i] = recordMedian(UnsafeBufferPointer(rebasing: qb[(i * m)..<((i + 1) * m)])) }
         }
+        // A record's samples are sorted, and what `miss` does to them (scale
+        // around the median by s > 0, clip, round) never reorders them, so
+        // F(y−) and F(y) are two binary searches instead of a pass over all
+        // 40 (rows that are not sorted take the pass).
+        let sorted: [Bool] = r.q.withUnsafeBufferPointer { qb in
+            (0..<n).map { i in (1..<m).allSatisfy { qb[i * m + $0 - 1] <= qb[i * m + $0] } }
+        }
+        let mD = Double(m)
         var scaled = [Double](repeating: 0, count: m)
         var v = [Double](repeating: 0, count: n)
         func miss(_ s: Double, _ c: Double) -> Double {
@@ -181,14 +189,24 @@ public enum KitCalib {
                     for i in 0..<n {
                         let med = meds[i], fl = r.floor[i], wh = r.whole[i]
                         let base = i * m
-                        for j in 0..<m {
-                            // scale_samples, then finish: clip to [floor, 100],
-                            // round half to even where the child was whole.
-                            var x = min(max(med + s * (qb[base + j] - med), fl), 100.0)
-                            if wh { x = x.rounded(.toNearestOrEven) }
-                            sb[j] = x
+                        // scale_samples, then finish: clip to [floor, 100],
+                        // round half to even where the child was whole.
+                        @inline(__always) func t(_ j: Int) -> Double {
+                            let x = min(max(med + s * (qb[base + j] - med), fl), 100.0)
+                            return wh ? x.rounded(.toNearestOrEven) : x
                         }
-                        let (flo, fhi) = tieInterval(UnsafeBufferPointer(sb), r.y[i])
+                        let flo: Double, fhi: Double
+                        if sorted[i] {
+                            let y = r.y[i], lo = y - eps, hi = y + eps
+                            var a0 = 0, a1 = m
+                            while a0 < a1 { let mid = (a0 + a1) >> 1; if t(mid) < lo { a0 = mid + 1 } else { a1 = mid } }
+                            var b0 = a0, b1 = m
+                            while b0 < b1 { let mid = (b0 + b1) >> 1; if t(mid) <= hi { b0 = mid + 1 } else { b1 = mid } }
+                            (flo, fhi) = (Double(a0) / mD, Double(b0) / mD)
+                        } else {
+                            for j in 0..<m { sb[j] = t(j) }
+                            (flo, fhi) = tieInterval(UnsafeBufferPointer(sb), r.y[i])
+                        }
                         v[i] = (belowShare(flo, fhi, a) + 1.0 - belowShare(flo, fhi, b)) * w[i]
                     }
                 }
@@ -263,7 +281,12 @@ public enum KitCalib {
 
     /// `lead_bin`: `searchsorted(edges[:-1], lead, "left")`.
     public static func leadBin(_ kind: String, _ leadS: Double) -> Int {
-        let edges = binsOf(kind).edges
+        leadBin(fiveHour: kind.hasPrefix("five_hour"), leadS)
+    }
+
+    @inline(__always)
+    static func leadBin(fiveHour: Bool, _ leadS: Double) -> Int {
+        let edges = fiveHour ? fiveHourBins.edges : weeklyBins.edges
         var b = 0
         for e in edges.dropLast() where e < leadS { b += 1 }
         return b
@@ -281,7 +304,8 @@ public enum KitCalib {
         let n = Set(r.origin).count
         var fit = KindFit.identity(kind, method: method, n: n)
         if n < minOrigins { return fit }
-        let b = r.leadS.map { leadBin(kind, $0) }
+        let five = windowOf(kind) == "five_hour"
+        let b = r.leadS.map { leadBin(fiveHour: five, $0) }
         fit.nBin = (0..<nb).map { j in Set((0..<r.count).filter { b[$0] == j }.map { r.origin[$0] }).count }
         let lam = Double(n) / (Double(n) + n0)
         let m = r.m
@@ -365,31 +389,37 @@ public enum KitCalib {
         let n = paths.count
         let k = fit.scales(at: grid.map { Double($0 - now) / 1000.0 })
         var V = paths
-        var childMed = [Double](repeating: 0, count: g)
-        var col = [Double](repeating: 0, count: n)
+        // One stable sort per column gives the mid ranks (ties averaged),
+        // the child's median and the order the new values are dealt in.
+        var pairs = [(v: Double, i: Int)](repeating: (0, 0), count: n)
+        var r = [Double](repeating: 0, count: n)
+        var newVals = [Double](repeating: 0, count: n)
         for j in 0..<g {
-            for i in 0..<n { col[i] = paths[i][j] }
-            let r = midRanks(col)
-            let med = KitDetQ.median(col)
-            childMed[j] = med
+            for i in 0..<n { pairs[i] = (paths[i][j], i) }
+            pairs.sort { $0.v != $1.v ? $0.v < $1.v : $0.i < $1.i }
+            var a = 0
+            while a < n {
+                var b = a
+                while b + 1 < n && pairs[b + 1].v == pairs[a].v { b += 1 }
+                let mid = (Double(a + b) / 2 + 1 - 0.5) / Double(n)
+                for t in a...b { r[pairs[t].i] = mid }
+                a = b + 1
+            }
+            let med = n % 2 == 1 ? pairs[n / 2].v : (pairs[n / 2 - 1].v + pairs[n / 2].v) / 2
             // V = m + s(c) · (P − m), s linear between the knots in the
             // central level c = |2r − 1|, flat outside.
-            var newVals = (0..<n).map { i -> Double in
+            for i in 0..<n {
                 let c = abs(2.0 * r[i] - 1.0)
-                return med + KitDetQ.npInterp(c, xs: knots, ys: k[j]) * (col[i] - med)
+                newVals[i] = med + KitDetQ.npInterp(c, xs: knots, ys: k[j]) * (paths[i][j] - med)
             }
             // Rearrange: the k-th smallest child value (stable order) gets the
-            // k-th smallest new one.
-            let order = col.indices.sorted { col[$0] != col[$1] ? col[$0] < col[$1] : $0 < $1 }
+            // k-th smallest new one; then shift the column so its median is
+            // exactly the child's (the two middle paths sit either side of
+            // the median and move by a hair).
             newVals.sort()
-            for (rank, i) in order.enumerated() { V[i][j] = newVals[rank] }
-        }
-        // Shift each column so its median is exactly the child's (the two
-        // middle paths sit either side of the median and move by a hair).
-        for j in 0..<g {
-            for i in 0..<n { col[i] = V[i][j] }
-            let shift = childMed[j] - KitDetQ.median(col)
-            for i in 0..<n { V[i][j] += shift }
+            let newMed = n % 2 == 1 ? newVals[n / 2] : (newVals[n / 2 - 1] + newVals[n / 2]) / 2
+            let shift = med - newMed
+            for (rank, p) in pairs.enumerated() { V[p.i][j] = newVals[rank] + shift }
         }
         let childMonotone = paths.allSatisfy { p in zip(p, p.dropFirst()).allSatisfy { $1 - $0 >= -1e-12 } }
         if childMonotone { monotonePaths(&V) }
@@ -463,8 +493,12 @@ public enum KitCalib {
                 var q = [[Double]](repeating: [Double](repeating: 0, count: g), count: mLevels)
                 var col = [Double](repeating: 0, count: p.count)
                 for j in 0..<g {
-                    for i in p.indices { col[i] = p[i][j] }
-                    col.sort()
+                    var inOrder = true
+                    for i in p.indices {
+                        col[i] = p[i][j]
+                        if i > 0 && col[i] < col[i - 1] { inOrder = false }
+                    }
+                    if !inOrder { col.sort() }
                     for (li, lv) in levelGrid(mLevels).enumerated() {
                         q[li][j] = col.count == mLevels ? col[li] : KitDetQ.readSorted(col, lv)
                         q[li][j] = Double(Float(q[li][j]))
@@ -515,7 +549,8 @@ public enum KitCalib {
         func select(_ st: Stored, _ times: [Millis], _ vals: [Double]) -> Records? {
             if times.isEmpty { return nil }
             let lead = times.map { Double($0 - st.origin) / 1000.0 }
-            let b = lead.map { leadBin(st.kind, $0) }
+            let five = windowOf(st.kind) == "five_hour"
+            let b = lead.map { leadBin(fiveHour: five, $0) }
             var pick: [Int] = []
             for j in Set(b).sorted() {
                 var ix = b.indices.filter { b[$0] == j }
@@ -708,6 +743,6 @@ extension KitCalib {
             col.sort()
             for (li, lv) in levels.enumerated() { out[li][j] = KitDetQ.readSorted(col, lv) }
         }
-        return out
+        return KitDetQ.sharingEqualRows(out)
     }
 }
