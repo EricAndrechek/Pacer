@@ -102,6 +102,51 @@ import Testing
         #expect(pool == sim)
     }
 
+    /// Both pools end to end over the real registry: the real Timestral
+    /// children, when their weights are on this Mac (skipped otherwise).
+    @Test func poolsRunWithTheRealTimestralChildren() throws {
+        for (pool, size, cases, ids) in [(G208FableBurstMix.name, "123m", "cases-spend", ["s04", "s10"]),
+                                         (G207OpusPool.name, "5m", "cases", ["c00", "c01"])] {
+            guard let id = TimestralTestWeights.ids[size], TimestralTestWeights.url(id) != nil else {
+                print("\(pool): Timestral-\(size) weights not on this Mac, skipped")
+                continue
+            }
+            for cid in ids {
+                let c = try #require(try ArenaFixtures.cases(cases).cases.first { $0.id == cid })
+                let h = ArenaFixtures.history(c), req = ArenaFixtures.request(c)
+                let log = LogBox()
+                let services = ArenaServices(weights: { TimestralTestWeights.url($0) }, log: { log.add("\($0): \($1)") })
+                let runner = ArenaRunner(registry: ArenaRegistry.all, services: services)
+                var paths: [[Double]] = []
+                let ms = try SimulationTimingTests.ms {
+                    paths = try #require(try runner.forecast(model: pool, history: h, request: req).byKey[c.request.key]?.paths)
+                }
+                let sim = pool == G207OpusPool.name ? G207OpusLimit.name : G208FableBurst.name
+                let alone = try #require(try runner.forecast(model: sim, history: h, request: req).byKey[c.request.key]?.paths)
+                print(String(format: "\(pool) \(cid) with Timestral-\(size): %.0f ms, logs \(log.lines)", ms))
+                #expect(log.lines.isEmpty, "\(log.lines)")
+                #expect(paths.count == 200)
+                let monotone = paths.allSatisfy { p in zip(p, p.dropFirst()).allSatisfy { $0 <= $1 } && p.allSatisfy { $0 >= 0 && $0 <= 100 } }
+                if pool == G208FableBurstMix.name {
+                    #expect(monotone, "the mix keeps every path in [0, 100] and non-decreasing")
+                } else {
+                    // The opus pool stacks its children's paths as they are, and
+                    // g2-07's can fall: a re-base drops a path to 0 mid-cycle.
+                    #expect(paths.allSatisfy { p in p.allSatisfy { $0 >= 0 && $0 <= 100 } })
+                    if !monotone { print("\(pool) \(cid): some paths fall (g2-07's re-base hazard)") }
+                }
+                #expect(paths != alone, "the network's paths are in the pool")
+            }
+        }
+    }
+
+    final class LogBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _lines: [String] = []
+        func add(_ s: String) { lock.lock(); _lines.append(s); lock.unlock() }
+        var lines: [String] { lock.lock(); defer { lock.unlock() }; return _lines }
+    }
+
     static func asScoped(_ c: ArenaFixtures.Case, cap: String) throws -> (ArenaHistory, ArenaRequest) {
         let base = ArenaFixtures.history(c)
         let id = ArenaMeterID(account: c.inputs.account, windowKind: "weekly_scoped", scopeModel: cap)
