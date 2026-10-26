@@ -187,7 +187,8 @@ import Testing
     /// Timestral float32 tolerance), the PIT records, the calibration and
     /// the calibrated quantiles, every case, with ties at u = 0.5 and no
     /// rationing (the fixtures' det mode).
-    @Test func g108DeterministicMatchesPython() throws {
+    @Test(arguments: [false, true])
+    func g108DeterministicMatchesPython(relative: Bool) throws {
         guard Self.weightsHere else { print("g1-08: Timestral-123M weights not on this Mac, skipped"); return }
         let cases = try Self.cases()
         let fm = try ArenaFixtures.model("comb-g1-08-opus-fm")
@@ -202,6 +203,7 @@ import Testing
             let tr = Self.request(c, nPaths: 200).targets[0]
             let model = try Self.instance(spec, runner: runner, history: h)
             model.meters.tieU01 = 0.5
+            model.meters.relativeNetwork = relative
             let L = try model.meters.levels(h, now: c.request.now, tr)
             let bt = try #require(L.base.backtest)
             // The cuts.
@@ -253,13 +255,17 @@ import Testing
             worstOut = max(worstOut, caseWorst)
             lines.append("\(out.case) \(c.inputs.window_kind): \(live.count) cuts, \(recs.pit.count) PITs, worst |Δout| \(String(format: "%.4g", caseWorst))")
         }
-        print("g1-08 det parity\n" + lines.joined(separator: "\n"))
-        print(String(format: "g1-08 det: worst |Δ| bq (rel) %.3g, PIT %.3g (%d of %d PITs moved > 1e-4), map %.3g, quantiles %.4g points",
+        print("g1-08 det parity (\(relative ? "relative" : "raw") contexts)\n" + lines.joined(separator: "\n"))
+        print(String(format: "g1-08 det, \(relative ? "relative" : "raw") contexts: worst |Δ| bq (rel) %.3g, PIT %.3g (%d of %d PITs moved > 1e-4), map %.3g, quantiles %.4g points",
                      worstBq, worstPit, pitMoved, pits, worstMap, worstOut))
-        // The network rows carry float32 noise (Timestral parity 1e-3 relative); a PIT inside a
-        // tie in one language and just outside it in the other moves by up to half a tie, so the
-        // quantiles are held to a few hundredths of a point, not 1e-6.
-        #expect(worstOut <= 0.05)
+        // Raw contexts, as the Python: the network's float32 noise carried through (the
+        // Timestral meters' ~0.01 points). Relative contexts (the app's default): the same
+        // network answer to float32 noise, rounded back at the raw magnitude, but a value a hair
+        // from a rounding boundary can land on the other side and make or break a tie, which
+        // moves that PIT by up to half the tie: the fixtures show 2 such PITs in 9153, 0.06
+        // points on the quantiles.
+        #expect(worstOut <= (relative ? 0.1 : 0.01))
+        #expect(pitMoved <= (relative ? 5 : 0))
     }
 
     /// g2-06's shrink and rounding over the same deterministic paths, on the
@@ -302,6 +308,45 @@ import Testing
         print("g2-06 weekly det: \(off) of \(total) whole-point values differ (rounding a value within float noise of .5), worst \(worst)")
         #expect(worst <= 1.0)
         #expect(Double(off) <= 0.01 * Double(max(total, 1)))
+    }
+
+    /// The cut memo is keyed on the context relative to its latest value, so
+    /// a view whose start moves later (the app's slides every few minutes)
+    /// still finds every cut whose context it holds whole; and g2-06 asked
+    /// on g1-08's history cut computes nothing.
+    @Test func cutMemoSurvivesASlidingStart() throws {
+        guard Self.weightsHere else { return }
+        let c = try #require(try Self.cases()["s01"])
+        let spec = try Self.g108Spec()
+        let runner = ArenaRunner(registry: [spec], services: TimestralTestWeights.services())
+        let cache = FMCalCutCache(capacity: 4096)
+        let h = ArenaFixtures.history(c)
+        let tr = Self.request(c, nPaths: 200).targets[0]
+        let a = try Self.instance(spec, runner: runner, history: h)
+        a.meters.cutCache = cache
+        let first = try #require(try a.meters.levels(h, now: c.request.now, tr).base.backtest)
+        let computed = cache.misses
+        #expect(computed == first.cuts.compactMap(\.cut).count)
+        // Two days later start: the cumulative burn restarts lower.
+        let later = ArenaHistory(store: h.store, now: h.now, accounts: h.accounts, start: c.inputs.history_start + 2 * ArenaTime.day)
+        let b = try Self.instance(spec, runner: runner, history: later)
+        b.meters.cutCache = cache
+        let second = try #require(try b.meters.levels(later, now: c.request.now, tr).base.backtest)
+        let reused = cache.hits
+        let stillWhole = second.cuts.compactMap(\.cut).filter { $0.c - Millis(second.ctxN) * second.step >= later.historyStart + 6 * ArenaTime.hour }
+        print("sliding start: \(computed) cuts computed, then \(reused) of \(second.cuts.compactMap(\.cut).count) answered from the memo (\(stillWhole.count) with a whole context)")
+        #expect(reused >= stillWhole.count)
+        let old = Dictionary(uniqueKeysWithValues: first.cuts.compactMap(\.cut).map { ($0.c, $0) })
+        for cut in stillWhole { #expect(old[cut.c]?.bq == cut.bq, "cut \(cut.c)") }
+        // g2-06 on the first cut: the network part is the history cut's memo.
+        let gctx = ArenaContext(spec: try Self.g206Spec(), seed: 3, services: TimestralTestWeights.services(), runner: runner,
+                                history: { h })
+        let g = try G206OpusFMGate2(context: gctx)
+        g.fm.cutCache = cache
+        g.fit(h)
+        let before = (cache.hits, cache.misses)
+        _ = try g.forecast(Self.request(c, nPaths: 200))
+        #expect(cache.hits == before.0 && cache.misses == before.1, "g2-06 reused g1-08's backtest on the same cut")
     }
 
     // MARK: - As is, Monte-Carlo

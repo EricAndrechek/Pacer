@@ -54,6 +54,57 @@ public enum FMCal {
         return (lv, rows)
     }
 
+    /// The context the network is handed: the cumulative burn relative to
+    /// its latest value (rounded to 1e-9 points), so a cut's context, and the
+    /// memo below, no longer depend on where the history's view starts (the
+    /// app's slides forward as old cycles leave it).
+    ///
+    /// The Python hands the network the raw cumulative burn. Timestral
+    /// normalizes each patch by the causal mean and std of what it has seen
+    /// and adds the mean back, and its non-negative clip (at cumulative 0)
+    /// only touches quantiles below the latest value, where the burn is 0
+    /// anyway, so the network's answer moves with the offset. What does not
+    /// is its float32 output: the Python reads quantiles near a cumulative
+    /// value of thousands, where float32 resolves only 1e-4 to 1e-3 points,
+    /// and a low quantile a hair above the latest value reads as exactly no
+    /// burn. Those exact zeros are ties the PIT spreads over, so they shape
+    /// the calibration (a tie-free version moved its quantiles by up to a
+    /// point on the fixtures). `pythonBurn` puts that rounding back: each
+    /// relative quantile is rounded as float32 at the raw magnitude, as the
+    /// Python's is.
+    public static func relativeContext(_ v: [Double]) -> [Double] {
+        guard let last = v.last, last.isFinite else { return v }
+        return v.map { $0.isFinite ? (($0 - last) * 1e9).rounded() / 1e9 : $0 }
+    }
+
+    /// The network's relative answer `[H][Q]` -> running max over time per
+    /// level, rows sorted: `burn_quantiles` before its `max(·, 0)`. The
+    /// rounding `pythonBurn` applies is monotone, so it commutes with both,
+    /// and this part can be memoized whatever the raw magnitude.
+    public static func runningSorted(_ r: [[Double]]) -> [[Double]] {
+        guard let nq = r.first?.count else { return [] }
+        var running = [Double](repeating: -.infinity, count: nq)
+        return r.map { row in
+            (0..<nq).map { k -> Double in running[k] = max(running[k], row[k]); return running[k] }.sorted()
+        }
+    }
+
+    /// One row of `runningSorted` as the Python's burn: the quantile it
+    /// would have read (`cLast + b` in float32, as the network returns it),
+    /// minus the latest value, never negative.
+    @inline(__always)
+    public static func pythonBurn<F: BinaryFloatingPoint>(_ row: [F], cLast: Double) -> [Double] {
+        row.map { max(Double(Float(cLast + Double($0))) - cLast, 0.0) }
+    }
+
+    /// A row of `runningSorted` as burn: from a relative answer
+    /// (`pythonBurn`), or from a raw one (`burn_quantiles` exactly: minus the
+    /// latest value, never negative).
+    @inline(__always)
+    static func burn<F: BinaryFloatingPoint>(_ row: [F], cLast: Double, relative: Bool) -> [Double] {
+        relative ? pythonBurn(row, cLast: cLast) : row.map { max(Double($0) - cLast, 0.0) }
+    }
+
     /// `pit`: the randomised PIT of `r` against one non-decreasing quantile
     /// row at `lv`. A value sitting on tied levels spreads over the tie's
     /// mass (up to the neighbours' midpoints), read at `u01`.
@@ -135,6 +186,9 @@ public enum FMCal {
         /// capped at `H`, for every lead.
         public let rows: [Int]
         let rowIndex: [Int: Int]
+        /// The network's rows behind `rows` (burn row r is network row r - 1;
+        /// row 0 is the zero row at now).
+        let netRows: [Int]
         /// Every candidate cut, newest first (the Python dict's insertion
         /// order on a fresh instance); nil where the meter was idle or stale.
         public private(set) var cuts: [(c: Millis, cut: Cut?)] = []
@@ -153,6 +207,24 @@ public enum FMCal {
             }
             rows = rs.sorted()
             rowIndex = Dictionary(uniqueKeysWithValues: rows.enumerated().map { ($1, $0) })
+            netRows = rows.filter { $0 >= 1 }.map { $0 - 1 }
+        }
+
+        /// A cut's burn table at `rows` from its memoized relative rows:
+        /// rounded as the Python reads them at this cut's magnitude, the zero
+        /// row at now, then `ext_levels`, kept in float32 as the Python keeps
+        /// them.
+        func table(_ net: [[Float]], levels: [Double], cLast: Double, relative: Bool) -> (lv: [Double], bq: [[Float]]) {
+            var burn: [[Double]] = []
+            burn.reserveCapacity(rows.count)
+            var k = 0
+            for r in rows {
+                if r == 0 { burn.append([Double](repeating: 0, count: levels.count)) } else {
+                    burn.append(FMCal.burn(net[k], cLast: cLast, relative: relative)); k += 1
+                }
+            }
+            let (lv, bq) = FMCal.extLevels(levels, burn)
+            return (lv, bq.map { $0.map(Float.init) })
         }
 
         /// The cut times, newest first, on a fixed lattice (multiples of
@@ -172,15 +244,20 @@ public enum FMCal {
         /// `refresh` for a fresh instance: every candidate cut, its network
         /// call answered by `cache` when an identical context was forecast
         /// before (any cut, any forecast, this process).
+        /// `relative`: hand the network each cut's context relative to its
+        /// latest value (`FMCal.relativeContext`, the default in the app) or
+        /// raw, as the Python does.
         public func refresh(_ fc: TimestralForecaster, weightsID: String, series s: FMSeries.MeterSeries, now: Millis,
-                            cache: FMCalCutCache = .shared, checkCancelled: () throws -> Void = {}) throws {
+                            cache: FMCalCutCache = .shared, relative: Bool = true,
+                            checkCancelled: () throws -> Void = {}) throws {
             let cand = candidates(s, now: now)
             let k30 = max(1, Int((30.0 * Double(FMSeries.minMs) / Double(step)).rounded(.toNearestOrEven)))
             var pending: [(slot: Int, c: Millis, ctx: [Double], key: FMCalCutCache.Key,
                            meta: (cLast: Double, used: Double, reset: Millis, phase: Double, act: Double))] = []
             cuts = []
             cuts.reserveCapacity(cand.count)
-            let tag = "\(weightsID)|\(wk)|\(step)|\(ctxN)|\(H)|\(rows.map(String.init).joined(separator: ","))"
+            let tag = "\(weightsID)|\(wk)|\(step)|\(ctxN)|\(H)|\(relative ? "rel" : "raw")|"
+                + netRows.map(String.init).joined(separator: ",")
             for c in cand {
                 // j = searchsorted(times, c, "right") - 1
                 let j = Self.lastAtOrBefore(s.times, c)
@@ -195,28 +272,36 @@ public enum FMCal {
                 let back = v[v.count - 1 - k30]
                 let act = back.isFinite ? vLast - back : 0.0
                 let meta = (cLast: vLast, used: s.cycleUtil[j], reset: resetC, phase: phase, act: act)
-                let key = FMCalCutCache.Key(tag: tag, context: v)
+                let rel = relative ? FMCal.relativeContext(v) : v
+                let key = FMCalCutCache.Key(tag: tag, context: rel)
                 if let hit = cache.get(key) {
+                    let (lv, bq) = table(hit.rows, levels: hit.lv, cLast: meta.cLast, relative: relative)
                     cuts.append((c, Cut(c: c, cLast: meta.cLast, usedC: meta.used, resetC: resetC, phase: phase,
-                                        act: act, lv: hit.lv, bq: hit.rows)))
+                                        act: act, lv: lv, bq: bq)))
                 } else {
                     cuts.append((c, nil))
-                    pending.append((cuts.count - 1, c, v, key, meta))
+                    pending.append((cuts.count - 1, c, rel, key, meta))
                 }
             }
-            // One network call per missing cut. Not batched: a cut's answer
-            // must not depend on which other cuts happened to share its
-            // batch (float32 GEMM rounding), since it is memoized by content.
-            for p in pending {
+            // The missing cuts in batches of 32, as the Python's. A series'
+            // answer does not depend on its batch-mates (checked bit for bit:
+            // CombinedTimingTests.batchedRowsAreBitIdentical), which the memo
+            // relies on.
+            var b = 0
+            while b < pending.count {
                 try checkCancelled()
-                let out = try FMBackends.quantiles(fc, context: [[p.ctx]], horizon: H)
-                var burn = FMPaths.burnQuantiles(out.curve(), cLast: p.meta.cLast)
-                burn.insert([Double](repeating: 0, count: out.q), at: 0)
-                let (lv, bq) = FMCal.extLevels(out.levels, burn)
-                let kept = rows.map { r in bq[r].map(Float.init) }
-                cache.put(p.key, FMCalCutCache.Entry(lv: lv, rows: kept))
-                cuts[p.slot] = (p.c, Cut(c: p.c, cLast: p.meta.cLast, usedC: p.meta.used, resetC: p.meta.reset,
-                                         phase: p.meta.phase, act: p.meta.act, lv: lv, bq: kept))
+                let batch = pending[b..<min(b + 32, pending.count)]
+                let out = try FMBackends.quantiles(fc, context: batch.map { [$0.ctx] }, horizon: H)
+                for (k, p) in batch.enumerated() {
+                    // Network values are float32, so Float keeps them exactly.
+                    let B = FMCal.runningSorted(out.curve(k))
+                    let kept = netRows.map { r in B[r].map(Float.init) }
+                    cache.put(p.key, FMCalCutCache.Entry(lv: out.levels, rows: kept))
+                    let (lv, bq) = table(kept, levels: out.levels, cLast: p.meta.cLast, relative: relative)
+                    cuts[p.slot] = (p.c, Cut(c: p.c, cLast: p.meta.cLast, usedC: p.meta.used, resetC: p.meta.reset,
+                                             phase: p.meta.phase, act: p.meta.act, lv: lv, bq: bq))
+                }
+                b += 32
             }
         }
 
@@ -403,6 +488,8 @@ public final class FMCalCutCache: @unchecked Sendable {
         }
     }
 
+    /// The network's levels and its relative answer, run up and sorted
+    /// (`FMCal.runningSorted`), at the rows a cut's records read.
     public final class Entry: @unchecked Sendable {
         public let lv: [Double]
         public let rows: [[Float]]

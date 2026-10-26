@@ -27,6 +27,10 @@ public final class MeterFM {
     /// Where the self-backtest's network calls are memoized (tests use
     /// their own, to time a cold start).
     var cutCache: FMCalCutCache = .shared
+    /// The network reads contexts relative to their latest value
+    /// (`FMCal.relativeContext`); false: raw, exactly as the Python (the
+    /// parity tests check both).
+    var relativeNetwork = true
     private var _backend: TimestralForecaster?
 
     init(cfg: ArenaConfig, context: ArenaContext) throws {
@@ -91,7 +95,7 @@ public final class MeterFM {
         var gh = Hasher()
         gh.combine(tr.grid)
         let key = "MeterFM.base|\(weightsID)|\(acct)|\(wk)|\(cap ?? "")|\(now)|\(tr.resetAt.map(String.init) ?? "-")"
-            + "|\(step)|\(ctxN)|\(stale)|\(calibrate)|\(every)|\(maxCuts)|\(tr.grid.count)|\(gh.finalize())"
+            + "|\(step)|\(ctxN)|\(stale)|\(calibrate)|\(every)|\(maxCuts)|\(tr.grid.count)|\(gh.finalize())|\(relativeNetwork)"
         return try history.memo.value(key) {
             let s = FMSeries.meterSeries(history, account: acct, windowKind: wk, scopeModel: cap, now: now)
             let used = tr.resetAt.flatMap { s.usedNow($0) } ?? s.lastActiveUtil ?? 0
@@ -104,8 +108,11 @@ public final class MeterFM {
             let fc = try backend
             try ctx.checkCancelled()
             let H = max(1, Int(((Double(gridLast - now)) / Double(step)).rounded(.up)))
-            let out = try FMBackends.quantiles(fc, context: [[ctxV]], horizon: H)
-            var burn = FMPaths.burnQuantiles(out.curve(), cLast: cLast)
+            // Relative to the latest value, rounded back as the Python reads
+            // it, as the self-backtest's cuts are (`FMCal.relativeContext`).
+            let out = try FMBackends.quantiles(fc, context: [[relativeNetwork ? FMCal.relativeContext(ctxV) : ctxV]],
+                                               horizon: H)
+            var burn = FMCal.runningSorted(out.curve()).map { FMCal.burn($0, cLast: cLast, relative: relativeNetwork) }
             burn.insert([Double](repeating: 0, count: out.q), at: 0)                 // [H+1][Q] at t_rel
             let (lv, bq) = FMCal.extLevels(out.levels, burn)
             let tRel = (0...H).map { Double(step) * Double($0) }
@@ -116,7 +123,7 @@ public final class MeterFM {
             if calibrate {
                 let b = FMCal.SelfBacktest(wk: wk, step: step, ctxN: ctxN, stale: stale, every: every,
                                            maxCuts: maxCuts, duration: s.duration)
-                try b.refresh(fc, weightsID: weightsID, series: s, now: now, cache: cutCache,
+                try b.refresh(fc, weightsID: weightsID, series: s, now: now, cache: cutCache, relative: relativeNetwork,
                               checkCancelled: ctx.checkCancelled)
                 bt = b
             }
