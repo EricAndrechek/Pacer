@@ -1,0 +1,28 @@
+name = "g2-04-opus-fable-burst"
+description = "A per-model weekly cap as a usage simulator: circular block bootstrap of the capped family's own five-minute spend series (kernel-weighted by local hour, day type, recency and how busy the account was just before the anchor), converted by a blended points-per-dollar drawn per path, and floored to whole points with a sampled carry."
+targets = ["meter.scoped"]
+children = []
+deps = []
+weights = []
+
+[config]
+bin_min = 5              # resolution of the replayed spend series
+hist_days = 75           # how far back anchors may sit
+bw_hour = 2.5            # local-hour-of-day kernel (hours), widened with the lead
+bw_hour_per_day = 3.0
+weekend_mismatch = 0.6   # weight of a weekend/weekday mismatch, faded with the lead
+recency_days = 45        # anchor recency half-life-ish
+state_wins_h = [1.5, 72.0]   # "how busy just before" windows compared to now
+bw_state = 1.5           # kernel on log(1 + dollars) in those windows
+bw_gap = 0.8             # kernel on log(1 + hours since the family was last used)
+p_flat = 0.20            # share of paths that are pure persistence
+damp = 1.5               # soft saturation of the rise toward the room left (0: off)
+other_account = 0.25     # weight of another account's series, rescaled to this one's level
+sigma_scale = 0.60       # lognormal multiplier on a replayed trajectory
+sigma_k = 0.22           # lognormal on the conversion, shrunk by the evidence behind it
+k_prior_rise = 15.0
+carry_jitter = true
+discretize = true        # floor paths to whole points (truth is whole points)
+min_anchors = 24
+fallback_tau_h = 16.0
+fallback_sigma = 0.7

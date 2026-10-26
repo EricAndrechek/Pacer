@@ -1,0 +1,21 @@
+name = "g2-05-sonnet-recal"
+description = "Online calibration layer: backtests its child(ren), fits a per-window shift/spread map (shrunk to an offline prior) minimizing CRPS on the resolved past, and applies it to the child's meter paths."
+targets = ["meter.five_hour", "meter.seven_day", "meter.scoped"]
+children = ["fm-timestral-123m-meter"]
+deps = ["torch==2.10.0", "safetensors>=0.4", "huggingface_hub>=0.28"]
+weights = ["mistralai/Timestral-123M@5a147287addda85f6acd8da3fb8858fe9af7e8f7"]
+
+[config]
+children = ["fm-timestral-123m-meter"]
+pool = "quantile"
+backtest_every_h = { five_hour = 2, seven_day = 12, weekly_scoped = 12 }
+backtest_n = 12
+max_evals = 24
+half_life_n = 24
+n0 = 6.0
+pen = 0.25
+[config.prior]
+# (shift a, spread s) per window kind
+five_hour = [1.0, 1.0]
+seven_day = [1.0, 1.0]
+weekly_scoped = [1.0, 1.0]

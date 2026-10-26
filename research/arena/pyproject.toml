@@ -1,0 +1,53 @@
+[project]
+name = "pacer-arena"
+version = "0.1.0"
+description = "Forecast arena: point-in-time harness, scoring and agent fleet for Pacer's usage forecasts"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.0",
+    "polars>=1.10",
+    "pyarrow>=17",
+    "duckdb>=1.1",
+    "scipy>=1.13",
+    "pandas>=2.2",
+    "scoringrules>=0.7",
+    "arch>=8.0.0",
+    "lightgbm>=4.5",
+    "scikit-learn>=1.5",
+]
+
+[project.optional-dependencies]
+# Pretrained time-series models (kit/fm, models/fm-*, models/struct-*), for
+# host workers: `uv sync --extra fm`, then `uv run --extra fm arena …`.
+# Inside a Docker worker the same packages come from each model.toml's `deps`
+# (`arena build`); keep the pins equal so host and container agree. torch
+# 2.10.0 is the newest whose Linux aarch64 wheel is CPU-only (2.11+ pulls CUDA).
+# Timestral, Toto and Moirai-2 are vendored in kit/fm/_vendor (their PyPI
+# packages are git-only or pin numpy<2), so they need only what is listed here.
+fm = [
+    "torch==2.10.0",
+    "safetensors>=0.4",
+    "huggingface_hub>=0.28",
+    "einops>=0.7",
+    "jaxtyping>=0.2.29",
+    "rotary-embedding-torch==0.8.6",
+    "chronos-forecasting==2.3.2",
+    "timesfm[torch]==3.0.2",
+    "tirex-ts==1.4.2",
+]
+
+[project.scripts]
+arena = "arena.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["arena", "kit", "synth", "export", "fleet", "report"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,7 @@
+name = "naive-flat"
+description = "Persistence: the latest meter reading flat to reset, the last hour's spend or tokens flat, an idle window staying idle."
+targets = ["meter.five_hour", "meter.seven_day", "meter.scoped", "cycle.next_start", "spend.hourly", "tokens.hourly"]
+children = []
+
+[config]
+hours = 1        # hours averaged for spend and tokens (1 = the last hour)

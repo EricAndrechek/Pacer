@@ -1,0 +1,15 @@
+name = "ml-qrf"
+description = "Quantile regression forest over whole futures: a multi-output random forest on the as-of features weights past cutoffs like the query (Meinshausen's QRF weights), and paths are those cutoffs' own rise trajectories, drawn by weight."
+targets = ["meter.five_hour", "meter.seven_day", "meter.scoped"]
+children = []
+deps = ["scikit-learn>=1.5"]
+
+[config]
+target = "delta"          # delta: an analog's rise in pp | frac: its rise as a share of its headroom
+max_rows = 3000
+min_rows = 60
+retrain_h = 24
+n_estimators = 120
+min_samples_leaf = 8
+weekly_min_samples_leaf = 30
+max_features = 0.4

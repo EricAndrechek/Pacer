@@ -1,0 +1,8 @@
+name = "g1-05-opus-ens-all"
+description = "Router over the whole board: the meter ensemble, the hourly ensemble, and the only models that cover the split and the next cycle start."
+targets = ["meter.five_hour", "meter.seven_day", "meter.scoped", "spend.hourly", "tokens.hourly", "split.accounts", "cycle.next_start"]
+children = ["g1-05-opus-ens-meter", "g1-05-opus-ens-hourly", "naive-split", "naive-flat"]
+deps = []
+
+[config]
+order = ["g1-05-opus-ens-meter", "g1-05-opus-ens-hourly", "naive-split", "naive-flat"]

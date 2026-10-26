@@ -1,0 +1,13 @@
+name = "g1-02-haiku-fm-elite"
+description = "Elite foundation model selection: top 3 FMs (Timestral-209M, Chronos2, Moirai2) plus structural model for redundancy and diversity."
+targets = ["meter.five_hour", "meter.seven_day", "meter.scoped"]
+children = ["fm-timestral-209m-meter", "fm-chronos2-meter", "fm-moirai2-meter", "struct-timestral-28m"]
+
+[config]
+children = ["fm-timestral-209m-meter", "fm-chronos2-meter", "fm-moirai2-meter", "struct-timestral-28m"]
+pool = "quantile"
+shrink = 0.05
+half_life_n = 48
+backtest_every_h = { five_hour = 3, seven_day = 12, weekly_scoped = 12 }
+backtest_n = 4
+max_evals = 16

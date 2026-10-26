@@ -1,0 +1,11 @@
+name = "g1-07-sonnet-next-start"
+description = "cycle.next_start by hazard analogs: past moments at the same local time of day and similar idle length, and how long until the next turn."
+targets = ["cycle.next_start"]
+children = []
+
+[config]
+step_min = 10
+sigma_tod_h = 1.25
+sigma_idle = 1.2
+w_dow = [1.0, 0.25, 0.03]
+half_life_days = 45.0

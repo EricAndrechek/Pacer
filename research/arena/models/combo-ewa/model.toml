@@ -1,0 +1,15 @@
+name = "combo-ewa"
+description = "Online exponentially weighted averaging of the children's meter paths: weights from each child's past CRPS (ctx.backtest, then its own forecasts this episode as their truth arrives)."
+targets = ["meter.five_hour", "meter.seven_day", "meter.scoped"]
+children = ["port-engine-rule", "spend-decay-30m", "struct-timestral-28m"]
+
+[config]
+children = ["port-engine-rule", "spend-decay-30m", "struct-timestral-28m"]   # must be declared above too
+pool = "mixture"          # mixture (linear pool of the children's paths) | quantile (Vincentization)
+eta = 0.2                 # learning rate on the summed relative losses (coverage- and age-weighted)
+half_life_n = 24          # forgetting: a forecast's say halves every 24 newer ones of its kind
+backtest_every_h = { five_hour = 3, seven_day = 12, weekly_scoped = 12 }
+backtest_n = 6             # latest origins per cadence, each a fresh fit of every child. Sized so a
+                           # cold episode costs ~3x its slowest child (struct-timestral-28m): with no
+                           # backtest the per-checkpoint child calls alone are ~2x; 6 + 7 origins add ~0.6x
+max_evals = 16            # readings scored per past forecast

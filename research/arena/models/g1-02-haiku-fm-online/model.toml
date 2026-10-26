@@ -1,0 +1,9 @@
+name = "g1-02-haiku-fm-online"
+description = "Online exponentially weighted averaging of foundation models with recent performance emphasis for responsive adaptation."
+targets = ["meter.five_hour", "meter.seven_day", "meter.scoped"]
+children = ["fm-timestral-209m-meter", "fm-chronos2-meter", "fm-moirai2-meter"]
+
+[config]
+children = ["fm-timestral-209m-meter", "fm-chronos2-meter", "fm-moirai2-meter"]
+pool = "mixture"
+half_life_n = 24

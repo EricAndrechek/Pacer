@@ -1,0 +1,10 @@
+name = "g1-07-sonnet-pool-scoped"
+description = "Linear pool of the analog meter bootstrap with spend-decay-1d (live value + converted burn) for meter.scoped; the spend-decay model carries most of the weight."
+targets = ["meter.scoped"]
+children = ["g1-07-sonnet-analog-meter", "spend-decay-1d"]
+
+[config]
+
+[config.weights.scoped]
+g1-07-sonnet-analog-meter = 0.1
+spend-decay-1d = 0.9

@@ -1,0 +1,42 @@
+name = "g1-05-opus-ens-meter-big"
+description = "The wide form of g1-05-opus-ens-meter: six children including Timestral-123M. Scores better on the visible tier but timed out on the leaderboard scorer once; use g1-05-opus-ens-meter unless the time budget is known to be generous."
+targets = ["meter.five_hour", "meter.seven_day", "meter.scoped"]
+children = [
+  "fm-timestral-123m-meter",
+  "spend-decay-1d",
+  "spend-decay-6h",
+  "spend-decay-1h",
+  "port-engine-recent-rate",
+  "port-engine-kalman-trend",
+]
+deps = []
+
+[config]
+children = [
+  "fm-timestral-123m-meter",
+  "spend-decay-1d",
+  "spend-decay-6h",
+  "spend-decay-1h",
+  "port-engine-recent-rate",
+  "port-engine-kalman-trend",
+]
+pool = "mixture"           # a linear pool of the children, as its exact quantile function (beat Vincentization on all three meter targets)
+bands = [0.15, 0.5]        # lead-fraction bands the weights and spread factor are fitted per
+shrink = 0.05              # pull of a band's weights toward equal
+recal = "scale"            # calibrations fitted on the ledger: rise | scale | beta, comma-separated
+                           # (rise and beta both lost to scale alone on the visible tier; see REPORT.md)
+rises = [0.0, 0.25, 0.5, 0.75, 1.0, 1.25]   # share of the children's predicted rise believed
+rise_shrink = 0.15         # pull of the fitted rise factor toward 1 (penalty on (1-r)^2)
+scale_shrink = 0.25        # pull of the fitted spread factor toward 1 (penalty on log(s)^2)
+scales = [0.3, 0.4, 0.5, 0.6, 0.75, 0.9, 1.0, 1.2, 1.5]
+beta_n0 = 40.0             # PIT points at which the Beta map gets half its weight
+min_points = 12            # eval points a band needs before it is fitted at all
+m_fit = 40                 # samples kept per child forecast in the ledger
+max_evals = 16
+half_life_n = { five_hour = 24, seven_day = 48, weekly_scoped = 48 }
+monotone = true
+floor_live = true
+direct_extras = true
+anchor_tau_min = { five_hour = 8, seven_day = 25, weekly_scoped = 25 }
+backtest_every_h = { five_hour = 3, seven_day = 12, weekly_scoped = 12 }
+backtest_n = 6

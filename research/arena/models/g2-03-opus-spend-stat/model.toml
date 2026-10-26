@@ -1,0 +1,12 @@
+name = "g2-03-opus-spend-stat"
+description = "Weighted empirical quantile model for spend/tokens: hour-of-day, day-of-week, and recency weighting with AR(1) paths."
+targets = ["spend.hourly", "tokens.hourly"]
+children = []
+deps = []
+
+[config]
+context_hours = 672
+rho = 0.85
+recency_halflife_h = 168
+kappa_hour = 2.0
+kappa_dow = 1.5

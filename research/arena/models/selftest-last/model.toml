@@ -1,0 +1,4 @@
+name = "selftest-last"
+description = "Self-test naive model: the last known value, flat (`arena selftest`)."
+targets = ["meter.five_hour", "meter.seven_day", "meter.scoped", "spend.hourly", "tokens.hourly"]
+children = []

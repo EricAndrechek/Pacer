@@ -1,0 +1,13 @@
+name = "g1-02-haiku-fm-spend-stack"
+description = "Learned stacking of foundation model spend forecasters (Timestral 209M/28M/5M) with adaptive weighting."
+targets = ["spend.hourly", "tokens.hourly"]
+children = ["fm-timestral-209m-spend", "fm-timestral-28m-spend", "fm-timestral-5m-spend"]
+
+[config]
+children = ["fm-timestral-209m-spend", "fm-timestral-28m-spend", "fm-timestral-5m-spend"]
+pool = "mixture"
+shrink = 0.05
+half_life_n = 48
+backtest_every_h = { default = 6 }
+backtest_n = 4
+max_evals = 16

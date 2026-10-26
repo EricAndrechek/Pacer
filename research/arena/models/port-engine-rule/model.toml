@@ -1,0 +1,7 @@
+name = "port-engine-rule"
+description = "The app's shipping rate-limit engine: per account, window and phase, the record's best method (stand-in when it cannot fit), with that method's stratified conformal band."
+targets = ["meter.five_hour", "meter.seven_day", "meter.scoped"]
+children = []
+
+[config]
+method = "rule"

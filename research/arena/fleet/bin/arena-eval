@@ -1,0 +1,15 @@
+#!/usr/bin/env python3
+"""Development entry point for the eval gate. The installed copy at
+<fleet root>/bin/arena-eval is fleet/evalgate.py itself, written by
+`arena fleet install` with a pinned interpreter and `-I`, and is the only
+command an agent's sandbox exempts (through the agent's own wrapper).
+See fleet/evalgate.py."""
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from fleet.evalgate import main  # noqa: E402
+
+if __name__ == "__main__":
+    sys.exit(main(script=Path(__file__)))

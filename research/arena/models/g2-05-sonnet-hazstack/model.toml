@@ -1,0 +1,27 @@
+name = "g2-05-sonnet-hazstack"
+description = "Zero-mass layer over a learned FM+decay stack (7d, scoped); 5h passes the FM through. Zero-mass calibration layer: an empirical, regime-adaptive estimate of the chance the meter has not moved by each lead (kernel on time since last rise, recent rate, hour) pins the low quantiles of an FM child at the current level and stretches the rest."
+targets = ["meter.five_hour", "meter.seven_day", "meter.scoped"]
+children = ["fm-timestral-123m-meter", "g2-05-sonnet-stack"]
+deps = ["torch==2.10.0", "safetensors>=0.4", "huggingface_hub>=0.28"]
+weights = ["mistralai/Timestral-123M@5a147287addda85f6acd8da3fb8858fe9af7e8f7"]
+
+[config]
+tau_d = 14.0          # recency half-life scale (days) of the samples
+h_since = 0.8         # kernel width on log(1+minutes since last rise)
+h_rate = 0.8          # kernel width on log(1+rise over the last hour)
+tod_h = 0.0           # hour-of-day kernel width (0 = off)
+n0 = 3.0              # prior pseudo-count toward the pooled flat share
+max_samples = 6000
+passthrough = []
+delta = 0.5
+
+stale_min = 120
+[config.child]
+five_hour = "fm-timestral-123m-meter"
+seven_day = "g2-05-sonnet-stack"
+weekly_scoped = "g2-05-sonnet-stack"
+
+[config.pi_scale]
+five_hour = 0.6    # 5-hour meter moves faster; full-strength pinning cost crps (3.20 -> 3.27), 0.6 is neutral
+seven_day = 1.0
+weekly_scoped = 1.0

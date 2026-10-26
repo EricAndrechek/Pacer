@@ -1,0 +1,133 @@
+# Generation 2: one [[agent]] per agent, from the launcher's records.
+# turns: assistant turns counted from the run's stream. cost_usd: Claude Code's
+# API-equivalent cost of the agent's own session. eval_calls: arena-eval calls
+# made (eval_scored: those that returned scores). exit: finished, or the cap
+# (turns / budget) that stopped it. models: what it handed back (models/<name>).
+
+[[agent]]
+name = "g2-01-haiku"
+claude_model = "claude-haiku-4-5"
+effort = "high"
+niche = "weekly"
+turns = 94
+cost_usd = 1.1
+eval_calls = 0
+eval_scored = 0
+exit = "finished"
+max_turns = 300
+budget_usd = 8.0
+eval_budget = 20
+models = ["g2-01-haiku-timestral-combo", "g2-01-haiku-weekly-209m", "g2-01-haiku-weekly-209m-extended", "g2-01-haiku-weekly-209m-mega", "g2-01-haiku-weekly-209m-optimal", "g2-01-haiku-weekly-28m", "g2-01-haiku-weekly-base", "g2-01-haiku-weekly-blend", "g2-01-haiku-weekly-context-1008", "g2-01-haiku-weekly-context-1152", "g2-01-haiku-weekly-context-1296", "g2-01-haiku-weekly-context-1344", "g2-01-haiku-weekly-context-144", "g2-01-haiku-weekly-context-336", "g2-01-haiku-weekly-ewa"]
+summary = "Tuned Timestral size and context for the seven-day meter: the 209M model with a 14-day context was about 8% better than the 123M baseline on a few visible episodes; no leaderboard result."
+
+[[agent]]
+name = "g2-02-sonnet"
+claude_model = "claude-sonnet-4-6"
+effort = "high"
+niche = "deep-ensemble"
+turns = 192
+cost_usd = 14.39
+eval_calls = 3
+eval_scored = 0
+exit = "finished"
+max_turns = 300
+budget_usd = 15.0
+eval_budget = 20
+models = ["g2-02-sonnet-deep-meter", "g2-02-sonnet-deep-meter-v5", "g2-02-sonnet-deep-meter-v6", "g2-02-sonnet-deep-meter-v7", "g2-02-sonnet-deep-meter-v8"]
+summary = "Layers of combiners over the best earlier models ended as pure routing (calibrated wrapper for five-hour and seven-day, spend-decay-1d for scoped); all leaderboard calls timed out, so no score."
+
+[[agent]]
+name = "g2-03-opus"
+claude_model = "claude-opus-4-6"
+effort = "high"
+niche = "spend"
+turns = 309
+cost_usd = 29.64
+eval_calls = 6
+eval_scored = 3
+exit = "finished"
+max_turns = 300
+budget_usd = 30.0
+eval_budget = 20
+models = ["g2-03-opus-spend-ens", "g2-03-opus-spend-ens3", "g2-03-opus-spend-fast", "g2-03-opus-spend-hybrid", "g2-03-opus-spend-stat", "g2-03-opus-spend-stat2"]
+summary = "Weighted-empirical-quantile plus analog and surprise-path models for spend and tokens; strong on visible, worse on hidden until surprise paths widened tails; ensembles with children timed out."
+
+[[agent]]
+name = "g2-04-opus"
+claude_model = "claude-opus-5"
+effort = "high"
+niche = "fable-cap"
+turns = 158
+cost_usd = 28.2
+eval_calls = 4
+eval_scored = 2
+exit = "finished"
+max_turns = 300
+budget_usd = 30.0
+eval_budget = 20
+models = ["g2-04-opus-fable-burst", "g2-04-opus-fable-mix", "g2-04-opus-fable-pool"]
+summary = "Fable-cap model: resampled capped-family spend, random points-per-dollar conversion, damping, whole-point rounding, plus a spend-decay mix; better limit calls and PIT than burst alone."
+
+[[agent]]
+name = "g2-05-sonnet"
+claude_model = "claude-sonnet-5-5"
+effort = "high"
+niche = "calibration"
+turns = 128
+cost_usd = 7.47
+eval_calls = 10
+eval_scored = 5
+exit = "finished"
+max_turns = 300
+budget_usd = 20.0
+eval_budget = 20
+models = ["g2-05-sonnet-ens", "g2-05-sonnet-final", "g2-05-sonnet-flat", "g2-05-sonnet-flat-kw", "g2-05-sonnet-hazard", "g2-05-sonnet-hazstack", "g2-05-sonnet-l08", "g2-05-sonnet-recal", "g2-05-sonnet-stack"]
+summary = "Calibration layer: puts probability mass at the current whole-point reading from the meter's own unchanged-share estimate; flattened PIT with CRPS changes of a few percent; heavy ensembles timed out."
+
+[[agent]]
+name = "g2-06-opus"
+claude_model = "claude-opus-5-5"
+effort = "high"
+niche = "wildcard"
+turns = 118
+cost_usd = 15.19
+eval_calls = 3
+eval_scored = 2
+exit = "finished"
+max_turns = 300
+budget_usd = 30.0
+eval_budget = 20
+models = ["g2-06-opus-fmgate", "g2-06-opus-fmgate2"]
+summary = "Gated the leaders by account state (idle, blocked) with sampled resume times and rounding to whole points; helped dormant accounts and five-hour PIT; noisy hidden-tier scores."
+
+[[agent]]
+name = "g2-07-opus"
+claude_model = "claude-opus-5-5"
+effort = "xhigh"
+niche = "limit-calls"
+turns = 141
+cost_usd = 23.48
+eval_calls = 5
+eval_scored = 4
+exit = "finished"
+max_turns = 300
+budget_usd = 35.0
+eval_budget = 20
+models = ["g2-07-opus-limit", "g2-07-opus-pool"]
+summary = "A limit simulator (bootstrapped burn, per-path ceilings, parking, coupling, re-base hazard) pooled with Timestral-5M; competitive seven-day Brier, poor time-to-limit, scoped rises over-predicted."
+
+[[agent]]
+name = "g2-08-fable"
+claude_model = "claude-fable-5-1"
+effort = "high"
+niche = "five-hour"
+turns = 87
+cost_usd = 32.94
+eval_calls = 5
+eval_scored = 3
+exit = "finished"
+max_turns = 300
+budget_usd = 40.0
+eval_budget = 20
+models = ["g2-08-fable-burst", "g2-08-fable-burst-mix", "g2-08-fable-burst-mix3", "g2-08-fable-ref-timestral"]
+summary = "Five-hour burst process (semi-Markov activity, integer paths); about 15% better than Timestral on visible A1 episodes, weaker on A2; a 50/50 Timestral mix tied it on CRPS, won on others."

@@ -1,0 +1,903 @@
+# Who wrote each model in this folder (read by arena/provenance.py; the results
+# database takes its attribution columns from here). kind: port (written by the
+# coordinator's builders: ports of the app's engine, baselines, learned and
+# pretrained models, combiners), example, selftest (harness self-test
+# controls), or agent (a fleet agent's hand-back, with its generation, agent,
+# Claude model, effort, niche and the earlier models it copied or adapted).
+# `arena provenance check` verifies every folder is listed.
+
+[models.combo-ewa]
+kind = "port"
+
+[models.combo-fforma]
+kind = "port"
+
+[models.combo-median]
+kind = "port"
+
+[models.combo-stack]
+kind = "port"
+
+[models.example-linear]
+kind = "example"
+
+[models.fm-chronos2-meter]
+kind = "port"
+
+[models.fm-chronos2-spend]
+kind = "port"
+
+[models.fm-moirai2-meter]
+kind = "port"
+
+[models.fm-timesfm25-meter]
+kind = "port"
+
+[models.fm-timestral-123m-meter]
+kind = "port"
+
+[models.fm-timestral-123m-spend]
+kind = "port"
+
+[models.fm-timestral-209m-meter]
+kind = "port"
+
+[models.fm-timestral-209m-spend]
+kind = "port"
+
+[models.fm-timestral-28m-meter]
+kind = "port"
+
+[models.fm-timestral-28m-spend]
+kind = "port"
+
+[models.fm-timestral-5m-meter]
+kind = "port"
+
+[models.fm-timestral-5m-spend]
+kind = "port"
+
+[models.fm-tirex-meter]
+kind = "port"
+
+[models.fm-toto-meter]
+kind = "port"
+
+[models.g1-01-sonnet-bestcombo]
+kind = "agent"
+generation = 1
+agent = "g1-01-sonnet"
+claude_model = "claude-sonnet-4-6"
+effort = "low"
+niche = "machine-learning"
+
+[models.g1-01-sonnet-calibrate123]
+kind = "agent"
+generation = 1
+agent = "g1-01-sonnet"
+claude_model = "claude-sonnet-4-6"
+effort = "low"
+niche = "machine-learning"
+
+[models.g1-01-sonnet-calstack]
+kind = "agent"
+generation = 1
+agent = "g1-01-sonnet"
+claude_model = "claude-sonnet-4-6"
+effort = "low"
+niche = "machine-learning"
+
+[models.g1-01-sonnet-combo123]
+kind = "agent"
+generation = 1
+agent = "g1-01-sonnet"
+claude_model = "claude-sonnet-4-6"
+effort = "low"
+niche = "machine-learning"
+
+[models.g1-01-sonnet-cqr]
+kind = "agent"
+generation = 1
+agent = "g1-01-sonnet"
+claude_model = "claude-sonnet-4-6"
+effort = "low"
+niche = "machine-learning"
+
+[models.g1-01-sonnet-router]
+kind = "agent"
+generation = 1
+agent = "g1-01-sonnet"
+claude_model = "claude-sonnet-4-6"
+effort = "low"
+niche = "machine-learning"
+
+[models.g1-01-sonnet-stack123]
+kind = "agent"
+generation = 1
+agent = "g1-01-sonnet"
+claude_model = "claude-sonnet-4-6"
+effort = "low"
+niche = "machine-learning"
+
+[models.g1-02-haiku-fm-broad]
+kind = "agent"
+generation = 1
+agent = "g1-02-haiku"
+claude_model = "claude-haiku-4-5"
+effort = "high"
+niche = "foundation-model"
+copied_from = ["combo-stack"]
+
+[models.g1-02-haiku-fm-clean]
+kind = "agent"
+generation = 1
+agent = "g1-02-haiku"
+claude_model = "claude-haiku-4-5"
+effort = "high"
+niche = "foundation-model"
+copied_from = ["combo-median"]
+
+[models.g1-02-haiku-fm-elite]
+kind = "agent"
+generation = 1
+agent = "g1-02-haiku"
+claude_model = "claude-haiku-4-5"
+effort = "high"
+niche = "foundation-model"
+copied_from = ["combo-stack"]
+
+[models.g1-02-haiku-fm-ensemble]
+kind = "agent"
+generation = 1
+agent = "g1-02-haiku"
+claude_model = "claude-haiku-4-5"
+effort = "high"
+niche = "foundation-model"
+copied_from = ["combo-median"]
+
+[models.g1-02-haiku-fm-meter-stack]
+kind = "agent"
+generation = 1
+agent = "g1-02-haiku"
+claude_model = "claude-haiku-4-5"
+effort = "high"
+niche = "foundation-model"
+copied_from = ["combo-stack"]
+
+[models.g1-02-haiku-fm-online]
+kind = "agent"
+generation = 1
+agent = "g1-02-haiku"
+claude_model = "claude-haiku-4-5"
+effort = "high"
+niche = "foundation-model"
+
+[models.g1-02-haiku-fm-spend-ensemble]
+kind = "agent"
+generation = 1
+agent = "g1-02-haiku"
+claude_model = "claude-haiku-4-5"
+effort = "high"
+niche = "foundation-model"
+copied_from = ["combo-median"]
+
+[models.g1-02-haiku-fm-spend-stack]
+kind = "agent"
+generation = 1
+agent = "g1-02-haiku"
+claude_model = "claude-haiku-4-5"
+effort = "high"
+niche = "foundation-model"
+copied_from = ["combo-stack"]
+
+[models.g1-02-haiku-fm-split]
+kind = "agent"
+generation = 1
+agent = "g1-02-haiku"
+claude_model = "claude-haiku-4-5"
+effort = "high"
+niche = "foundation-model"
+copied_from = ["combo-stack"]
+
+[models.g1-02-haiku-fm-timestral-all]
+kind = "agent"
+generation = 1
+agent = "g1-02-haiku"
+claude_model = "claude-haiku-4-5"
+effort = "high"
+niche = "foundation-model"
+copied_from = ["combo-stack"]
+
+[models.g1-02-haiku-hybrid-fm-struct]
+kind = "agent"
+generation = 1
+agent = "g1-02-haiku"
+claude_model = "claude-haiku-4-5"
+effort = "high"
+niche = "foundation-model"
+copied_from = ["combo-stack"]
+
+[models.g1-03-sonnet-hybrid]
+kind = "agent"
+generation = 1
+agent = "g1-03-sonnet"
+claude_model = "claude-sonnet-4-6"
+effort = "high"
+niche = "structural"
+
+[models.g1-03-sonnet-structural]
+kind = "agent"
+generation = 1
+agent = "g1-03-sonnet"
+claude_model = "claude-sonnet-4-6"
+effort = "high"
+niche = "structural"
+
+[models.g1-04-opus-all]
+kind = "agent"
+generation = 1
+agent = "g1-04-opus"
+claude_model = "claude-opus-4-6"
+effort = "high"
+niche = "machine-learning"
+
+[models.g1-04-opus-gbm-conformal]
+kind = "agent"
+generation = 1
+agent = "g1-04-opus"
+claude_model = "claude-opus-4-6"
+effort = "high"
+niche = "machine-learning"
+
+[models.g1-04-opus-ml-spend]
+kind = "agent"
+generation = 1
+agent = "g1-04-opus"
+claude_model = "claude-opus-4-6"
+effort = "high"
+niche = "machine-learning"
+
+[models.g1-05-opus-ens-all]
+kind = "agent"
+generation = 1
+agent = "g1-05-opus"
+claude_model = "claude-opus-5"
+effort = "medium"
+niche = "ensemble"
+
+[models.g1-05-opus-ens-hourly]
+kind = "agent"
+generation = 1
+agent = "g1-05-opus"
+claude_model = "claude-opus-5"
+effort = "medium"
+niche = "ensemble"
+
+[models.g1-05-opus-ens-meter]
+kind = "agent"
+generation = 1
+agent = "g1-05-opus"
+claude_model = "claude-opus-5"
+effort = "medium"
+niche = "ensemble"
+
+[models.g1-05-opus-ens-meter-big]
+kind = "agent"
+generation = 1
+agent = "g1-05-opus"
+claude_model = "claude-opus-5"
+effort = "medium"
+niche = "ensemble"
+
+[models.g1-06-sonnet-decay]
+kind = "agent"
+generation = 1
+agent = "g1-06-sonnet"
+claude_model = "claude-sonnet-5-5"
+effort = "medium"
+niche = "structural"
+copied_from = ["spend-decay-1d", "spend-decay-1h", "spend-decay-30m", "spend-decay-6h"]
+
+[models.g1-07-sonnet-analog-hourly]
+kind = "agent"
+generation = 1
+agent = "g1-07-sonnet"
+claude_model = "claude-sonnet-5-5"
+effort = "xhigh"
+niche = "statistical"
+
+[models.g1-07-sonnet-analog-meter]
+kind = "agent"
+generation = 1
+agent = "g1-07-sonnet"
+claude_model = "claude-sonnet-5-5"
+effort = "xhigh"
+niche = "statistical"
+
+[models.g1-07-sonnet-next-start]
+kind = "agent"
+generation = 1
+agent = "g1-07-sonnet"
+claude_model = "claude-sonnet-5-5"
+effort = "xhigh"
+niche = "statistical"
+
+[models.g1-07-sonnet-pool-five]
+kind = "agent"
+generation = 1
+agent = "g1-07-sonnet"
+claude_model = "claude-sonnet-5-5"
+effort = "xhigh"
+niche = "statistical"
+
+[models.g1-07-sonnet-pool-scoped]
+kind = "agent"
+generation = 1
+agent = "g1-07-sonnet"
+claude_model = "claude-sonnet-5-5"
+effort = "xhigh"
+niche = "statistical"
+
+[models.g1-07-sonnet-pool-seven]
+kind = "agent"
+generation = 1
+agent = "g1-07-sonnet"
+claude_model = "claude-sonnet-5-5"
+effort = "xhigh"
+niche = "statistical"
+
+[models.g1-07-sonnet-split-markov]
+kind = "agent"
+generation = 1
+agent = "g1-07-sonnet"
+claude_model = "claude-sonnet-5-5"
+effort = "xhigh"
+niche = "statistical"
+
+[models.g1-08-opus-fm]
+kind = "agent"
+generation = 1
+agent = "g1-08-opus"
+claude_model = "claude-opus-5-5"
+effort = "high"
+niche = "foundation-model"
+
+[models.g1-09-opus-analog-spend]
+kind = "agent"
+generation = 1
+agent = "g1-09-opus"
+claude_model = "claude-opus-5-5"
+effort = "xhigh"
+niche = "ensemble"
+
+[models.g1-09-opus-ensemble]
+kind = "agent"
+generation = 1
+agent = "g1-09-opus"
+claude_model = "claude-opus-5-5"
+effort = "xhigh"
+niche = "ensemble"
+
+[models.g1-09-opus-nextstart]
+kind = "agent"
+generation = 1
+agent = "g1-09-opus"
+claude_model = "claude-opus-5-5"
+effort = "xhigh"
+niche = "ensemble"
+
+[models.g1-09-opus-split]
+kind = "agent"
+generation = 1
+agent = "g1-09-opus"
+claude_model = "claude-opus-5-5"
+effort = "xhigh"
+niche = "ensemble"
+
+[models.g1-09-opus-struct-analog]
+kind = "agent"
+generation = 1
+agent = "g1-09-opus"
+claude_model = "claude-opus-5-5"
+effort = "xhigh"
+niche = "ensemble"
+copied_from = ["struct-chronos2", "struct-timestral-123m", "struct-timestral-209m", "struct-timestral-28m", "struct-timestral-5m"]
+
+[models.g1-10-fable-analog]
+kind = "agent"
+generation = 1
+agent = "g1-10-fable"
+claude_model = "claude-fable-5-1"
+effort = "high"
+niche = "statistical"
+
+[models.g1-10-fable-mix]
+kind = "agent"
+generation = 1
+agent = "g1-10-fable"
+claude_model = "claude-fable-5-1"
+effort = "high"
+niche = "statistical"
+
+[models.g2-01-haiku-timestral-combo]
+kind = "agent"
+generation = 2
+agent = "g2-01-haiku"
+claude_model = "claude-haiku-4-5"
+effort = "high"
+niche = "weekly"
+
+[models.g2-01-haiku-weekly-209m]
+kind = "agent"
+generation = 2
+agent = "g2-01-haiku"
+claude_model = "claude-haiku-4-5"
+effort = "high"
+niche = "weekly"
+copied_from = ["fm-chronos2-meter", "fm-moirai2-meter", "fm-timesfm25-meter", "fm-timestral-123m-meter", "fm-timestral-209m-meter", "fm-timestral-28m-meter", "fm-timestral-5m-meter", "fm-tirex-meter", "fm-toto-meter"]
+
+[models.g2-01-haiku-weekly-209m-extended]
+kind = "agent"
+generation = 2
+agent = "g2-01-haiku"
+claude_model = "claude-haiku-4-5"
+effort = "high"
+niche = "weekly"
+copied_from = ["fm-chronos2-meter", "fm-moirai2-meter", "fm-timesfm25-meter", "fm-timestral-123m-meter", "fm-timestral-209m-meter", "fm-timestral-28m-meter", "fm-timestral-5m-meter", "fm-tirex-meter", "fm-toto-meter"]
+
+[models.g2-01-haiku-weekly-209m-mega]
+kind = "agent"
+generation = 2
+agent = "g2-01-haiku"
+claude_model = "claude-haiku-4-5"
+effort = "high"
+niche = "weekly"
+copied_from = ["fm-chronos2-meter", "fm-moirai2-meter", "fm-timesfm25-meter", "fm-timestral-123m-meter", "fm-timestral-209m-meter", "fm-timestral-28m-meter", "fm-timestral-5m-meter", "fm-tirex-meter", "fm-toto-meter"]
+
+[models.g2-01-haiku-weekly-209m-optimal]
+kind = "agent"
+generation = 2
+agent = "g2-01-haiku"
+claude_model = "claude-haiku-4-5"
+effort = "high"
+niche = "weekly"
+copied_from = ["fm-chronos2-meter", "fm-moirai2-meter", "fm-timesfm25-meter", "fm-timestral-123m-meter", "fm-timestral-209m-meter", "fm-timestral-28m-meter", "fm-timestral-5m-meter", "fm-tirex-meter", "fm-toto-meter"]
+
+[models.g2-01-haiku-weekly-28m]
+kind = "agent"
+generation = 2
+agent = "g2-01-haiku"
+claude_model = "claude-haiku-4-5"
+effort = "high"
+niche = "weekly"
+copied_from = ["fm-chronos2-meter", "fm-moirai2-meter", "fm-timesfm25-meter", "fm-timestral-123m-meter", "fm-timestral-209m-meter", "fm-timestral-28m-meter", "fm-timestral-5m-meter", "fm-tirex-meter", "fm-toto-meter"]
+
+[models.g2-01-haiku-weekly-base]
+kind = "agent"
+generation = 2
+agent = "g2-01-haiku"
+claude_model = "claude-haiku-4-5"
+effort = "high"
+niche = "weekly"
+copied_from = ["fm-chronos2-meter", "fm-moirai2-meter", "fm-timesfm25-meter", "fm-timestral-123m-meter", "fm-timestral-209m-meter", "fm-timestral-28m-meter", "fm-timestral-5m-meter", "fm-tirex-meter", "fm-toto-meter"]
+
+[models.g2-01-haiku-weekly-blend]
+kind = "agent"
+generation = 2
+agent = "g2-01-haiku"
+claude_model = "claude-haiku-4-5"
+effort = "high"
+niche = "weekly"
+copied_from = ["combo-ewa", "g1-01-sonnet-combo123"]
+
+[models.g2-01-haiku-weekly-context-1008]
+kind = "agent"
+generation = 2
+agent = "g2-01-haiku"
+claude_model = "claude-haiku-4-5"
+effort = "high"
+niche = "weekly"
+copied_from = ["fm-chronos2-meter", "fm-moirai2-meter", "fm-timesfm25-meter", "fm-timestral-123m-meter", "fm-timestral-209m-meter", "fm-timestral-28m-meter", "fm-timestral-5m-meter", "fm-tirex-meter", "fm-toto-meter"]
+
+[models.g2-01-haiku-weekly-context-1152]
+kind = "agent"
+generation = 2
+agent = "g2-01-haiku"
+claude_model = "claude-haiku-4-5"
+effort = "high"
+niche = "weekly"
+copied_from = ["fm-chronos2-meter", "fm-moirai2-meter", "fm-timesfm25-meter", "fm-timestral-123m-meter", "fm-timestral-209m-meter", "fm-timestral-28m-meter", "fm-timestral-5m-meter", "fm-tirex-meter", "fm-toto-meter"]
+
+[models.g2-01-haiku-weekly-context-1296]
+kind = "agent"
+generation = 2
+agent = "g2-01-haiku"
+claude_model = "claude-haiku-4-5"
+effort = "high"
+niche = "weekly"
+copied_from = ["fm-chronos2-meter", "fm-moirai2-meter", "fm-timesfm25-meter", "fm-timestral-123m-meter", "fm-timestral-209m-meter", "fm-timestral-28m-meter", "fm-timestral-5m-meter", "fm-tirex-meter", "fm-toto-meter"]
+
+[models.g2-01-haiku-weekly-context-1344]
+kind = "agent"
+generation = 2
+agent = "g2-01-haiku"
+claude_model = "claude-haiku-4-5"
+effort = "high"
+niche = "weekly"
+copied_from = ["fm-chronos2-meter", "fm-moirai2-meter", "fm-timesfm25-meter", "fm-timestral-123m-meter", "fm-timestral-209m-meter", "fm-timestral-28m-meter", "fm-timestral-5m-meter", "fm-tirex-meter", "fm-toto-meter"]
+
+[models.g2-01-haiku-weekly-context-144]
+kind = "agent"
+generation = 2
+agent = "g2-01-haiku"
+claude_model = "claude-haiku-4-5"
+effort = "high"
+niche = "weekly"
+copied_from = ["fm-chronos2-meter", "fm-moirai2-meter", "fm-timesfm25-meter", "fm-timestral-123m-meter", "fm-timestral-209m-meter", "fm-timestral-28m-meter", "fm-timestral-5m-meter", "fm-tirex-meter", "fm-toto-meter"]
+
+[models.g2-01-haiku-weekly-context-336]
+kind = "agent"
+generation = 2
+agent = "g2-01-haiku"
+claude_model = "claude-haiku-4-5"
+effort = "high"
+niche = "weekly"
+copied_from = ["fm-chronos2-meter", "fm-moirai2-meter", "fm-timesfm25-meter", "fm-timestral-123m-meter", "fm-timestral-209m-meter", "fm-timestral-28m-meter", "fm-timestral-5m-meter", "fm-tirex-meter", "fm-toto-meter"]
+
+[models.g2-01-haiku-weekly-ewa]
+kind = "agent"
+generation = 2
+agent = "g2-01-haiku"
+claude_model = "claude-haiku-4-5"
+effort = "high"
+niche = "weekly"
+copied_from = ["combo-ewa", "g1-01-sonnet-combo123"]
+
+[models.g2-02-sonnet-deep-meter]
+kind = "agent"
+generation = 2
+agent = "g2-02-sonnet"
+claude_model = "claude-sonnet-4-6"
+effort = "high"
+niche = "deep-ensemble"
+
+[models.g2-02-sonnet-deep-meter-v5]
+kind = "agent"
+generation = 2
+agent = "g2-02-sonnet"
+claude_model = "claude-sonnet-4-6"
+effort = "high"
+niche = "deep-ensemble"
+
+[models.g2-02-sonnet-deep-meter-v6]
+kind = "agent"
+generation = 2
+agent = "g2-02-sonnet"
+claude_model = "claude-sonnet-4-6"
+effort = "high"
+niche = "deep-ensemble"
+
+[models.g2-02-sonnet-deep-meter-v7]
+kind = "agent"
+generation = 2
+agent = "g2-02-sonnet"
+claude_model = "claude-sonnet-4-6"
+effort = "high"
+niche = "deep-ensemble"
+
+[models.g2-02-sonnet-deep-meter-v8]
+kind = "agent"
+generation = 2
+agent = "g2-02-sonnet"
+claude_model = "claude-sonnet-4-6"
+effort = "high"
+niche = "deep-ensemble"
+
+[models.g2-03-opus-spend-ens]
+kind = "agent"
+generation = 2
+agent = "g2-03-opus"
+claude_model = "claude-opus-4-6"
+effort = "high"
+niche = "spend"
+
+[models.g2-03-opus-spend-ens3]
+kind = "agent"
+generation = 2
+agent = "g2-03-opus"
+claude_model = "claude-opus-4-6"
+effort = "high"
+niche = "spend"
+
+[models.g2-03-opus-spend-fast]
+kind = "agent"
+generation = 2
+agent = "g2-03-opus"
+claude_model = "claude-opus-4-6"
+effort = "high"
+niche = "spend"
+
+[models.g2-03-opus-spend-hybrid]
+kind = "agent"
+generation = 2
+agent = "g2-03-opus"
+claude_model = "claude-opus-4-6"
+effort = "high"
+niche = "spend"
+
+[models.g2-03-opus-spend-stat]
+kind = "agent"
+generation = 2
+agent = "g2-03-opus"
+claude_model = "claude-opus-4-6"
+effort = "high"
+niche = "spend"
+
+[models.g2-03-opus-spend-stat2]
+kind = "agent"
+generation = 2
+agent = "g2-03-opus"
+claude_model = "claude-opus-4-6"
+effort = "high"
+niche = "spend"
+
+[models.g2-04-opus-fable-burst]
+kind = "agent"
+generation = 2
+agent = "g2-04-opus"
+claude_model = "claude-opus-5"
+effort = "high"
+niche = "fable-cap"
+
+[models.g2-04-opus-fable-mix]
+kind = "agent"
+generation = 2
+agent = "g2-04-opus"
+claude_model = "claude-opus-5"
+effort = "high"
+niche = "fable-cap"
+
+[models.g2-04-opus-fable-pool]
+kind = "agent"
+generation = 2
+agent = "g2-04-opus"
+claude_model = "claude-opus-5"
+effort = "high"
+niche = "fable-cap"
+
+[models.g2-05-sonnet-ens]
+kind = "agent"
+generation = 2
+agent = "g2-05-sonnet"
+claude_model = "claude-sonnet-5-5"
+effort = "high"
+niche = "calibration"
+
+[models.g2-05-sonnet-final]
+kind = "agent"
+generation = 2
+agent = "g2-05-sonnet"
+claude_model = "claude-sonnet-5-5"
+effort = "high"
+niche = "calibration"
+
+[models.g2-05-sonnet-flat]
+kind = "agent"
+generation = 2
+agent = "g2-05-sonnet"
+claude_model = "claude-sonnet-5-5"
+effort = "high"
+niche = "calibration"
+
+[models.g2-05-sonnet-flat-kw]
+kind = "agent"
+generation = 2
+agent = "g2-05-sonnet"
+claude_model = "claude-sonnet-5-5"
+effort = "high"
+niche = "calibration"
+
+[models.g2-05-sonnet-hazard]
+kind = "agent"
+generation = 2
+agent = "g2-05-sonnet"
+claude_model = "claude-sonnet-5-5"
+effort = "high"
+niche = "calibration"
+
+[models.g2-05-sonnet-hazstack]
+kind = "agent"
+generation = 2
+agent = "g2-05-sonnet"
+claude_model = "claude-sonnet-5-5"
+effort = "high"
+niche = "calibration"
+
+[models.g2-05-sonnet-l08]
+kind = "agent"
+generation = 2
+agent = "g2-05-sonnet"
+claude_model = "claude-sonnet-5-5"
+effort = "high"
+niche = "calibration"
+
+[models.g2-05-sonnet-recal]
+kind = "agent"
+generation = 2
+agent = "g2-05-sonnet"
+claude_model = "claude-sonnet-5-5"
+effort = "high"
+niche = "calibration"
+
+[models.g2-05-sonnet-stack]
+kind = "agent"
+generation = 2
+agent = "g2-05-sonnet"
+claude_model = "claude-sonnet-5-5"
+effort = "high"
+niche = "calibration"
+copied_from = ["combo-stack", "g1-02-haiku-fm-broad", "g1-02-haiku-fm-elite", "g1-02-haiku-fm-meter-stack", "g1-02-haiku-fm-spend-stack", "g1-02-haiku-fm-split", "g1-02-haiku-fm-timestral-all", "g1-02-haiku-hybrid-fm-struct"]
+
+[models.g2-06-opus-fmgate]
+kind = "agent"
+generation = 2
+agent = "g2-06-opus"
+claude_model = "claude-opus-5-5"
+effort = "high"
+niche = "wildcard"
+
+[models.g2-06-opus-fmgate2]
+kind = "agent"
+generation = 2
+agent = "g2-06-opus"
+claude_model = "claude-opus-5-5"
+effort = "high"
+niche = "wildcard"
+
+[models.g2-07-opus-limit]
+kind = "agent"
+generation = 2
+agent = "g2-07-opus"
+claude_model = "claude-opus-5-5"
+effort = "xhigh"
+niche = "limit-calls"
+
+[models.g2-07-opus-pool]
+kind = "agent"
+generation = 2
+agent = "g2-07-opus"
+claude_model = "claude-opus-5-5"
+effort = "xhigh"
+niche = "limit-calls"
+
+[models.g2-08-fable-burst]
+kind = "agent"
+generation = 2
+agent = "g2-08-fable"
+claude_model = "claude-fable-5-1"
+effort = "high"
+niche = "five-hour"
+
+[models.g2-08-fable-burst-mix]
+kind = "agent"
+generation = 2
+agent = "g2-08-fable"
+claude_model = "claude-fable-5-1"
+effort = "high"
+niche = "five-hour"
+
+[models.g2-08-fable-burst-mix3]
+kind = "agent"
+generation = 2
+agent = "g2-08-fable"
+claude_model = "claude-fable-5-1"
+effort = "high"
+niche = "five-hour"
+
+[models.g2-08-fable-ref-timestral]
+kind = "agent"
+generation = 2
+agent = "g2-08-fable"
+claude_model = "claude-fable-5-1"
+effort = "high"
+niche = "five-hour"
+copied_from = ["fm-chronos2-meter", "fm-moirai2-meter", "fm-timesfm25-meter", "fm-timestral-123m-meter", "fm-timestral-209m-meter", "fm-timestral-28m-meter", "fm-timestral-5m-meter", "fm-tirex-meter", "fm-toto-meter"]
+
+[models.ml-gbm-quantile]
+kind = "port"
+
+[models.ml-qrf]
+kind = "port"
+
+[models.naive-diurnal-spend]
+kind = "port"
+
+[models.naive-flat]
+kind = "port"
+
+[models.naive-linear-to-reset]
+kind = "port"
+
+[models.naive-seasonal-day]
+kind = "port"
+
+[models.naive-seasonal-week]
+kind = "port"
+
+[models.naive-split]
+kind = "port"
+
+[models.port-engine-damped-acceleration]
+kind = "port"
+
+[models.port-engine-diurnal-rate]
+kind = "port"
+
+[models.port-engine-kalman-trend]
+kind = "port"
+
+[models.port-engine-linear-recent]
+kind = "port"
+
+[models.port-engine-recency-weighted]
+kind = "port"
+
+[models.port-engine-recent-rate]
+kind = "port"
+
+[models.port-engine-rule]
+kind = "port"
+
+[models.port-engine-saturating]
+kind = "port"
+
+[models.port-live-meter]
+kind = "port"
+
+[models.selftest-constant]
+kind = "selftest"
+
+[models.selftest-last]
+kind = "selftest"
+
+[models.selftest-line]
+kind = "selftest"
+
+[models.selftest-oracle]
+kind = "selftest"
+
+[models.selftest-probe]
+kind = "selftest"
+
+[models.selftest-spy]
+kind = "selftest"
+
+[models.selftest-walk-truth]
+kind = "selftest"
+
+[models.spend-decay-1d]
+kind = "port"
+
+[models.spend-decay-1h]
+kind = "port"
+
+[models.spend-decay-30m]
+kind = "port"
+
+[models.spend-decay-6h]
+kind = "port"
+
+[models.struct-chronos2]
+kind = "port"
+
+[models.struct-timestral-123m]
+kind = "port"
+
+[models.struct-timestral-209m]
+kind = "port"
+
+[models.struct-timestral-28m]
+kind = "port"
+
+[models.struct-timestral-5m]
+kind = "port"

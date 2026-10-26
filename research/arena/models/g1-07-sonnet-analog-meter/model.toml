@@ -1,0 +1,22 @@
+name = "g1-07-sonnet-analog-meter"
+description = "Meters by analog bootstrap of the meter's own cumulative point increments: time-of-day, weekday and recent-pace matched pasts."
+targets = ["meter.five_hour", "meter.seven_day", "meter.scoped"]
+children = []
+
+[config]
+
+[config.five]
+ess_min = 30
+level_gamma = 0.0
+rate_gamma = 0.5
+sigma_tod_h = 4.0
+half_life_days = 60.0
+
+[config.long]
+ess_min = 30
+level_gamma = 0.5
+block_h = 12
+block_sigma = 0.0
+sigma_level = 0
+sigma_tod_h = 1.5
+half_life_days = 35.0

@@ -1,0 +1,16 @@
+name = "combo-fforma"
+description = "FFORMA-style weights: a softmax-linear map from as-of features (phase, burn, activity profile, the children's disagreement) to the children's weights, trained on their past relative CRPS; a mixture of the children's paths."
+targets = ["meter.five_hour", "meter.seven_day", "meter.scoped"]
+children = ["port-engine-rule", "spend-decay-30m", "struct-timestral-28m"]
+
+[config]
+children = ["port-engine-rule", "spend-decay-30m", "struct-timestral-28m"]
+pool = "mixture"
+lam = 1.0                 # L2 on the map (standardized features): large = near-equal weights
+min_groups = 8            # fewer scored forecasts: equal weights
+half_life_n = 48
+backtest_every_h = { five_hour = 3, seven_day = 12, weekly_scoped = 12 }
+backtest_n = 6             # latest origins per cadence, each a fresh fit of every child. Sized so a
+                           # cold episode costs ~3x its slowest child (struct-timestral-28m): with no
+                           # backtest the per-checkpoint child calls alone are ~2x; 6 + 7 origins add ~0.6x
+max_evals = 16

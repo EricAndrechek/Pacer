@@ -1,0 +1,49 @@
+name: Arena
+
+# The forecast arena (research/arena) is a uv project, separate from the app.
+# This workflow runs its tests and the public-repo leak check; it is the only
+# CI that touches it, and it runs only when arena files change.
+on:
+  pull_request:
+    paths: ["research/arena/**", ".github/workflows/arena.yml"]
+  push:
+    branches: [main]
+    paths: ["research/arena/**", ".github/workflows/arena.yml"]
+
+concurrency:
+  group: arena-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  arena:
+    name: Arena tests and leak check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: research/arena
+    env:
+      # Skips the Docker-image tests (conftest.py); weight-dependent tests
+      # skip themselves when the model weights or the fm extra are absent.
+      ARENA_CI: "1"
+    steps:
+      - uses: actions/checkout@v5.0.0
+
+      # No cache: nothing is stored between runs, no artifacts are uploaded.
+      - uses: astral-sh/setup-uv@v7.1.0
+        with:
+          enable-cache: false
+
+      # Without the fm extra: no torch, no pretrained weights.
+      - name: Install
+        run: uv sync
+
+      - name: Tests
+        run: uv run pytest -q
+
+      # Generic rules only: the local identifier rules need the owner's machine.
+      - name: Leak check
+        run: uv run arena leakcheck --no-local

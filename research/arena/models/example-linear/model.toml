@@ -1,0 +1,8 @@
+name = "example-linear"
+description = "The trivial reference: a straight line through recent meter readings, flat recent spend."
+targets = ["meter.five_hour", "meter.seven_day", "meter.scoped", "spend.hourly"]
+children = []
+
+[config]
+recent_readings = 12      # meter points fitted per cycle
+spend_lookback_h = 24     # hours of spend averaged for the flat forecast

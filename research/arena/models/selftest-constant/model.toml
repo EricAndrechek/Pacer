@@ -1,0 +1,7 @@
+name = "selftest-constant"
+description = "Self-test baseline: the same constant for every grid time (`arena selftest`)."
+targets = ["meter.five_hour", "meter.seven_day", "meter.scoped", "cycle.next_start", "spend.hourly", "tokens.hourly", "split.accounts"]
+children = []
+
+[config]
+value = 0.0      # the forecast, for every target but cycle.next_start (never starts)

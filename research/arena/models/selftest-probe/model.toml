@@ -1,0 +1,13 @@
+name = "selftest-probe"
+description = "Self-test adversary: tries every way to see the future or the hidden data, forecasts a constant, and reports what it found (`arena selftest`)."
+targets = ["meter.five_hour", "meter.seven_day", "meter.scoped", "cycle.next_start", "spend.hourly", "tokens.hourly", "split.accounts"]
+children = []
+
+[config]
+# The self-test fills these in per snapshot; defaults keep the model runnable
+# on its own. `marker` is a token the self-test plants in the holdout and the
+# runner's environment; `paths` are host paths it should not reach;
+# `holdout_cols` name a column per table whose value is hidden until after now.
+marker = "NOMARKER"
+paths = []
+host_now = 0

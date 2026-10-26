@@ -1,0 +1,18 @@
+name = "g2-01-haiku-weekly-209m-extended"
+description = "Timestral-209M with extended context (1344 steps = 14 days) for weekly forecasting."
+targets = ["meter.seven_day"]
+children = []
+deps = ["torch==2.10.0", "safetensors>=0.4", "huggingface_hub>=0.28"]
+weights = ["mistralai/Timestral-209M@9874d252ab0aae16f7f7c999f98f98d6ad7d8365"]
+
+[config]
+backend = "timestral"
+weights = "mistralai/Timestral-209M@9874d252ab0aae16f7f7c999f98f98d6ad7d8365"
+threads = 4
+stale_min = 120
+
+[config.step_min]
+seven_day = 15
+
+[config.context_steps]
+seven_day = 1344

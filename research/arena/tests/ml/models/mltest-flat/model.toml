@@ -1,0 +1,8 @@
+name = "mltest-flat"
+description = "Test child: the latest reading, flat, with a small spread."
+targets = ["meter.five_hour", "meter.seven_day", "meter.scoped"]
+children = []
+
+[config]
+offset = 0.0
+spread = 1.0

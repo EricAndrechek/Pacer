@@ -1,0 +1,9 @@
+name = "g2-08-fable-burst-mix3"
+description = "Three-way pool for the five-hour meter: burst-process paths (g2-08-fable-burst) with two pretrained forecasters on the cumulative burn (fm-timestral-123m-meter, fm-chronos2-meter); dense head pinned to the burst paths."
+targets = ["meter.five_hour"]
+children = ["g2-08-fable-burst", "fm-timestral-123m-meter", "fm-chronos2-meter"]
+deps = []
+
+[config]
+weights = { "g2-08-fable-burst" = 0.4, "fm-timestral-123m-meter" = 0.3, "fm-chronos2-meter" = 0.3 }
+head_min = 3

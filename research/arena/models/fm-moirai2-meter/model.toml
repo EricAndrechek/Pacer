@@ -1,0 +1,23 @@
+name = "fm-moirai2-meter"
+description = "Moirai 2.0 R-small (Salesforce, 11M), zero-shot, on the meter's cumulative burn (this cycle after the previous ones), resampled; quantiles to the reset as meter paths."
+targets = ["meter.five_hour", "meter.seven_day", "meter.scoped"]
+children = []
+deps = ["torch==2.10.0", "einops>=0.7", "jaxtyping>=0.2.29", "safetensors>=0.4"]
+weights = ["Salesforce/moirai-2.0-R-small@30f43ff08c8494f4943ae1521e9d4e94a0fbb389"]
+
+[config]
+backend = "moirai2"
+weights = "Salesforce/moirai-2.0-R-small@30f43ff08c8494f4943ae1521e9d4e94a0fbb389"
+threads = 4
+stale_min = 120
+
+[config.step_min]
+five_hour = 5
+seven_day = 15
+weekly_scoped = 15
+
+[config.context_steps]
+# The lab's default context, 1 day / 1 week (not tuned here).
+five_hour = 288
+seven_day = 672
+weekly_scoped = 672

@@ -1,0 +1,53 @@
+name = "g2-05-sonnet-final"
+description = "Single-process calibrated meters: Timestral-123M + 6h burn-decay (fixed mixture for weekly meters) then an empirical, regime-adaptive zero-mass layer that pins the low quantiles at the current reading."
+targets = ["meter.five_hour", "meter.seven_day", "meter.scoped"]
+children = []
+deps = ["torch==2.10.0", "safetensors>=0.4", "huggingface_hub>=0.28"]
+weights = ["mistralai/Timestral-123M@5a147287addda85f6acd8da3fb8858fe9af7e8f7"]
+
+[config]
+w_decay = 0.5         # share of the 6h burn-decay model in the weekly mixtures
+tau_d = 14.0          # recency scale (days) of the history samples behind the flat share
+h_since = 0.8         # kernel width on log(1+minutes since last rise)
+h_rate = 0.8          # kernel width on log(1+rise over the last hour)
+tod_h = 0.0           # hour-of-day kernel width (0 = off)
+n0 = 3.0              # prior pseudo-count toward the pooled flat share
+max_samples = 6000
+delta = 0.5           # rise (pp) below which the child's paths count as flat
+stale_min = 120
+
+[config.pi_scale]
+five_hour = 0.0       # 5h: no pinning (leaderboard call 8: pinning at 0.6 gave next_reading_ae .62 vs .29 raw and a rising PIT)
+seven_day = 1.0
+weekly_scoped = 1.0
+
+[config.fm]
+backend = "timestral"
+weights = "mistralai/Timestral-123M@5a147287addda85f6acd8da3fb8858fe9af7e8f7"
+threads = 2
+stale_min = 120
+
+[config.fm.step_min]
+five_hour = 5
+seven_day = 15
+weekly_scoped = 15
+
+[config.fm.context_steps]
+five_hour = 144
+seven_day = 288
+weekly_scoped = 288
+
+[config.decay]
+lookback_min = 360
+case_days = 120
+phase_band = 0.10
+
+[config.decay.default_tau_h]
+five_hour = 2.0
+seven_day = 16.0
+weekly_scoped = 16.0
+
+[config.up_k]
+five_hour = 1.4
+seven_day = 1.2
+weekly_scoped = 1.2

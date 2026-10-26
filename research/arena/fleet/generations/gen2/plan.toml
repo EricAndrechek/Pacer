@@ -1,0 +1,76 @@
+[fleet]
+max_parallel = 5
+eval_budget = 20
+eval_episodes = 24
+
+[[agent]]
+name = "g2-01-haiku"
+niche = "weekly"
+model = "claude-haiku-4-5"
+effort = "high"
+max_turns = 300
+budget_usd = 8
+task = "Generation 2. Study SCORES.md and the generation-1 and ported models in models/ (read their REPORT.md notes in MODELS.md where present). Learn from the best performers, then beat them on your focus target(s): whole forecast paths, honest ranges (calibration is scored), the next reading, limit calls. Copy or call earlier models freely (never modify them); deeper stacks of models calling models are welcome where they help. Develop on the visible tier with `arena test --episodes 8`; spend arena-eval calls deliberately. Focus: meter.seven_day. Beat the structural Timestral models (spend forecasts converted to meter points)."
+
+[[agent]]
+name = "g2-02-sonnet"
+niche = "deep-ensemble"
+model = "claude-sonnet-4-6"
+effort = "high"
+max_turns = 300
+budget_usd = 15
+task = "Generation 2. Study SCORES.md and the generation-1 and ported models in models/ (read their REPORT.md notes in MODELS.md where present). Learn from the best performers, then beat them on your focus target(s): whole forecast paths, honest ranges (calibration is scored), the next reading, limit calls. Copy or call earlier models freely (never modify them); deeper stacks of models calling models are welcome where they help. Develop on the visible tier with `arena test --episodes 8`; spend arena-eval calls deliberately. Build combiners over the strongest earlier models across families (ports, foundation, structural, ML, generation-1), several layers deep if it helps; weight by recent skill and situation."
+
+[[agent]]
+name = "g2-03-opus"
+niche = "spend"
+model = "claude-opus-4-6"
+effort = "high"
+max_turns = 300
+budget_usd = 30
+task = "Generation 2. Study SCORES.md and the generation-1 and ported models in models/ (read their REPORT.md notes in MODELS.md where present). Learn from the best performers, then beat them on your focus target(s): whole forecast paths, honest ranges (calibration is scored), the next reading, limit calls. Copy or call earlier models freely (never modify them); deeper stacks of models calling models are welcome where they help. Develop on the visible tier with `arena test --episodes 8`; spend arena-eval calls deliberately. Focus: spend.hourly and tokens.hourly, then feed better spend into structural meter models."
+
+[[agent]]
+name = "g2-04-opus"
+niche = "fable-cap"
+model = "claude-opus-5"
+effort = "high"
+max_turns = 300
+budget_usd = 30
+task = "Generation 2. Study SCORES.md and the generation-1 and ported models in models/ (read their REPORT.md notes in MODELS.md where present). Learn from the best performers, then beat them on your focus target(s): whole forecast paths, honest ranges (calibration is scored), the next reading, limit calls. Copy or call earlier models freely (never modify them); deeper stacks of models calling models are welcome where they help. Develop on the visible tier with `arena test --episodes 8`; spend arena-eval calls deliberately. Focus: meter.scoped (the Fable weekly cap). The leaders are only ~20% better than the shipping rule here; find what they miss."
+
+[[agent]]
+name = "g2-05-sonnet"
+niche = "calibration"
+model = "claude-sonnet-5-5"
+effort = "high"
+max_turns = 300
+budget_usd = 20
+task = "Generation 2. Study SCORES.md and the generation-1 and ported models in models/ (read their REPORT.md notes in MODELS.md where present). Learn from the best performers, then beat them on your focus target(s): whole forecast paths, honest ranges (calibration is scored), the next reading, limit calls. Copy or call earlier models freely (never modify them); deeper stacks of models calling models are welcome where they help. Develop on the visible tier with `arena test --episodes 8`; spend arena-eval calls deliberately. Focus: honest ranges. Many leaders are under- or over-dispersed (cover80 far from 0.8, PIT not flat). Build calibration layers (conformal, quantile recalibration) over the best models without hurting their accuracy."
+
+[[agent]]
+name = "g2-06-opus"
+niche = "wildcard"
+model = "claude-opus-5-5"
+effort = "high"
+max_turns = 300
+budget_usd = 30
+task = "Generation 2. Study SCORES.md and the generation-1 and ported models in models/ (read their REPORT.md notes in MODELS.md where present). Learn from the best performers, then beat them on your focus target(s): whole forecast paths, honest ranges (calibration is scored), the next reading, limit calls. Copy or call earlier models freely (never modify them); deeper stacks of models calling models are welcome where they help. Develop on the visible tier with `arena test --episodes 8`; spend arena-eval calls deliberately. Any approach you believe can beat the field on any target: new data signals (sessions, prompts, subagent spawns, account switches), new model classes, or new combinations."
+
+[[agent]]
+name = "g2-07-opus"
+niche = "limit-calls"
+model = "claude-opus-5-5"
+effort = "xhigh"
+max_turns = 300
+budget_usd = 35
+task = "Generation 2. Study SCORES.md and the generation-1 and ported models in models/ (read their REPORT.md notes in MODELS.md where present). Learn from the best performers, then beat them on your focus target(s): whole forecast paths, honest ranges (calibration is scored), the next reading, limit calls. Copy or call earlier models freely (never modify them); deeper stacks of models calling models are welcome where they help. Develop on the visible tier with `arena test --episodes 8`; spend arena-eval calls deliberately. Focus: calling the limit — brier_hit and time-to-limit (crps_ttl) on all meters, plus the value at reset."
+
+[[agent]]
+name = "g2-08-fable"
+niche = "five-hour"
+model = "claude-fable-5-1"
+effort = "high"
+max_turns = 300
+budget_usd = 40
+task = "Generation 2. Study SCORES.md and the generation-1 and ported models in models/ (read their REPORT.md notes in MODELS.md where present). Learn from the best performers, then beat them on your focus target(s): whole forecast paths, honest ranges (calibration is scored), the next reading, limit calls. Copy or call earlier models freely (never modify them); deeper stacks of models calling models are welcome where they help. Develop on the visible tier with `arena test --episodes 8`; spend arena-eval calls deliberately. Focus: meter.five_hour. Beat the Timestral meter models and the generation-1 leaders on CRPS, error at reset and the next reading."

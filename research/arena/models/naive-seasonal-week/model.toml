@@ -1,0 +1,7 @@
+name = "naive-seasonal-week"
+description = "Seasonal naive: each hour's spend or tokens is the same hour one week earlier (168 h), repeating the last week beyond it."
+targets = ["spend.hourly", "tokens.hourly"]
+children = []
+
+[config]
+period_h = 168

@@ -1,0 +1,9 @@
+name = "g1-01-sonnet-calibrate123"
+description = "ML calibration layer on top of fm-timestral-123m-meter: uses backtested forecasts to learn a spread-scale factor that corrects the child's slightly over-wide prediction intervals, improving CRPS and coverage metrics."
+targets = ["meter.five_hour", "meter.seven_day", "meter.scoped"]
+children = ["fm-timestral-123m-meter"]
+
+[config]
+child = "fm-timestral-123m-meter"
+backtest_every_h = { five_hour = 3, seven_day = 12, weekly_scoped = 12 }
+scale = 0.60

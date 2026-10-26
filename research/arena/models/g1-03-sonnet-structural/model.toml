@@ -1,0 +1,14 @@
+name = "g1-03-sonnet-structural"
+description = "Structural: past-cycle bootstrap conditioned on burn state with time-of-day and recency weighting."
+targets = ["meter.five_hour"]
+children = []
+deps = []
+
+[config]
+min_cycles = 5
+value_sigma = 15.0
+rate_sigma_pph = 8.0
+active_threshold_pph = 0.5
+time_sigma_frac = 0.15
+rate_lookback_min = 30
+recency_half_life_days = 14.0

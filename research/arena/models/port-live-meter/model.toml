@@ -1,0 +1,7 @@
+name = "port-live-meter"
+description = "The app's live meter (#318) as a forecaster: the live value now (reading + converted spend since it), flat to reset; spread from the spend-to-meter fit's residuals."
+targets = ["meter.five_hour", "meter.seven_day", "meter.scoped"]
+children = []
+
+[config]
+neighbours = 400     # fit intervals whose converted spend is nearest the current one, for the spread

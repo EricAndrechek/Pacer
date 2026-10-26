@@ -1,0 +1,9 @@
+name = "g2-03-opus-spend-ens"
+description = "Ensemble: blends stat model paths (good CRPS) with analog model paths (good variogram)."
+targets = ["spend.hourly", "tokens.hourly"]
+children = ["g2-03-opus-spend-stat", "g1-09-opus-analog-spend"]
+deps = []
+
+[config]
+stat_weight = 0.5
+analog_weight = 0.5

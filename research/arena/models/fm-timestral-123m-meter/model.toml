@@ -1,0 +1,24 @@
+name = "fm-timestral-123m-meter"
+description = "Timestral-123M (Mistral AI), zero-shot, on the meter's cumulative burn (this cycle after the previous ones), resampled; quantiles to the reset as meter paths."
+targets = ["meter.five_hour", "meter.seven_day", "meter.scoped"]
+children = []
+deps = ["torch==2.10.0", "safetensors>=0.4", "huggingface_hub>=0.28"]
+weights = ["mistralai/Timestral-123M@5a147287addda85f6acd8da3fb8858fe9af7e8f7"]
+
+[config]
+backend = "timestral"
+weights = "mistralai/Timestral-123M@5a147287addda85f6acd8da3fb8858fe9af7e8f7"
+threads = 4
+stale_min = 120
+
+[config.step_min]
+five_hour = 5
+seven_day = 15
+weekly_scoped = 15
+
+[config.context_steps]
+# Timestral-28M on the visible tier: 12 h (5-min steps) beat 3 h and 6 h for the 5-hour meter,
+# matched 1 day; 3 days (15-min steps) matched 1 week for the weekly meters.
+five_hour = 144
+seven_day = 288
+weekly_scoped = 288

@@ -1,0 +1,15 @@
+name = "g1-03-sonnet-hybrid"
+description = "Structural hybrid: bootstrap for 5h, struct-timestral-5m for 7d/scoped, naive-flat for spend.hourly."
+targets = ["meter.five_hour", "meter.seven_day", "meter.scoped", "spend.hourly"]
+children = ["struct-timestral-5m", "naive-flat"]
+deps = []
+
+[config]
+# Bootstrap parameters (for 5h meter)
+min_cycles = 5
+value_sigma = 15.0          # bandwidth for value-similarity weighting (% points)
+rate_sigma_pph = 8.0        # bandwidth for burn-rate similarity (% per hour)
+active_threshold_pph = 0.5  # minimum burn rate (% per hour) to be considered active
+time_sigma_frac = 0.15      # bandwidth for time-of-day similarity (fraction of 24h)
+rate_lookback_min = 30      # minutes of recent readings to compute burn rate
+recency_half_life_days = 14.0  # half-life for recency weighting of past cycles

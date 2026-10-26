@@ -1,0 +1,10 @@
+name = "g1-01-sonnet-router"
+description = "Target-aware router: uses CQR (LightGBM) for five_hour and scoped targets (where ML features dominate), and calibrated timestral-123m for seven_day (where FM time-series knowledge dominates). Best of both worlds."
+targets = ["meter.five_hour", "meter.seven_day", "meter.scoped"]
+children = ["g1-01-sonnet-cqr", "g1-01-sonnet-calibrate123"]
+deps = []
+
+[config]
+five_hour_child = "g1-01-sonnet-cqr"
+scoped_child = "g1-01-sonnet-cqr"
+seven_day_child = "g1-01-sonnet-calibrate123"

@@ -1,0 +1,165 @@
+# Generation 1: one [[agent]] per agent, from the launcher's records.
+# turns: assistant turns counted from the run's stream. cost_usd: Claude Code's
+# API-equivalent cost of the agent's own session. eval_calls: arena-eval calls
+# made (eval_scored: those that returned scores). exit: finished, or the cap
+# (turns / budget) that stopped it. models: what it handed back (models/<name>).
+
+[[agent]]
+name = "g1-01-sonnet"
+claude_model = "claude-sonnet-4-6"
+effort = "low"
+niche = "machine-learning"
+turns = 224
+cost_usd = 12.57
+eval_calls = 7
+eval_scored = 1
+exit = "budget cap"
+max_turns = 250
+budget_usd = 12.0
+eval_budget = 20
+models = ["g1-01-sonnet-bestcombo", "g1-01-sonnet-calibrate123", "g1-01-sonnet-calstack", "g1-01-sonnet-combo123", "g1-01-sonnet-cqr", "g1-01-sonnet-router", "g1-01-sonnet-stack123"]
+summary = "LightGBM quantile regression (cqr), a CRPS-calibrated wrapper over the 123M Timestral and stacks of foundation models; calibrate123 became the board leader on five-hour and seven-day."
+
+[[agent]]
+name = "g1-02-haiku"
+claude_model = "claude-haiku-4-5"
+effort = "high"
+niche = "foundation-model"
+turns = 110
+cost_usd = 0.9
+eval_calls = 0
+eval_scored = 0
+exit = "finished"
+max_turns = 250
+budget_usd = 8.0
+eval_budget = 20
+models = ["g1-02-haiku-fm-broad", "g1-02-haiku-fm-clean", "g1-02-haiku-fm-elite", "g1-02-haiku-fm-ensemble", "g1-02-haiku-fm-meter-stack", "g1-02-haiku-fm-online", "g1-02-haiku-fm-spend-ensemble", "g1-02-haiku-fm-spend-stack", "g1-02-haiku-fm-split", "g1-02-haiku-fm-timestral-all", "g1-02-haiku-hybrid-fm-struct"]
+summary = "Eleven ensembles of pretrained forecasters (median, CRPS stack, quantile pooling, online weighting) across meter, spend and split targets; sandbox restrictions blocked scoring, so no results."
+
+[[agent]]
+name = "g1-03-sonnet"
+claude_model = "claude-sonnet-4-6"
+effort = "high"
+niche = "structural"
+turns = 265
+cost_usd = 13.91
+eval_calls = 3
+eval_scored = 1
+exit = "finished"
+max_turns = 250
+budget_usd = 15.0
+eval_budget = 20
+models = ["g1-03-sonnet-hybrid", "g1-03-sonnet-structural"]
+summary = "A past-cycle bootstrap for the five-hour meter weighted by level, burn rate, activity and time of day; about 10% better than spend-decay on the visible tier but biased low on the hidden tier."
+
+[[agent]]
+name = "g1-04-opus"
+claude_model = "claude-opus-4-6"
+effort = "high"
+niche = "machine-learning"
+turns = 378
+cost_usd = 30.07
+eval_calls = 5
+eval_scored = 3
+exit = "budget cap"
+max_turns = 250
+budget_usd = 30.0
+eval_budget = 20
+models = ["g1-04-opus-all", "g1-04-opus-gbm-conformal", "g1-04-opus-ml-spend"]
+summary = "Two LightGBM quantile families: spend/tokens with lags and AR(1) copula paths, and meters with out-of-fold spread scaling and minimum spread for weekly targets; weaker on the hidden tier than visible."
+
+[[agent]]
+name = "g1-05-opus"
+claude_model = "claude-opus-5"
+effort = "medium"
+niche = "ensemble"
+turns = 233
+cost_usd = 30.06
+eval_calls = 3
+eval_scored = 0
+exit = "budget cap"
+max_turns = 250
+budget_usd = 30.0
+eval_budget = 20
+models = ["g1-05-opus-ens-all", "g1-05-opus-ens-hourly", "g1-05-opus-ens-meter", "g1-05-opus-ens-meter-big"]
+summary = "A banded ensemble of diverse children with fitted spread and a nowcast head; a mixture pool beat quantile averaging, the wide version timed out on the scorer, and the slimmed submission was unscored."
+
+[[agent]]
+name = "g1-06-sonnet"
+claude_model = "claude-sonnet-5-5"
+effort = "medium"
+niche = "structural"
+turns = 20
+cost_usd = 0.45
+eval_calls = 1
+eval_scored = 1
+exit = "finished"
+max_turns = 250
+budget_usd = 15.0
+eval_budget = 20
+models = ["g1-06-sonnet-decay"]
+summary = "A spend-decay-6h copy with a 1.5x wider sampled spread; about 6% better seven-day CRPS on eight visible episodes, within noise, with sandbox friction noted."
+
+[[agent]]
+name = "g1-07-sonnet"
+claude_model = "claude-sonnet-5-5"
+effort = "xhigh"
+niche = "statistical"
+turns = 255
+cost_usd = 14.88
+eval_calls = 10
+eval_scored = 9
+exit = "finished"
+max_turns = 250
+budget_usd = 20.0
+eval_budget = 20
+models = ["g1-07-sonnet-analog-hourly", "g1-07-sonnet-analog-meter", "g1-07-sonnet-next-start", "g1-07-sonnet-pool-five", "g1-07-sonnet-pool-scoped", "g1-07-sonnet-pool-seven", "g1-07-sonnet-split-markov"]
+summary = "Statistical analog, block-bootstrap, hazard and Markov models plus pools with spend-decay; self-calibration carried to the hidden tier, beating foundation models on hourly, next-start and split."
+
+[[agent]]
+name = "g1-08-opus"
+claude_model = "claude-opus-5-5"
+effort = "high"
+niche = "foundation-model"
+turns = 152
+cost_usd = 17.5
+eval_calls = 5
+eval_scored = 5
+exit = "finished"
+max_turns = 250
+budget_usd = 30.0
+eval_budget = 20
+models = ["g1-08-opus-fm"]
+summary = "One all-target model: Timestral recalibrated on its own self-backtests with level and phase conditioning, rationing near caps, a regime simulation for split; calibration helped weekly meters."
+
+[[agent]]
+name = "g1-09-opus"
+claude_model = "claude-opus-5-5"
+effort = "xhigh"
+niche = "ensemble"
+turns = 166
+cost_usd = 21.88
+eval_calls = 6
+eval_scored = 4
+exit = "finished"
+max_turns = 250
+budget_usd = 35.0
+eval_budget = 20
+models = ["g1-09-opus-analog-spend", "g1-09-opus-ensemble", "g1-09-opus-nextstart", "g1-09-opus-split", "g1-09-opus-struct-analog"]
+summary = "Routed in-process ensemble of Timestral, analog-spend structural and spend-decay with a weekly re-base overlay; child-worker versions timed out on the scorer and stacking weights failed out of sample."
+
+[[agent]]
+name = "g1-10-fable"
+claude_model = "claude-fable-5-1"
+effort = "high"
+niche = "statistical"
+turns = 203
+cost_usd = 25.15
+eval_calls = 5
+eval_scored = 4
+exit = "finished"
+max_turns = 250
+budget_usd = 40.0
+eval_budget = 20
+models = ["g1-10-fable-analog", "g1-10-fable-mix"]
+summary = "Kernel-weighted analog ensembles from the account's own past across all targets; strong on hourly, split and next-start, behind the leaders on weekly meters; one mix call lost to the shell time limit."

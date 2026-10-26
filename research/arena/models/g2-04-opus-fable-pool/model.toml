@@ -1,0 +1,14 @@
+name = "g2-04-opus-fable-pool"
+description = "Pools the Fable burst simulator with spend-decay-6h and puts the pooled paths back on the whole-point lattice the server reports, with one uniform carry per path drawn inside the bracket the cycle's readings imply."
+targets = ["meter.scoped"]
+children = ["g2-04-opus-fable-burst", "spend-decay-6h"]
+deps = []
+weights = []
+
+[config]
+round_to_points = true
+carry_from_readings = true
+
+[config.shares."meter.scoped"]
+g2-04-opus-fable-burst = 0.7
+spend-decay-6h = 0.3

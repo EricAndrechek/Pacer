@@ -1,0 +1,5 @@
+name = "parent"
+targets = ["meter.five_hour", "meter.seven_day", "meter.scoped", "spend.hourly"]
+children = ["childm"]
+[config]
+backtest = true

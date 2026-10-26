@@ -1,0 +1,15 @@
+name = "combo-stack"
+description = "Per-target stacking: simplex weights that minimize the pooled forecast's own CRPS over the children's past forecasts (ctx.backtest plus this episode's, scored as truth arrives); a mixture of the children's paths."
+targets = ["meter.five_hour", "meter.seven_day", "meter.scoped"]
+children = ["port-engine-rule", "spend-decay-30m", "struct-timestral-28m"]
+
+[config]
+children = ["port-engine-rule", "spend-decay-30m", "struct-timestral-28m"]
+pool = "mixture"          # the weights are fitted for this pool: mixture (exact quadratic CRPS) | quantile
+shrink = 0.05             # pull toward equal weights (relative to the mean loss)
+half_life_n = 48
+backtest_every_h = { five_hour = 3, seven_day = 12, weekly_scoped = 12 }
+backtest_n = 6             # latest origins per cadence, each a fresh fit of every child. Sized so a
+                           # cold episode costs ~3x its slowest child (struct-timestral-28m): with no
+                           # backtest the per-checkpoint child calls alone are ~2x; 6 + 7 origins add ~0.6x
+max_evals = 16

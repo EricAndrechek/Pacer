@@ -1,0 +1,4 @@
+name = "naive-linear-to-reset"
+description = "The cycle's average pace so far (0 at its start through the latest reading), extended in a straight line to reset."
+targets = ["meter.five_hour", "meter.seven_day", "meter.scoped"]
+children = []

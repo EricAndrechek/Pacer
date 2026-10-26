@@ -1,0 +1,5 @@
+name = "sleeper"
+targets = ["meter.five_hour", "meter.seven_day", "spend.hourly"]
+children = []
+[config]
+sleep_s = 2.0

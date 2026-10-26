@@ -1,0 +1,17 @@
+name = "g2-02-sonnet-deep-meter-v8"
+description = "Optimal target-expert routing. five_hour+seven_day: calibrate123=1.0 (0.895/0.745, best; calstack mixture proved worse). scoped: spend-decay-1d=1.0 (0.500, best; pool-scoped=0.508 worse). Fixed weights eliminate scope_only backtest bias."
+targets = ["meter.five_hour", "meter.seven_day", "meter.scoped"]
+children = [
+  "g1-01-sonnet-calibrate123",
+  "spend-decay-1d",
+]
+deps = []
+
+[config]
+children = [
+  "g1-01-sonnet-calibrate123",
+  "spend-decay-1d",
+]
+pool = "mixture"
+backtest_n = 1
+max_evals = 4

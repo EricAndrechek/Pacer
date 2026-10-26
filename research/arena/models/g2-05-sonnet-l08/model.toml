@@ -1,0 +1,28 @@
+name = "g2-05-sonnet-l08"
+description = "Calibrated ensemble of meter forecasters (Timestral-123M, g1-08-opus-fm self-recalibrated FM, 6h burn-decay), mixed per window kind, then a regime-adaptive zero-mass layer and mild upper-tail widening."
+targets = ["meter.five_hour", "meter.seven_day", "meter.scoped"]
+children = ["g1-08-opus-fm"]
+deps = ["torch==2.10.0", "safetensors>=0.4", "huggingface_hub>=0.28"]
+weights = ["mistralai/Timestral-123M@5a147287addda85f6acd8da3fb8858fe9af7e8f7", "mistralai/Timestral-28M@49b26409ac87b5935539a5d8ffe7f397b720db47"]
+[config]
+tau_d = 14.0
+h_since = 0.8
+h_rate = 0.8
+n0 = 3.0
+max_samples = 6000
+delta = 0.5
+stale_min = 120
+[config.pi_scale]
+five_hour = 0.6
+seven_day = 1.0
+weekly_scoped = 1.0
+[config.up_k]
+five_hour = 1.25
+seven_day = 1.2
+weekly_scoped = 1.2
+[config.mix.seven_day]
+g1-08-opus-fm = 1.0
+[config.mix.weekly_scoped]
+g1-08-opus-fm = 1.0
+[config.mix.five_hour]
+g1-08-opus-fm = 1.0

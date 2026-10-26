@@ -1,0 +1,75 @@
+name = "g1-10-fable-analog"
+description = "Kernel-weighted analog ensembles from the account's own past (phase, local time, recent burn, recency), one statistical idea for every target."
+targets = ["meter.five_hour", "meter.seven_day", "meter.scoped", "cycle.next_start", "spend.hourly", "tokens.hourly", "split.accounts"]
+children = []
+deps = []
+weights = []
+
+[config]
+hourly_history_days = 60
+verbose = false
+
+[config.meter]
+# cut step and trajectory resolution per window kind
+[config.meter.five_hour]
+step_min = 5
+M = 60
+use_turns = false
+shrink = 0.85
+bw_phase_frac = 0.08
+bw_hour = 2.5
+bw_rate = 1.0
+recency_days = 120
+other_account = 0.3
+weekend_mismatch = 0.5
+target_ess = 30
+
+[config.meter.seven_day]
+step_min = 30
+M = 168
+use_turns = false
+bw_phase_frac = 0.10
+bw_hour = 2.0
+bw_rate = 0.8
+block_share = 1.0
+block_days = 60
+block_recency_days = 21
+block_bw_total = 1.0
+recency_days = 60
+other_account = 0.3
+weekend_mismatch = 0.5
+target_ess = 30
+
+[config.meter.weekly_scoped]
+step_min = 30
+M = 168
+use_turns = false
+bw_phase_frac = 0.10
+bw_hour = 2.0
+bw_rate = 0.8
+recency_days = 60
+other_account = 0.3
+weekend_mismatch = 0.5
+target_ess = 30
+
+[config.hourly]
+bw_hour = 1.5
+bw_rate = 1.0
+bw_day = 1.0
+scale_alpha = 0.5
+recency_days = 30
+weekend_mismatch = 0.5
+target_ess = 25
+partial_weight = 0.5
+
+[config.split]
+bw_share = 0.2
+recency_days = 30
+target_ess = 25
+
+[config.next_start]
+bw_hour = 1.5
+bw_idle = 0.5
+recency_days = 30
+weekend_mismatch = 0.5
+target_ess = 30
