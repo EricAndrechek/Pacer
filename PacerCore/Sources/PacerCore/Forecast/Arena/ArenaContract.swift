@@ -137,6 +137,11 @@ public final class ArenaHistoryStore: Sendable {
     public let tzOffsetMin: Int?
     /// The earliest row anything may see (`SnapshotData.data_start`).
     public let dataStart: Millis
+    /// A memo for the store's lifetime: what is built once from every row and
+    /// then read at many cuts (the analog model's table of past cycles, a
+    /// loaded network's buffers keyed by the store). Per-cut values belong in
+    /// `ArenaHistory.memo` instead, which cannot leak a later cut's rows.
+    public let memo = ArenaMemo()
     /// True when every row's `tKnown` is non-decreasing in event order (the
     /// app: a row is known when it is written), so "known at t" is a prefix.
     let metersKnownInOrder: [ArenaMeterID: Bool]
@@ -314,6 +319,11 @@ public struct ArenaTargetForecast: Sendable {
     }
 
     public var gridCount: Int { paths?.first?.count ?? quantiles?.first?.count ?? 0 }
+
+    /// How many doubles this forecast holds (for memory bounds).
+    public var valueCount: Int {
+        (paths?.reduce(0) { $0 + $1.count } ?? 0) + (quantiles?.reduce(0) { $0 + $1.count } ?? 0)
+    }
 
     /// The value at quantile `q` at every grid time: linear between the
     /// model's levels (held flat beyond the outermost), or numpy's default
@@ -497,9 +507,12 @@ public final class ArenaRunner {
     public var maxBacktestPoints: Int
     public var nPaths: Int
     /// Memoized forecasts, keyed by model, history cut and request. Cleared
-    /// whole when it passes `memoLimit`, which bounds a long backfill's memory.
+    /// whole when it holds more than `memoLimitValues` doubles (64 MB by
+    /// default): a weekly forecast as paths is ~200 × 340 values, so a count
+    /// of entries alone let a long backfill's memo reach gigabytes.
     private var memo: [String: ArenaForecast] = [:]
-    public var memoLimit = 4_096
+    private var memoValues = 0
+    public var memoLimitValues = 8_000_000
 
     public init(registry: [ArenaModelSpec], services: ArenaServices = ArenaServices(), seed: UInt64 = 42,
                 maxBacktestPoints: Int = 48, nPaths: Int = 200) {
@@ -523,8 +536,10 @@ public final class ArenaRunner {
         try instance.fit(history)
         fitted = history
         let fc = try instance.forecast(request)
-        if memo.count >= memoLimit { memo.removeAll(keepingCapacity: true) }
+        let size = fc.byKey.values.reduce(0) { $0 + $1.valueCount }
+        if memoValues + size > memoLimitValues { memo.removeAll(keepingCapacity: false); memoValues = 0 }
         memo[key] = fc
+        memoValues += size
         return fc
     }
 
