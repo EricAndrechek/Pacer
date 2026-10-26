@@ -1,5 +1,7 @@
 # Forecast arena results
 
+> **Round 1b (decisive lockbox runs, 26 October 2026):** six models tie for best on each meter, roughly a quarter better than Pacer's shipping rule on the 5-hour meter and a third better on the weekly one; spend-decay is the only one tied on both and is the first port. The calibration layer was validated off the lockbox only. See [`findings/2026-10-round1b/`](findings/2026-10-round1b/narrative.md).
+
 Generated 2026-10-26. Baseline: `port-engine-rule`. Relative-only: skill in percent against the baseline.
 
 ## Summary

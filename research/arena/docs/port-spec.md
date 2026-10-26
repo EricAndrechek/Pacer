@@ -1,7 +1,10 @@
 # Port spec: the round-1 winners in Pacer (Swift)
 
 For the session that implements, inside Pacer, the forecasters the arena's
-first round picked, and runs them in shadow beside the shipping rule. It is
+first round picked. The app runs every top model for real, and each user's
+Pacer picks per meter from its own record (the engine's self-evaluation),
+falling back to the shipping rule when no model has a record yet; there is no
+shadow phase. It is
 self-contained: every constant, rule and edge case needed is here, with the
 Python that defines it (paths are under `research/arena/`). The Python is the
 reference: where this text and the code disagree, the code wins and this
@@ -19,9 +22,8 @@ for the weekly (and scoped) meters. Spend-decay was already well
 calibrated on the five-hour meter, with the lowest error at reset on the
 weekly one, but its weekly ranges were too wide; the calibration layer
 recalibrates the ranges from its own recent backtests without moving the
-median, so the point the user reads is spend-decay's. The coordinator
-scores the calibrated pair on the lockbox; the visible-tier checks are in
-the hand-back, not here.
+median, so the point the user reads is spend-decay's. The calibrated pair was validated on the visible and synthetic tiers only
+(`findings/2026-10-round1b/narrative.md`); its lockbox effect is untested.
 
 | | forecaster | meters | status |
 |---|---|---|---|
