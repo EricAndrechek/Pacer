@@ -455,6 +455,42 @@ extension EngineSelfEval {
     /// Cycles an arena model needs behind it before it can be picked.
     static func arenaMinPeriods(weekly: Bool) -> Int { weekly ? 3 : 8 }
 
+    /// How far behind the engine's best method an arena model may fall, on
+    /// the cycles it has been scored on, before it stops being scored deeper
+    /// and stops counting for selection: half again its error plus a point.
+    /// The pick's near-tie band is 5%, so a model this far behind is never
+    /// picked; scoring it over months more cycles would only sharpen a record
+    /// no one acts on, and it is most of a first launch's cost.
+    static let arenaLossRatio = 1.5
+    static let arenaLossMargin = 1.0
+    /// Cycles behind a model before it can be judged a loser.
+    static func arenaPruneMinPeriods(weekly: Bool) -> Int { weekly ? 6 : 24 }
+
+    /// The arena models that lose clearly to the engine's best method over
+    /// the same cycles (`arenaLossRatio`). Judged on each model's own
+    /// cycles, against every engine method that was scored on at least half
+    /// of them, with the statistic selection ranks by (`typicalError`).
+    public static func arenaLosers(_ records: [Record], arenaIds: Set<String>, weekly: Bool) -> Set<String> {
+        guard !arenaIds.isEmpty else { return [] }
+        var byMethod: [String: [Record]] = [:]
+        for r in records { byMethod[r.method, default: []].append(r) }
+        var losers = Set<String>()
+        for id in arenaIds {
+            guard let rows = byMethod[id] else { continue }
+            let periods = Set(rows.map(\.periodKey))
+            guard periods.count >= arenaPruneMinPeriods(weekly: weekly) else { continue }
+            let own = typicalError(rows.map { abs($0.predicted - $0.truth) }, weekly: weekly)
+            var best = Double.infinity
+            for (method, all) in byMethod where !arenaIds.contains(method) {
+                let on = all.filter { periods.contains($0.periodKey) }
+                guard Set(on.map(\.periodKey)).count * 2 >= periods.count else { continue }
+                best = min(best, typicalError(on.map { abs($0.predicted - $0.truth) }, weekly: weekly))
+            }
+            if best.isFinite, own > best * arenaLossRatio + arenaLossMargin { losers.insert(id) }
+        }
+        return losers
+    }
+
     /// The records selection compares, once arena models compete.
     ///
     /// The engine's methods are scored over every cycle the store holds; the
@@ -465,15 +501,18 @@ extension EngineSelfEval {
     /// stretch was easier, so every method is compared over the same span:
     /// the cycles from the latest first cycle of the arena models that can be
     /// picked. A model with fewer than `arenaMinPeriods` cycles behind it is
-    /// left out until it has them. With no arena model in the record this is
-    /// the identity, which keeps selection exactly as it was.
+    /// left out until it has them, and a clear loser (`arenaLosers`, which
+    /// the scorer stops scoring deeper) is left out and does not shorten the
+    /// span. With no arena model in the record this is the identity, which
+    /// keeps selection exactly as it was.
     public static func arenaComparable(_ records: [Record], arenaIds: Set<String>, weekly: Bool) -> [Record] {
         guard !arenaIds.isEmpty else { return records }
         var periods: [String: Set<String>] = [:]
         for r in records where arenaIds.contains(r.method) { periods[r.method, default: []].insert(r.periodKey) }
         guard !periods.isEmpty else { return records }
         let floor = arenaMinPeriods(weekly: weekly)
-        let eligible = periods.filter { $0.value.count >= floor }
+        let losers = arenaLosers(records, arenaIds: arenaIds, weekly: weekly)
+        let eligible = periods.filter { $0.value.count >= floor && !losers.contains($0.key) }
         // periodKeys are ISO 8601 instants, so their order is time order.
         guard let start = eligible.values.compactMap({ $0.min() }).max() else {
             return records.filter { !arenaIds.contains($0.method) }

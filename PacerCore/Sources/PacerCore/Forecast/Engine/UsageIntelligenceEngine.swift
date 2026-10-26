@@ -1963,6 +1963,20 @@ public actor UsageIntelligenceEngine {
     /// `persist` on the way out — so everything between them works in base
     /// surface ids and needs no notion of accounts at all.
     private func fetchEvalRows() -> [EvalRow] {
+        // Raw SQLite first, as the limit reads do (`RawEvalReader`): with the
+        // arena models scored into it the record is several times the
+        // engine's own, and materialising it through SwiftData would stretch
+        // the first refit of every launch. Nil falls back to the query below.
+        if let url = rawStoreURL, let raw = RawEvalReader.scopeRows(storeURL: url, suffix: scope.suffix) {
+            return raw.compactMap { row in
+                guard let base = scope.unqualify(row.surface) else { return nil }
+                return (EngineEvalOutcome.makeKey(surface: base, method: row.method, bucket: row.bucket,
+                                                  periodKey: row.periodKey),
+                        base,
+                        EngineSelfEval.Record(method: row.method, bucket: row.bucket, periodKey: row.periodKey,
+                                              predicted: row.predicted, truth: row.truth))
+            }
+        }
         // Only this scope's rows reach memory. A scoped surface id ends in
         // `#<account>` and a global one has no `#` (`EngineScope.suffix`), so
         // `contains` narrows the fetch; `unqualify` below still makes the

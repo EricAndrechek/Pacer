@@ -51,9 +51,11 @@ struct RuntimeWiringTests {
         _ = await runtime.scorer.pass(accounts: [account], now: RuntimeEngineTests.now)
         await engine.recompute(now: RuntimeEngineTests.now)
         #expect(await engine.resolvedMethod(windowKey: "five_hour").selected == "test-oracle")
-        await runtime.live.settle()
-        // Give the landed callback its hop back.
-        for _ in 0..<100 where redraws.liveAccounts.isEmpty { try await Task.sleep(for: .milliseconds(10)) }
+        // The request and the landed callback each hop through a task.
+        for _ in 0..<500 where redraws.liveAccounts.isEmpty {
+            await runtime.live.settle()
+            try await Task.sleep(for: .milliseconds(10))
+        }
         #expect(redraws.liveAccounts == [[account]])
         #expect(await engine.resolvedMethod(windowKey: "five_hour").resolved == "test-oracle")
         await runtime.stop()

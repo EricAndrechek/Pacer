@@ -178,7 +178,12 @@ public actor ArenaRecordScorer {
         let account: String
         let window: WindowSpec
         let binding: ArenaWindowBinding
-        let models: [ArenaModelSpec]
+        /// The models still being scored deeper: losers drop out
+        /// (`EngineSelfEval.arenaLosers`).
+        var models: [ArenaModelSpec]
+        /// This window's record over the cycles the pass may score, every
+        /// method, kept current as the pass adds to it: what judges losers.
+        var records: [EngineSelfEval.Record]
         let store: ArenaHistoryStore
         let surface: String
         /// Live only during the stream's turn (`pass`), so one window's memo
@@ -221,7 +226,7 @@ public actor ArenaRecordScorer {
                 let runner = ArenaRunner(registry: roster.registry, services: services)
                 runner.memoLimit = weekly ? config.weeklyMemoLimit : config.sessionMemoLimit
                 streams[i].runner = runner
-                defer { streams[i].runner = nil }
+                defer { streams[i].runner = nil; prune(&streams[i]) }
                 for _ in 0..<(weekly ? config.weeklyCyclesPerTurn : config.sessionCyclesPerTurn) {
                     guard !cancel.isSet else { return report }
                     guard !streams[i].queue.isEmpty else { break }
@@ -231,6 +236,10 @@ public actor ArenaRecordScorer {
                     if !news.isEmpty {
                         persist(news, surface: streams[i].surface)
                         report.outcomes += news.count
+                        streams[i].records += news.map {
+                            EngineSelfEval.Record(method: $0.method, bucket: $0.bucket, periodKey: $0.periodKey,
+                                                  predicted: $0.predicted, truth: $0.truth)
+                        }
                         await landed(streams[i].account, news)
                     }
                     if SuspendingClock.now - lastLog >= .seconds(120) {
@@ -275,14 +284,26 @@ public actor ArenaRecordScorer {
         for window in f.windows {
             guard let binding = ArenaWindowBinding.make(account: account, window: window),
                   let samples = f.rateLimit[window.key], !samples.isEmpty else { continue }
-            let models = roster.specs(for: binding.target).filter { Self.weightsPresent($0, roster: roster, services: services) }
-            guard !models.isEmpty else { continue }
+            let available = roster.specs(for: binding.target).filter { Self.weightsPresent($0, roster: roster, services: services) }
+            guard !available.isEmpty else { continue }
             let (_, cycles) = BurnTrajectory.segment(samples: samples, duration: window.duration, now: now)
             let cap = window.isWeeklyScale ? config.weeklyCycleCap : config.sessionCycleCap
             let completed = cycles.filter { $0.resetsAt <= now }.sorted { $0.resetsAt > $1.resetsAt }.prefix(cap)
             let surface = EngineScope.account(account).qualify(EngineSelfEval.rlSurface(window.key))
-            let existing = existingKeys(surface: surface, methods: models.map(\.name),
-                                        periods: completed.map { EngineSelfEval.periodKeyRL($0.resetsAt) })
+            let stored = storedRecords(surface: surface,
+                                       periods: completed.map { EngineSelfEval.periodKeyRL($0.resetsAt) })
+            let existing = Set(stored.map {
+                EngineEvalOutcome.makeKey(surface: surface, method: $0.method, bucket: $0.bucket, periodKey: $0.periodKey)
+            })
+            let records = stored.filter { EngineSelfEval.isCurrentRLBucket($0.bucket) }
+            let losers = EngineSelfEval.arenaLosers(records, arenaIds: Set(available.map(\.name)),
+                                                    weekly: window.isWeeklyScale)
+            if !losers.isEmpty {
+                Log.write("Arena", "\(window.key) …\(account.suffix(4)): not scoring deeper (well behind the record): "
+                          + losers.sorted().joined(separator: ", "))
+            }
+            let models = available.filter { !losers.contains($0.name) }
+            guard !models.isEmpty else { continue }
             let wanted = models.count * config.cuts.count
             let queue = completed.filter { c in
                 let period = EngineSelfEval.periodKeyRL(c.resetsAt)
@@ -292,8 +313,8 @@ public actor ArenaRecordScorer {
                 return have < wanted
             }
             guard !queue.isEmpty else { continue }
-            out.append(Stream(account: account, window: window, binding: binding, models: models, store: store,
-                              surface: surface, runner: nil, queue: Array(queue), existing: existing))
+            out.append(Stream(account: account, window: window, binding: binding, models: models, records: records,
+                              store: store, surface: surface, runner: nil, queue: Array(queue), existing: existing))
         }
         return out
     }
@@ -363,16 +384,33 @@ public actor ArenaRecordScorer {
         EngineEvalOutcome.makeKey(surface: surface, method: model, bucket: EngineSelfEval.rlBucket(cut), periodKey: period)
     }
 
-    /// The stored keys among these cycles' rows: only the cycles a pass could
-    /// score, so a pass every fifteen minutes doesn't load the whole record.
-    private func existingKeys(surface: String, methods: [String], periods: [String]) -> Set<String> {
+    /// A window's stored rows for these cycles, every method: only the
+    /// cycles a pass could score, so a pass every fifteen minutes doesn't
+    /// load the whole record. Raw SQLite when the store is a file.
+    private func storedRecords(surface: String, periods: [String]) -> [EngineSelfEval.Record] {
         guard !periods.isEmpty else { return [] }
-        var d = FetchDescriptor<EngineEvalOutcome>(
-            predicate: #Predicate {
-                $0.surface == surface && methods.contains($0.method) && periods.contains($0.periodKey)
-            })
-        d.propertiesToFetch = [\.key]
-        return Set(((try? ModelContext(container).fetch(d)) ?? []).map(\.key))
+        if let url = ArenaHistoryBuilder.storeURL(container),
+           let rows = RawEvalReader.surfaceRows(storeURL: url, surface: surface, periods: periods) {
+            return rows.map {
+                .init(method: $0.method, bucket: $0.bucket, periodKey: $0.periodKey, predicted: $0.predicted, truth: $0.truth)
+            }
+        }
+        let d = FetchDescriptor<EngineEvalOutcome>(
+            predicate: #Predicate { $0.surface == surface && periods.contains($0.periodKey) })
+        return ((try? ModelContext(container).fetch(d)) ?? []).map {
+            .init(method: $0.method, bucket: $0.bucket, periodKey: $0.periodKey, predicted: $0.predicted, truth: $0.truth)
+        }
+    }
+
+    /// Drop the stream's models that have fallen clearly behind.
+    private func prune(_ s: inout Stream) {
+        let losers = EngineSelfEval.arenaLosers(s.records, arenaIds: Set(s.models.map(\.name)),
+                                                weekly: s.window.isWeeklyScale)
+        guard !losers.isEmpty else { return }
+        s.models.removeAll { losers.contains($0.name) }
+        Log.write("Arena", "\(s.window.key) …\(s.account.suffix(4)): not scoring deeper (well behind the record): "
+                  + losers.sorted().joined(separator: ", "))
+        if s.models.isEmpty { s.queue.removeAll() }
     }
 
     private func persist(_ news: [EngineSelfEval.NewOutcome], surface: String) {
