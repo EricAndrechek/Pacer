@@ -528,7 +528,8 @@ struct RuntimeEngineTests {
         await rt.live.submit([ArenaLiveRequest(binding: binding, resetsAt: Self.now.addingTimeInterval(3 * 3600),
                                                latestReadingAt: Self.now, models: ["test-clocked"])])
         await rt.live.settle()
-        #expect(Clocked.cuts.count == 96 + 1)
+        let wantCuts: Int = 96 + 1
+        #expect(Clocked.cuts.count == wantCuts)
         #expect(Clocked.cuts.allSatisfy { $0 % (5 * ArenaTime.minute) == 0 })
     }
 

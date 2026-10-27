@@ -30,7 +30,7 @@ public enum KitMLData {
     public static let families = arenaFamilies
 
     /// `PHASE_U = np.linspace(0, 1, 41)` (numpy: i·step, the last exactly 1).
-    public static let phaseU: [Double] = (0..<41).map { $0 == 40 ? 1.0 : Double($0) * (1.0 / 40.0) }
+    public static let phaseU: [Double] = (0..<41).map { (i: Int) -> Double in i == 40 ? 1.0 : Double(i) * (1.0 / 40.0) }
 
     /// `model_family` → FAMILIES index (`replace_strict(..., default=other)`).
     static func familyIndex(_ f: String) -> Int8 { Int8(families.firstIndex(of: f) ?? 4) }

@@ -70,7 +70,8 @@ import Testing
         let P = KitMLCombine.poolMixtureExact([lo, hi], [0.25, 0.75], 8)
         #expect(P.count == 8)
         // 2 of the low child at levels .25, .75; 6 of the high one at (j + .5) / 6.
-        let want = [2.5, 7.5] + (0..<6).map { 50 + 10 * (Double($0) + 0.5) / 6 }
+        let highs: [Double] = (0..<6).map { (j: Int) -> Double in 50.0 + 10.0 * (Double(j) + 0.5) / 6.0 }
+        let want: [Double] = [2.5, 7.5] + highs
         #expect(zip(P.map { $0[0] }, want).allSatisfy { abs($0 - $1) < 1e-12 })
         var rng = ArenaRNG(seed: 5)
         let drawn = KitMLCombine.poolMixture([[[1], [2], [3], [4]], [[9], [8]]], [0.5, 0.5], 4, rng: &rng)
