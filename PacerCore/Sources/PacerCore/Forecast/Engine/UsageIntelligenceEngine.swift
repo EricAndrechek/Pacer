@@ -91,7 +91,7 @@ public actor UsageIntelligenceEngine {
     /// scorer into this engine's record and drawn from live projections it
     /// never waits for (`ArenaCachedBurnModel`). Nil: the engine's own roster
     /// only, as before.
-    private var arena: ArenaEngineLink?
+    private(set) var arena: ArenaEngineLink?
 
     public func adopt(arena: ArenaEngineLink?) {
         self.arena = arena
@@ -145,7 +145,7 @@ public actor UsageIntelligenceEngine {
     private var evalRowsCache: [EvalRow]?
 
     /// The most recent feature snapshot, or nil before the first recompute.
-    private var features: EngineFeatures?
+    private(set) var features: EngineFeatures?
     /// The per-user fit derived from `features`.
     private var fit = Fit()
     /// Per-surface method track records (end-of-day, rate-limit windows),
