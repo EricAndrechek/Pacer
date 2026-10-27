@@ -37,10 +37,17 @@ public struct ArenaEngineLink: Sendable {
     public let compareLimit: Int
     /// Ask for live projections. Returns at once; they land in `cache`.
     public let requestLive: @Sendable ([ArenaLiveRequest]) -> Void
+    /// Make one request's projections now, at the live lane's priority, and
+    /// return once they are in `cache` (or their failures are): the compare
+    /// sheet's "draw this model" (`ArenaLiveForecaster.makeNow`). Nil: none
+    /// can be made on demand.
+    public let makeLive: (@Sendable (ArenaLiveRequest) async -> Void)?
 
     public init(roster: ArenaRoster, cache: ArenaLiveCache, compareLimit: Int = 3,
-                requestLive: @escaping @Sendable ([ArenaLiveRequest]) -> Void) {
+                requestLive: @escaping @Sendable ([ArenaLiveRequest]) -> Void,
+                makeLive: (@Sendable (ArenaLiveRequest) async -> Void)? = nil) {
         self.roster = roster; self.cache = cache; self.compareLimit = compareLimit; self.requestLive = requestLive
+        self.makeLive = makeLive
     }
 }
 
@@ -52,9 +59,16 @@ public struct ArenaLiveRequest: Sendable, Hashable {
     /// is current.
     public let latestReadingAt: Date
     public let models: [String]
+    /// Cut the history here rather than at the newest it holds: an on-demand
+    /// projection is drawn beside the fit's lines, and the cache serves it
+    /// only to a cycle whose `now` is near its cut (`ArenaLiveCache.maxAge`).
+    /// Never later than the history.
+    public let cutAt: Date?
 
-    public init(binding: ArenaWindowBinding, resetsAt: Date, latestReadingAt: Date, models: [String]) {
+    public init(binding: ArenaWindowBinding, resetsAt: Date, latestReadingAt: Date, models: [String],
+                cutAt: Date? = nil) {
         self.binding = binding; self.resetsAt = resetsAt; self.latestReadingAt = latestReadingAt; self.models = models
+        self.cutAt = cutAt
     }
 }
 
@@ -212,6 +226,10 @@ public actor ArenaRecordScorer {
     private let config: Config
     private let calendar: Calendar
     private let landed: @Sendable (_ account: String, _ outcomes: [EngineSelfEval.NewOutcome]) async -> Void
+    /// Where each account's pass is, for the compare sheet
+    /// (`ArenaScoringProgress`): written at each phase and cycle, read by
+    /// anyone without waiting on this actor.
+    let progress: ArenaScoringProgressBoard
     /// See the file header.
     private let queue = DispatchSerialQueue(label: "com.ericandrechek.pacer.arena.scorer", qos: .background)
     public nonisolated var unownedExecutor: UnownedSerialExecutor { queue.asUnownedSerialExecutor() }
@@ -231,8 +249,10 @@ public actor ArenaRecordScorer {
     init(container: ModelContainer, roster: ArenaRoster, history: ArenaHistoryCache, services: ArenaServices,
          budget: ArenaCPUBudget, costs: ArenaModelCosts = ArenaModelCosts(defaults: nil), cancel: ArenaCancelFlag,
          config: Config = Config(), calendar: Calendar = .current,
+         progress: ArenaScoringProgressBoard = ArenaScoringProgressBoard(),
          landed: @escaping @Sendable (String, [EngineSelfEval.NewOutcome]) async -> Void) {
         self.container = container; self.roster = roster; self.history = history; self.services = services
+        self.progress = progress
         self.budget = budget; self.costs = costs; self.cancel = cancel; self.config = config; self.calendar = calendar
         self.modelIndex = Dictionary(roster.registry.enumerated().map { ($0.element.name, UInt16($0.offset)) },
                                      uniquingKeysWith: { a, _ in a })
@@ -282,9 +302,17 @@ public actor ArenaRecordScorer {
         let account: String
         let window: WindowSpec
         let binding: ArenaWindowBinding
-        /// The models still being scored deeper: losers drop out
-        /// (`EngineSelfEval.arenaLosers`).
+        /// Every model the window can run. All of them are scored on every
+        /// cycle that completes; a loser (`EngineSelfEval.arenaLosers`) only
+        /// stops going deeper into history (`shallow`).
         var models: [ArenaModelSpec]
+        /// The losers, each with the cycles it is still scored on: those
+        /// whose index (`periodIndex`, newest 0) is under its bound. A
+        /// pruned model's record must not freeze: if the user's habits
+        /// change, the cycles since are what can show it winning again.
+        var shallow: [String: UInt16]
+        /// Models pruned during this pass (the progress stops naming them).
+        var prunedInPass = Set<String>()
         /// This window's record over the cycles the pass may score, every
         /// method, kept current as the pass adds to it: what judges losers.
         var records: [EngineSelfEval.Record]
@@ -320,7 +348,7 @@ public actor ArenaRecordScorer {
 
     /// The two phases of a pass: the cheap models over every cycle in depth,
     /// then the rest (`Config.cheapCostMs`, `ArenaModelCosts`).
-    enum Phase: Int, CaseIterable { case cheap = 1, heavy = 2 }
+    public enum Phase: Int, CaseIterable, Sendable { case cheap = 1, heavy = 2 }
 
     /// One account's runner for the pass, and the models that have run on it
     /// (a model's first forecast on a runner is not timed: `ArenaModelCosts`).
@@ -343,13 +371,94 @@ public actor ArenaRecordScorer {
         }
     }
 
-    /// Whether any of `models` is missing at any cut of `cycle`.
+    /// Whether any of `models` that is still scored on `cycle` is missing at
+    /// any cut of it.
     private func needs(_ s: Stream, _ cycle: BurnTrajectory.Cycle, models: [ArenaModelSpec]) -> Bool {
         let period = EngineSelfEval.periodKeyRL(cycle.resetsAt)
         for ci in config.cuts.indices {
-            for m in models where !isDone(s, m.name, cut: ci, period: period) { return true }
+            for m in models where scores(s, m.name, period: period) && !isDone(s, m.name, cut: ci, period: period) {
+                return true
+            }
         }
         return false
+    }
+
+    /// Whether `model` is scored on the cycle `period` names (`Stream.shallow`).
+    private func scores(_ s: Stream, _ model: String, period: String) -> Bool {
+        guard let bound = s.shallow[model] else { return true }
+        guard let p = s.periodIndex[period] else { return false }
+        return p < bound
+    }
+
+    /// Where a loser's scoring stops (`Stream.shallow`): above the newest
+    /// cycle it has a record for, so every cycle completed since it was
+    /// pruned is scored, and never short of the `recent` newest, so its
+    /// recent record stays whole. With no record in depth, all of it is
+    /// newer than its record.
+    static func shallowBound(model: UInt16?, existing: Set<DoneKey>, cycles: Int, recent: Int) -> UInt16 {
+        var newest = cycles
+        if let model {
+            for k in existing where k.model == model && Int(k.period) < newest { newest = Int(k.period) }
+        }
+        return UInt16(clamping: max(recent, newest))
+    }
+
+    /// What a phase planned for each account when it started: cycles queued
+    /// and the models with anything missing in them (`ArenaScoringProgress`).
+    private struct ProgressPlan {
+        var cycles: [String: Int] = [:]
+        var models: [String: Set<String>] = [:]
+    }
+
+    /// The models `phase` has something to score for in `cycles`: phase 2
+    /// queues every model still contending, but the cheap ones had every
+    /// cycle in phase 1, so what it is scoring is the heavy ones. By the
+    /// stored record only: a model's declines this process are not counted,
+    /// so one that declined stays listed until the phase moves past it.
+    private func displayModels(_ s: Stream, _ phase: Phase, cycles: [BurnTrajectory.Cycle]) -> Set<String> {
+        var models = phaseModels(s, phase)
+        if phase == .heavy {
+            let cheap = Set(phaseModels(s, .cheap).map(\.name))
+            models.removeAll { cheap.contains($0.name) }
+        }
+        var out = Set<String>()
+        for c in cycles {
+            let period = EngineSelfEval.periodKeyRL(c.resetsAt)
+            for m in models where !out.contains(m.name) && scores(s, m.name, period: period) {
+                if config.cuts.indices.contains(where: { !isDone(s, m.name, cut: $0, period: period) }) { out.insert(m.name) }
+            }
+            if out.count == models.count { break }
+        }
+        return out
+    }
+
+    /// Publish where `account` is in `phase`: its cycles still queued against
+    /// those the phase planned, and the planned models still contending. An
+    /// account done with phase 1 while others are not shows what phase 2 has
+    /// for it, which is what it is waiting for.
+    private func publishProgress(_ streams: [Stream], account: String, phase: Phase, plan: ProgressPlan) {
+        let mine = streams.filter { $0.account == account }
+        let remaining = mine.reduce(0) { $0 + $1.queue.count }
+        let contending = Set(mine.flatMap { s in s.models.map(\.name).filter { !s.prunedInPass.contains($0) } })
+        if remaining > 0 {
+            let total = plan.cycles[account] ?? remaining
+            progress.set(.init(phase: phase, cyclesDone: max(0, total - remaining), cyclesTotal: total,
+                               models: (plan.models[account] ?? []).intersection(contending).sorted(),
+                               updatedAt: Date()), account: account)
+            return
+        }
+        guard phase == .cheap else { progress.set(nil, account: account); return }
+        var total = 0
+        var models = Set<String>()
+        for s in mine {
+            let heavy = phaseModels(s, .heavy)
+            let ahead = heavy.isEmpty ? [] : s.cycles.filter { needs(s, $0, models: heavy) }
+            guard !ahead.isEmpty else { continue }
+            total += ahead.count
+            models.formUnion(displayModels(s, .heavy, cycles: ahead))
+        }
+        progress.set(total > 0 ? .init(phase: .heavy, cyclesDone: 0, cyclesTotal: total, models: models.sorted(),
+                                       updatedAt: Date()) : nil, account: account)
     }
 
     /// One pass over `accounts`: a full one (120 days, the first time an
@@ -359,6 +468,8 @@ public actor ArenaRecordScorer {
     public func pass(accounts: [String], now: Date = Date()) async -> Report {
         var report = Report()
         guard !roster.isEmpty, !cancel.isSet else { return report }
+        // However the pass ends, it has no more work for these accounts.
+        defer { progress.clear(accounts: accounts) }
         // Nothing can run yet (every model waits on a download): no history
         // to read.
         guard roster.selectable.contains(where: { Self.weightsPresent($0, roster: roster, services: services) })
@@ -394,6 +505,12 @@ public actor ArenaRecordScorer {
             let queued = streams.reduce(0) { $0 + $1.queue.count }
             guard queued > 0 else { continue }
             planned += queued
+            var plan = ProgressPlan()
+            for s in streams {
+                plan.cycles[s.account, default: 0] += s.queue.count
+                plan.models[s.account, default: []].formUnion(displayModels(s, phase, cycles: s.queue))
+            }
+            for account in Set(streams.map(\.account)) { publishProgress(streams, account: account, phase: phase, plan: plan) }
             let names = Set(streams.flatMap { phaseModels($0, phase).map(\.name) })
             Log.write("Arena", "phase \(phase.rawValue): scoring \(queued) cycle(s) over "
                       + "\(streams.filter { !$0.queue.isEmpty }.count) window(s), \(names.count) model(s)"
@@ -417,7 +534,12 @@ public actor ArenaRecordScorer {
                         return RunnerSlot(r)
                     }()
                     runners[account] = slot
-                    defer { prune(&streams[i]); streams[i].turns += 1 }
+                    defer {
+                        prune(&streams[i], phase: phase)
+                        streams[i].turns += 1
+                        // A prune can drop the rest of a window's queue.
+                        publishProgress(streams, account: account, phase: phase, plan: plan)
+                    }
                     let perTurn = weekly ? config.weeklyCyclesPerTurn : config.sessionCyclesPerTurn
                     let turn = streams[i].turns == 0 ? max(perTurn, EngineSelfEval.arenaMinPeriods(weekly: weekly)) : perTurn
                     for _ in 0..<turn {
@@ -429,6 +551,7 @@ public actor ArenaRecordScorer {
                         let news = score(cycle, in: &streams[i], models: models, slot: slot, report: &report)
                         report.cycles += 1
                         report.phaseCycles[phase.rawValue, default: 0] += 1
+                        publishProgress(streams, account: account, phase: phase, plan: plan)
                         if !news.isEmpty {
                             report.outcomes += news.count
                             streams[i].records += news.map {
@@ -580,24 +703,26 @@ public actor ArenaRecordScorer {
                 Log.write("Arena", "\(window.key) …\(account.suffix(4)): not scoring deeper (well behind the record): "
                           + losers.sorted().joined(separator: ", "))
             }
-            let models = available.filter { !losers.contains($0.name) }
-            guard !models.isEmpty else { continue }
-            let wanted = models.count * config.cuts.count
+            let recent = EngineSelfEval.arenaMinPeriods(weekly: window.isWeeklyScale)
+            var shallow: [String: UInt16] = [:]
+            for name in losers {
+                shallow[name] = Self.shallowBound(model: modelIndex[name], existing: existing, cycles: completed.count,
+                                                  recent: recent)
+            }
             let todo = completed.filter { c in
                 guard let p = periodIndex[EngineSelfEval.periodKeyRL(c.resetsAt)] else { return false }
-                var have = 0
-                for ci in config.cuts.indices {
-                    for m in models {
-                        if let mi = modelIndex[m.name], existing.contains(DoneKey(model: mi, cut: UInt8(ci), period: p)) {
-                            have += 1
-                        }
+                for m in available {
+                    if let bound = shallow[m.name], p >= bound { continue }
+                    guard let mi = modelIndex[m.name] else { continue }
+                    for ci in config.cuts.indices where !existing.contains(DoneKey(model: mi, cut: UInt8(ci), period: p)) {
+                        return true
                     }
                 }
-                return have < wanted
+                return false
             }
             guard !todo.isEmpty else { continue }
-            out.append(Stream(account: account, window: window, binding: binding, models: models, records: records,
-                              store: store, surface: surface, cycles: Array(todo), existing: existing,
+            out.append(Stream(account: account, window: window, binding: binding, models: available, shallow: shallow,
+                              records: records, store: store, surface: surface, cycles: Array(todo), existing: existing,
                               periodIndex: periodIndex))
         }
         return out
@@ -627,7 +752,8 @@ public actor ArenaRecordScorer {
             // the same cuts.
             guard seen.count >= 3 else { continue }
             let missing = models.filter {
-                !isDone(s, $0.name, cut: ci, period: period) && !declined.contains(Self.key(s.surface, $0.name, cf, period))
+                scores(s, $0.name, period: period) && !isDone(s, $0.name, cut: ci, period: period)
+                    && !declined.contains(Self.key(s.surface, $0.name, cf, period))
             }
             guard !missing.isEmpty else { continue }
             let partial = BurnTrajectory.PartialCycle(samples: seen, now: cutNow, cycleStart: cycle.cycleStart,
@@ -703,15 +829,26 @@ public actor ArenaRecordScorer {
         }
     }
 
-    /// Drop the stream's models that have fallen clearly behind.
-    private func prune(_ s: inout Stream) {
+    /// Stop going deeper with the stream's models that have fallen clearly
+    /// behind; they stay on the window's recent and newly completed cycles
+    /// (`Stream.shallow`). Cycles left in the phase's queue that no longer
+    /// need anything are dropped.
+    private func prune(_ s: inout Stream, phase: Phase) {
         let losers = EngineSelfEval.arenaLosers(s.records, arenaIds: Set(s.models.map(\.name)),
                                                 weekly: s.window.isWeeklyScale)
+            .subtracting(s.shallow.keys)
         guard !losers.isEmpty else { return }
-        s.models.removeAll { losers.contains($0.name) }
+        let recent = EngineSelfEval.arenaMinPeriods(weekly: s.window.isWeeklyScale)
+        for name in losers {
+            s.shallow[name] = Self.shallowBound(model: modelIndex[name], existing: s.existing, cycles: s.periodIndex.count,
+                                                recent: recent)
+        }
+        s.prunedInPass.formUnion(losers)
         Log.write("Arena", "\(s.window.key) …\(s.account.suffix(4)): not scoring deeper (well behind the record): "
                   + losers.sorted().joined(separator: ", "))
-        if s.models.isEmpty { s.queue.removeAll() }
+        let models = phaseModels(s, phase)
+        let stream = s
+        s.queue.removeAll { !needs(stream, $0, models: models) }
     }
 
     /// Whether every pinned weight `spec` and its children need is on this
@@ -790,14 +927,7 @@ public actor ArenaLiveForecaster {
                 let built = await history.built(account: account)
                 let cutMs = ArenaCut.millis(built.builtThrough)
                 let cut = ArenaHistory(store: built.store, now: cutMs, accounts: [account])
-                let runner: ArenaRunner
-                if let kept = runners[account], kept.generation == built.generation {
-                    runner = kept.runner
-                } else {
-                    runner = ArenaRunner(registry: roster.registry, services: services)
-                    runner.memoLimitValues = Self.liveMemoLimitValues
-                    runners[account] = (built.generation, runner)
-                }
+                let runner = runner(account: account, built: built)
                 for r in requests where make(r, cut: cut, asOf: ArenaTime.date(cutMs), runner: runner) {
                     changed.insert(account)
                 }
@@ -805,6 +935,35 @@ public actor ArenaLiveForecaster {
             if !changed.isEmpty { await landed(changed) }
         }
         draining = false
+    }
+
+    /// The account's kept runner while its history is the same full build.
+    private func runner(account: String, built: ArenaHistoryBuilder.Built) -> ArenaRunner {
+        if let kept = runners[account], kept.generation == built.generation { return kept.runner }
+        let runner = ArenaRunner(registry: roster.registry, services: services)
+        runner.memoLimitValues = Self.liveMemoLimitValues
+        runners[account] = (built.generation, runner)
+        return runner
+    }
+
+    /// Make `request`'s projections now and return once each is in the cache
+    /// or has failed into it: one model the compare sheet was asked to draw,
+    /// usually one the refit doesn't ask for. Urgent like every live
+    /// request, so the scorer waits; a model already made at this cut for
+    /// this cycle is not run again (`make`). Not queued behind `pending`: the
+    /// sheet is waiting on this one, and a refit's newer request for the
+    /// same window must not replace it.
+    public func makeNow(_ request: ArenaLiveRequest) async {
+        guard !request.models.isEmpty, !cancel.isSet else { return }
+        budget.beginUrgent()
+        defer { budget.endUrgent() }
+        let account = request.binding.account
+        let built = await history.built(account: account)
+        let cutMs = min(ArenaCut.millis(built.builtThrough), request.cutAt.map(ArenaCut.millis) ?? .max)
+        let cut = ArenaHistory(store: built.store, now: cutMs, accounts: [account])
+        if make(request, cut: cut, asOf: ArenaTime.date(cutMs), runner: runner(account: account, built: built)) {
+            await landed([account])
+        }
     }
 
     /// Returns whether anything new landed.
@@ -855,6 +1014,8 @@ public final class ArenaRuntime: Sendable {
     public let budget: ArenaCPUBudget
     /// Raises the share while the Mac is plugged in and idle, from `start`.
     public let governor: ArenaBudgetGovernor?
+    /// Where the scorer is with each account (`ArenaScoringProgress`).
+    public let progress: ArenaScoringProgressBoard
     let cancel = ArenaCancelFlag()
     private let relief: ArenaMemoryRelief
     /// Frees a network's kept scratch once it has gone two minutes unused
@@ -882,15 +1043,19 @@ public final class ArenaRuntime: Sendable {
     ///   - onLiveLanded: live projections for these accounts are in the
     ///     cache; have their engines draw them
     ///     (`UsageIntelligenceEngine.refreshArenaResolution`).
+    ///   - progress: where the scorer publishes its progress; the app's
+    ///     sheet reads `ArenaScoringProgressBoard.shared`.
     public init(container: ModelContainer, roster: ArenaRoster = .standard,
                 weights: @escaping @Sendable (String) -> URL? = ArenaRuntime.defaultWeights,
                 ensureWeights: @escaping @Sendable ([String]) async -> Void = ArenaRuntime.defaultEnsureWeights,
                 config: ArenaRecordScorer.Config = .init(), compareLimit: Int = 3,
                 costs: ArenaModelCosts = ArenaModelCosts(defaults: nil),
+                progress: ArenaScoringProgressBoard = .shared,
                 onRecordLanded: @escaping @Sendable (String, [EngineSelfEval.NewOutcome]) async -> Void,
                 onLiveLanded: @escaping @Sendable (Set<String>) async -> Void) {
         self.roster = roster
         self.compareLimit = compareLimit
+        self.progress = progress
         self.ensureWeights = ensureWeights
         self.weights = weights
         // One thread per BLAS call, process-wide (only the arena uses BLAS),
@@ -924,7 +1089,7 @@ public final class ArenaRuntime: Sendable {
         })
         self.scorer = ArenaRecordScorer(container: container, roster: roster, history: history,
                                         services: scorerServices, budget: budget, costs: costs, cancel: cancel,
-                                        config: config, landed: onRecordLanded)
+                                        config: config, progress: progress, landed: onRecordLanded)
         self.live = ArenaLiveForecaster(roster: roster, history: history, cache: cache, services: liveServices,
                                         budget: budget, cancel: cancel, landed: onLiveLanded)
         self.relief = ArenaMemoryRelief(live: live, scorerFlag: scorer.relief)
@@ -943,7 +1108,8 @@ public final class ArenaRuntime: Sendable {
     public var link: ArenaEngineLink {
         let live = self.live
         return ArenaEngineLink(roster: roster, cache: cache, compareLimit: compareLimit,
-                               requestLive: { reqs in Task.detached(priority: .utility) { await live.submit(reqs) } })
+                               requestLive: { reqs in Task.detached(priority: .utility) { await live.submit(reqs) } },
+                               makeLive: { req in await live.makeNow(req) })
     }
 
     /// Start scoring `accounts()` in the background, and fetch any pinned

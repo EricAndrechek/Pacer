@@ -1046,49 +1046,9 @@ public actor UsageIntelligenceEngine {
         let statFor = { (id: String) -> EngineSelfEval.Accuracy.MethodStat? in
             accuracy?.methods.first { $0.method == id }
         }
-        let scored: [BurnTrajectory.ScoredTrajectory] = rf.roster.compactMap { model -> BurnTrajectory.ScoredTrajectory? in
-            guard let projection = model.fit(current) else { return nil }
-            // Anchor to the live value (same rule as `burnOutlook`): smoothed
-            // fits sit under a spiking last sample, and an un-anchored curve
-            // starts BELOW the user's current dot on the chart. Shift up only.
-            let anchor = max(0, current.usedNow - projection(f.now))
-            // Crossing walked at the 5-minute sampling cadence — same walk as
-            // `burnOutlook`, so the chart's marker and the tile's ETA agree.
-            var crossing: Date?
-            if current.usedNow < 100 {
-                var t = f.now.addingTimeInterval(5 * 60)
-                while t <= current.resetsAt {
-                    if projection(t) + anchor >= 100 { crossing = t; break }
-                    t = t.addingTimeInterval(5 * 60)
-                }
-            }
-            // The trajectory ENDS at the crossing: a dashed line pinned at
-            // 100% for the rest of the window is noise — the curve already
-            // said everything at the moment it touched the cap. The first
-            // point is pinned to the live value so the dashed line continues
-            // the solid one without a step.
-            var points: [BurnTrajectory.Sample] = [.init(at: f.now, usedPercentage: current.usedNow)]
-            for i in 1...sampleCount {
-                let date = f.now.addingTimeInterval(span * Double(i) / Double(sampleCount))
-                if let crossing, date >= crossing {
-                    points.append(.init(at: crossing, usedPercentage: 100))
-                    break
-                }
-                // Floored at the live reading, as the shown value is
-                // (`BurnTrajectory.displayedAtReset`): a meter does not fall
-                // inside a window, and a fit whose slope turned negative (the
-                // Kalman filter after a jump then a flat stretch, #312) drew a
-                // line falling to 22% under a 60% reading. Now every line ends
-                // at the value that model would show.
-                points.append(.init(at: date, usedPercentage: min(100, max(current.usedNow, projection(date) + anchor))))
-            }
-            let stat = statFor(model.id)
-            return BurnTrajectory.ScoredTrajectory(
-                modelId: model.id, complexity: model.complexity,
-                trajectory: .init(modelId: model.id, points: points, crossesFullAt: crossing),
-                typicalAbsError: stat?.typicalAbsError ?? .infinity,
-                coverage: stat == nil ? 0 : 1,
-                isSelected: model.id == rf.resolvedId)
+        let scored: [BurnTrajectory.ScoredTrajectory] = rf.roster.compactMap { model in
+            scoredTrajectory(model, f, current: current, sampleCount: sampleCount, stat: statFor(model.id),
+                             isSelected: model.id == rf.resolvedId)
         }
 
         // `isSelected` is the model `makeFit` resolved for this cycle, the
@@ -1118,6 +1078,58 @@ public actor UsageIntelligenceEngine {
                     : Self.unavailableReason(inRoster: rf.roster.contains { $0.id == id }, current: current))
         }
         return scored + unavailable
+    }
+
+    /// One model's forward line for the live cycle, as the compare sheet and
+    /// the pace chart draw it: anchored up to the live value, walked for the
+    /// cap crossing, floored at the reading. Nil when the model declines.
+    static func scoredTrajectory(
+        _ model: BurnTrajectory.Model, _ f: EngineFeatures, current: BurnTrajectory.PartialCycle, sampleCount: Int,
+        stat: EngineSelfEval.Accuracy.MethodStat?, isSelected: Bool
+    ) -> BurnTrajectory.ScoredTrajectory? {
+        let span = current.resetsAt.timeIntervalSince(f.now)
+        guard span > 0 else { return nil }
+        guard let projection = model.fit(current) else { return nil }
+        // Anchor to the live value (same rule as `burnOutlook`): smoothed
+        // fits sit under a spiking last sample, and an un-anchored curve
+        // starts BELOW the user's current dot on the chart. Shift up only.
+        let anchor = max(0, current.usedNow - projection(f.now))
+        // Crossing walked at the 5-minute sampling cadence — same walk as
+        // `burnOutlook`, so the chart's marker and the tile's ETA agree.
+        var crossing: Date?
+        if current.usedNow < 100 {
+            var t = f.now.addingTimeInterval(5 * 60)
+            while t <= current.resetsAt {
+                if projection(t) + anchor >= 100 { crossing = t; break }
+                t = t.addingTimeInterval(5 * 60)
+            }
+        }
+        // The trajectory ENDS at the crossing: a dashed line pinned at
+        // 100% for the rest of the window is noise — the curve already
+        // said everything at the moment it touched the cap. The first
+        // point is pinned to the live value so the dashed line continues
+        // the solid one without a step.
+        var points: [BurnTrajectory.Sample] = [.init(at: f.now, usedPercentage: current.usedNow)]
+        for i in 1...sampleCount {
+            let date = f.now.addingTimeInterval(span * Double(i) / Double(sampleCount))
+            if let crossing, date >= crossing {
+                points.append(.init(at: crossing, usedPercentage: 100))
+                break
+            }
+            // Floored at the live reading, as the shown value is
+            // (`BurnTrajectory.displayedAtReset`): a meter does not fall
+            // inside a window, and a fit whose slope turned negative (the
+            // Kalman filter after a jump then a flat stretch, #312) drew a
+            // line falling to 22% under a 60% reading. Now every line ends
+            // at the value that model would show.
+            points.append(.init(at: date, usedPercentage: min(100, max(current.usedNow, projection(date) + anchor))))
+        }
+        return BurnTrajectory.ScoredTrajectory(
+            modelId: model.id, complexity: model.complexity,
+            trajectory: .init(modelId: model.id, points: points, crossesFullAt: crossing),
+            typicalAbsError: stat?.typicalAbsError ?? .infinity,
+            coverage: stat == nil ? 0 : 1,
+            isSelected: isSelected)
     }
 
     /// Why a known model has no line this cycle: the conditions its `fit`
