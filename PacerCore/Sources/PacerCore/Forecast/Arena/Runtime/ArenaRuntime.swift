@@ -212,6 +212,10 @@ public actor ArenaRecordScorer {
     private let config: Config
     private let calendar: Calendar
     private let landed: @Sendable (_ account: String, _ outcomes: [EngineSelfEval.NewOutcome]) async -> Void
+    /// Where each account's pass is, for the compare sheet
+    /// (`ArenaScoringProgress`): written at each phase and cycle, read by
+    /// anyone without waiting on this actor.
+    let progress: ArenaScoringProgressBoard
     /// See the file header.
     private let queue = DispatchSerialQueue(label: "com.ericandrechek.pacer.arena.scorer", qos: .background)
     public nonisolated var unownedExecutor: UnownedSerialExecutor { queue.asUnownedSerialExecutor() }
@@ -231,8 +235,10 @@ public actor ArenaRecordScorer {
     init(container: ModelContainer, roster: ArenaRoster, history: ArenaHistoryCache, services: ArenaServices,
          budget: ArenaCPUBudget, costs: ArenaModelCosts = ArenaModelCosts(defaults: nil), cancel: ArenaCancelFlag,
          config: Config = Config(), calendar: Calendar = .current,
+         progress: ArenaScoringProgressBoard = ArenaScoringProgressBoard(),
          landed: @escaping @Sendable (String, [EngineSelfEval.NewOutcome]) async -> Void) {
         self.container = container; self.roster = roster; self.history = history; self.services = services
+        self.progress = progress
         self.budget = budget; self.costs = costs; self.cancel = cancel; self.config = config; self.calendar = calendar
         self.modelIndex = Dictionary(roster.registry.enumerated().map { ($0.element.name, UInt16($0.offset)) },
                                      uniquingKeysWith: { a, _ in a })
@@ -320,7 +326,7 @@ public actor ArenaRecordScorer {
 
     /// The two phases of a pass: the cheap models over every cycle in depth,
     /// then the rest (`Config.cheapCostMs`, `ArenaModelCosts`).
-    enum Phase: Int, CaseIterable { case cheap = 1, heavy = 2 }
+    public enum Phase: Int, CaseIterable, Sendable { case cheap = 1, heavy = 2 }
 
     /// One account's runner for the pass, and the models that have run on it
     /// (a model's first forecast on a runner is not timed: `ArenaModelCosts`).
@@ -352,6 +358,64 @@ public actor ArenaRecordScorer {
         return false
     }
 
+    /// What a phase planned for each account when it started: cycles queued
+    /// and the models with anything missing in them (`ArenaScoringProgress`).
+    private struct ProgressPlan {
+        var cycles: [String: Int] = [:]
+        var models: [String: Set<String>] = [:]
+    }
+
+    /// The models `phase` has something to score for in `cycles`: phase 2
+    /// queues every model still contending, but the cheap ones had every
+    /// cycle in phase 1, so what it is scoring is the heavy ones. By the
+    /// stored record only: a model's declines this process are not counted,
+    /// so one that declined stays listed until the phase moves past it.
+    private func displayModels(_ s: Stream, _ phase: Phase, cycles: [BurnTrajectory.Cycle]) -> Set<String> {
+        var models = phaseModels(s, phase)
+        if phase == .heavy {
+            let cheap = Set(phaseModels(s, .cheap).map(\.name))
+            models.removeAll { cheap.contains($0.name) }
+        }
+        var out = Set<String>()
+        for c in cycles {
+            let period = EngineSelfEval.periodKeyRL(c.resetsAt)
+            for m in models where !out.contains(m.name) {
+                if config.cuts.indices.contains(where: { !isDone(s, m.name, cut: $0, period: period) }) { out.insert(m.name) }
+            }
+            if out.count == models.count { break }
+        }
+        return out
+    }
+
+    /// Publish where `account` is in `phase`: its cycles still queued against
+    /// those the phase planned, and the planned models still contending. An
+    /// account done with phase 1 while others are not shows what phase 2 has
+    /// for it, which is what it is waiting for.
+    private func publishProgress(_ streams: [Stream], account: String, phase: Phase, plan: ProgressPlan) {
+        let mine = streams.filter { $0.account == account }
+        let remaining = mine.reduce(0) { $0 + $1.queue.count }
+        let contending = Set(mine.flatMap { $0.models.map(\.name) })
+        if remaining > 0 {
+            let total = plan.cycles[account] ?? remaining
+            progress.set(.init(phase: phase, cyclesDone: max(0, total - remaining), cyclesTotal: total,
+                               models: (plan.models[account] ?? []).intersection(contending).sorted(),
+                               updatedAt: Date()), account: account)
+            return
+        }
+        guard phase == .cheap else { progress.set(nil, account: account); return }
+        var total = 0
+        var models = Set<String>()
+        for s in mine {
+            let heavy = phaseModels(s, .heavy)
+            let ahead = heavy.isEmpty ? [] : s.cycles.filter { needs(s, $0, models: heavy) }
+            guard !ahead.isEmpty else { continue }
+            total += ahead.count
+            models.formUnion(displayModels(s, .heavy, cycles: ahead))
+        }
+        progress.set(total > 0 ? .init(phase: .heavy, cyclesDone: 0, cyclesTotal: total, models: models.sorted(),
+                                       updatedAt: Date()) : nil, account: account)
+    }
+
     /// One pass over `accounts`: a full one (120 days, the first time an
     /// account is seen with this roster) or an incremental one (the recent
     /// weeks). Returns what it did.
@@ -359,6 +423,8 @@ public actor ArenaRecordScorer {
     public func pass(accounts: [String], now: Date = Date()) async -> Report {
         var report = Report()
         guard !roster.isEmpty, !cancel.isSet else { return report }
+        // However the pass ends, it has no more work for these accounts.
+        defer { progress.clear(accounts: accounts) }
         // Nothing can run yet (every model waits on a download): no history
         // to read.
         guard roster.selectable.contains(where: { Self.weightsPresent($0, roster: roster, services: services) })
@@ -394,6 +460,12 @@ public actor ArenaRecordScorer {
             let queued = streams.reduce(0) { $0 + $1.queue.count }
             guard queued > 0 else { continue }
             planned += queued
+            var plan = ProgressPlan()
+            for s in streams {
+                plan.cycles[s.account, default: 0] += s.queue.count
+                plan.models[s.account, default: []].formUnion(displayModels(s, phase, cycles: s.queue))
+            }
+            for account in Set(streams.map(\.account)) { publishProgress(streams, account: account, phase: phase, plan: plan) }
             let names = Set(streams.flatMap { phaseModels($0, phase).map(\.name) })
             Log.write("Arena", "phase \(phase.rawValue): scoring \(queued) cycle(s) over "
                       + "\(streams.filter { !$0.queue.isEmpty }.count) window(s), \(names.count) model(s)"
@@ -417,7 +489,12 @@ public actor ArenaRecordScorer {
                         return RunnerSlot(r)
                     }()
                     runners[account] = slot
-                    defer { prune(&streams[i]); streams[i].turns += 1 }
+                    defer {
+                        prune(&streams[i])
+                        streams[i].turns += 1
+                        // A prune can drop the rest of a window's queue.
+                        publishProgress(streams, account: account, phase: phase, plan: plan)
+                    }
                     let perTurn = weekly ? config.weeklyCyclesPerTurn : config.sessionCyclesPerTurn
                     let turn = streams[i].turns == 0 ? max(perTurn, EngineSelfEval.arenaMinPeriods(weekly: weekly)) : perTurn
                     for _ in 0..<turn {
@@ -429,6 +506,7 @@ public actor ArenaRecordScorer {
                         let news = score(cycle, in: &streams[i], models: models, slot: slot, report: &report)
                         report.cycles += 1
                         report.phaseCycles[phase.rawValue, default: 0] += 1
+                        publishProgress(streams, account: account, phase: phase, plan: plan)
                         if !news.isEmpty {
                             report.outcomes += news.count
                             streams[i].records += news.map {
@@ -855,6 +933,8 @@ public final class ArenaRuntime: Sendable {
     public let budget: ArenaCPUBudget
     /// Raises the share while the Mac is plugged in and idle, from `start`.
     public let governor: ArenaBudgetGovernor?
+    /// Where the scorer is with each account (`ArenaScoringProgress`).
+    public let progress: ArenaScoringProgressBoard
     let cancel = ArenaCancelFlag()
     private let relief: ArenaMemoryRelief
     /// Frees a network's kept scratch once it has gone two minutes unused
@@ -882,15 +962,19 @@ public final class ArenaRuntime: Sendable {
     ///   - onLiveLanded: live projections for these accounts are in the
     ///     cache; have their engines draw them
     ///     (`UsageIntelligenceEngine.refreshArenaResolution`).
+    ///   - progress: where the scorer publishes its progress; the app's
+    ///     sheet reads `ArenaScoringProgressBoard.shared`.
     public init(container: ModelContainer, roster: ArenaRoster = .standard,
                 weights: @escaping @Sendable (String) -> URL? = ArenaRuntime.defaultWeights,
                 ensureWeights: @escaping @Sendable ([String]) async -> Void = ArenaRuntime.defaultEnsureWeights,
                 config: ArenaRecordScorer.Config = .init(), compareLimit: Int = 3,
                 costs: ArenaModelCosts = ArenaModelCosts(defaults: nil),
+                progress: ArenaScoringProgressBoard = .shared,
                 onRecordLanded: @escaping @Sendable (String, [EngineSelfEval.NewOutcome]) async -> Void,
                 onLiveLanded: @escaping @Sendable (Set<String>) async -> Void) {
         self.roster = roster
         self.compareLimit = compareLimit
+        self.progress = progress
         self.ensureWeights = ensureWeights
         self.weights = weights
         // One thread per BLAS call, process-wide (only the arena uses BLAS),
@@ -924,7 +1008,7 @@ public final class ArenaRuntime: Sendable {
         })
         self.scorer = ArenaRecordScorer(container: container, roster: roster, history: history,
                                         services: scorerServices, budget: budget, costs: costs, cancel: cancel,
-                                        config: config, landed: onRecordLanded)
+                                        config: config, progress: progress, landed: onRecordLanded)
         self.live = ArenaLiveForecaster(roster: roster, history: history, cache: cache, services: liveServices,
                                         budget: budget, cancel: cancel, landed: onLiveLanded)
         self.relief = ArenaMemoryRelief(live: live, scorerFlag: scorer.relief)
