@@ -139,6 +139,35 @@ struct RuntimeArenaListTests {
         #expect(out.map(\.id) == ["test-a"])
     }
 
+    /// The shipped roster, with a record as deep as the scorer's cap behind
+    /// every model: one row per selectable model, none a helper, each with a
+    /// name of its own, and cheap enough to build on every refresh.
+    @Test func theStandardRosterListsEveryModelCheaply() {
+        let roster = ArenaRoster.standard
+        for (target, weekly) in [(ArenaTarget.meterFiveHour, false), (.meterSevenDay, true)] {
+            let specs = roster.specs(for: target)
+            let rows = specs.enumerated().flatMap { i, s in
+                Self.records(s.name, periods: weekly ? 18 : 180, miss: Double(i % 7)).flatMap { r in
+                    EngineSelfEval.rlCutFractions.map {
+                        EngineSelfEval.Record(method: r.method, bucket: EngineSelfEval.rlBucket($0),
+                                              periodKey: r.periodKey, predicted: r.predicted, truth: r.truth)
+                    }
+                }
+            }
+            let acc = Self.accuracy(rows, weekly: weekly)
+            let runner = ArenaRunner(registry: roster.registry)
+            let started = ContinuousClock.now
+            let out = UsageIntelligenceEngine.arenaListing(
+                specs: specs, accuracy: acc, weekly: weekly, pick: nil, drawn: [], liveFailure: { _ in nil },
+                weightsPresent: { runner.requiredWeights($0.name).allSatisfy { ArenaWeightStore.services($0) != nil } })
+            let elapsed = ContinuousClock.now - started
+            #expect(out.count == specs.count && !out.isEmpty)
+            #expect(Set(out.map(\.name)).count == out.count)
+            #expect(out.allSatisfy { ArenaRoster.isSelectable(roster.spec($0.id)!) })
+            #expect(elapsed < .milliseconds(100), "listing took \(elapsed)")
+        }
+    }
+
     // MARK: The engine's accessor
 
     static func engine(roster: [ArenaModelSpec]) async throws
