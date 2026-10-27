@@ -177,6 +177,12 @@ public enum ArenaModelNames {
                                       "The 123M network's forecast, its range retuned on its own past misses."),
         "ml-gbm-quantile": ("Boosted trees",
                             "Trees trained on your past cycles predict how much the meter still rises."),
+        "fm-timesfm25-meter": ("Pretrained network (TimesFM)",
+                               "Google's TimesFM 2.5 network reads this meter's recent history and continues it."),
+        "fm-chronos2-meter": ("Pretrained network (Chronos-2)",
+                              "Amazon's Chronos-2 network reads this meter's recent history and continues it."),
+        "g1-01-sonnet-calstack": ("Two networks, blended",
+                                  "The calibrated 123M network and TimesFM, weighted by how each did on your past cycles."),
     ]
 
     public static func displayName(_ id: String) -> String? {
