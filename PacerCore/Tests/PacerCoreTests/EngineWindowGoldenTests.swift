@@ -21,6 +21,9 @@ import Testing
 /// one more trajectory (`traj n=7`). Dropping the shadow floor let the cold
 /// start score every model, so the 7-day window's tied cold backtest now goes
 /// to the simpler `recent-rate` (same 61.6 at reset); the 5-hour is unchanged.
+/// The v3 grading's twelve cuts (2026-10-27) give the band nine residuals a
+/// cycle inside 0.2–0.9 instead of eight, which moved the 5-hour
+/// `cal[pooled]` median and the band built from it, and nothing else.
 struct EngineWindowGoldenTests {
 
     static let utc = Calendar(identifier: .gregorian).with(timeZone: TimeZone(identifier: "UTC")!)
@@ -99,8 +102,8 @@ struct EngineWindowGoldenTests {
     == five_hour ==
     selectedId=saturating duration=18000.0000 history=12
     cycles obs=12 over90=0 hit100=0
-    cal[pooled] n=12 q10=-8.7325 q50=-8.7325 q90=-8.7325
-    outlook value=87.4769 i80=78.7445...78.7445 i50=78.7445...78.7445 conf=medium support=12 method=rl-saturating note=-
+    cal[pooled] n=12 q10=-8.9325 q50=-8.9325 q90=-8.9325
+    outlook value=87.4769 i80=78.5444...78.5444 i50=78.5444...78.5444 conf=medium support=12 method=rl-saturating note=-
     burn used=55.0000 slope=22.0000 cross=nil early=nil late=nil anchor=2.4050 method=saturating
     traj n=7 selected=saturating pts=25 cross=nil last=87.4769
     == seven_day ==

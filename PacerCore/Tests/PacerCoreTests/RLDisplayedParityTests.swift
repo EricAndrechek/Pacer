@@ -42,11 +42,13 @@ struct RLDisplayedParityTests {
 
     @Test func swiftRecordMatchesThePythonHarness() throws {
         let f = try Self.fixture()
-        #expect(f.bucketVersion == EngineSelfEval.rlBucketVersion)
+        // The harness grades v2's cuts; the value graded at a cut is what
+        // this checks, the same at any grid.
+        #expect(f.bucketVersion == EngineSelfEval.previousRLGrading.version)
         let cycles = Self.cycles(f)
         let out = EngineSelfEval.newOutcomesRL(
             window: "five_hour", cycles: cycles, activityGrid: [], calendar: Self.utc,
-            existingKeys: [], includeDiurnal: false)
+            existingKeys: [], includeDiurnal: false, grading: EngineSelfEval.previousRLGrading)
         let periodIndex = Dictionary(uniqueKeysWithValues: cycles.enumerated().map {
             (EngineSelfEval.periodKeyRL($0.element.resetsAt), $0.offset)
         })
@@ -93,7 +95,7 @@ struct RLDisplayedParityTests {
         for o in out {
             #expect(EngineSelfEval.isCurrentRLBucket(o.bucket))
             let cycle = try #require(byPeriod[o.periodKey])
-            let cf = try #require(Double(o.bucket.dropFirst(4).prefix(4)))
+            let cf = try #require(EngineSelfEval.rlCutFraction(o.bucket))
             let now = cycle.cycleStart.addingTimeInterval(cycle.resetsAt.timeIntervalSince(cycle.cycleStart) * cf)
             let partial = BurnTrajectory.PartialCycle(
                 samples: cycle.samples, now: now, cycleStart: cycle.cycleStart, resetsAt: cycle.resetsAt)

@@ -6,7 +6,7 @@ import Foundation
 // The sheet draws the engine's methods, the pick and the few best-recorded
 // arena models (`arenaRoster`, `ArenaEngineLink.compareLimit`): each drawn
 // arena model is a live projection per refit, so that set stays small. Until
-// a model has `EngineSelfEval.arenaMinPeriods` cycles behind it, it is in
+// a model has `EngineSelfEval.rlMinPeriods` cycles behind it, it is in
 // none of them, and a fresh install showed none of the ported models at all
 // while the background scorer was filling their record. This lists them all,
 // drawn or not, from what the engine already holds: the accuracy the refit
@@ -35,7 +35,7 @@ public struct ArenaModelListing: Sendable, Equatable, Identifiable {
     public let cycles: Int
     /// The record's typical miss (`EngineSelfEval.Accuracy.MethodStat`), only
     /// once `cycles` reaches the selection floor; nil before. Measured over
-    /// the sheet's span (`EngineSelfEval.comparableAccuracy`), the cycles the
+    /// the sheet's span (`EngineSelfEval.rankRL`), the cycles the
     /// drawn rows' numbers cover, so the two halves of the list compare.
     public let typicalAbsError: Double?
     /// The record's pick for this window.
@@ -133,7 +133,7 @@ extension UsageIntelligenceEngine {
         specs: [ArenaModelSpec], accuracy: EngineSelfEval.Accuracy?, weekly: Bool, pick: String?,
         drawn: Set<String>, liveFailure: (String) -> String?, weightsPresent: (ArenaModelSpec) -> Bool
     ) -> [ArenaModelListing] {
-        let floor = EngineSelfEval.arenaMinPeriods(weekly: weekly)
+        let floor = EngineSelfEval.rlMinPeriods(weekly: weekly)
         var stats: [String: EngineSelfEval.Accuracy.MethodStat] = [:]
         for m in accuracy?.methods ?? [] { stats[m.method] = m }
         let ready = Dictionary(specs.map { ($0.name, weightsPresent($0)) }, uniquingKeysWith: { a, _ in a })

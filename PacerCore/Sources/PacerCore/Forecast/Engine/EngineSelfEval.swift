@@ -52,9 +52,13 @@ public enum EngineSelfEval {
         public let periodKey: String
         public let predicted: Double
         public let truth: Double
-        public init(method: String, bucket: String, periodKey: String, predicted: Double, truth: Double) {
+        /// What produced the grade (`NewOutcome.inputs`); nil on end-of-day
+        /// rows and on rate-limit rows from before it was recorded.
+        public var inputs: String?
+        public init(method: String, bucket: String, periodKey: String, predicted: Double, truth: Double,
+                    inputs: String? = nil) {
             self.method = method; self.bucket = bucket; self.periodKey = periodKey
-            self.predicted = predicted; self.truth = truth
+            self.predicted = predicted; self.truth = truth; self.inputs = inputs
         }
         var absPctError: Double { truth > 0 ? abs(predicted - truth) / truth * 100 : .infinity }
     }
@@ -67,6 +71,11 @@ public enum EngineSelfEval {
         public let periodKey: String
         public let predicted: Double
         public let truth: Double
+        /// What produced a rate-limit grade: the model's version and, for a
+        /// model that reads spend, the pricing and history generations
+        /// (`ArenaGradeInputs`). A stored grade whose inputs differ from the
+        /// model's now is graded again, in place (the key is the same).
+        public var inputs: String? = nil
     }
 
     // MARK: - Scoring completed periods
@@ -215,7 +224,7 @@ public enum EngineSelfEval {
             /// surfaces whose buckets carry no cut.
             public var byStage: [StageStat] = []
             /// The cycles behind `typicalAbsError` and `byStage` when the
-            /// accuracy is measured over a `span` (`comparableAccuracy`): its
+            /// accuracy is measured over a `span` (`RLRanking.accuracy`): its
             /// record inside the span. Nil: the whole record, `periods`.
             public var spanPeriods: Int? = nil
             /// The first cycle (`periodKey`) of its whole record, set with a
@@ -225,7 +234,7 @@ public enum EngineSelfEval {
             /// The cycles behind the numbers shown.
             public var shownPeriods: Int { spanPeriods ?? periods }
         }
-        /// The cycles every number in a `comparableAccuracy` is measured
+        /// The cycles every number in an `RLRanking.accuracy` is measured
         /// over: the newest `cycles`, from `start` on.
         public struct Span: Sendable, Equatable {
             /// The span's first cycle (a `periodKey`).
@@ -236,8 +245,8 @@ public enum EngineSelfEval {
             /// it, and each number is the method's whole record.
             public let isWholeRecord: Bool
         }
-        /// Early, middle or late in the window: cuts 0.2–0.4, 0.5–0.7 and
-        /// 0.8–0.9 of the rate-limit grid (`rlCutFractions`).
+        /// Early, middle or late in the window: cuts below 0.45, below 0.75,
+        /// and the rest of the rate-limit grid (`rlGrading`).
         public enum Stage: String, Sendable, CaseIterable {
             case early, middle, late
             init(cut: Double) { self = cut < 0.45 ? .early : cut < 0.75 ? .middle : .late }
@@ -250,7 +259,7 @@ public enum EngineSelfEval {
         }
         public let surface: String
         public let methods: [MethodStat]
-        /// What the numbers are measured over, for a `comparableAccuracy`;
+        /// What the numbers are measured over, for an `RLRanking.accuracy`;
         /// nil: each method over its own whole record (`accuracy`).
         public var span: Span? = nil
 
@@ -274,12 +283,12 @@ public enum EngineSelfEval {
     }
 
     /// `weekly` picks the statistic `typicalAbsError` reports — the same one
-    /// `bestMethod` ranks by, so the accuracy shown and the model chosen can't
-    /// disagree (see `typicalError`). `phase` narrows `typicalAbsError` to that
-    /// half of the window's cuts, as `bestMethod(phase:)` does (#305); the
-    /// period count and `byStage` always cover every cut.
+    /// selection ranks by, so the accuracy shown and the model chosen can't
+    /// disagree (see `typicalError`). `at` weights each cut's errors by how
+    /// close it is to that point of the window (`cutWeight`), as ranking does;
+    /// the period count and `byStage` always cover every cut equally.
     public static func accuracy(surface: String = surfaceEOD, from records: [Record],
-                                weekly: Bool = false, phase: SelectionPhase? = nil) -> Accuracy {
+                                weekly: Bool = false, at x: Double? = nil) -> Accuracy {
         let byMethod = Dictionary(grouping: records, by: { $0.method })
         let methods = byMethod.map { method, rows -> Accuracy.MethodStat in
             let periods = Set(rows.map { $0.periodKey }).count
@@ -292,70 +301,15 @@ public enum EngineSelfEval {
                 guard let errs = stageErrors[stage], !errs.isEmpty else { return nil }
                 return .init(stage: stage, typicalAbsError: typicalError(errs, weekly: weekly), scores: errs.count)
             }
+            let weighted = rows.map { r in
+                (error: abs(r.predicted - r.truth), weight: rlCutFraction(r.bucket).map { cutWeight($0, at: x) } ?? 1)
+            }
             return .init(method: method,
                          medianAbsPctError: median(rows.map { $0.absPctError }),
-                         typicalAbsError: typicalError(phaseErrors(rows, phase), weekly: weekly),
+                         typicalAbsError: typicalError(weighted, weekly: weekly),
                          periods: periods, byStage: byStage)
         }.sorted { $0.medianAbsPctError < $1.medianAbsPctError }
         return Accuracy(surface: surface, methods: methods)
-    }
-
-    /// The accuracy the compare sheet shows: every method's numbers over the
-    /// same cycles, from `start` (the span selection compares over,
-    /// `arenaSpan`) to the newest.
-    ///
-    /// The engine's methods are scored over every cycle the store holds and
-    /// the arena models newest first, often only over the last few dozen.
-    /// Shown each over its own record, a model scored only on recent,
-    /// near-idle cycles read "within ±0%" beside an engine method's ±3%
-    /// over months, which says nothing about which is better. Over one span
-    /// the numbers are the ones selection ranked (`bestMethod` over
-    /// `arenaComparable`, with the same `phase`), so the column and the pick
-    /// can't disagree.
-    ///
-    /// `typicalAbsError`, `medianAbsPctError` and `byStage` cover the span;
-    /// `periods` stays the whole record, and `spanPeriods` and `firstPeriod`
-    /// say how much of the span each record covers. A method whose record
-    /// lies wholly before the span keeps its row, with no number.
-    ///
-    /// With no `start`, or one no later than the record's first cycle, the
-    /// span is the whole record and every number is `accuracy`'s. `whole` is
-    /// that accuracy when the caller has it already, so this costs a pass
-    /// over the span alone.
-    public static func comparableAccuracy(surface: String, from records: [Record], weekly: Bool = false,
-                                          phase: SelectionPhase? = nil, since start: String?,
-                                          whole: Accuracy? = nil) -> Accuracy {
-        let whole = whole ?? accuracy(surface: surface, from: records, weekly: weekly, phase: phase)
-        // Each record's first cycle and every cycle: periodKeys are ISO 8601
-        // instants, so their order is time order.
-        var firstPeriod: [String: String] = [:]
-        var cycles = Set<String>()
-        for r in records {
-            if firstPeriod[r.method].map({ r.periodKey < $0 }) ?? true { firstPeriod[r.method] = r.periodKey }
-            cycles.insert(r.periodKey)
-        }
-        guard let earliest = cycles.min() else { return whole }
-        var first = earliest
-        if let start, start > earliest { first = cycles.filter { $0 >= start }.min() ?? start }
-        let narrowed = first > earliest
-        let shown = narrowed
-            ? accuracy(surface: surface, from: records.filter { $0.periodKey >= first }, weekly: weekly, phase: phase)
-            : whole
-
-        let periods = Dictionary(whole.methods.map { ($0.method, $0.periods) }, uniquingKeysWith: { a, _ in a })
-        var methods = shown.methods.map { m -> Accuracy.MethodStat in
-            .init(method: m.method, medianAbsPctError: m.medianAbsPctError, typicalAbsError: m.typicalAbsError,
-                  periods: periods[m.method] ?? m.periods, byStage: m.byStage, spanPeriods: m.periods,
-                  firstPeriod: firstPeriod[m.method])
-        }
-        let listed = Set(methods.map(\.method))
-        for m in whole.methods.sorted(by: { $0.method < $1.method }) where !listed.contains(m.method) {
-            methods.append(.init(method: m.method, medianAbsPctError: .infinity, typicalAbsError: .infinity,
-                                 periods: m.periods, spanPeriods: 0, firstPeriod: firstPeriod[m.method]))
-        }
-        return Accuracy(surface: surface, methods: methods,
-                        span: .init(start: first, cycles: cycles.filter { $0 >= first }.count,
-                                    isWholeRecord: !narrowed))
     }
 
     /// The error a rate-limit model is judged by: the median, or on a
@@ -367,22 +321,96 @@ public enum EngineSelfEval {
     /// from 6.7 to 8.8 pp in the harness. The mean keeps the misses that
     /// matter, an early cut undershooting a capped cycle. Mirrors the harness's
     /// `headline_key`.
+    ///
+    /// Re-checked with the matched-point ranking (2026-10-27, walk-forward
+    /// over the owner's record): on five-hour windows the median won on the
+    /// longest replay and the mean on the two shorter ones, and the weekly
+    /// record is a few dozen cycles; neither is a reason to change it.
     static func typicalError(_ errors: [Double], weekly: Bool) -> Double {
         weekly ? mean(errors) : median(errors)
     }
 
-    /// Version suffix of the rate-limit record's bucket keys. v1 rows scored the
-    /// raw extrapolation and stay in the table unread: every reader takes only
-    /// the current version, and the engine re-scores full history into it once
-    /// per launch (`backfillRateLimitRecord`).
-    static let rlBucketVersion = "v2"
-    static func rlBucket(_ cutFraction: Double) -> String {
-        "cut=\(String(format: "%.2f", cutFraction))|\(rlBucketVersion)"
+    /// `typicalError` with a weight on each error (`cutWeight`): the weighted
+    /// median, or the weighted mean on a weekly-scale window. Equal weights
+    /// give exactly the unweighted statistic.
+    static func typicalError(_ errors: [(error: Double, weight: Double)], weekly: Bool) -> Double {
+        weekly ? weightedMean(errors) : weightedMedian(errors)
     }
-    static func isCurrentRLBucket(_ bucket: String) -> Bool {
-        bucket.hasSuffix("|\(rlBucketVersion)")
+
+    static func weightedMean(_ xs: [(error: Double, weight: Double)]) -> Double {
+        var w = 0.0, s = 0.0
+        for x in xs where x.weight > 0 { w += x.weight; s += x.weight * x.error }
+        return w > 0 ? s / w : .infinity
     }
-    /// The cut fraction of an RL bucket (`cut=0.20|v2` → 0.2).
+
+    /// The error at which half the weight is below: with equal weights and an
+    /// even count, the mean of the middle two, as `median` gives.
+    static func weightedMedian(_ xs: [(error: Double, weight: Double)]) -> Double {
+        let s = xs.filter { $0.weight > 0 }.sorted { $0.error < $1.error }
+        let total = s.reduce(0) { $0 + $1.weight }
+        guard total > 0 else { return .infinity }
+        let half = total / 2, eps = total * 1e-12
+        var acc = 0.0
+        for (i, x) in s.enumerated() {
+            acc += x.weight
+            if acc > half + eps { return x.error }
+            if acc >= half - eps { return i + 1 < s.count ? (x.error + s[i + 1].error) / 2 : x.error }
+        }
+        return s[s.count - 1].error
+    }
+
+    // MARK: - Rate-limit grading
+
+    /// One way of grading the rate-limit record: the cuts every model is
+    /// graded at, and the bucket version their rows are stored under.
+    ///
+    /// Every model, the engine's curve fits and the arena's ports alike, is
+    /// graded on the same cuts of the same completed cycles into the same
+    /// rows: the engine grades its own methods on its actor
+    /// (`newOutcomesRL`, cheap), `ArenaRecordScorer` the rest in the
+    /// background, both reading this.
+    public struct RLGrading: Sendable, Equatable {
+        public let version: String
+        public let cuts: [Double]
+        /// Decimals in a bucket's cut: v2 wrote two (`cut=0.20|v2`); the
+        /// current grid needs three (`cut=0.175|v3`).
+        let decimals: Int
+
+        public func bucket(_ cut: Double) -> String {
+            "cut=\(String(format: "%.\(decimals)f", cut))|\(version)"
+        }
+        public func contains(bucket: String) -> Bool { bucket.hasSuffix("|\(version)") }
+        /// The matched point clamped into the grid, so a cycle just started or
+        /// about to reset still weighs its nearest cuts (`cutWeight`).
+        func clamp(_ x: Double?) -> Double? {
+            guard let x, let lo = cuts.first, let hi = cuts.last else { return x }
+            return min(hi, max(lo, x))
+        }
+    }
+
+    /// Twelve cuts, every 0.075 of the window from 0.1 to 0.925, so a live
+    /// cycle at any point of its window has graded cuts near it to be ranked
+    /// on (`cutWeight`). v3 replaced v2's eight cuts (0.2–0.9), which left the
+    /// first fifth of a window, where the forecasts differ most, ungraded.
+    public static let rlGrading = RLGrading(
+        version: "v3", cuts: [0.1, 0.175, 0.25, 0.325, 0.4, 0.475, 0.55, 0.625, 0.7, 0.775, 0.85, 0.925],
+        decimals: 3)
+    /// The grading before `rlGrading`. Its rows keep driving a window's
+    /// selection and sheet until the current grading can (`rlGradingInUse`),
+    /// so the bump has no stretch where nothing can be picked. v1 rows (the
+    /// raw extrapolation, before the shown value was graded) are not read.
+    public static let previousRLGrading = RLGrading(
+        version: "v2", cuts: [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9], decimals: 2)
+
+    static var rlBucketVersion: String { rlGrading.version }
+    static var rlCutFractions: [Double] { rlGrading.cuts }
+    static func rlBucket(_ cutFraction: Double) -> String { rlGrading.bucket(cutFraction) }
+    static func isCurrentRLBucket(_ bucket: String) -> Bool { rlGrading.contains(bucket: bucket) }
+    /// A bucket either grading reads (current or previous).
+    static func isReadRLBucket(_ bucket: String) -> Bool {
+        rlGrading.contains(bucket: bucket) || previousRLGrading.contains(bucket: bucket)
+    }
+    /// The cut fraction of an RL bucket (`cut=0.175|v3` → 0.175).
     static func rlCutFraction(_ bucket: String) -> Double? {
         guard bucket.hasPrefix("cut=") else { return nil }
         return Double(bucket.dropFirst(4).prefix { $0 != "|" })
@@ -392,17 +420,22 @@ public enum EngineSelfEval {
 
     /// Surface id for a rate-limit window's outlook track record.
     public static func rlSurface(_ window: String) -> String { "rl-\(window)" }
-    /// Cut grid for scoring completed cycles (mirrors `scoreCompletedCycle`).
-    static let rlCutFractions = [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
 
-    /// Score the rate-limit roster over *completed* cycles and emit the
-    /// outcomes not already persisted — the rate-limit analogue of
-    /// `newOutcomesEOD`, and how the diurnal model finally earns a persistent
-    /// per-user track record instead of being re-picked cold each scan.
+    /// Score the engine's own methods over *completed* cycles and emit the
+    /// outcomes not already graded — the rate-limit analogue of
+    /// `newOutcomesEOD`, on the same cuts (`rlGrading`) the arena models
+    /// are graded at.
+    ///
+    /// `existingKeys` are the keys already graded with the inputs their
+    /// method has now (`RateLimitRoster.engineInputs`): a key graded under
+    /// an older version is missing from it, and is graded again.
     ///
     /// Leak-free by walk-forward: the diurnal model scored against cycle *i* is
     /// fit only on cycles *before* it (plus the activity-grid prior, which is a
     /// cost-activity shape, not the rate-limit data being scored).
+    ///
+    /// `grading` is the current one but for the parity test against the
+    /// Python harness, which still grades v2's cuts.
     public static func newOutcomesRL(
         window: String,
         cycles: [BurnTrajectory.Cycle],
@@ -410,7 +443,8 @@ public enum EngineSelfEval {
         calendar: Calendar,
         existingKeys: Set<String>,
         includeDiurnal: Bool,
-        indices: Range<Int>? = nil
+        indices: Range<Int>? = nil,
+        grading: RLGrading = rlGrading
     ) -> [NewOutcome] {
         let surface = rlSurface(window)
         let sorted = cycles.sorted { $0.cycleStart < $1.cycleStart }
@@ -427,10 +461,10 @@ public enum EngineSelfEval {
             // diurnal table, which is built from every earlier cycle. This is
             // what keeps the once-per-launch full-history pass cheap after the
             // first one.
-            let scored = rlCutFractions.allSatisfy { cf in
+            let scored = grading.cuts.allSatisfy { cf in
                 rosterIds.allSatisfy { id in
                     existingKeys.contains(EngineEvalOutcome.makeKey(
-                        surface: surface, method: id, bucket: rlBucket(cf), periodKey: periodKey))
+                        surface: surface, method: id, bucket: grading.bucket(cf), periodKey: periodKey))
                 }
             }
             if scored { continue }
@@ -441,86 +475,93 @@ public enum EngineSelfEval {
             }
             let duration = cycle.resetsAt.timeIntervalSince(cycle.cycleStart)
             guard duration > 0 else { continue }
-            for cf in rlCutFractions {
+            for cf in grading.cuts {
                 let now = cycle.cycleStart.addingTimeInterval(duration * cf)
                 let seen = cycle.samples.filter { $0.at <= now }
                 guard seen.count >= 3 else { continue }
                 let partial = BurnTrajectory.PartialCycle(
                     samples: seen, now: now, cycleStart: cycle.cycleStart, resetsAt: cycle.resetsAt)
-                let bucket = rlBucket(cf)
+                let bucket = grading.bucket(cf)
                 for m in roster {
                     let key = EngineEvalOutcome.makeKey(surface: surface, method: m.id, bucket: bucket, periodKey: periodKey)
                     guard !existingKeys.contains(key) else { continue }
                     guard let proj = m.fit(partial) else { continue }
                     out.append(NewOutcome(surface: surface, method: m.id, bucket: bucket, periodKey: periodKey,
                                           predicted: BurnTrajectory.displayedAtReset(proj, partial: partial),
-                                          truth: trueFinal))
+                                          truth: trueFinal, inputs: RateLimitRoster.engineInputs(m.id)))
                 }
             }
         }
         return out
     }
 
-    /// The first or second half of a rate-limit window, for selection (#305):
-    /// cuts 0.2–0.4 and 0.5–0.9 of the grid, and the live cycle's elapsed
-    /// fraction on either side of 0.5. A model that reads the early, sparse
-    /// part of a window well is often not the one that reads its late part
-    /// well, and one all-cuts number picked the same model for both.
-    public enum SelectionPhase: Sendable, Equatable {
-        case early, late
-        public init(cut: Double) { self = cut < 0.5 ? .early : .late }
-    }
+    // MARK: - Matching the live point
 
-    /// A method's absolute errors on `phase`'s cuts, or on every cut when nil.
-    static func phaseErrors(_ rows: [Record], _ phase: SelectionPhase?) -> [Double] {
-        rows.compactMap { r in
-            if let phase {
-                guard let cut = rlCutFraction(r.bucket), SelectionPhase(cut: cut) == phase else { return nil }
-            }
-            return abs(r.predicted - r.truth)
-        }
+    /// How much an error graded at `cut` counts when ranking for a cycle `x`
+    /// of the way through its window: 1 at `x`, falling linearly to 0 at
+    /// `rlCutKernelHalfWidth` away. No live cycle (`x` nil): every cut the
+    /// same.
+    ///
+    /// Replaced the early/late halves (#305), which ranked a cycle 0.49 of
+    /// the way through on cuts 0.2–0.4 and one at 0.51 on 0.5–0.9. Chosen by
+    /// a walk-forward replay over the owner's record (at each past cycle,
+    /// pick from the earlier ones, score the pick's own miss): on five-hour
+    /// windows a triangle 0.2 wide was no worse than the halves on any of
+    /// three candidate sets and better on the two with the ported models in
+    /// them; narrower and wider kernels, Gaussians and "every cut" each lost
+    /// on at least one.
+    static func cutWeight(_ cut: Double, at x: Double?) -> Double {
+        guard let x else { return 1 }
+        let h = EngineParams.current.rlCutKernelHalfWidth
+        guard h > 0 else { return 1 }
+        // A cut exactly the width away weighs nothing, whatever the last bit
+        // of `cut - x` says (0.6 − 0.4 is a hair under 0.2).
+        let w = 1 - abs(cut - x) / h
+        return w > 1e-9 ? w : 0
     }
 
     /// Pick the best method from an accumulated record: lowest typical
     /// absolute error (`typicalError`: the median, the mean when `weekly`) in
     /// the surface's native units (percentage points for rate-limit windows),
-    /// breaking near-ties toward the simpler model. This keeps selection
-    /// consistent with the accuracy the UI displays (`typicalAbsError`, for
-    /// the same `phase`) — the two can never contradict each other.
+    /// each cut weighted by its closeness to `at` (`cutWeight`), breaking
+    /// near-ties toward the simpler model. Selection on a rate-limit window
+    /// goes through `rankRL`, which calls this on the shared span.
     ///
     /// The near-tie band is 1.5 points, or `tieRelative` of the best error
     /// when given. Rate-limit windows pass `EngineParams.rlTieRelative` (5%):
     /// at a ~3 pp typical miss, 1.5 points tied most of the roster, so the
-    /// simplest model won whatever the record said. With `phase`, errors come
-    /// from that half of the window's cuts only (#305).
+    /// simplest model won whatever the record said.
     /// Returns `nil` until at least `minPeriods` completed periods back a
     /// method — the engine then falls back to its cold on-the-fly backtest.
-    ///
-    /// Every model clears the same floor. A new model used to need 15 scored
-    /// periods first (a "shadow"), back when its record could only grow one
-    /// live cycle at a time. The record backfill now scores every model over
-    /// every cycle the store holds, archive included, on the first refit after
-    /// install, so a new model arrives with the same depth of record as the
-    /// ones it competes with, and a separate floor only kept it off the screen.
     public static func bestMethod(
         from records: [Record],
         minPeriods: Int = 2,
         complexity: [String: Int] = [:],
         weekly: Bool = false,
-        phase: SelectionPhase? = nil,
+        at x: Double? = nil,
         tieRelative: Double? = nil
     ) -> String? {
         let byMethod = Dictionary(grouping: records, by: { $0.method })
-        let scored = byMethod.compactMap { id, rows -> (id: String, err: Double, cx: Int)? in
+        let scored = byMethod.compactMap { id, rows -> (id: String, err: Double)? in
             guard Set(rows.map { $0.periodKey }).count >= minPeriods else { return nil }
-            let errs = phaseErrors(rows, phase)
-            guard !errs.isEmpty else { return nil }
-            return (id, typicalError(errs, weekly: weekly), complexity[id] ?? 3)
+            let errs = rows.map { r in
+                (error: abs(r.predicted - r.truth), weight: rlCutFraction(r.bucket).map { cutWeight($0, at: x) } ?? 1)
+            }
+            let err = typicalError(errs, weekly: weekly)
+            return err.isFinite ? (id, err) : nil
         }
-        guard let best = scored.min(by: { $0.err < $1.err }) else { return nil }
-        let band = tieRelative.map { best.err * $0 } ?? 1.5
-        return scored.filter { $0.err <= best.err + band }
-            .min { ($0.cx, $0.err) < ($1.cx, $1.err) }?.id
+        return pickWithinTie(scored, complexity: complexity, tieRelative: tieRelative)
+    }
+
+    /// The simplest of the methods within the near-tie band of the best
+    /// (`bestMethod`), then the lower error, then the id, so the pick holds
+    /// still between refits.
+    static func pickWithinTie(_ scored: [(id: String, err: Double)], complexity: [String: Int],
+                              tieRelative: Double?) -> String? {
+        guard let best = scored.map(\.err).min() else { return nil }
+        let band = tieRelative.map { best * $0 } ?? 1.5
+        return scored.filter { $0.err <= best + band }
+            .min { (complexity[$0.id] ?? 3, $0.err, $0.id) < (complexity[$1.id] ?? 3, $1.err, $1.id) }?.id
     }
 
     /// Cycle identity, rounded to the minute so reset jitter doesn't split a
@@ -551,146 +592,262 @@ public enum EngineSelfEval {
     }
 }
 
-// MARK: - Arena models in the record
+// MARK: - One ranking for every model
 
 extension EngineSelfEval {
 
-    /// Cycles an arena model needs behind it before it can be picked.
-    static func arenaMinPeriods(weekly: Bool) -> Int { weekly ? 3 : 8 }
+    /// Cycles a method needs graded before it can be picked or ranked: the
+    /// same for every method, the engine's curve fits and the arena's ports
+    /// alike. Before a window has them, the engine's cold backtest picks.
+    public static func rlMinPeriods(weekly: Bool) -> Int { weekly ? 3 : 8 }
 
-    /// How far behind the engine's best method an arena model may fall, on
-    /// the cycles it has been scored on, before it stops being scored deeper
-    /// and stops counting for selection: half again its error plus a point.
-    /// The pick's near-tie band is 5%, so a model this far behind is never
-    /// picked; scoring it over months more cycles would only sharpen a record
-    /// no one acts on, and it is most of a first launch's cost.
-    static let arenaLossRatio = 1.5
-    static let arenaLossMargin = 1.0
-    /// Cycles behind a model before it can be judged a loser.
-    static func arenaPruneMinPeriods(weekly: Bool) -> Int { weekly ? 6 : 24 }
-    /// Once judged, how many arena models stay contenders: the best few, and
-    /// any within `arenaContenderBand` of the best of them. The pick's tie
-    /// band is 5%, so a model outside both is never picked, and scoring two
-    /// dozen models over months of cycles is a first launch measured in days.
-    static let arenaContenders = 4
-    static let arenaContenderBand = 1.10
+    /// How many completed cycles of a window every model is graded on, newest
+    /// first: the shared depth, and the span ranking compares over once every
+    /// model has been graded that deep.
+    ///
+    /// Chosen from cost and storage (see `ArenaRecordScorer.Config`): a
+    /// five-hour cycle costs about 11 s of CPU to grade every model at every
+    /// cut on an M-series Mac, a weekly one about 18 s, and each graded cycle
+    /// is about 500 rows. 120 five-hour cycles is a month or more of
+    /// steady use, enough that a 5% tie band separates models (the replay saw
+    /// no gain from a deeper span); 17 weekly cycles is what the 120 days of
+    /// history the arena reads can hold.
+    public static func rlDepth(weekly: Bool) -> Int { weekly ? 17 : 120 }
 
-    /// The arena models out of the running: those that lose clearly to the
-    /// engine's best method over the same cycles (`arenaLossRatio`), judged
-    /// on each model's own cycles against every engine method scored on at
-    /// least half of them; and, among the models judged, those outside the
-    /// `arenaContenders` best and the band around the best, compared over
-    /// the cycles every judged model was scored on. Both with the statistic
-    /// selection ranks by (`typicalError`).
-    public static func arenaLosers(_ records: [Record], arenaIds: Set<String>, weekly: Bool) -> Set<String> {
-        guard !arenaIds.isEmpty else { return [] }
-        let index = ErrorIndex(records)
-        var out = arenaLosersToEngine(index, arenaIds: arenaIds, weekly: weekly)
-        out.formUnion(arenaNonContenders(index, arenaIds: arenaIds.subtracting(out), weekly: weekly))
-        return out
+    /// A ranked model is "well behind" when it is clearly worse than the best
+    /// over the same cycles: its typical miss more than half again the
+    /// best's plus a point, measured over (nearly) the whole span; or it
+    /// loses to the best cycle by cycle beyond chance (a one-sided sign test
+    /// at p < 0.001 over at least 20 cycles where they differ) while a fifth
+    /// or more behind. The first is the margin no near-tie band (5%) comes
+    /// near; the second catches a model that is consistently, not just on
+    /// average, worse. Display only: it is still graded on every cycle, and
+    /// can climb back.
+    static let wellBehindRatio = 1.5
+    static let wellBehindMargin = 1.0
+    static let wellBehindCoverage = 0.9
+    static let wellBehindSignTestP = 0.001
+    static let wellBehindSignTestMinCycles = 20
+    static let wellBehindSignTestRatio = 1.2
+
+    /// One window's record ranked the way selection and the compare sheet
+    /// read it: every method over the same cycles (`span`), at the same point
+    /// of the window (`at`, `cutWeight`), by the same statistic.
+    public struct RLRanking: Sendable, Equatable {
+        public struct Standing: Sendable, Equatable {
+            public let method: String
+            /// Completed cycles graded within the shared depth.
+            public let cycles: Int
+            /// Of the span's cycles, the ones it is graded on.
+            public let spanCycles: Int
+            /// Its oldest graded cycle within the depth.
+            public let firstPeriod: String?
+            /// Its typical miss at the matched point over the span; nil when
+            /// it is not ranked (fewer than `rlMinPeriods` cycles graded).
+            public let typicalAbsError: Double?
+            /// Clearly behind the best (`wellBehindRatio`).
+            public let wellBehind: Bool
+            public let complexity: Int
+            /// Over the span, every cut counted the same: what the old
+            /// accuracy rows showed (`Accuracy`).
+            public let medianAbsPctError: Double
+            public let byStage: [Accuracy.StageStat]
+
+            public var isRanked: Bool { typicalAbsError != nil }
+        }
+
+        public let grading: RLGrading
+        /// The matched point, clamped into the grid; nil with no live cycle.
+        public let at: Double?
+        /// The cycles every ranked number covers; nil with no record.
+        public let span: Accuracy.Span?
+        /// Ranked models by typical miss (the well-behind ones after them),
+        /// then the unranked by how far their grading has come.
+        public let standings: [Standing]
+        public let pick: String?
+        /// Completed cycles in the shared depth: every cycle any method is
+        /// graded on there.
+        public let depthCycles: Int
+
+        public func standing(_ method: String) -> Standing? { standings.first { $0.method == method } }
+        public var ranked: [Standing] { standings.filter(\.isRanked) }
+
+        static func empty(_ grading: RLGrading, at: Double?) -> RLRanking {
+            RLRanking(grading: grading, at: at, span: nil, standings: [], pick: nil, depthCycles: 0)
+        }
+
+        /// The sheet's accuracy rows, from the ranking: each over the span,
+        /// `periods` its graded cycles within the depth.
+        public func accuracy(surface: String) -> Accuracy {
+            Accuracy(surface: surface, methods: standings.map { s in
+                .init(method: s.method, medianAbsPctError: s.medianAbsPctError,
+                      typicalAbsError: s.typicalAbsError ?? .infinity, periods: s.cycles, byStage: s.byStage,
+                      spanPeriods: s.spanCycles, firstPeriod: s.firstPeriod)
+            }, span: span)
+        }
     }
 
-    /// Each method's absolute errors by cycle, built in one pass: the loser
-    /// tests compare methods cycle by cycle, and runs every refit over a
-    /// record that, with the arena models in it, is tens of thousands of rows.
-    struct ErrorIndex {
-        var byMethod: [String: [String: [Double]]] = [:]
-        init(_ records: [Record]) {
-            for r in records { byMethod[r.method, default: [:]][r.periodKey, default: []].append(abs(r.predicted - r.truth)) }
+    /// Rank `records` (one window's) under `grading`.
+    ///
+    /// - The depth: the newest `depth` cycles any method is graded on.
+    /// - Eligible: a method with `rlMinPeriods` cycles graded there.
+    /// - The span: from the latest first cycle of the eligible methods to the
+    ///   newest. While the background grader catches up (newest first) that
+    ///   is the cycles every eligible model has; once it has caught up, the
+    ///   whole depth. No method is pruned from it, and none shortens it
+    ///   without being eligible.
+    /// - Each eligible method's typical miss over the span, each cut's
+    ///   errors weighted by its closeness to `at` (`cutWeight`); the pick is
+    ///   the simplest within the near-tie band of the best (`bestMethod`).
+    ///
+    /// `candidates` limits the methods ranked (the ones that can run on this
+    /// window); nil ranks every method in the record. `pickable` limits the
+    /// pick further (nil: any ranked method).
+    public static func rankRL(_ records: [Record], grading: RLGrading = rlGrading, candidates: Set<String>? = nil,
+                              pickable: Set<String>? = nil, complexity: [String: Int] = [:], weekly: Bool,
+                              at x: Double?, depth: Int? = nil, tieRelative: Double? = nil) -> RLRanking {
+        let x = grading.clamp(x)
+        struct Graded { let cut: Double; let error: Double; let pct: Double }
+        var cutOf: [String: Double] = [:]
+        var byMethod: [String: [String: [Graded]]] = [:]
+        var allPeriods = Set<String>()
+        for r in records where r.truth > 0 && grading.contains(bucket: r.bucket) {
+            if let candidates, !candidates.contains(r.method) { continue }
+            let cut: Double
+            if let c = cutOf[r.bucket] { cut = c } else {
+                guard let c = rlCutFraction(r.bucket) else { continue }
+                cutOf[r.bucket] = c
+                cut = c
+            }
+            allPeriods.insert(r.periodKey)
+            byMethod[r.method, default: [:]][r.periodKey, default: []]
+                .append(Graded(cut: cut, error: abs(r.predicted - r.truth), pct: r.absPctError))
         }
-        func errors(_ method: String, over periods: some Collection<String>) -> [Double] {
-            guard let m = byMethod[method] else { return [] }
-            var out: [Double] = []
-            for p in periods { if let e = m[p] { out += e } }
+        // periodKeys are ISO 8601 instants, so their order is time order.
+        var periods = allPeriods.sorted()
+        if let depth, periods.count > depth { periods = Array(periods.suffix(depth)) }
+        guard let depthStart = periods.first else { return .empty(grading, at: x) }
+
+        let minPeriods = rlMinPeriods(weekly: weekly)
+        var cycles: [String: Int] = [:], first: [String: String] = [:]
+        for (m, byPeriod) in byMethod {
+            for p in byPeriod.keys where p >= depthStart {
+                cycles[m, default: 0] += 1
+                if first[m].map({ p < $0 }) ?? true { first[m] = p }
+            }
+        }
+        let eligible = Set(cycles.filter { $0.value >= minPeriods }.keys)
+        let start = eligible.compactMap { first[$0] }.max() ?? depthStart
+        let span = periods.filter { $0 >= start }
+
+        struct Row { let method: String; let spanCycles: Int; let typical: Double?; let pct: Double
+                     let byStage: [Accuracy.StageStat] }
+        var rows: [Row] = []
+        for (m, byPeriod) in byMethod where cycles[m] != nil {
+            var pairs: [(error: Double, weight: Double)] = []
+            var pcts: [Double] = []
+            var stages: [Accuracy.Stage: [Double]] = [:]
+            var inSpan = 0
+            for p in span {
+                guard let gs = byPeriod[p] else { continue }
+                inSpan += 1
+                for g in gs {
+                    pairs.append((g.error, cutWeight(g.cut, at: x)))
+                    pcts.append(g.pct)
+                    stages[Accuracy.Stage(cut: g.cut), default: []].append(g.error)
+                }
+            }
+            var typical: Double?
+            if eligible.contains(m), inSpan > 0 {
+                let t = typicalError(pairs, weekly: weekly)
+                typical = t.isFinite ? t : nil
+            }
+            let byStage = Accuracy.Stage.allCases.compactMap { stage -> Accuracy.StageStat? in
+                guard let errs = stages[stage], !errs.isEmpty else { return nil }
+                return .init(stage: stage, typicalAbsError: typicalError(errs, weekly: weekly), scores: errs.count)
+            }
+            rows.append(Row(method: m, spanCycles: inSpan, typical: typical, pct: median(pcts), byStage: byStage))
+        }
+
+        let ranked = rows.compactMap { r in r.typical.map { (id: r.method, err: $0) } }
+        let pick = pickWithinTie(ranked.filter { pickable?.contains($0.id) ?? true }, complexity: complexity,
+                                 tieRelative: tieRelative)
+        let best = ranked.min { ($0.err, $0.id) < ($1.err, $1.id) }
+
+        func cycleScores(_ m: String) -> [String: Double] {
+            var out: [String: Double] = [:]
+            guard let byPeriod = byMethod[m] else { return out }
+            for p in span {
+                guard let gs = byPeriod[p] else { continue }
+                var w = 0.0, s = 0.0
+                for g in gs { let k = cutWeight(g.cut, at: x); w += k; s += k * g.error }
+                out[p] = w > 0 ? s / w : gs.reduce(0) { $0 + $1.error } / Double(gs.count)
+            }
             return out
         }
-    }
-
-    static func arenaNonContenders(_ index: ErrorIndex, arenaIds: Set<String>, weekly: Bool) -> Set<String> {
-        let floor = arenaPruneMinPeriods(weekly: weekly)
-        let judged = arenaIds.compactMap { id -> (String, Set<String>)? in
-            guard let p = index.byMethod[id], p.count >= floor else { return nil }
-            return (id, Set(p.keys))
-        }
-        guard judged.count > arenaContenders else { return [] }
-        // The cycles every judged model was scored on.
-        var common = judged[0].1
-        for (_, p) in judged.dropFirst() { common.formIntersection(p) }
-        guard common.count >= floor else { return [] }
-        let ranked = judged.map { id, _ in (id: id, err: typicalError(index.errors(id, over: common), weekly: weekly)) }
-            .sorted { ($0.err, $0.id) < ($1.err, $1.id) }
-        guard let best = ranked.first?.err else { return [] }
-        return Set(ranked.dropFirst(arenaContenders).filter { $0.err > best * arenaContenderBand }.map(\.id))
-    }
-
-    static func arenaLosersToEngine(_ index: ErrorIndex, arenaIds: Set<String>, weekly: Bool) -> Set<String> {
-        var losers = Set<String>()
-        let engineMethods = index.byMethod.filter { !arenaIds.contains($0.key) }
-        for id in arenaIds {
-            guard let own = index.byMethod[id], own.count >= arenaPruneMinPeriods(weekly: weekly) else { continue }
-            let ownError = typicalError(own.values.flatMap { $0 }, weekly: weekly)
-            var best = Double.infinity
-            for (_, byPeriod) in engineMethods {
-                var errs: [Double] = []
-                var covered = 0
-                for p in own.keys { if let e = byPeriod[p] { errs += e; covered += 1 } }
-                guard covered * 2 >= own.count else { continue }
-                best = min(best, typicalError(errs, weekly: weekly))
+        let bestScores = best.map { cycleScores($0.id) } ?? [:]
+        func isWellBehind(_ r: Row) -> Bool {
+            guard let t = r.typical, let best, r.method != best.id else { return false }
+            if t > best.err * wellBehindRatio + wellBehindMargin,
+               Double(r.spanCycles) >= wellBehindCoverage * Double(span.count) { return true }
+            guard t >= best.err * wellBehindSignTestRatio else { return false }
+            var worse = 0, better = 0
+            for (p, s) in cycleScores(r.method) {
+                guard let b = bestScores[p] else { continue }
+                if s > b { worse += 1 } else if s < b { better += 1 }
             }
-            if best.isFinite, ownError > best * arenaLossRatio + arenaLossMargin { losers.insert(id) }
+            let n = worse + better
+            return n >= wellBehindSignTestMinCycles && binomialUpperTail(n: n, k: worse) < wellBehindSignTestP
         }
-        return losers
-    }
 
-    /// The records selection compares, once arena models compete.
-    ///
-    /// The engine's methods are scored over every cycle the store holds; the
-    /// arena models are scored by a background pass, newest cycle first, that
-    /// can take hours on a first launch, and only over the last few months
-    /// (`ArenaRecordScorer.Config`). Ranking a model's error over the last 20
-    /// cycles against another's over the last 300 would reward whichever
-    /// stretch was easier, so every method is compared over the same span:
-    /// the cycles from the latest first cycle of the arena models that can be
-    /// picked. A model with fewer than `arenaMinPeriods` cycles behind it is
-    /// left out until it has them, and a clear loser (`arenaLosers`, which
-    /// the scorer stops scoring deeper) is left out and does not shorten the
-    /// span. With no arena model in the record this is the identity, which
-    /// keeps selection exactly as it was.
-    public static func arenaComparable(_ records: [Record], arenaIds: Set<String>, weekly: Bool) -> [Record] {
-        comparable(records, span: arenaSpan(records, arenaIds: arenaIds, weekly: weekly), arenaIds: arenaIds)
-    }
-
-    /// Where `arenaComparable`'s span starts and which arena models it
-    /// counts, apart from the filtering: the refit derives it once and both
-    /// selection and the sheet's numbers (`comparableAccuracy`) read it.
-    public struct ArenaSpan: Sendable, Equatable {
-        /// The first cycle compared; nil, every cycle the record holds.
-        public var start: String?
-        /// The arena models compared; nil when the record holds none, and
-        /// every method in it is compared.
-        public var eligible: Set<String>?
-    }
-
-    public static func arenaSpan(_ records: [Record], arenaIds: Set<String>, weekly: Bool) -> ArenaSpan {
-        guard !arenaIds.isEmpty else { return .init() }
-        var periods: [String: Set<String>] = [:]
-        for r in records where arenaIds.contains(r.method) { periods[r.method, default: []].insert(r.periodKey) }
-        guard !periods.isEmpty else { return .init() }
-        let floor = arenaMinPeriods(weekly: weekly)
-        let losers = arenaLosers(records, arenaIds: arenaIds, weekly: weekly)
-        let eligible = periods.filter { $0.value.count >= floor && !losers.contains($0.key) }
-        // periodKeys are ISO 8601 instants, so their order is time order.
-        // No arena model can be compared yet: none counts, over every cycle.
-        return .init(start: eligible.values.compactMap { $0.min() }.max(), eligible: Set(eligible.keys))
-    }
-
-    /// `records` narrowed to `span`: from its start, arena models only when
-    /// it counts them.
-    public static func comparable(_ records: [Record], span: ArenaSpan, arenaIds: Set<String>) -> [Record] {
-        guard let eligible = span.eligible else { return records }
-        return records.filter { r in
-            if let start = span.start, r.periodKey < start { return false }
-            return !arenaIds.contains(r.method) || eligible.contains(r.method)
+        let standings = rows.map { r in
+            RLRanking.Standing(method: r.method, cycles: cycles[r.method] ?? 0, spanCycles: r.spanCycles,
+                               firstPeriod: first[r.method], typicalAbsError: r.typical, wellBehind: isWellBehind(r),
+                               complexity: complexity[r.method] ?? 3, medianAbsPctError: r.pct, byStage: r.byStage)
+        }.sorted { a, b in
+            func group(_ s: RLRanking.Standing) -> Int { s.isRanked ? (s.wellBehind ? 1 : 0) : 2 }
+            if group(a) != group(b) { return group(a) < group(b) }
+            if let ta = a.typicalAbsError, let tb = b.typicalAbsError, ta != tb { return ta < tb }
+            if !a.isRanked, a.cycles != b.cycles { return a.cycles > b.cycles }
+            if a.complexity != b.complexity { return a.complexity < b.complexity }
+            return a.method < b.method
         }
+        return RLRanking(grading: grading, at: x,
+                         span: .init(start: start, cycles: span.count,
+                                     isWholeRecord: start == depthStart && periods.count == allPeriods.count),
+                         standings: standings, pick: pick, depthCycles: periods.count)
+    }
+
+    /// P(X ≥ k) for X ~ Binomial(n, ½): the sign test's one-sided p-value.
+    static func binomialUpperTail(n: Int, k: Int) -> Double {
+        guard k > 0 else { return 1 }
+        guard k <= n else { return 0 }
+        let logHalfN = Double(n) * log(0.5)
+        var total = 0.0
+        for i in k...n {
+            total += exp(lgamma(Double(n + 1)) - lgamma(Double(i + 1)) - lgamma(Double(n - i + 1)) + logHalfN)
+        }
+        return min(1, total)
+    }
+
+    /// Which grading drives a window while the record moves from the previous
+    /// one to the current (a bucket version bump): the current one as soon as
+    /// it can pick and ranks every model the previous one ranked that can
+    /// still run, or once the grader has been through the whole depth under
+    /// it (`currentComplete`: a model that no longer forecasts must not hold
+    /// the switch forever). Until then the previous grading picks and fills
+    /// the sheet, so a bump never leaves a window with nothing to pick, nor
+    /// one picked from the few models graded first.
+    public static func rlGradingInUse(current: RLRanking, previous: RLRanking, runnable: Set<String>? = nil,
+                                      currentComplete: Bool = false) -> RLRanking {
+        guard current.pick != nil else {
+            // Neither picks: show whichever has a record.
+            let showPrevious = previous.pick != nil || (current.standings.isEmpty && !previous.standings.isEmpty)
+            return showPrevious ? previous : current
+        }
+        guard previous.pick != nil, !currentComplete else { return current }
+        var wanted = Set(previous.ranked.map(\.method))
+        if let runnable { wanted.formIntersection(runnable) }
+        return wanted.isSubset(of: Set(current.ranked.map(\.method))) ? current : previous
     }
 }

@@ -43,6 +43,11 @@ public final class EngineEvalOutcome {
     /// recomputing.
     public var absPctError: Double
     public var recordedAt: Date
+    /// What produced a rate-limit grade (`EngineSelfEval.NewOutcome.inputs`):
+    /// the model's version, and for a model that reads spend the pricing and
+    /// history generations. A grade whose inputs no longer match is graded
+    /// again. Nil on rows from before it was recorded, and on end-of-day rows.
+    public var inputs: String?
 
     public init(
         surface: String,
@@ -51,7 +56,8 @@ public final class EngineEvalOutcome {
         periodKey: String,
         predicted: Double,
         truth: Double,
-        recordedAt: Date = Date()
+        recordedAt: Date = Date(),
+        inputs: String? = nil
     ) {
         self.key = Self.makeKey(surface: surface, method: method, bucket: bucket, periodKey: periodKey)
         self.surface = surface
@@ -62,6 +68,7 @@ public final class EngineEvalOutcome {
         self.truth = truth
         self.absPctError = Self.absPctError(predicted: predicted, truth: truth)
         self.recordedAt = recordedAt
+        self.inputs = inputs
     }
 
     /// Replace the scored values after the history they were computed from

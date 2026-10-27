@@ -17,6 +17,8 @@ struct RuntimeEngineTests {
     static let now = Date(timeIntervalSince1970: (Date().timeIntervalSince1970 / 60).rounded(.down) * 60)
     static let account = "acct-runtime"
     static let fiveHours: TimeInterval = 5 * 3600
+    /// Cuts every completed cycle is graded at (`EngineSelfEval.rlGrading`).
+    static let cuts = EngineSelfEval.rlCutFractions.count
 
     /// `cycles` completed five-hour cycles back to back, newest ending an hour
     /// ago, then a live one two hours in. Each climbs slowly then jumps in its
@@ -119,7 +121,10 @@ struct RuntimeEngineTests {
     static func runtime(_ container: ModelContainer, roster: [ArenaModelSpec],
                         config: ArenaRecordScorer.Config = noSleep(), landed: Landed = Landed(),
                         engine: UsageIntelligenceEngine? = nil) -> ArenaRuntime {
+        // A board of its own: the app's (`.shared`) would carry one test's
+        // passes into the next.
         ArenaRuntime(container: container, roster: ArenaRoster(registry: roster), config: config,
+                     progress: ArenaScoringProgressBoard(),
                      onRecordLanded: { _, news in
                          landed.add(news)
                          _ = await engine?.ingestArenaOutcomes(news)
@@ -177,11 +182,11 @@ struct RuntimeEngineTests {
         let container = try Self.seeded()
         let rt = Self.runtime(container, roster: [Self.peeker, Self.helper])
         let first = await rt.scorer.pass(accounts: [Self.account], now: Self.now)
-        // 12 completed cycles × 8 cuts (every cut has ≥ 3 readings), one
+        // 12 completed cycles × 12 cuts (every cut has ≥ 3 readings), one
         // selectable model; the helper is never scored.
         #expect(first.cycles == 12)
-        #expect(first.outcomes == 12 * 8)
-        #expect(try Self.arenaRows(container, method: "test-peeker").count == 96)
+        #expect(first.outcomes == 12 * Self.cuts)
+        #expect(try Self.arenaRows(container, method: "test-peeker").count == 12 * Self.cuts)
         #expect(try Self.arenaRows(container, method: "port-engine-recent-rate").isEmpty)
         let surfaces = Set(try Self.arenaRows(container, method: "test-peeker").map(\.surface))
         #expect(surfaces == ["rl-five_hour#\(Self.account)"])
@@ -200,7 +205,7 @@ struct RuntimeEngineTests {
         let relaunched = Self.runtime(container, roster: [Self.peeker, Self.helper])
         let third = await relaunched.scorer.pass(accounts: [Self.account], now: Self.now)
         #expect(third.outcomes == dropped.count)
-        #expect(try Self.arenaRows(container, method: "test-peeker").count == 96)
+        #expect(try Self.arenaRows(container, method: "test-peeker").count == 12 * Self.cuts)
     }
 
     @Test func theScorerTakesTheNewestCyclesFirst() async throws {
@@ -314,7 +319,7 @@ struct RuntimeEngineTests {
         #expect(await engine.resolvedMethod(windowKey: "five_hour").selected != "test-oracle")
 
         _ = await rt.scorer.pass(accounts: [Self.account], now: Self.now)
-        #expect(landed.all.count == 96)
+        #expect(landed.all.count == 12 * Self.cuts)
         await engine.recompute(now: Self.now)
         let picked = await engine.resolvedMethod(windowKey: "five_hour")
         #expect(picked.selected == "test-oracle")
@@ -392,30 +397,6 @@ struct RuntimeEngineTests {
         #expect(await engine.arenaModelIds(windowKey: "five_hour").isEmpty)
     }
 
-    /// A model well behind the engine's best on the cycles it was scored on
-    /// stops being scored deeper, here and in every later pass.
-    @Test func aClearLoserStopsBeingScoredDeeper() async throws {
-        let container = try Self.seeded(cycles: 40)
-        // A perfect engine record to lose to.
-        let ctx = ModelContext(container)
-        let surface = EngineScope.account(Self.account).qualify(EngineSelfEval.rlSurface("five_hour"))
-        let finals = try Self.completedFinals(container)
-        for (period, final) in finals {
-            for cf in EngineSelfEval.rlCutFractions {
-                ctx.insert(EngineEvalOutcome(surface: surface, method: "linear-recent", bucket: EngineSelfEval.rlBucket(cf),
-                                             periodKey: period, predicted: final, truth: final))
-            }
-        }
-        try ctx.save()
-        let rt = Self.runtime(container, roster: [Self.peeker])
-        let first = await rt.scorer.pass(accounts: [Self.account], now: Self.now)
-        // Six turns of four cycles, then judged.
-        #expect(first.cycles == 24)
-        #expect(try Self.arenaRows(container, method: "test-peeker").count == 24 * 8)
-        let again = Self.runtime(container, roster: [Self.peeker])
-        #expect(await again.scorer.pass(accounts: [Self.account], now: Self.now).forecasts == 0)
-    }
-
     static func completedFinals(_ container: ModelContainer) throws -> [(String, Double)] {
         let rows = try ModelContext(container).fetch(FetchDescriptor<RateLimitSample>())
         let samples = rows.map { (at: $0.sampledAt, usedPercentage: $0.usedPercentage, resetsAt: $0.resetsAt!) }
@@ -423,24 +404,6 @@ struct RuntimeEngineTests {
         return history.filter { $0.resetsAt <= now }.map {
             (EngineSelfEval.periodKeyRL($0.resetsAt), $0.samples.map(\.usedPercentage).max() ?? 0)
         }
-    }
-
-    @Test func losersAreJudgedAgainstTheEnginesBestOnTheirOwnCycles() {
-        func rows(_ m: String, _ n: Int, err: Double, from: Int = 1) -> [EngineSelfEval.Record] {
-            (from..<(from + n)).map {
-                .init(method: m, bucket: "cut=0.50|v2", periodKey: String(format: "2026-01-%02dT00:00:00Z", $0),
-                      predicted: 50 + err, truth: 50)
-            }
-        }
-        let engine = rows("linear-recent", 30, err: 3)
-        let records = engine + rows("far", 24, err: 6) + rows("close", 24, err: 5) + rows("young", 10, err: 40)
-        let losers = EngineSelfEval.arenaLosers(records, arenaIds: ["far", "close", "young"], weekly: false)
-        #expect(losers == ["far"])          // 6 > 3 × 1.5 + 1; 5 is not; 10 cycles is too few to judge
-        // A loser neither counts for selection nor shortens the span.
-        let shallowLoser = engine + rows("close", 24, err: 2, from: 7) + rows("far", 24, err: 9, from: 1)
-        let out = EngineSelfEval.arenaComparable(shallowLoser, arenaIds: ["far", "close"], weekly: false)
-        #expect(!out.contains { $0.method == "far" })
-        #expect(Set(out.map(\.periodKey)).count == 24)
     }
 
     /// A per-model weekly cap goes through the same loop as the fixed
@@ -484,25 +447,6 @@ struct RuntimeEngineTests {
         #expect(await engine.arenaModelIds(windowKey: identity) == ["test-oracle"])
     }
 
-    /// Once judged, only the best few arena models (and any close to the
-    /// best) stay in the running, compared over the cycles all were scored on.
-    @Test func onlyTheBestFewArenaModelsStayContenders() {
-        func rows(_ m: String, err: Double, periods: ClosedRange<Int> = 1...30) -> [EngineSelfEval.Record] {
-            periods.map {
-                .init(method: m, bucket: "cut=0.50|v2", periodKey: String(format: "2026-01-%02dT00:00:00Z", $0),
-                      predicted: 50 + err, truth: 50)
-            }
-        }
-        let engine = rows("linear-recent", err: 12)
-        let arena = (1...6).flatMap { rows("m\($0)", err: Double($0)) } + rows("m1b", err: 1.05)
-        let ids: Set<String> = ["m1", "m1b", "m2", "m3", "m4", "m5", "m6"]
-        // Top four (m1, m1b, m2, m3); m4 is outside the 10% band; m5, m6 too.
-        #expect(EngineSelfEval.arenaLosers(engine + arena, arenaIds: ids, weekly: false) == ["m4", "m5", "m6"])
-        // Four or fewer judged: nobody is cut on rank.
-        let few = (1...4).flatMap { rows("m\($0)", err: Double($0)) }
-        #expect(EngineSelfEval.arenaLosers(engine + few, arenaIds: ["m1", "m2", "m3", "m4"], weekly: false).isEmpty)
-    }
-
     /// Records the instant every cut it is asked at.
     final class Clocked: ArenaModel {
         nonisolated(unsafe) static var cuts: [Millis] = []
@@ -528,27 +472,8 @@ struct RuntimeEngineTests {
         await rt.live.submit([ArenaLiveRequest(binding: binding, resetsAt: Self.now.addingTimeInterval(3 * 3600),
                                                latestReadingAt: Self.now, models: ["test-clocked"])])
         await rt.live.settle()
-        let wantCuts: Int = 96 + 1
+        let wantCuts: Int = 12 * Self.cuts + 1
         #expect(Clocked.cuts.count == wantCuts)
         #expect(Clocked.cuts.allSatisfy { $0 % (5 * ArenaTime.minute) == 0 })
-    }
-
-    @Test func comparableRecordsShareOneSpan() {
-        func r(_ m: String, _ p: String, _ err: Double) -> EngineSelfEval.Record {
-            .init(method: m, bucket: "cut=0.50|v2", periodKey: p, predicted: 50 + err, truth: 50)
-        }
-        let engineRows = (1...20).map { r("linear-recent", String(format: "2026-01-%02dT00:00:00Z", $0), 3) }
-        let arenaRows = (13...20).map { r("arena-a", String(format: "2026-01-%02dT00:00:00Z", $0), 1) }
-        let thin = (19...20).map { r("arena-b", String(format: "2026-01-%02dT00:00:00Z", $0), 0) }
-        let out = EngineSelfEval.arenaComparable(engineRows + arenaRows + thin, arenaIds: ["arena-a", "arena-b"],
-                                                 weekly: false)
-        // From arena-a's first cycle on; arena-b, two cycles in, is left out.
-        #expect(Set(out.map(\.periodKey)).count == 8)
-        #expect(out.filter { $0.method == "linear-recent" }.count == 8)
-        #expect(!out.contains { $0.method == "arena-b" })
-        // No arena rows: unchanged.
-        #expect(EngineSelfEval.arenaComparable(engineRows, arenaIds: ["arena-a"], weekly: false) == engineRows)
-        // Only thin arena rows: the engine's record alone.
-        #expect(EngineSelfEval.arenaComparable(engineRows + thin, arenaIds: ["arena-b"], weekly: false) == engineRows)
     }
 }

@@ -65,6 +65,31 @@ struct RuntimeRawEvalReaderTests {
                 == Set(all.map { "\($0.method)|\($0.bucket)|\($0.periodKey)|\($0.predicted)" }))
     }
 
+    /// A grade's inputs come back as stored (nil on rows written before
+    /// them), and the scorer can ask for one grading's rows only.
+    @Test func inputsAndOneGradingsRows() throws {
+        let (container, url) = try Self.store()
+        let ctx = ModelContext(container)
+        try Self.seed(ctx)
+        for p in 0..<3 {
+            ctx.insert(EngineEvalOutcome(surface: "rl-five_hour#acct-a", method: "test-arena",
+                                         bucket: EngineSelfEval.rlBucket(0.175), periodKey: "2026-10-0\(p + 1)T00:00:00Z",
+                                         predicted: 1, truth: 2, inputs: "m1.p3.h4"))
+        }
+        try ctx.save()
+        let periods = (1...5).map { "2026-10-0\($0)T00:00:00Z" }
+        let current = try #require(RawEvalReader.surfaceRows(storeURL: url, surface: "rl-five_hour#acct-a",
+                                                             periods: periods, bucketSuffix: "|v3"))
+        #expect(current.count == 3)
+        #expect(Set(current.map(\.inputs)) == ["m1.p3.h4"])
+        let all = try #require(RawEvalReader.surfaceRows(storeURL: url, surface: "rl-five_hour#acct-a", periods: periods))
+        #expect(all.filter { $0.inputs == nil }.count == all.count - 3)
+        let viaData = try ModelContext(container).fetch(FetchDescriptor<EngineEvalOutcome>())
+            .filter { $0.surface == "rl-five_hour#acct-a" }
+        #expect(Set(all.map { "\($0.bucket)|\($0.periodKey)|\($0.method)|\($0.inputs ?? "-")" })
+                == Set(viaData.map { "\($0.bucket)|\($0.periodKey)|\($0.method)|\($0.inputs ?? "-")" }))
+    }
+
     /// The engine reads its record through it when the store is a file, and
     /// gets the same fit as through SwiftData.
     @Test func theEngineReadsItsRecordRaw() async throws {
@@ -80,7 +105,9 @@ struct RuntimeRawEvalReaderTests {
             picks.append(await e.selfEvalAccuracy(surface: EngineSelfEval.rlSurface("five_hour")))
         }
         #expect(picks[0] != nil)
-        #expect(picks[0]?.methods.map(\.method).sorted() == ["linear-recent", "test-arena"])
+        // Without the runtime only the app's roster is ranked: the test
+        // model's rows are read, and left out.
+        #expect(picks[0]?.methods.map(\.method).sorted() == ["linear-recent"])
         // Same stats; the order of exact ties is the dictionary's.
         #expect(picks[0]?.methods.sorted { $0.method < $1.method } == picks[1]?.methods.sorted { $0.method < $1.method })
     }

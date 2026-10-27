@@ -122,6 +122,16 @@ public enum RateLimitRoster {
         return c
     }
 
+    /// Each engine method's version, 1 unless listed. Bump one when a change
+    /// to the method changes what it forecasts: its grades are graded again
+    /// (`EngineSelfEval.NewOutcome.inputs`), as an arena port's are when its
+    /// `ArenaModelSpec.version` moves.
+    public static let engineVersions: [String: Int] = [:]
+
+    /// What an engine method's grade depends on besides the cycle: its own
+    /// version (it reads only the meter, never spend).
+    public static func engineInputs(_ id: String) -> String { "m\(engineVersions[id] ?? 1)" }
+
     /// Complexity of every method that can be picked, the arena's included,
     /// for `EngineSelfEval.bestMethod`'s near-tie break.
     public static func complexities(arena: ArenaRoster) -> [String: Int] {
