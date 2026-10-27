@@ -32,6 +32,9 @@ struct ProjectionCompareModal: View {
     @State private var actualsLoaded = false
     @State private var trajectories: [BurnTrajectory.ScoredTrajectory] = []
     @State private var accuracy: EngineSelfEval.Accuracy?
+    /// The arena models for this window that `trajectories` doesn't list
+    /// (`arenaModelList`), best record first: the "More models" rows.
+    @State private var otherModels: [ArenaModelListing] = []
     @State private var loaded = false
     /// How close the live meter has been today (#318), recomputed with the
     /// actuals; nil without a live fit or enough readings.
@@ -109,7 +112,7 @@ struct ProjectionCompareModal: View {
         // Filled in after the modal is on screen and read inside
         // `PacerModalContent`'s stored closure, so read here too (#140;
         // AGENTS.md, "SwiftUI state and data flow").
-        let _ = (trajectories, accuracy, loaded, actualsLoaded, liveReview)
+        let _ = (trajectories, accuracy, otherModels, loaded, actualsLoaded, liveReview)
         // Read here, by value, so a poll written by any context reloads the
         // actuals (`RateLimitWriteSignal`).
         let writes = RateLimitWriteSignal.shared.generation
@@ -139,6 +142,7 @@ struct ProjectionCompareModal: View {
                     live: data.live,
                     trajectories: overlays,
                     accuracy: accuracy,
+                    otherModels: otherModels,
                     liveReadout: readout?.isEstimate == true ? readout : nil,
                     liveReview: liveReview
                 )
@@ -220,12 +224,19 @@ struct ProjectionCompareModal: View {
         }
         let key = windowKey
         let live = readout?.live
-        let computed = await askEngine { () -> ([BurnTrajectory.ScoredTrajectory], EngineSelfEval.Accuracy?) in
-            (await engine.rateLimitTrajectories(windowKey: key, live: live),
-             await engine.selfEvalAccuracy(surface: EngineSelfEval.rlSurface(key)))
+        typealias Answer = (trajectories: [BurnTrajectory.ScoredTrajectory], accuracy: EngineSelfEval.Accuracy?,
+                            others: [ArenaModelListing])
+        let computed = await askEngine { () -> Answer in
+            let trajectories = await engine.rateLimitTrajectories(windowKey: key, live: live)
+            // Every arena model for the window, less the ones listed above
+            // with the lines: filtered here, once per answer, not per redraw.
+            let listed = Set(trajectories.map(\.modelId))
+            let others = await engine.arenaModelList(windowKey: key, live: live).filter { !listed.contains($0.id) }
+            return (trajectories, await engine.selfEvalAccuracy(surface: EngineSelfEval.rlSurface(key)), others)
         }
-        trajectories = computed.0
-        accuracy = computed.1
+        trajectories = computed.trajectories
+        accuracy = computed.accuracy
+        otherModels = computed.others
         loaded = true
     }
 }
@@ -248,12 +259,24 @@ struct ProjectionDetailView: View {
     /// miss) — powers the selected model's earned-record footer. Nil until
     /// the engine has scored a cycle.
     let accuracy: EngineSelfEval.Accuracy?
+    /// The window's arena models with no row above (no line slot this
+    /// refit), best record first: listed under "More models" with their
+    /// record or why there is none yet.
+    var otherModels: [ArenaModelListing] = []
     /// The live meter's estimate and the reading under it (#318), for the
     /// line under the chart; nil when the number is the reading.
     var liveReadout: LiveMeterReadout? = nil
     /// The readings against the live estimate just before each, and how close
     /// it has been today; nil without a live fit.
     var liveReview: LiveMeterDrift.Review? = nil
+
+    /// Whether "More models" is open. Collapsed by default, about thirty rows
+    /// under the dozen drawn, and kept once opened, here and on every window.
+    @AppStorage("pacer.projection.moreModelsExpanded", store: PacerSettings.store)
+    private var moreModelsExpanded = false
+    /// Open in `make render-live`, which cannot click it: a render of the
+    /// sheet is for looking at what it lists.
+    private var showsMoreModels: Bool { moreModelsExpanded || LiveRenderMode.isActive }
 
     /// Stable per-model colors for the lines and the legend swatches.
     private static let palette: [String: Color] = [
@@ -711,33 +734,11 @@ struct ProjectionDetailView: View {
             .padding(.bottom, 4)
 
             ForEach(Array(ranked.enumerated()), id: \.element.id) { idx, st in
-                HStack(spacing: 10) {
-                    RoundedRectangle(cornerRadius: 2)
-                        .fill(color(st.modelId).opacity(st.canProject ? 1 : 0.35))
-                        .frame(width: 14, height: 4)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(BurnTrajectory.displayName(st.modelId))
-                            .font(.system(size: 13, weight: st.isSelected ? .semibold : .regular))
-                        if let reason = st.unavailableReason {
-                            Text("can't project yet · \(reason)")
-                                .font(.system(size: 10))
-                                .foregroundStyle(.tertiary)
-                        }
-                    }
-                    if let summary = BurnTrajectory.summary(st.modelId) {
-                        PacerInfoButton(help: summary) {
-                            ModelInfoContent(
-                                modelId: st.modelId, windowDuration: durationSeconds,
-                                stat: accuracy?.methods.first { $0.method == st.modelId })
-                        }
-                    }
-                    if st.isSelected {
-                        Text("on the dashboard").font(.system(size: 10, weight: .semibold))
-                            .padding(.horizontal, 6).padding(.vertical, 2)
-                            .background(Capsule().fill(color(st.modelId).opacity(0.18)))
-                            .foregroundStyle(color(st.modelId))
-                    }
-                    Spacer()
+                ModelListRow(
+                    modelId: st.modelId, windowDuration: durationSeconds, stat: stat(st.modelId),
+                    swatch: color(st.modelId).opacity(st.canProject ? 1 : 0.35), accent: color(st.modelId),
+                    isSelected: st.isSelected, note: st.unavailableReason.map { "can't project yet · \($0)" }
+                ) {
                     if let crossAt = st.trajectory.crossesFullAt {
                         // Counts down on the shared minute schedule while the
                         // sheet stays open.
@@ -747,20 +748,8 @@ struct ProjectionDetailView: View {
                                 .font(.system(size: 11)).foregroundStyle(.red.opacity(0.85))
                         }
                     }
-                    Text(st.typicalAbsError.isFinite
-                         ? String(format: "within ±%.0f%%", st.typicalAbsError)
-                         : "—")
-                        .font(.system(size: 12).monospacedDigit())
-                        .foregroundStyle(.secondary)
+                    Self.accuracyText(st.typicalAbsError.isFinite ? st.typicalAbsError : nil)
                 }
-                .padding(.vertical, 7)
-                .padding(.horizontal, 10)
-                .background(
-                    st.isSelected
-                        ? RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            .fill(color(st.modelId).opacity(0.07))
-                        : nil
-                )
                 if idx != ranked.indices.last {
                     Divider().opacity(0.25).padding(.leading, 34)
                 }
@@ -773,7 +762,125 @@ struct ProjectionDetailView: View {
                     .padding(.horizontal, 10)
                     .padding(.top, 8)
             }
+
+            moreModels
         }
+    }
+
+    private func stat(_ id: String) -> EngineSelfEval.Accuracy.MethodStat? {
+        accuracy?.methods.first { $0.method == id }
+    }
+
+    /// "within ±3%", the column's number; "—" without one.
+    private static func accuracyText(_ error: Double?) -> some View {
+        Text(error.map { String(format: "within ±%.0f%%", $0) } ?? "—")
+            .font(.system(size: 12).monospacedDigit())
+            .foregroundStyle(.secondary)
+    }
+
+    /// Every other model this window can run, behind one disclosure: no line,
+    /// so no swatch; its record when it has one, else where its record is.
+    @ViewBuilder
+    private var moreModels: some View {
+        if !otherModels.isEmpty {
+            Button { moreModelsExpanded.toggle() } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: showsMoreModels ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 8, weight: .semibold))
+                        .frame(width: 14)
+                    Text("More models (\(otherModels.count))")
+                }
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 10)
+            .padding(.top, 12)
+            .padding(.bottom, 2)
+
+            if showsMoreModels {
+                ForEach(Array(otherModels.enumerated()), id: \.element.id) { idx, m in
+                    ModelListRow(modelId: m.id, windowDuration: durationSeconds, stat: stat(m.id),
+                                 swatch: nil, accent: color(m.id)) {
+                        if m.status == .recorded {
+                            Self.accuracyText(m.typicalAbsError)
+                        } else {
+                            Text(Self.statusText(m.status))
+                                .font(.system(size: 11).monospacedDigit())
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                    if idx != otherModels.indices.last {
+                        Divider().opacity(0.25).padding(.leading, 34)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Where a model without a record stands, in the accuracy column.
+    static func statusText(_ status: ArenaModelListing.Status) -> String {
+        switch status {
+        case .recorded: return "—"
+        case let .scoring(cycles, floor): return "scoring your history · \(cycles) of \(floor) cycles"
+        case .downloading: return "downloading"
+        case let .declined(reason): return reason
+        }
+    }
+}
+
+/// One row of the compare sheet's model list: the line's swatch, the name
+/// (with why it has no line, when it hasn't), its info button, the "on the
+/// dashboard" badge, then whatever the list puts on the right. The drawn
+/// models and "More models" share it, so the two halves can't drift apart.
+private struct ModelListRow<Trailing: View>: View {
+    let modelId: String
+    let windowDuration: TimeInterval
+    let stat: EngineSelfEval.Accuracy.MethodStat?
+    /// Nil: a model with no line slot; the space stays, so names align.
+    let swatch: Color?
+    /// The model's colour, for the badge and the selected row's tint.
+    let accent: Color
+    var isSelected = false
+    var note: String? = nil
+    @ViewBuilder let trailing: () -> Trailing
+
+    var body: some View {
+        HStack(spacing: 10) {
+            RoundedRectangle(cornerRadius: 2)
+                .fill(swatch ?? .clear)
+                .frame(width: 14, height: 4)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(BurnTrajectory.displayName(modelId))
+                    .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
+                if let note {
+                    Text(note)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            if let summary = BurnTrajectory.summary(modelId) {
+                PacerInfoButton(help: summary) {
+                    ModelInfoContent(modelId: modelId, windowDuration: windowDuration, stat: stat)
+                }
+            }
+            if isSelected {
+                Text("on the dashboard").font(.system(size: 10, weight: .semibold))
+                    .padding(.horizontal, 6).padding(.vertical, 2)
+                    .background(Capsule().fill(accent.opacity(0.18)))
+                    .foregroundStyle(accent)
+            }
+            Spacer()
+            trailing()
+        }
+        .padding(.vertical, 7)
+        .padding(.horizontal, 10)
+        .background(
+            isSelected
+                ? RoundedRectangle(cornerRadius: 7, style: .continuous).fill(accent.opacity(0.07))
+                : nil
+        )
     }
 }
 
@@ -788,11 +895,13 @@ struct ModelInfoGallery: View {
     @State private var accuracy: EngineSelfEval.Accuracy?
 
     var body: some View {
-        // The engine's methods, then any arena model this window's record
-        // holds (`RateLimitRoster`): the gallery shows what the sheet can.
-        let arenaIds = ArenaRoster.standard.selectableIds
+        // The engine's methods, then every arena model that forecasts this
+        // window, recorded or not (the sheet's "More models"): the gallery
+        // shows what the sheet can.
+        let target: ArenaTarget? = windowKey == RateLimitWindowName.fiveHour ? .meterFiveHour
+            : windowKey == RateLimitWindowName.sevenDay ? .meterSevenDay : nil
         let ids = RateLimitRoster.engineIds
-            + (accuracy?.methods.map(\.method).filter { arenaIds.contains($0) }.sorted() ?? [])
+            + (target.map { ArenaRoster.standard.specs(for: $0).map(\.name).sorted() } ?? [])
         LazyVGrid(columns: [GridItem(.adaptive(minimum: 300, maximum: 330), alignment: .top)],
                   alignment: .leading, spacing: 12) {
             ForEach(ids, id: \.self) { id in
