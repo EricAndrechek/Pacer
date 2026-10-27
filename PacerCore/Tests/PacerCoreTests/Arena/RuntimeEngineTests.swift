@@ -255,6 +255,33 @@ struct RuntimeEngineTests {
         #expect(report.forecasts == 0)
     }
 
+    /// Missing weights are asked for again before every pass, so a download
+    /// that failed is retried in the same process; once they are here, not.
+    @Test func everyPassAsksForMissingWeights() async throws {
+        let container = try Self.seeded()
+        let pinned = ArenaModelSpec(name: "test-pinned", targets: Self.meters, weights: ["acme/net@abc"]) {
+            Peeker(context: $0)
+        }
+        final class Asked: @unchecked Sendable {
+            let lock = NSLock()
+            var calls: [[String]] = []
+            func add(_ ids: [String]) { lock.withLock { calls.append(ids) } }
+            var count: Int { lock.withLock { calls.count } }
+        }
+        let asked = Asked()
+        var config = Self.noSleep()
+        config.rescanInterval = 0.05
+        let rt = ArenaRuntime(container: container, roster: ArenaRoster(registry: [pinned]),
+                              weights: { _ in nil }, ensureWeights: { asked.add($0) }, config: config,
+                              onRecordLanded: { _, _ in }, onLiveLanded: { _ in })
+        rt.start(accounts: { [Self.account] })
+        // Background priority: on a loaded Mac a pass can wait a while for a core.
+        for _ in 0..<3000 where asked.count < 3 { try await Task.sleep(for: .milliseconds(10)) }
+        await rt.stop()
+        #expect(asked.count >= 3)
+        #expect(asked.lock.withLock { asked.calls.allSatisfy { $0 == ["acme/net@abc"] } })
+    }
+
     @Test func stoppingEndsTheLoop() async throws {
         let container = try Self.seeded()
         let rt = Self.runtime(container, roster: [Self.peeker])

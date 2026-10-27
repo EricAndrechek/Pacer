@@ -49,6 +49,7 @@ struct RuntimeBudgetTests {
         #expect(abs(elapsed - 40) < 0.5)
         #expect(abs(budget.totals.spent - 10) < 1e-9)
         #expect(abs(budget.totals.slept - 30) < 0.5)
+        #expect(abs(budget.averageShare - 0.25) < 0.01)
     }
 
     /// One long step (a forecast with no check inside) is paid for in full

@@ -273,6 +273,10 @@ public actor ArenaRecordScorer {
     public func pass(accounts: [String], now: Date = Date()) async -> Report {
         var report = Report()
         guard !roster.isEmpty, !cancel.isSet else { return report }
+        // Nothing can run yet (every model waits on a download): no history
+        // to read.
+        guard roster.selectable.contains(where: { Self.weightsPresent($0, roster: roster, services: services) })
+        else { return report }
         let started = SuspendingClock.now
         var streams: [Stream] = []
         let fingerprint = self.fingerprint
@@ -378,8 +382,9 @@ public actor ArenaRecordScorer {
         }.joined(separator: ", ")
         Log.write("Arena", (done ? "scored " : "progress ") + "\(r.cycles)/\(total) cycle(s): +\(r.outcomes) outcome(s) "
                   + "from \(r.forecasts) forecast(s), \(r.declined) declined, "
-                  + String(format: "busy %.0f s of %.0f s awake; arena cpu %.0f s, paced %.0f s", r.busySeconds,
-                           Double(awake.components.seconds), cpu.spent, cpu.slept)
+                  + String(format: "busy %.0f s of %.0f s awake; arena cpu %.0f s since launch "
+                           + "(%.0f%% of a core), paced %.0f s", r.busySeconds,
+                           Double(awake.components.seconds), cpu.spent, budget.averageShare * 100, cpu.slept)
                   + (slowest.isEmpty ? "" : "; slowest: \(slowest)"))
     }
 

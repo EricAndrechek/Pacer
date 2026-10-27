@@ -64,6 +64,7 @@ public final class ArenaCPUBudget: @unchecked Sendable {
     static let maxUrgentYield = 5.0
 
     private let clock: Clock
+    private let createdAt: Double
     private let lock = NSLock()
     // Guarded by `lock`.
     private var tokens: Double
@@ -79,12 +80,21 @@ public final class ArenaCPUBudget: @unchecked Sendable {
         self.clock = clock
         self.tokens = max(0, burst)
         self.refilledAt = clock.wall()
+        self.createdAt = clock.wall()
     }
 
     /// CPU seconds charged so far, and seconds slept to stay within the rate.
     public var totals: (spent: Double, slept: Double) {
         lock.lock(); defer { lock.unlock() }
         return (spentTotal, sleptTotal)
+    }
+
+    /// CPU charged per second since the budget was made: the share of one
+    /// core the arena has averaged (at most `rate`, plus `burst` early on).
+    public var averageShare: Double {
+        let elapsed = clock.wall() - createdAt
+        lock.lock(); defer { lock.unlock() }
+        return elapsed > 0 ? spentTotal / elapsed : 0
     }
 
     /// Start counting this thread from now, without charging what it did
