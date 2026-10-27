@@ -133,8 +133,8 @@ app: vendor  ## Signed Debug build of Pacer.app (output: Build/Build/Products/De
 # Install / uninstall
 # ------------------------------------------------------------------
 
-install: vendor  ## Build + sign + notarize + copy to /Applications. Cleans up legacy daemon registration. Quits and re-opens Pacer.app if it was running. Idempotent.
-	@$(REPO_ROOT)/bin/dev-install.sh
+install: vendor  ## Build + sign + notarize + copy to /Applications. Cleans up legacy daemon registration. Quits and re-opens Pacer.app if it was running. Idempotent. CONFIGURATION=Release builds what users run.
+	@PACER_BUILD_CONFIGURATION="$(or $(CONFIGURATION),Debug)" $(REPO_ROOT)/bin/dev-install.sh
 
 uninstall:  ## Quit GUI + remove /Applications/Pacer.app + clean up legacy daemon plist. Preserves SwiftData and logs.
 	@$(REPO_ROOT)/bin/dev-uninstall.sh

@@ -115,12 +115,21 @@ xcodegen generate
 #    The override applies to both the app and the widget extension, which
 #    macOS requires to share a version.
 DEV_BUILD_VERSION="$(date -u +%s)"
+# Debug by default, the inner loop's build. `PACER_BUILD_CONFIGURATION=Release`
+# (or `make install CONFIGURATION=Release`) builds what users run: the
+# on-device forecast models run 15-18x slower in Debug, so judging their
+# background back-scoring on a Debug install judges the wrong program.
+BUILD_CONFIGURATION="${PACER_BUILD_CONFIGURATION:-Debug}"
+case "${BUILD_CONFIGURATION}" in
+    Debug|Release) ;;
+    *) echo "ERROR: PACER_BUILD_CONFIGURATION must be Debug or Release, not ${BUILD_CONFIGURATION}"; exit 1 ;;
+esac
 echo
-echo "==> Building Pacer.app (Debug, unsigned, build ${DEV_BUILD_VERSION})"
+echo "==> Building Pacer.app (${BUILD_CONFIGURATION}, unsigned, build ${DEV_BUILD_VERSION})"
 xcodebuild \
     -project Pacer.xcodeproj \
     -scheme Pacer \
-    -configuration Debug \
+    -configuration "${BUILD_CONFIGURATION}" \
     -destination 'platform=macOS' \
     -derivedDataPath "${REPO_ROOT}/Build" \
     CURRENT_PROJECT_VERSION="${DEV_BUILD_VERSION}" \
@@ -131,7 +140,7 @@ xcodebuild \
 # layouts end in Products/Debug/Pacer.app, so resolving by suffix is
 # version-proof — a hardcoded path breaks whenever the maintainer's and
 # CI's toolchains disagree on the <derivedDataPath>/[Build/]Products nesting.
-BUILD_OUTPUT="$(find "${REPO_ROOT}/Build" -type d -name "${APP_NAME}" -path "*/Products/Debug/*" | head -1)"
+BUILD_OUTPUT="$(find "${REPO_ROOT}/Build" -type d -name "${APP_NAME}" -path "*/Products/${BUILD_CONFIGURATION}/*" | head -1)"
 if [ -z "${BUILD_OUTPUT}" ] || [ ! -d "${BUILD_OUTPUT}" ]; then
     echo "ERROR: build did not produce ${APP_NAME} under ${REPO_ROOT}/Build"
     find "${REPO_ROOT}/Build" -name "${APP_NAME}" -type d 2>/dev/null | head -5
