@@ -11,8 +11,10 @@ import SwiftData
 // - `ArenaRecordScorer` back-computes each arena model over the account's
 //   completed cycles, at the engine's cuts and graded by the value the app
 //   shows (`displayedAtReset`), into the same `EngineEvalOutcome` rows the
-//   engine's own methods are scored into. Newest cycles first, within a CPU
-//   budget (`ArenaCPUBudget`), resumable: it skips every key already stored.
+//   engine's own methods are scored into. Cheap models first over the whole
+//   depth, then the heavy ones (`ArenaModelCosts`); newest cycles first,
+//   within a CPU budget (`ArenaCPUBudget`), resumable: it skips every key
+//   already stored.
 // - `ArenaLiveForecaster` makes the live projections the engine can draw
 //   (the pick, and the few the compare sheet lists), into `ArenaLiveCache`.
 // - `ArenaRuntime` holds both, the shared history, the CPU budget they share
@@ -68,7 +70,8 @@ final class ArenaCancelFlag: @unchecked Sendable {
 
 /// Drops what the arena keeps that can be made again when macOS reports
 /// memory pressure: the runners' forecast memos (up to 24 MB an account in a
-/// pass, 16 MB an account live) and the calibration layer's network cache.
+/// pass, 16 MB an account live), the calibration layer's network cache and
+/// the networks' kept scratch buffers (`FMScratch`).
 /// On a Mac short of memory those pages were what got compressed and swapped,
 /// and touching them again is a page-in on whatever thread asks.
 final class ArenaMemoryRelief: @unchecked Sendable {
@@ -81,6 +84,8 @@ final class ArenaMemoryRelief: @unchecked Sendable {
         source.setEventHandler { [source] in
             let level = source.data.contains(.critical) ? "critical" : "warning"
             FMCalCutCache.shared.removeAll()
+            FMScratch.release()
+            FMSeries.storeSeriesCache.removeAll()
             flag.set(true)
             Task.detached(priority: .utility) {
                 await live.dropRunners()
@@ -127,6 +132,12 @@ public actor ArenaRecordScorer {
         /// scans and views on top, the app as a whole stays near a quarter
         /// to a third of one core while a backfill runs.
         public var dutyCycle: Double = 0.2
+        /// The share while the Mac is plugged in, cool and idle
+        /// (`ArenaBudgetGovernor`): one core, never more.
+        public var idleDutyCycle: Double = 1
+        /// Whether `ArenaRuntime.start` lets the governor raise the share
+        /// to `idleDutyCycle` (the app); off, it stays at `dutyCycle`.
+        public var adaptiveBudget = true
         /// New outcomes are saved and handed to the engines in batches, at
         /// most this often (or at `flushOutcomes`), and at the end of a pass:
         /// a save per cycle was hundreds of saves on a first pass, each a
@@ -151,12 +162,19 @@ public actor ArenaRecordScorer {
         /// layer's: 24 origins 2 h apart on five-hour windows, 8 h on weekly
         /// ones), are made once and read at every later cut and cycle: a calib
         /// forecast costs 12–25 ms on a reused runner against 86–232 ms on a
-        /// fresh one. Every account in the pass has one, so the bound is per
-        /// account: 3 M doubles, 24 MB.
+        /// fresh one. Only the account being scored keeps one, so this is
+        /// the whole bound: 3 M doubles, 24 MB.
         public var memoLimitValues = 3_000_000
-        /// Cycles a window scores before the next window's turn.
+        /// Cycles a window scores before the next window's turn. A
+        /// window's first turn in each phase scores enough for selection
+        /// (`EngineSelfEval.arenaMinPeriods`), so every window can pick
+        /// before any goes deep.
         public var sessionCyclesPerTurn = 4
         public var weeklyCyclesPerTurn = 2
+        /// A model whose forecast costs at most this much CPU on this Mac
+        /// (`ArenaModelCosts`) is scored in phase 1, over every cycle in
+        /// depth, before any heavier one is scored at all.
+        public var cheapCostMs = 150.0
         /// Prices for the history's spend; nil: the store's ledger, as the
         /// live meter resolves it (tests and probes pass their own).
         public var pricing: PricingTable.Snapshot?
@@ -169,9 +187,13 @@ public actor ArenaRecordScorer {
         public var forecasts = 0
         public var declined = 0
         public var busySeconds = 0.0
-        /// Busy seconds and forecasts per model, for the log's slowest list.
+        /// Busy (wall) seconds, CPU seconds and forecasts per model, for the
+        /// log's slowest list.
         public var modelSeconds: [String: Double] = [:]
+        public var modelCPUSeconds: [String: Double] = [:]
         public var modelForecasts: [String: Int] = [:]
+        /// Cycles visited in each phase (1: the cheap models, 2: the rest).
+        public var phaseCycles: [Int: Int] = [:]
         public init() {}
     }
 
@@ -180,6 +202,9 @@ public actor ArenaRecordScorer {
     private let history: ArenaHistoryCache
     private let services: ArenaServices
     private let budget: ArenaCPUBudget
+    private let costs: ArenaModelCosts
+    /// Every registered model's place in the registry (`DoneKey`).
+    private let modelIndex: [String: UInt16]
     private let cancel: ArenaCancelFlag
     /// Set on memory pressure: the pass drops its runners (and their memos)
     /// at the next window's turn.
@@ -204,10 +229,13 @@ public actor ArenaRecordScorer {
     /// - Parameter services: the scorer's own: its `isCancelled` is the CPU
     ///   budget's checkpoint (`ArenaRuntime`).
     init(container: ModelContainer, roster: ArenaRoster, history: ArenaHistoryCache, services: ArenaServices,
-         budget: ArenaCPUBudget, cancel: ArenaCancelFlag, config: Config = Config(), calendar: Calendar = .current,
+         budget: ArenaCPUBudget, costs: ArenaModelCosts = ArenaModelCosts(defaults: nil), cancel: ArenaCancelFlag,
+         config: Config = Config(), calendar: Calendar = .current,
          landed: @escaping @Sendable (String, [EngineSelfEval.NewOutcome]) async -> Void) {
         self.container = container; self.roster = roster; self.history = history; self.services = services
-        self.budget = budget; self.cancel = cancel; self.config = config; self.calendar = calendar
+        self.budget = budget; self.costs = costs; self.cancel = cancel; self.config = config; self.calendar = calendar
+        self.modelIndex = Dictionary(roster.registry.enumerated().map { ($0.element.name, UInt16($0.offset)) },
+                                     uniquingKeysWith: { a, _ in a })
         self.landed = landed
     }
 
@@ -262,8 +290,66 @@ public actor ArenaRecordScorer {
         var records: [EngineSelfEval.Record]
         let store: ArenaHistoryStore
         let surface: String
-        var queue: [BurnTrajectory.Cycle]       // newest first
-        var existing: Set<String>
+        /// Every cycle in depth with something still to score, newest first.
+        let cycles: [BurnTrajectory.Cycle]
+        /// The current phase's cycles still to visit, newest first.
+        var queue: [BurnTrajectory.Cycle] = []
+        /// What is already scored, arena models only, as small integers: a
+        /// pass lasts days on a first launch, and this as strings (every
+        /// method, ~90 characters a key) was megabytes a window.
+        var existing: Set<DoneKey>
+        /// Each cycle's place in `cycles`, by period key.
+        let periodIndex: [String: UInt16]
+        /// Turns this window has had in the current phase.
+        var turns = 0
+    }
+
+    /// One (model, cut, cycle) of a window's record, by index: the model in
+    /// the registry, the cut in `Config.cuts`, the cycle among the window's
+    /// completed cycles in depth (`periodIndex`).
+    struct DoneKey: Hashable { let model: UInt16; let cut: UInt8; let period: UInt16 }
+
+    private func doneKey(_ s: Stream, _ model: String, cut: Int, period: String) -> DoneKey? {
+        guard let m = modelIndex[model], let p = s.periodIndex[period] else { return nil }
+        return DoneKey(model: m, cut: UInt8(cut), period: p)
+    }
+
+    private func isDone(_ s: Stream, _ model: String, cut: Int, period: String) -> Bool {
+        doneKey(s, model, cut: cut, period: period).map { s.existing.contains($0) } ?? false
+    }
+
+    /// The two phases of a pass: the cheap models over every cycle in depth,
+    /// then the rest (`Config.cheapCostMs`, `ArenaModelCosts`).
+    enum Phase: Int, CaseIterable { case cheap = 1, heavy = 2 }
+
+    /// One account's runner for the pass, and the models that have run on it
+    /// (a model's first forecast on a runner is not timed: `ArenaModelCosts`).
+    private final class RunnerSlot {
+        let runner: ArenaRunner
+        var warm = Set<String>()
+        init(_ runner: ArenaRunner) { self.runner = runner }
+    }
+
+    /// The stream's models this phase scores: in phase 1 the ones whose
+    /// forecast costs at most `cheapCostMs` here (re-read every cycle, so a
+    /// model timed heavier than its prior moves to phase 2 at once); in
+    /// phase 2 every one still missing anything.
+    private func phaseModels(_ s: Stream, _ phase: Phase) -> [ArenaModelSpec] {
+        switch phase {
+        case .heavy: return s.models
+        case .cheap:
+            let weekly = s.window.isWeeklyScale
+            return s.models.filter { costs.cost($0, weekly: weekly, registry: roster.registryByName) <= config.cheapCostMs }
+        }
+    }
+
+    /// Whether any of `models` is missing at any cut of `cycle`.
+    private func needs(_ s: Stream, _ cycle: BurnTrajectory.Cycle, models: [ArenaModelSpec]) -> Bool {
+        let period = EngineSelfEval.periodKeyRL(cycle.resetsAt)
+        for ci in config.cuts.indices {
+            for m in models where !isDone(s, m.name, cut: ci, period: period) { return true }
+        }
+        return false
     }
 
     /// One pass over `accounts`: a full one (120 days, the first time an
@@ -286,59 +372,90 @@ public actor ArenaRecordScorer {
             streams += await self.streams(account: account, now: now, full: full)
             coveredFingerprint[account] = fingerprint
         }
-        let queued = streams.reduce(0) { $0 + $1.queue.count }
-        guard queued > 0 else { return report }
-        Log.write("Arena", "scoring \(queued) cycle(s) over \(streams.count) window(s), "
-                  + "\(Set(streams.flatMap { $0.models.map(\.name) }).count) model(s), "
-                  + String(format: "%.0f%% of a core", config.dutyCycle * 100))
+        let depth = streams.reduce(0) { $0 + $1.cycles.count }
+        guard depth > 0 else { return report }
 
-        // Each window in turn, newest cycles first, a few cycles a turn, so
-        // every window's selection has something to go on early. One runner
-        // per account for the whole pass: a parent's child backtests over
+        // Phase 1 scores only the models that are cheap on this Mac, over
+        // every cycle in depth; phase 2 the rest. Within a phase each window
+        // takes its turn, newest cycles first, so every window's selection
+        // has something to go on early. The account being scored keeps one
+        // runner across its turns: a parent's child backtests over
         // neighbouring cuts and cycles mostly repeat, and its memo answers
         // them.
-        var runners: [String: ArenaRunner] = [:]
+        var runners: [String: RunnerSlot] = [:]
         var lastLog = SuspendingClock.now
-        while streams.contains(where: { !$0.queue.isEmpty }) {
-            for i in streams.indices where !streams[i].queue.isEmpty {
-                if relief.take() { runners.removeAll() }
-                let weekly = streams[i].window.isWeeklyScale
-                let account = streams[i].account
-                let runner = runners[account] ?? {
-                    let r = ArenaRunner(registry: roster.registry, services: services)
-                    r.memoLimitValues = config.memoLimitValues
-                    return r
-                }()
-                runners[account] = runner
-                defer { prune(&streams[i]) }
-                for _ in 0..<(weekly ? config.weeklyCyclesPerTurn : config.sessionCyclesPerTurn) {
-                    guard !cancel.isSet else { saveUnsaved(); return report }
-                    guard !streams[i].queue.isEmpty else { break }
-                    let cycle = streams[i].queue.removeFirst()
-                    let news = score(cycle, in: &streams[i], runner: runner, report: &report)
-                    report.cycles += 1
-                    if !news.isEmpty {
-                        report.outcomes += news.count
-                        streams[i].records += news.map {
-                            EngineSelfEval.Record(method: $0.method, bucket: $0.bucket, periodKey: $0.periodKey,
-                                                  predicted: $0.predicted, truth: $0.truth)
+        var planned = 0
+        for phase in Phase.allCases {
+            for i in streams.indices {
+                let models = phaseModels(streams[i], phase)
+                streams[i].queue = models.isEmpty ? [] : streams[i].cycles.filter { needs(streams[i], $0, models: models) }
+                streams[i].turns = 0
+            }
+            let queued = streams.reduce(0) { $0 + $1.queue.count }
+            guard queued > 0 else { continue }
+            planned += queued
+            let names = Set(streams.flatMap { phaseModels($0, phase).map(\.name) })
+            Log.write("Arena", "phase \(phase.rawValue): scoring \(queued) cycle(s) over "
+                      + "\(streams.filter { !$0.queue.isEmpty }.count) window(s), \(names.count) model(s)"
+                      + (phase == .cheap ? String(format: " (≤ %.0f ms a forecast)", config.cheapCostMs) : "")
+                      + String(format: ", %.0f%% of a core", budget.rate * 100))
+            while streams.contains(where: { !$0.queue.isEmpty }) {
+                for i in streams.indices where !streams[i].queue.isEmpty {
+                    if relief.take() { runners.removeAll() }
+                    let weekly = streams[i].window.isWeeklyScale
+                    let account = streams[i].account
+                    // One account's runner at a time: each holds a memo of up
+                    // to `memoLimitValues` (24 MB), and four accounts' were a
+                    // hundred megabytes for the days a first pass lasts. An
+                    // account's windows are consecutive streams, so its memo
+                    // still serves all of them in a round; what a switch costs
+                    // is a model's first forecast on the next turn.
+                    if runners.count > 1 || runners[account] == nil { runners = runners.filter { $0.key == account } }
+                    let slot = runners[account] ?? {
+                        let r = ArenaRunner(registry: roster.registry, services: services)
+                        r.memoLimitValues = config.memoLimitValues
+                        return RunnerSlot(r)
+                    }()
+                    runners[account] = slot
+                    defer { prune(&streams[i]); streams[i].turns += 1 }
+                    let perTurn = weekly ? config.weeklyCyclesPerTurn : config.sessionCyclesPerTurn
+                    let turn = streams[i].turns == 0 ? max(perTurn, EngineSelfEval.arenaMinPeriods(weekly: weekly)) : perTurn
+                    for _ in 0..<turn {
+                        guard !cancel.isSet else { saveUnsaved(); costs.save(); return report }
+                        guard !streams[i].queue.isEmpty else { break }
+                        let models = phaseModels(streams[i], phase)
+                        guard !models.isEmpty else { streams[i].queue.removeAll(); break }
+                        let cycle = streams[i].queue.removeFirst()
+                        let news = score(cycle, in: &streams[i], models: models, slot: slot, report: &report)
+                        report.cycles += 1
+                        report.phaseCycles[phase.rawValue, default: 0] += 1
+                        if !news.isEmpty {
+                            report.outcomes += news.count
+                            streams[i].records += news.map {
+                                EngineSelfEval.Record(method: $0.method, bucket: $0.bucket, periodKey: $0.periodKey,
+                                                      predicted: $0.predicted, truth: $0.truth)
+                            }
+                            unsaved.append((streams[i].account, streams[i].surface, news))
+                            unsavedCount += news.count
                         }
-                        unsaved.append((streams[i].account, streams[i].surface, news))
-                        unsavedCount += news.count
-                    }
-                    if unsavedCount >= config.flushOutcomes
-                        || SuspendingClock.now - lastFlush >= .seconds(config.flushInterval) {
-                        await flush()
-                    }
-                    if SuspendingClock.now - lastLog >= .seconds(120) {
-                        lastLog = SuspendingClock.now
-                        log(report, of: queued, since: started)
+                        if unsavedCount >= config.flushOutcomes
+                            || SuspendingClock.now - lastFlush >= .seconds(config.flushInterval) {
+                            await flush()
+                        }
+                        if SuspendingClock.now - lastLog >= .seconds(120) {
+                            lastLog = SuspendingClock.now
+                            log(report, phase: phase, of: planned, since: started)
+                        }
                     }
                 }
             }
+            log(report, phase: phase, of: planned, since: started, done: true)
         }
         await flush()
-        log(report, of: queued, since: started, done: true)
+        // Nothing runs a network until the next pass or refit: its kept
+        // scratch is only memory now (`FMScratch`).
+        runners.removeAll()
+        FMScratch.release()
         MemoryHygiene.relieve()
         return report
     }
@@ -346,6 +463,7 @@ public actor ArenaRecordScorer {
     /// Save what is unsaved, then hand each account's share to its engine.
     private func flush() async {
         lastFlush = SuspendingClock.now
+        costs.save()
         let batch = saveUnsaved()
         for (account, news) in batch where !news.isEmpty { await landed(account, news) }
     }
@@ -373,14 +491,16 @@ public actor ArenaRecordScorer {
         return byAccount
     }
 
-    private func log(_ r: Report, of total: Int, since started: SuspendingClock.Instant, done: Bool = false) {
+    private func log(_ r: Report, phase: Phase, of total: Int, since started: SuspendingClock.Instant,
+                     done: Bool = false) {
         let awake = SuspendingClock.now - started
         let cpu = budget.totals
-        // The three that cost the most, with their time per forecast.
-        let slowest = r.modelSeconds.sorted { $0.value > $1.value }.prefix(3).map { id, s in
+        // The three that cost the most CPU in all, with their CPU per forecast.
+        let slowest = r.modelCPUSeconds.sorted { $0.value > $1.value }.prefix(3).map { id, s in
             String(format: "%@ %.0f ms", id, s * 1000 / Double(max(1, r.modelForecasts[id] ?? 1)))
         }.joined(separator: ", ")
-        Log.write("Arena", (done ? "scored " : "progress ") + "\(r.cycles)/\(total) cycle(s): +\(r.outcomes) outcome(s) "
+        Log.write("Arena", (done ? "phase \(phase.rawValue) done, " : "phase \(phase.rawValue) progress ")
+                  + "\(r.cycles)/\(total) cycle(s): +\(r.outcomes) outcome(s) "
                   + "from \(r.forecasts) forecast(s), \(r.declined) declined, "
                   + String(format: "busy %.0f s of %.0f s awake; arena cpu %.0f s since launch "
                            + "(%.0f%% of a core), paced %.0f s", r.busySeconds,
@@ -431,10 +551,29 @@ public actor ArenaRecordScorer {
             let surface = EngineScope.account(account).qualify(EngineSelfEval.rlSurface(window.key))
             let stored = storedRecords(surface: surface,
                                        periods: completed.map { EngineSelfEval.periodKeyRL($0.resetsAt) })
-            let existing = Set(stored.map {
-                EngineEvalOutcome.makeKey(surface: surface, method: $0.method, bucket: $0.bucket, periodKey: $0.periodKey)
-            })
-            let records = stored.filter { EngineSelfEval.isCurrentRLBucket($0.bucket) }
+            var periodIndex: [String: UInt16] = [:]
+            for (i, c) in completed.enumerated() { periodIndex[EngineSelfEval.periodKeyRL(c.resetsAt)] = UInt16(i) }
+            let cutIndex = Dictionary(config.cuts.enumerated().map { (EngineSelfEval.rlBucket($0.element), $0.offset) },
+                                      uniquingKeysWith: { a, _ in a })
+            let arenaNames = Set(available.map(\.name))
+            var existing = Set<DoneKey>()
+            for r in stored where arenaNames.contains(r.method) {
+                guard let m = modelIndex[r.method], let c = cutIndex[r.bucket], let p = periodIndex[r.periodKey]
+                else { continue }
+                existing.insert(DoneKey(model: m, cut: UInt8(c), period: p))
+            }
+            // One copy of each method name and period key, shared by every
+            // record that names it: read from SQLite, each row had its own.
+            var interned: [String: String] = [:]
+            func intern(_ x: String) -> String {
+                if let c = interned[x] { return c }
+                interned[x] = x
+                return x
+            }
+            let records = stored.filter { EngineSelfEval.isCurrentRLBucket($0.bucket) }.map {
+                EngineSelfEval.Record(method: intern($0.method), bucket: intern($0.bucket), periodKey: intern($0.periodKey),
+                                      predicted: $0.predicted, truth: $0.truth)
+            }
             let losers = EngineSelfEval.arenaLosers(records, arenaIds: Set(available.map(\.name)),
                                                     weekly: window.isWeeklyScale)
             if !losers.isEmpty {
@@ -444,41 +583,48 @@ public actor ArenaRecordScorer {
             let models = available.filter { !losers.contains($0.name) }
             guard !models.isEmpty else { continue }
             let wanted = models.count * config.cuts.count
-            let queue = completed.filter { c in
-                let period = EngineSelfEval.periodKeyRL(c.resetsAt)
-                let have = config.cuts.reduce(0) { n, cf in
-                    n + models.filter { existing.contains(Self.key(surface, $0.name, cf, period)) }.count
+            let todo = completed.filter { c in
+                guard let p = periodIndex[EngineSelfEval.periodKeyRL(c.resetsAt)] else { return false }
+                var have = 0
+                for ci in config.cuts.indices {
+                    for m in models {
+                        if let mi = modelIndex[m.name], existing.contains(DoneKey(model: mi, cut: UInt8(ci), period: p)) {
+                            have += 1
+                        }
+                    }
                 }
                 return have < wanted
             }
-            guard !queue.isEmpty else { continue }
+            guard !todo.isEmpty else { continue }
             out.append(Stream(account: account, window: window, binding: binding, models: models, records: records,
-                              store: store, surface: surface, queue: Array(queue), existing: existing))
+                              store: store, surface: surface, cycles: Array(todo), existing: existing,
+                              periodIndex: periodIndex))
         }
         return out
     }
 
-    /// Every cut of one completed cycle, every model still missing at it:
-    /// cuts outer, models inner, one history cut shared by the models.
-    private func score(_ cycle: BurnTrajectory.Cycle, in s: inout Stream, runner: ArenaRunner,
-                       report: inout Report)
+    /// Every cut of one completed cycle, every one of `models` still missing
+    /// at it: cuts outer, models inner, one history cut shared by the models.
+    private func score(_ cycle: BurnTrajectory.Cycle, in s: inout Stream, models: [ArenaModelSpec],
+                       slot: RunnerSlot, report: inout Report)
         -> [EngineSelfEval.NewOutcome] {
+        let runner = slot.runner
+        let weekly = s.window.isWeeklyScale
         guard let truth = cycle.samples.map(\.usedPercentage).max(), truth > 0 else { return [] }
         let duration = cycle.resetsAt.timeIntervalSince(cycle.cycleStart)
         guard duration > 0 else { return [] }
         let period = EngineSelfEval.periodKeyRL(cycle.resetsAt)
         let baseSurface = EngineSelfEval.rlSurface(s.window.key)
         var out: [EngineSelfEval.NewOutcome] = []
-        for cf in config.cuts {
+        for (ci, cf) in config.cuts.enumerated() {
             guard !cancel.isSet else { return out }
             let cutNow = cycle.cycleStart.addingTimeInterval(duration * cf)
             let seen = cycle.samples.filter { $0.at <= cutNow }
             // The engine's own rule (`newOutcomesRL`), so both are scored on
             // the same cuts.
             guard seen.count >= 3 else { continue }
-            let missing = s.models.filter {
-                let k = Self.key(s.surface, $0.name, cf, period)
-                return !s.existing.contains(k) && !declined.contains(k)
+            let missing = models.filter {
+                !isDone(s, $0.name, cut: ci, period: period) && !declined.contains(Self.key(s.surface, $0.name, cf, period))
             }
             guard !missing.isEmpty else { continue }
             let partial = BurnTrajectory.PartialCycle(samples: seen, now: cutNow, cycleStart: cycle.cycleStart,
@@ -489,11 +635,21 @@ public actor ArenaRecordScorer {
                 let k = Self.key(s.surface, spec.name, cf, period)
                 report.forecasts += 1
                 let modelStart = SuspendingClock.now
+                // CPU, not wall: the wall time is mostly the budget's sleeps.
+                let cpuStart = budget.threadCPUSeconds()
+                var timed = true
                 defer {
                     let d = SuspendingClock.now - modelStart
                     report.modelSeconds[spec.name, default: 0] += Double(d.components.seconds)
                         + Double(d.components.attoseconds) * 1e-18
+                    let cpu = max(0, budget.threadCPUSeconds() - cpuStart)
+                    report.modelCPUSeconds[spec.name, default: 0] += cpu
                     report.modelForecasts[spec.name, default: 0] += 1
+                    // A model's first forecast on this runner fills its memo
+                    // (see `ArenaModelCosts`); a cancelled one is partial.
+                    if timed, !slot.warm.insert(spec.name).inserted {
+                        costs.record(spec.name, weekly: weekly, cpuMs: cpu * 1000)
+                    }
                 }
                 // The model's CPU is charged at every check inside it (the
                 // scorer's `isCancelled`) and its tail here.
@@ -507,8 +663,9 @@ public actor ArenaRecordScorer {
                     out.append(EngineSelfEval.NewOutcome(
                         surface: baseSurface, method: spec.name, bucket: EngineSelfEval.rlBucket(cf),
                         periodKey: period, predicted: shown, truth: truth))
-                    s.existing.insert(k)
+                    if let done = doneKey(s, spec.name, cut: ci, period: period) { s.existing.insert(done) }
                 } catch ArenaError.cancelled {
+                    timed = false
                     return out
                 } catch {
                     declined.insert(k)
@@ -693,8 +850,14 @@ public final class ArenaRuntime: Sendable {
     public let live: ArenaLiveForecaster
     /// The arena's share of the CPU, scorer and live together.
     public let budget: ArenaCPUBudget
+    /// Raises the share while the Mac is plugged in and idle, from `start`.
+    public let governor: ArenaBudgetGovernor?
     let cancel = ArenaCancelFlag()
     private let relief: ArenaMemoryRelief
+    /// Frees a network's kept scratch once it has gone two minutes unused
+    /// (`FMScratch.releaseIdle`): a backfill keeps its networks warm, and
+    /// between passes and refits nothing is held.
+    private let scratchSweep: DispatchSourceTimer
     private let ensureWeights: @Sendable ([String]) async -> Void
     private let weights: @Sendable (String) -> URL?
     public let compareLimit: Int
@@ -720,6 +883,7 @@ public final class ArenaRuntime: Sendable {
                 weights: @escaping @Sendable (String) -> URL? = ArenaRuntime.defaultWeights,
                 ensureWeights: @escaping @Sendable ([String]) async -> Void = ArenaRuntime.defaultEnsureWeights,
                 config: ArenaRecordScorer.Config = .init(), compareLimit: Int = 3,
+                costs: ArenaModelCosts = ArenaModelCosts(defaults: nil),
                 onRecordLanded: @escaping @Sendable (String, [EngineSelfEval.NewOutcome]) async -> Void,
                 onLiveLanded: @escaping @Sendable (Set<String>) async -> Void) {
         self.roster = roster
@@ -735,6 +899,9 @@ public final class ArenaRuntime: Sendable {
         let cancel = self.cancel
         let budget = ArenaCPUBudget(rate: config.dutyCycle)
         self.budget = budget
+        self.governor = config.adaptiveBudget
+            ? ArenaBudgetGovernor(budget: budget, shareRate: config.dutyCycle, fullRate: config.idleDutyCycle)
+            : nil
         // The history pays like the rest but never waits for the urgent lane:
         // the live forecaster is often what it is building for, and waits on it.
         let history = ArenaHistoryCache(container: container, pricing: config.pricing,
@@ -753,12 +920,21 @@ public final class ArenaRuntime: Sendable {
             return cancel.isSet
         })
         self.scorer = ArenaRecordScorer(container: container, roster: roster, history: history,
-                                        services: scorerServices, budget: budget, cancel: cancel, config: config,
-                                        landed: onRecordLanded)
+                                        services: scorerServices, budget: budget, costs: costs, cancel: cancel,
+                                        config: config, landed: onRecordLanded)
         self.live = ArenaLiveForecaster(roster: roster, history: history, cache: cache, services: liveServices,
                                         budget: budget, cancel: cancel, landed: onLiveLanded)
         self.relief = ArenaMemoryRelief(live: live, scorerFlag: scorer.relief)
+        let sweep = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+        sweep.schedule(deadline: .now() + 60, repeating: 60, leeway: .seconds(5))
+        sweep.setEventHandler { FMScratch.releaseIdle() }
+        // Active from here, as the memory relief is: a source released
+        // before it was ever activated is a crash in libdispatch.
+        sweep.activate()
+        self.scratchSweep = sweep
     }
+
+    deinit { scratchSweep.cancel() }
 
     /// What every engine adopts.
     public var link: ArenaEngineLink {
@@ -785,12 +961,15 @@ public final class ArenaRuntime: Sendable {
             Task.detached(priority: .background) { await ensure(missing) }
         }
         let scorer = self.scorer
+        governor?.start()
         Task.detached(priority: .background) { await scorer.start(accounts: accounts, beforePass: fetchMissing) }
     }
 
     /// Stop at the next model boundary and wait for it.
     public func stop() async {
         cancel.set(true)
+        governor?.stop()
         await scorer.stop()
+        FMScratch.release()
     }
 }
