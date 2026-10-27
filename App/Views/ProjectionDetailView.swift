@@ -805,12 +805,14 @@ struct ProjectionDetailView: View {
         VStack(alignment: .leading, spacing: 0) {
             // Column headers make the right-hand number self-explanatory —
             // it's how far each model's final-value calls have missed on
-            // this user's completed cycles.
+            // this user's completed cycles. Every number in the column, and
+            // in "More models", covers the same cycles (`Accuracy.span`); the
+            // heading says how many when that is fewer than the record.
             HStack {
                 Text("MODEL")
                 Spacer()
-                Text("TYPICAL ACCURACY, PAST CYCLES")
-                    .help("Typical |shown final − actual final| at this half of the window (first or second) across your completed cycles (median; mean on weekly windows), in percentage points — lower is better")
+                Text(PacerAccuracyFormat.columnTitle(accuracy?.span))
+                    .help(PacerAccuracyFormat.columnHelp(accuracy?.span))
             }
             .font(.system(size: 9, weight: .semibold, design: .rounded))
             .foregroundStyle(.tertiary)
@@ -833,7 +835,8 @@ struct ProjectionDetailView: View {
                                 .font(.system(size: 11)).foregroundStyle(.red.opacity(0.85))
                         }
                     }
-                    Self.accuracyText(st.typicalAbsError.isFinite ? st.typicalAbsError : nil)
+                    Self.accuracyText(st.typicalAbsError.isFinite ? st.typicalAbsError : nil,
+                                      partialCycles: accuracy?.partialCycles(st.modelId))
                 }
                 if idx != ranked.indices.last {
                     Divider().opacity(0.25).padding(.leading, 34)
@@ -854,9 +857,11 @@ struct ProjectionDetailView: View {
         accuracy?.methods.first { $0.method == id }
     }
 
-    /// "within ±3%", the column's number; "—" without one.
-    private static func accuracyText(_ error: Double?) -> some View {
-        Text(error.map { String(format: "within ±%.0f%%", $0) } ?? "—")
+    /// "within ±3%", the column's number; "—" without one; "within ±2% ·
+    /// 12 cycles" when it rests on fewer cycles than the column's. The drawn
+    /// rows and "More models" both write it here.
+    private static func accuracyText(_ error: Double?, partialCycles: Int?) -> some View {
+        Text(PacerAccuracyFormat.record(error, partialCycles: partialCycles))
             .font(.system(size: 12).monospacedDigit())
             .foregroundStyle(.secondary)
     }
@@ -934,21 +939,13 @@ struct ProjectionDetailView: View {
         return ModelListRow(modelId: m.id, windowDuration: durationSeconds, stat: stat(m.id),
                             marker: marker, accent: color(m.id), note: note, onTap: tap, tapHelp: help) {
             if m.status == .recorded {
-                Self.recordText(m.typicalAbsError, cycles: m.cycles)
+                Self.accuracyText(m.typicalAbsError, partialCycles: accuracy?.partialCycles(m.id))
             } else {
                 Text(Self.statusText(m.status))
                     .font(.system(size: 11).monospacedDigit())
                     .foregroundStyle(.tertiary)
             }
         }
-    }
-
-    /// "within ±4% · 61 cycles": a recorded row's accuracy, in the drawn
-    /// rows' style, and how deep the record behind it is.
-    private static func recordText(_ error: Double?, cycles: Int) -> some View {
-        Text((error.map { String(format: "within ±%.0f%%", $0) } ?? "—") + " · \(cycles) cycles")
-            .font(.system(size: 12).monospacedDigit())
-            .foregroundStyle(.secondary)
     }
 
     /// "Scoring your history: heavy models, 346 of 698 cycles".
@@ -1126,7 +1123,8 @@ private struct ModelInfoContent: View {
             }
             if let stat, !stat.byStage.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("TYPICAL ACCURACY, \(stat.periods) PAST CYCLES")
+                    // The cycles the stages cover: the sheet's span.
+                    Text("TYPICAL ACCURACY, \(stat.shownPeriods) PAST CYCLES")
                         .font(.system(size: 9, weight: .semibold, design: .rounded))
                         .foregroundStyle(.tertiary)
                         .tracking(0.5)
@@ -1134,7 +1132,7 @@ private struct ModelInfoContent: View {
                         HStack {
                             Text(Self.label(s.stage))
                             Spacer()
-                            Text(String(format: "within ±%.0f%%", s.typicalAbsError))
+                            Text(PacerAccuracyFormat.within(s.typicalAbsError))
                                 .monospacedDigit()
                                 .foregroundStyle(.secondary)
                         }
