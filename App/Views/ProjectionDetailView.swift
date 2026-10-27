@@ -517,6 +517,8 @@ struct ProjectionDetailView: View {
             Text(legendText)
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
+            // Below the legend, which is about the lines: none of these has one.
+            moreModels
         }
     }
 
@@ -762,8 +764,6 @@ struct ProjectionDetailView: View {
                     .padding(.horizontal, 10)
                     .padding(.top, 8)
             }
-
-            moreModels
         }
     }
 
@@ -783,37 +783,41 @@ struct ProjectionDetailView: View {
     @ViewBuilder
     private var moreModels: some View {
         if !otherModels.isEmpty {
-            Button { moreModelsExpanded.toggle() } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: showsMoreModels ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 8, weight: .semibold))
-                        .frame(width: 14)
-                    Text("More models (\(otherModels.count))")
-                }
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(.secondary)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .padding(.horizontal, 10)
-            .padding(.top, 12)
-            .padding(.bottom, 2)
+            VStack(alignment: .leading, spacing: 0) { moreModelsList }
+        }
+    }
 
-            if showsMoreModels {
-                ForEach(Array(otherModels.enumerated()), id: \.element.id) { idx, m in
-                    ModelListRow(modelId: m.id, windowDuration: durationSeconds, stat: stat(m.id),
-                                 swatch: nil, accent: color(m.id)) {
-                        if m.status == .recorded {
-                            Self.accuracyText(m.typicalAbsError)
-                        } else {
-                            Text(Self.statusText(m.status))
-                                .font(.system(size: 11).monospacedDigit())
-                                .foregroundStyle(.tertiary)
-                        }
+    @ViewBuilder
+    private var moreModelsList: some View {
+        Button { moreModelsExpanded.toggle() } label: {
+            HStack(spacing: 4) {
+                Image(systemName: showsMoreModels ? "chevron.down" : "chevron.right")
+                    .font(.system(size: 8, weight: .semibold))
+                    .frame(width: 14)
+                Text("More models (\(otherModels.count))")
+            }
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(.secondary)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 10)
+        .padding(.bottom, 2)
+
+        if showsMoreModels {
+            ForEach(Array(otherModels.enumerated()), id: \.element.id) { idx, m in
+                ModelListRow(modelId: m.id, windowDuration: durationSeconds, stat: stat(m.id),
+                             swatch: nil, accent: color(m.id)) {
+                    if m.status == .recorded {
+                        Self.accuracyText(m.typicalAbsError)
+                    } else {
+                        Text(Self.statusText(m.status))
+                            .font(.system(size: 11).monospacedDigit())
+                            .foregroundStyle(.tertiary)
                     }
-                    if idx != otherModels.indices.last {
-                        Divider().opacity(0.25).padding(.leading, 34)
-                    }
+                }
+                if idx != otherModels.indices.last {
+                    Divider().opacity(0.25).padding(.leading, 34)
                 }
             }
         }
