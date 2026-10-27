@@ -68,6 +68,49 @@ struct RuntimeBudgetGovernorTests {
                              "budget: 20% of a core (in use)"])
     }
 
+    /// The scorer's QoS follows the mode: utility (performance cores) at the
+    /// full core, background at the everyday share.
+    @Test func theScorersQoSFollowsTheMode() {
+        #expect(ArenaBudgetPolicy.scorerQoS(.fullCore) == QOS_CLASS_UTILITY)
+        for r in [ArenaBudgetPolicy.Reason.inUse, .battery, .lowPower, .thermal] {
+            #expect(ArenaBudgetPolicy.scorerQoS(.share(r)) == QOS_CLASS_BACKGROUND)
+        }
+        let script = RuntimeBudgetTests.Script()
+        let budget = ArenaCPUBudget(rate: 0.2, burst: 0, clock: script.clock)
+        #expect(budget.scorerQoS == QOS_CLASS_BACKGROUND)
+        let s = Signals()
+        s.set(Self.signals(idle: 300))
+        let g = ArenaBudgetGovernor(budget: budget, shareRate: 0.2, fullRate: 1, read: { s.get() }, log: { _ in })
+        g.evaluate()
+        #expect(budget.scorerQoS == QOS_CLASS_UTILITY)
+        s.set(Self.signals(idle: 1))
+        g.evaluate()
+        #expect(budget.scorerQoS == QOS_CLASS_BACKGROUND)
+    }
+
+    /// On a background serial queue's thread, as the scorer's work runs: the
+    /// QoS is raised for the job, and dispatch puts the next job back at the
+    /// queue's.
+    @Test func theQoSIsAppliedOnTheScorersKindOfThread() async {
+        let queue = DispatchSerialQueue(label: "test.arena.qos", qos: .background)
+        let seen: (before: qos_class_t, applied: Bool, after: qos_class_t) = await withCheckedContinuation { c in
+            queue.async {
+                let before = qos_class_self()
+                let ok = ArenaQoS.apply(QOS_CLASS_UTILITY)
+                c.resume(returning: (before, ok, qos_class_self()))
+            }
+        }
+        #expect(seen.before == QOS_CLASS_BACKGROUND)
+        #expect(seen.applied)
+        #expect(seen.after == QOS_CLASS_UTILITY)
+        let next: qos_class_t = await withCheckedContinuation { c in queue.async { c.resume(returning: qos_class_self()) } }
+        #expect(next == QOS_CLASS_BACKGROUND)
+        let back: qos_class_t = await withCheckedContinuation { c in
+            queue.async { _ = ArenaQoS.apply(QOS_CLASS_UTILITY); ArenaQoS.apply(QOS_CLASS_BACKGROUND); c.resume(returning: qos_class_self()) }
+        }
+        #expect(back == QOS_CLASS_BACKGROUND)
+    }
+
     /// Never more than one core, whatever is asked.
     @Test func neverMoreThanOneCore() {
         let script = RuntimeBudgetTests.Script()

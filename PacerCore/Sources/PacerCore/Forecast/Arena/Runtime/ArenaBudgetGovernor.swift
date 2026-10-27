@@ -97,6 +97,14 @@ public enum ArenaBudgetPolicy {
         return .fullCore
     }
 
+    /// The QoS the scorer works at in `mode`: utility at the full core, so
+    /// it may run on a performance core (background QoS keeps a thread on
+    /// the efficiency cores, where a forecast costs several times the CPU);
+    /// background at the everyday share, behind everything the user runs.
+    public static func scorerQoS(_ mode: Mode) -> qos_class_t {
+        mode == .fullCore ? QOS_CLASS_UTILITY : QOS_CLASS_BACKGROUND
+    }
+
     /// What the log says: `full core (plugged in, idle)`, `20% of a core (on battery)`.
     public static func describe(_ mode: Mode, shareRate: Double) -> String {
         switch mode {
@@ -155,6 +163,7 @@ public final class ArenaBudgetGovernor: @unchecked Sendable {
         let wasFull = previous == .fullCore
         if previous == nil || wasFull != (next == .fullCore) {
             budget.rate = rate
+            budget.scorerQoS = ArenaBudgetPolicy.scorerQoS(next)
             log("budget: " + ArenaBudgetPolicy.describe(next, shareRate: shareRate))
             reschedule(full: next == .fullCore)
         }
@@ -202,5 +211,28 @@ public final class ArenaBudgetGovernor: @unchecked Sendable {
         let t = timer
         lock.unlock()
         t?.schedule(deadline: .now() + every, repeating: every, leeway: .milliseconds(full ? 250 : 1000))
+    }
+}
+
+/// Sets the calling thread's QoS for the work it runs next.
+///
+/// The scorer's actor runs on a background serial queue; each stretch of work
+/// between suspensions is one job on one of the queue's worker threads, and
+/// dispatch puts the thread back to the queue's QoS when the job returns. So
+/// the scorer applies the QoS it should have at every cut (`scorerQoS`), and
+/// a change of mode takes hold within one cut.
+public enum ArenaQoS {
+    private static let failures = ArenaCancelFlag()
+
+    /// Returns whether the thread now runs at `qos`.
+    @discardableResult
+    public static func apply(_ qos: qos_class_t) -> Bool {
+        guard qos_class_self() != qos else { return true }
+        let rc = pthread_set_qos_class_self_np(qos, 0)
+        if rc != 0, !failures.isSet {
+            failures.set(true)
+            Log.write("Arena", "could not set the scorer's QoS (\(rc)); it stays at the queue's")
+        }
+        return rc == 0
     }
 }

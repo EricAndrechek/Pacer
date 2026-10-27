@@ -618,6 +618,9 @@ public actor ArenaRecordScorer {
         var out: [EngineSelfEval.NewOutcome] = []
         for (ci, cf) in config.cuts.enumerated() {
             guard !cancel.isSet else { return out }
+            // Utility while the governor gives the full core (performance
+            // cores), background otherwise (`ArenaQoS`).
+            ArenaQoS.apply(budget.scorerQoS)
             let cutNow = cycle.cycleStart.addingTimeInterval(duration * cf)
             let seen = cycle.samples.filter { $0.at <= cutNow }
             // The engine's own rule (`newOutcomesRL`), so both are scored on
