@@ -516,15 +516,59 @@ struct RuntimeUnifiedGraderTests {
         await engine.recompute(now: Fixtures.now)
         let acc = try #require(await engine.selfEvalAccuracy(surface: EngineSelfEval.rlSurface("five_hour")))
         #expect(acc.stat("test-peeker").map(\.periods) == 12)
-        // The old rows go once nothing reads them.
+        // The old rows go once nothing reads them (a background task: under
+        // a loaded parallel run it can wait seconds for a thread).
         var left = Int.max
-        for _ in 0..<200 {
+        for _ in 0..<1500 {
             left = try ModelContext(container).fetchCount(FetchDescriptor<EngineEvalOutcome>(
                 predicate: #Predicate { $0.bucket.contains("|v2") }))
             if left == 0 { break }
             try await Task.sleep(for: .milliseconds(20))
         }
         #expect(left == 0)
+    }
+
+    /// The arena models' grades older than the shared depth are pruned, in
+    /// memory and in the store; the engine's own methods keep their whole
+    /// history.
+    @Test func gradesPastTheSharedDepthArePruned() async throws {
+        let container = try Fixtures.seeded(cycles: 12)
+        let ctx = ModelContext(container)
+        let surface = EngineScope.account(Fixtures.account).qualify(EngineSelfEval.rlSurface("five_hour"))
+        // 130 synthetic cycles, all before the seeded ones.
+        let base = Self.resetOf(0, of: 12).addingTimeInterval(-200 * 6 * 3600)
+        for i in 0..<130 {
+            let period = EngineSelfEval.periodKeyRL(base.addingTimeInterval(Double(i) * 6 * 3600))
+            for m in ["linear-recent", "test-peeker"] {
+                for cf in EngineSelfEval.rlCutFractions {
+                    ctx.insert(EngineEvalOutcome(surface: surface, method: m, bucket: EngineSelfEval.rlBucket(cf),
+                                                 periodKey: period, predicted: 52, truth: 50,
+                                                 inputs: m == "linear-recent" ? "m1" : "m1.p0.h0"))
+                }
+            }
+        }
+        try ctx.save()
+        let engine = await Fixtures.engine(container)
+        let rt = Fixtures.runtime(container, roster: [Fixtures.peeker], engine: engine)
+        await engine.adopt(arena: rt.link)
+        await engine.recompute(now: Fixtures.now)
+        // The depth: the 12 seeded cycles (the refit grades the engine's
+        // methods on them) and the newest 108 synthetic ones. The 22 oldest
+        // synthetic cycles are past it.
+        func count(_ method: String) throws -> Int {
+            try ModelContext(container).fetchCount(FetchDescriptor<EngineEvalOutcome>(
+                predicate: #Predicate { $0.method == method && $0.surface == surface }))
+        }
+        var arena = Int.max
+        for _ in 0..<1500 {
+            arena = try count("test-peeker")
+            if arena == 108 * Self.cuts { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(arena == 108 * Self.cuts)
+        #expect(try count("linear-recent") >= 130 * Self.cuts)
+        let acc = try #require(await engine.selfEvalAccuracy(surface: EngineSelfEval.rlSurface("five_hour")))
+        #expect(acc.stat("test-peeker")?.periods == 108)
     }
 
     /// `RuntimeEngineTests.seeded`'s reset for cycle `c` of `cycles`.

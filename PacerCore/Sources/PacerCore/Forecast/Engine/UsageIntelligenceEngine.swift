@@ -167,6 +167,8 @@ public actor UsageIntelligenceEngine {
     /// the store this launch: once every window ranks on the current one,
     /// nothing reads them.
     private var previousGradingRetired = false
+    /// Local day of the last prune past the shared depth (`pruneBeyondDepth`).
+    private var lastDepthPruneDay: String?
     /// Last prediction-snapshot written per surface (signature + when) — the
     /// change/heartbeat policy that keeps the trail from growing per tick.
     /// In-memory only: a relaunch writes one fresh row per surface, which
@@ -398,6 +400,15 @@ public actor UsageIntelligenceEngine {
         if fitsRateLimits, !previousGradingRetired, !rankings.isEmpty,
            rankings.values.allSatisfy({ $0.grading == EngineSelfEval.rlGrading }) {
             allRows = retirePreviousGrading(allRows)
+            evalRowsCache = allRows
+        }
+
+        // Once a day: the arena models' grades older than the shared depth
+        // are ranked by nothing, and would grow the record without end.
+        let today = TokenSample.formatDate(now, timeZone: calendar.timeZone)
+        if fitsRateLimits, lastDepthPruneDay != today, !rankings.isEmpty {
+            lastDepthPruneDay = today
+            allRows = pruneBeyondDepth(allRows, rankings: rankings)
             evalRowsCache = allRows
         }
 
@@ -2329,6 +2340,62 @@ extension UsageIntelligenceEngine {
             }
         }
         return kept
+    }
+
+    /// Drop, from memory and (in the background) from the store, the arena
+    /// models' current-grading rows for cycles older than each window's
+    /// shared depth (`RLRanking.depthStart`). Nothing ranks them, and the
+    /// grader never goes back that far, so without this the record grows by
+    /// every model's grades of every cycle for good: about a megabyte a day
+    /// for a heavy account. The engine's own methods keep their whole
+    /// history: it is the record of every cycle, which the cycle facts and
+    /// the bands read, and it grows by seven models' grades a cycle.
+    func pruneBeyondDepth(_ rows: [EvalRow], rankings: [String: EngineSelfEval.RLRanking]) -> [EvalRow] {
+        let engine = Self.engineMethodIds
+        var cutoffs: [String: String] = [:]
+        for (key, r) in rankings where r.grading == EngineSelfEval.rlGrading {
+            if let start = r.depthStart, r.depthCycles >= EngineSelfEval.rlDepth(weekly: r.weekly) {
+                cutoffs[EngineSelfEval.rlSurface(key)] = start
+            }
+        }
+        guard !cutoffs.isEmpty else { return rows }
+        var pruned: [String: String] = [:]
+        let kept = rows.filter { row in
+            guard let cutoff = cutoffs[row.surface], row.record.periodKey < cutoff,
+                  !engine.contains(row.record.method), EngineSelfEval.isCurrentRLBucket(row.record.bucket)
+            else { return true }
+            pruned[row.surface] = cutoff
+            return false
+        }
+        guard !pruned.isEmpty else { return rows }
+        let container = modelContainer, label = scopeLabel, dropped = rows.count - kept.count
+        let targets = pruned.map { (self.scope.qualify($0.key), $0.value) }
+        Task.detached(priority: .background) {
+            let removed = Self.deleteBeyondDepth(container: container, cutoffs: targets)
+            Log.write("Engine", "record \(label): pruned \(removed) arena grade(s) past the shared depth "
+                      + "(\(dropped) held in memory)")
+        }
+        return kept
+    }
+
+    /// Delete each surface's current-grading rows older than its cutoff,
+    /// but the engine's own methods'.
+    static func deleteBeyondDepth(container: ModelContainer, cutoffs: [(surface: String, cutoff: String)]) -> Int {
+        let context = ModelContext(container)
+        let engine = Array(engineMethodIds)
+        let grading = EngineSelfEval.rlGrading
+        let buckets = grading.cuts.map(grading.bucket)
+        var removed = 0
+        for (surface, cutoff) in cutoffs {
+            let predicate = #Predicate<EngineEvalOutcome> {
+                $0.surface == surface && $0.periodKey < cutoff && buckets.contains($0.bucket)
+                    && !engine.contains($0.method)
+            }
+            removed += (try? context.fetchCount(FetchDescriptor(predicate: predicate))) ?? 0
+            try? context.delete(model: EngineEvalOutcome.self, where: predicate)
+        }
+        try? context.save()
+        return removed
     }
 
     /// Every bucket a rate-limit row was ever written under but the current

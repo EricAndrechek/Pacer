@@ -671,12 +671,17 @@ extension EngineSelfEval {
         /// Completed cycles in the shared depth: every cycle any method is
         /// graded on there.
         public let depthCycles: Int
+        /// The oldest cycle in the shared depth; nil with no record. Nothing
+        /// older is ranked.
+        public var depthStart: String? = nil
+        /// A weekly-scale window's ranking (`rlDepth`, `rlMinPeriods`).
+        public var weekly = false
 
         public func standing(_ method: String) -> Standing? { standings.first { $0.method == method } }
         public var ranked: [Standing] { standings.filter(\.isRanked) }
 
         static func empty(_ grading: RLGrading, at: Double?) -> RLRanking {
-            RLRanking(grading: grading, at: at, span: nil, standings: [], pick: nil, depthCycles: 0)
+            RLRanking(grading: grading, at: at, span: nil, standings: [], pick: nil, depthCycles: 0, depthStart: nil)
         }
 
         /// The sheet's accuracy rows, from the ranking: each over the span,
@@ -819,7 +824,8 @@ extension EngineSelfEval {
         return RLRanking(grading: grading, at: x,
                          span: .init(start: start, cycles: span.count,
                                      isWholeRecord: start == depthStart && periods.count == allPeriods.count),
-                         standings: standings, pick: pick, depthCycles: periods.count)
+                         standings: standings, pick: pick, depthCycles: periods.count, depthStart: depthStart,
+                         weekly: weekly)
     }
 
     /// P(X ≥ k) for X ~ Binomial(n, ½): the sign test's one-sided p-value.
