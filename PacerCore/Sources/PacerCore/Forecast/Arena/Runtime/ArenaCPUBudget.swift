@@ -75,6 +75,7 @@ public final class ArenaCPUBudget: @unchecked Sendable {
     private let lock = NSLock()
     // Guarded by `lock`.
     private var currentRate: Double
+    private var currentScorerQoS = QOS_CLASS_BACKGROUND
     private var tokens: Double
     private var refilledAt: Double
     private var marks: [UInt64: Double] = [:]
@@ -102,6 +103,15 @@ public final class ArenaCPUBudget: @unchecked Sendable {
         refilledAt = now
         if new < currentRate { tokens = min(tokens, 0) }
         currentRate = new
+    }
+
+    /// The QoS the scorer runs its work at (`ArenaQoS.apply`, at every cut):
+    /// background, the efficiency cores only, at the everyday share; utility,
+    /// which may use the performance cores, while the governor gives it the
+    /// full core (`ArenaBudgetPolicy.scorerQoS`).
+    public var scorerQoS: qos_class_t {
+        get { lock.lock(); defer { lock.unlock() }; return currentScorerQoS }
+        set { lock.lock(); currentScorerQoS = newValue; lock.unlock() }
     }
 
     /// The calling thread's CPU time, seconds, on the budget's clock.
