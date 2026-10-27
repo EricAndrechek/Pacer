@@ -216,3 +216,40 @@ struct RuntimeCostOrderTests {
         #expect(visits[2 * need + 1].0 == "acct-second")
     }
 }
+
+/// The compare sheet's arena rows: the pick, then the best-recorded others,
+/// counting only models with the cycles selection needs behind them. The
+/// cheap models are scored first, so for hours a heavy one has a cycle or two,
+/// and an error from one cycle must not list it ahead of a real record.
+@Suite("Arena runtime: the compare list needs a record")
+struct RuntimeCompareListTests {
+
+    static func stat(_ m: String, err: Double, periods: Int) -> EngineSelfEval.Accuracy.MethodStat {
+        .init(method: m, medianAbsPctError: err, typicalAbsError: err, periods: periods)
+    }
+
+    @Test func aModelWithTooFewCyclesIsNotListed() {
+        let names = ["arena-a", "arena-b", "arena-c", "arena-d"]
+        let roster = ArenaRoster(registry: names.map { n in
+            ArenaModelSpec(name: n, targets: RuntimeEngineTests.meters) { RuntimeEngineTests.Peeker(context: $0) }
+        })
+        let link = ArenaEngineLink(roster: roster, cache: ArenaLiveCache(), compareLimit: 3, requestLive: { _ in })
+        for (kind, weekly) in [(RateLimitWindowKind.fiveHour, false), (.sevenDay, true)] {
+            let need = EngineSelfEval.arenaMinPeriods(weekly: weekly)
+            let accuracy = EngineSelfEval.Accuracy(surface: "rl", methods: [
+                Self.stat("arena-a", err: 0.5, periods: 1),          // best error, one cycle
+                Self.stat("arena-b", err: 2, periods: need),
+                Self.stat("arena-c", err: 3, periods: need + 5),
+                Self.stat("arena-d", err: 1, periods: need - 1),
+            ])
+            let listed = UsageIntelligenceEngine.arenaRoster(window: .fixed(kind), account: "acct", arena: link,
+                                                             pick: nil, accuracy: accuracy).models.map(\.id)
+            #expect(listed == ["arena-b", "arena-c"])
+            // The pick is drawn whatever its record (selection already
+            // required one, through `arenaComparable`).
+            let withPick = UsageIntelligenceEngine.arenaRoster(window: .fixed(kind), account: "acct", arena: link,
+                                                               pick: "arena-a", accuracy: accuracy).models.map(\.id)
+            #expect(withPick == ["arena-a", "arena-b", "arena-c"])
+        }
+    }
+}
