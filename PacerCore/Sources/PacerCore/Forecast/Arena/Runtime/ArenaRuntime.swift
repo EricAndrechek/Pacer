@@ -288,9 +288,17 @@ public actor ArenaRecordScorer {
         let account: String
         let window: WindowSpec
         let binding: ArenaWindowBinding
-        /// The models still being scored deeper: losers drop out
-        /// (`EngineSelfEval.arenaLosers`).
+        /// Every model the window can run. All of them are scored on every
+        /// cycle that completes; a loser (`EngineSelfEval.arenaLosers`) only
+        /// stops going deeper into history (`shallow`).
         var models: [ArenaModelSpec]
+        /// The losers, each with the cycles it is still scored on: those
+        /// whose index (`periodIndex`, newest 0) is under its bound. A
+        /// pruned model's record must not freeze: if the user's habits
+        /// change, the cycles since are what can show it winning again.
+        var shallow: [String: UInt16]
+        /// Models pruned during this pass (the progress stops naming them).
+        var prunedInPass = Set<String>()
         /// This window's record over the cycles the pass may score, every
         /// method, kept current as the pass adds to it: what judges losers.
         var records: [EngineSelfEval.Record]
@@ -349,13 +357,36 @@ public actor ArenaRecordScorer {
         }
     }
 
-    /// Whether any of `models` is missing at any cut of `cycle`.
+    /// Whether any of `models` that is still scored on `cycle` is missing at
+    /// any cut of it.
     private func needs(_ s: Stream, _ cycle: BurnTrajectory.Cycle, models: [ArenaModelSpec]) -> Bool {
         let period = EngineSelfEval.periodKeyRL(cycle.resetsAt)
         for ci in config.cuts.indices {
-            for m in models where !isDone(s, m.name, cut: ci, period: period) { return true }
+            for m in models where scores(s, m.name, period: period) && !isDone(s, m.name, cut: ci, period: period) {
+                return true
+            }
         }
         return false
+    }
+
+    /// Whether `model` is scored on the cycle `period` names (`Stream.shallow`).
+    private func scores(_ s: Stream, _ model: String, period: String) -> Bool {
+        guard let bound = s.shallow[model] else { return true }
+        guard let p = s.periodIndex[period] else { return false }
+        return p < bound
+    }
+
+    /// Where a loser's scoring stops (`Stream.shallow`): above the newest
+    /// cycle it has a record for, so every cycle completed since it was
+    /// pruned is scored, and never short of the `recent` newest, so its
+    /// recent record stays whole. With no record in depth, all of it is
+    /// newer than its record.
+    static func shallowBound(model: UInt16?, existing: Set<DoneKey>, cycles: Int, recent: Int) -> UInt16 {
+        var newest = cycles
+        if let model {
+            for k in existing where k.model == model && Int(k.period) < newest { newest = Int(k.period) }
+        }
+        return UInt16(clamping: max(recent, newest))
     }
 
     /// What a phase planned for each account when it started: cycles queued
@@ -379,7 +410,7 @@ public actor ArenaRecordScorer {
         var out = Set<String>()
         for c in cycles {
             let period = EngineSelfEval.periodKeyRL(c.resetsAt)
-            for m in models where !out.contains(m.name) {
+            for m in models where !out.contains(m.name) && scores(s, m.name, period: period) {
                 if config.cuts.indices.contains(where: { !isDone(s, m.name, cut: $0, period: period) }) { out.insert(m.name) }
             }
             if out.count == models.count { break }
@@ -394,7 +425,7 @@ public actor ArenaRecordScorer {
     private func publishProgress(_ streams: [Stream], account: String, phase: Phase, plan: ProgressPlan) {
         let mine = streams.filter { $0.account == account }
         let remaining = mine.reduce(0) { $0 + $1.queue.count }
-        let contending = Set(mine.flatMap { $0.models.map(\.name) })
+        let contending = Set(mine.flatMap { s in s.models.map(\.name).filter { !s.prunedInPass.contains($0) } })
         if remaining > 0 {
             let total = plan.cycles[account] ?? remaining
             progress.set(.init(phase: phase, cyclesDone: max(0, total - remaining), cyclesTotal: total,
@@ -490,7 +521,7 @@ public actor ArenaRecordScorer {
                     }()
                     runners[account] = slot
                     defer {
-                        prune(&streams[i])
+                        prune(&streams[i], phase: phase)
                         streams[i].turns += 1
                         // A prune can drop the rest of a window's queue.
                         publishProgress(streams, account: account, phase: phase, plan: plan)
@@ -658,24 +689,26 @@ public actor ArenaRecordScorer {
                 Log.write("Arena", "\(window.key) …\(account.suffix(4)): not scoring deeper (well behind the record): "
                           + losers.sorted().joined(separator: ", "))
             }
-            let models = available.filter { !losers.contains($0.name) }
-            guard !models.isEmpty else { continue }
-            let wanted = models.count * config.cuts.count
+            let recent = EngineSelfEval.arenaMinPeriods(weekly: window.isWeeklyScale)
+            var shallow: [String: UInt16] = [:]
+            for name in losers {
+                shallow[name] = Self.shallowBound(model: modelIndex[name], existing: existing, cycles: completed.count,
+                                                  recent: recent)
+            }
             let todo = completed.filter { c in
                 guard let p = periodIndex[EngineSelfEval.periodKeyRL(c.resetsAt)] else { return false }
-                var have = 0
-                for ci in config.cuts.indices {
-                    for m in models {
-                        if let mi = modelIndex[m.name], existing.contains(DoneKey(model: mi, cut: UInt8(ci), period: p)) {
-                            have += 1
-                        }
+                for m in available {
+                    if let bound = shallow[m.name], p >= bound { continue }
+                    guard let mi = modelIndex[m.name] else { continue }
+                    for ci in config.cuts.indices where !existing.contains(DoneKey(model: mi, cut: UInt8(ci), period: p)) {
+                        return true
                     }
                 }
-                return have < wanted
+                return false
             }
             guard !todo.isEmpty else { continue }
-            out.append(Stream(account: account, window: window, binding: binding, models: models, records: records,
-                              store: store, surface: surface, cycles: Array(todo), existing: existing,
+            out.append(Stream(account: account, window: window, binding: binding, models: available, shallow: shallow,
+                              records: records, store: store, surface: surface, cycles: Array(todo), existing: existing,
                               periodIndex: periodIndex))
         }
         return out
@@ -705,7 +738,8 @@ public actor ArenaRecordScorer {
             // the same cuts.
             guard seen.count >= 3 else { continue }
             let missing = models.filter {
-                !isDone(s, $0.name, cut: ci, period: period) && !declined.contains(Self.key(s.surface, $0.name, cf, period))
+                scores(s, $0.name, period: period) && !isDone(s, $0.name, cut: ci, period: period)
+                    && !declined.contains(Self.key(s.surface, $0.name, cf, period))
             }
             guard !missing.isEmpty else { continue }
             let partial = BurnTrajectory.PartialCycle(samples: seen, now: cutNow, cycleStart: cycle.cycleStart,
@@ -781,15 +815,26 @@ public actor ArenaRecordScorer {
         }
     }
 
-    /// Drop the stream's models that have fallen clearly behind.
-    private func prune(_ s: inout Stream) {
+    /// Stop going deeper with the stream's models that have fallen clearly
+    /// behind; they stay on the window's recent and newly completed cycles
+    /// (`Stream.shallow`). Cycles left in the phase's queue that no longer
+    /// need anything are dropped.
+    private func prune(_ s: inout Stream, phase: Phase) {
         let losers = EngineSelfEval.arenaLosers(s.records, arenaIds: Set(s.models.map(\.name)),
                                                 weekly: s.window.isWeeklyScale)
+            .subtracting(s.shallow.keys)
         guard !losers.isEmpty else { return }
-        s.models.removeAll { losers.contains($0.name) }
+        let recent = EngineSelfEval.arenaMinPeriods(weekly: s.window.isWeeklyScale)
+        for name in losers {
+            s.shallow[name] = Self.shallowBound(model: modelIndex[name], existing: s.existing, cycles: s.periodIndex.count,
+                                                recent: recent)
+        }
+        s.prunedInPass.formUnion(losers)
         Log.write("Arena", "\(s.window.key) …\(s.account.suffix(4)): not scoring deeper (well behind the record): "
                   + losers.sorted().joined(separator: ", "))
-        if s.models.isEmpty { s.queue.removeAll() }
+        let models = phaseModels(s, phase)
+        let stream = s
+        s.queue.removeAll { !needs(stream, $0, models: models) }
     }
 
     /// Whether every pinned weight `spec` and its children need is on this
