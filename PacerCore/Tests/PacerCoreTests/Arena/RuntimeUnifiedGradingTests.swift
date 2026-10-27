@@ -516,15 +516,10 @@ struct RuntimeUnifiedGraderTests {
         await engine.recompute(now: Fixtures.now)
         let acc = try #require(await engine.selfEvalAccuracy(surface: EngineSelfEval.rlSurface("five_hour")))
         #expect(acc.stat("test-peeker").map(\.periods) == 12)
-        // The old rows go once nothing reads them (a background task: under
-        // a loaded parallel run it can wait seconds for a thread).
-        var left = Int.max
-        for _ in 0..<1500 {
-            left = try ModelContext(container).fetchCount(FetchDescriptor<EngineEvalOutcome>(
-                predicate: #Predicate { $0.bucket.contains("|v2") }))
-            if left == 0 { break }
-            try await Task.sleep(for: .milliseconds(20))
-        }
+        // The old rows go once nothing reads them, in the background.
+        await engine.settleRecordCleanup()
+        let left = try ModelContext(container).fetchCount(FetchDescriptor<EngineEvalOutcome>(
+            predicate: #Predicate { $0.bucket.contains("|v2") }))
         #expect(left == 0)
     }
 
@@ -559,12 +554,8 @@ struct RuntimeUnifiedGraderTests {
             try ModelContext(container).fetchCount(FetchDescriptor<EngineEvalOutcome>(
                 predicate: #Predicate { $0.method == method && $0.surface == surface }))
         }
-        var arena = Int.max
-        for _ in 0..<1500 {
-            arena = try count("test-peeker")
-            if arena == 108 * Self.cuts { break }
-            try await Task.sleep(for: .milliseconds(20))
-        }
+        await engine.settleRecordCleanup()
+        let arena = try count("test-peeker")
         #expect(arena == 108 * Self.cuts)
         #expect(try count("linear-recent") >= 130 * Self.cuts)
         let acc = try #require(await engine.selfEvalAccuracy(surface: EngineSelfEval.rlSurface("five_hour")))

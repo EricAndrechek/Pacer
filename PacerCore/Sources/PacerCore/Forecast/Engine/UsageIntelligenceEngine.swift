@@ -169,6 +169,21 @@ public actor UsageIntelligenceEngine {
     private var previousGradingRetired = false
     /// Local day of the last prune past the shared depth (`pruneBeyondDepth`).
     private var lastDepthPruneDay: String?
+    /// The background deletes `retirePreviousGrading` and `pruneBeyondDepth`
+    /// started, chained, so tests can wait for them (`settleRecordCleanup`).
+    private var recordCleanup: Task<Void, Never>?
+
+    /// Wait for the store deletes the refits have started (tests).
+    public func settleRecordCleanup() async { await recordCleanup?.value }
+
+    /// Run `work` in the background after any cleanup already queued.
+    private func queueRecordCleanup(_ work: @escaping @Sendable () -> Void) {
+        let previous = recordCleanup
+        recordCleanup = Task.detached(priority: .background) {
+            await previous?.value
+            work()
+        }
+    }
     /// Last prediction-snapshot written per surface (signature + when) — the
     /// change/heartbeat policy that keeps the trail from growing per tick.
     /// In-memory only: a relaunch writes one fresh row per surface, which
@@ -2332,7 +2347,7 @@ extension UsageIntelligenceEngine {
         let container = modelContainer
         let label = scopeLabel
         let dropped = rows.count - kept.count
-        Task.detached(priority: .background) {
+        queueRecordCleanup {
             let removed = Self.deletePreviousGradings(container: container, surfaces: surfaces)
             if removed > 0 || dropped > 0 {
                 Log.write("Engine", "record \(label): retired \(removed) row(s) of earlier gradings "
@@ -2370,7 +2385,7 @@ extension UsageIntelligenceEngine {
         guard !pruned.isEmpty else { return rows }
         let container = modelContainer, label = scopeLabel, dropped = rows.count - kept.count
         let targets = pruned.map { (self.scope.qualify($0.key), $0.value) }
-        Task.detached(priority: .background) {
+        queueRecordCleanup {
             let removed = Self.deleteBeyondDepth(container: container, cutoffs: targets)
             Log.write("Engine", "record \(label): pruned \(removed) arena grade(s) past the shared depth "
                       + "(\(dropped) held in memory)")
