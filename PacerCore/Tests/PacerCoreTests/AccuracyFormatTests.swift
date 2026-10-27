@@ -37,19 +37,18 @@ struct AccuracyFormatTests {
         #expect(PacerAccuracyFormat.record(0.5, partialCycles: 1) == "within ±0.5% · 1 cycle")
     }
 
-    @Test func theHeadingNamesTheSpanWhenItIsNarrower() {
-        typealias Span = EngineSelfEval.Accuracy.Span
-        let whole = Span(start: "a", cycles: 61, isWholeRecord: true)
-        let last = Span(start: "b", cycles: 24, isWholeRecord: false)
-        #expect(PacerAccuracyFormat.columnTitle(nil) == "TYPICAL ACCURACY, PAST CYCLES")
-        #expect(PacerAccuracyFormat.columnTitle(whole) == "TYPICAL ACCURACY, PAST CYCLES")
-        #expect(PacerAccuracyFormat.columnTitle(last) == "TYPICAL ACCURACY, LAST 24 CYCLES")
+    /// The heading names the span once, so no row has to.
+    @Test func theHeadingNamesTheSpan() {
+        #expect(PacerAccuracyFormat.columnTitle(spanCycles: 0) == "TYPICAL MISS")
+        #expect(PacerAccuracyFormat.columnTitle(spanCycles: 1) == "TYPICAL MISS, LAST CYCLE")
+        #expect(PacerAccuracyFormat.columnTitle(spanCycles: 24) == "TYPICAL MISS, LAST 24 CYCLES")
 
-        let today = "Typical |shown final − actual final| at this half of the window (first or second) across your "
-            + "completed cycles (median; mean on weekly windows), in percentage points — lower is better"
-        #expect(PacerAccuracyFormat.columnHelp(nil) == today)
-        #expect(PacerAccuracyFormat.columnHelp(whole) == today)
-        #expect(PacerAccuracyFormat.columnHelp(last).contains("over your last 24 completed cycles"))
-        #expect(PacerAccuracyFormat.columnHelp(last).hasSuffix("A model scored on fewer says how many."))
+        let what = "How far each model's call of the final has typically been off at this point in the window, "
+            + "in percentage points; lower is better"
+        #expect(PacerAccuracyFormat.columnHelp(spanCycles: 0) == what + ".")
+        #expect(PacerAccuracyFormat.columnHelp(spanCycles: 1)
+            == what + ". Over your last completed cycle; a model scored on fewer says how many.")
+        #expect(PacerAccuracyFormat.columnHelp(spanCycles: 24)
+            == what + ". Over your last 24 completed cycles; a model scored on fewer says how many.")
     }
 }

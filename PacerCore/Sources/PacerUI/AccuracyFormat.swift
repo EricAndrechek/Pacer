@@ -3,9 +3,8 @@ import PacerCore
 
 /// How the compare sheet writes a model's track record: its typical miss
 /// ("within ±3%"), the cycles behind it when they are fewer than the
-/// column's, and the column's heading. One place, so the drawn rows, the
-/// "More models" rows and the info popover can't print the same number two
-/// ways.
+/// column's, and the column's heading. One place, so the list and the info
+/// popover can't print the same number two ways.
 ///
 /// The numbers are percentage points of the window (`EngineSelfEval
 /// .Accuracy.MethodStat.typicalAbsError`), written with "%" as the meter is.
@@ -40,21 +39,23 @@ public enum PacerAccuracyFormat {
     /// "1 cycle", "12 cycles".
     public static func cycles(_ n: Int) -> String { n == 1 ? "1 cycle" : "\(n) cycles" }
 
-    /// The accuracy column's heading. Over a span narrower than the record
-    /// it says how many of the newest cycles every number covers: "TYPICAL
-    /// ACCURACY, LAST 24 CYCLES". Over the whole record, as it always read.
-    public static func columnTitle(_ span: EngineSelfEval.Accuracy.Span?) -> String {
-        guard let span, !span.isWholeRecord else { return "TYPICAL ACCURACY, PAST CYCLES" }
-        return "TYPICAL ACCURACY, LAST \(cycles(span.cycles).uppercased())"
+    /// The model list's right-hand heading, naming once the cycles every
+    /// number under it covers (`MeterModelBoard.spanCycles`): "TYPICAL MISS,
+    /// LAST 24 CYCLES"; "TYPICAL MISS" before any.
+    public static func columnTitle(spanCycles n: Int) -> String {
+        switch n {
+        case ..<1: return "TYPICAL MISS"
+        case 1: return "TYPICAL MISS, LAST CYCLE"
+        default: return "TYPICAL MISS, LAST \(n) CYCLES"
+        }
     }
 
     /// The heading's tooltip.
-    public static func columnHelp(_ span: EngineSelfEval.Accuracy.Span?) -> String {
-        let what = "Typical |shown final − actual final| at this half of the window (first or second)"
-        let how = "(median; mean on weekly windows), in percentage points — lower is better"
-        guard let span, !span.isWholeRecord else { return "\(what) across your completed cycles \(how)" }
-        let last = span.cycles == 1 ? "completed cycle" : "\(span.cycles) completed cycles"
-        return "\(what) over your last \(last), the ones the models are compared on \(how). "
-            + "A model scored on fewer says how many."
+    public static func columnHelp(spanCycles n: Int) -> String {
+        let what = "How far each model's call of the final has typically been off at this point in the window, "
+            + "in percentage points; lower is better"
+        guard n > 0 else { return what + "." }
+        let over = n == 1 ? "your last completed cycle" : "your last \(n) completed cycles"
+        return "\(what). Over \(over); a model scored on fewer says how many."
     }
 }

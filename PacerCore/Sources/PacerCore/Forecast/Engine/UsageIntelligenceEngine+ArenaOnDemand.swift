@@ -1,14 +1,15 @@
 import Foundation
 
-// The compare sheet draws the engine's own methods, the pick and the few
-// best-recorded arena models; every other model sits under "More models" with
-// no line. Clicking one there draws it: its live projection is made once, on
-// demand, at the live lane's priority, through the same forecaster and cache
-// as the drawn ones (`ArenaLiveForecaster.makeNow`), and drawn beside them
-// until it is clicked again or the sheet closes. Nothing is persisted; the
-// selection is the sheet's (`ArenaExtraLines`).
+// The compare sheet lists every model for a meter and draws the ones toggled
+// on. The window's fit already projects the engine's methods, the pick and the
+// few best-recorded arena models; any other toggled on is made here: its live
+// projection is made once, on demand, at the live lane's priority, through the
+// same forecaster and cache as the drawn ones (`ArenaLiveForecaster.makeNow`),
+// and drawn beside them until it is toggled off or the sheet closes. Nothing
+// is persisted; the selection is the sheet's (`ArenaExtraLines`).
 
-/// What a window can draw now for models picked from "More models".
+/// What a window can draw now for models toggled on that its fit does not
+/// project.
 public struct ArenaOnDemand: Sendable {
     public enum Line: Sendable {
         /// Its projection is in the cache for this cycle: the line, built as
@@ -90,14 +91,16 @@ extension UsageIntelligenceEngine {
     }
 }
 
-/// The models a compare sheet was asked to draw from "More models", and where
-/// each stands. A value the sheet holds in `@State` for as long as it is open:
+/// The models a compare sheet was asked to draw that its window does not
+/// project itself, and where each stands. A value the sheet holds in `@State` for as long as it is open:
 /// never persisted, emptied when the sheet's window or account changes
 /// (`follow`), and any answer for another key is dropped (`apply`), so an old
 /// account's projection never lands on the new one's chart.
 public struct ArenaExtraLines: Sendable {
-    /// Lines drawn this way at once, at most.
-    public static let cap = 6
+    /// Lines drawn this way at once, at most: the sheet's cap on every line
+    /// (`ModelBoardList.lineCap`), so this share of them never refuses one
+    /// the sheet has room for.
+    public static let cap = 10
 
     public enum State: Sendable, Equatable {
         case computing
@@ -154,6 +157,18 @@ public struct ArenaExtraLines: Sendable {
         entries[id] = Entry()
         ids.append(id)
         return true
+    }
+
+    /// Select exactly `wanted`: a model no longer in it is dropped (an
+    /// answer still on its way for it is ignored), a new one starts
+    /// computing, and the rest keep their lines and asks. The sheet calls this
+    /// with the lines it wants that the window does not draw itself.
+    public mutating func sync(_ wanted: [String]) {
+        remove(Set(ids).subtracting(wanted))
+        for id in wanted where entries[id] == nil && !isFull {
+            entries[id] = Entry()
+            ids.append(id)
+        }
     }
 
     /// Forget models that need no line from here (the window now draws them).

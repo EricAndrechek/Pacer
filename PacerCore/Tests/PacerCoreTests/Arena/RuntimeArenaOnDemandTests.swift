@@ -195,6 +195,26 @@ struct RuntimeArenaOnDemandTests {
         let r15 = extras.toggle("m-extra")
         #expect(r15)
         extras.remove(["m1", "m2"])
-        #expect(extras.ids == ["m3", "m4", "m5", "m-extra"])
+        #expect(extras.ids == (3..<ArenaExtraLines.cap).map { "m\($0)" } + ["m-extra"])
+    }
+
+    /// `sync` selects exactly what it is handed: the ones kept keep their
+    /// state, the new ones start computing, the rest are dropped.
+    @Test func syncSelectsExactlyTheWantedOnes() {
+        var extras = ArenaExtraLines(key: Self.key)
+        extras.toggle("a")
+        extras.toggle("b")
+        _ = extras.takeToMake()
+        extras.sync(["b", "c"])
+        #expect(extras.ids == ["b", "c"])
+        #expect(!extras.contains("a"))
+        #expect(extras.state("c") == .computing)
+        // "b" was asked already: not asked again.
+        #expect(extras.takeToMake() == ["c"])
+        // Never past the cap.
+        extras.sync((0..<(ArenaExtraLines.cap + 3)).map { "m\($0)" })
+        #expect(extras.ids.count == ArenaExtraLines.cap)
+        extras.sync([])
+        #expect(extras.ids.isEmpty)
     }
 }
