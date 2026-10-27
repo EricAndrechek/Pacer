@@ -854,6 +854,10 @@ public final class ArenaRuntime: Sendable {
     public let governor: ArenaBudgetGovernor?
     let cancel = ArenaCancelFlag()
     private let relief: ArenaMemoryRelief
+    /// Frees a network's kept scratch once it has gone two minutes unused
+    /// (`FMScratch.releaseIdle`): a backfill keeps its networks warm, and
+    /// between passes and refits nothing is held.
+    private let scratchSweep: DispatchSourceTimer
     private let ensureWeights: @Sendable ([String]) async -> Void
     private let weights: @Sendable (String) -> URL?
     public let compareLimit: Int
@@ -921,7 +925,16 @@ public final class ArenaRuntime: Sendable {
         self.live = ArenaLiveForecaster(roster: roster, history: history, cache: cache, services: liveServices,
                                         budget: budget, cancel: cancel, landed: onLiveLanded)
         self.relief = ArenaMemoryRelief(live: live, scorerFlag: scorer.relief)
+        let sweep = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+        sweep.schedule(deadline: .now() + 60, repeating: 60, leeway: .seconds(5))
+        sweep.setEventHandler { FMScratch.releaseIdle() }
+        // Active from here, as the memory relief is: a source released
+        // before it was ever activated is a crash in libdispatch.
+        sweep.activate()
+        self.scratchSweep = sweep
     }
+
+    deinit { scratchSweep.cancel() }
 
     /// What every engine adopts.
     public var link: ArenaEngineLink {
@@ -957,5 +970,6 @@ public final class ArenaRuntime: Sendable {
         cancel.set(true)
         governor?.stop()
         await scorer.stop()
+        FMScratch.release()
     }
 }

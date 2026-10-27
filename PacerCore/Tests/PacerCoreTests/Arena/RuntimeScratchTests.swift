@@ -49,4 +49,16 @@ struct RuntimeScratchTests {
         FMScratch.release()
         #expect(pool.keptBytes == 0)
     }
+
+    /// A network's kept scratch goes once it has been unused for the idle
+    /// time, not before.
+    @Test func idleScratchIsFreed() {
+        let pool = FMWorkspacePool<Workspace>()
+        pool.with { ws in _ = ws.buf(.small, 1 << 16) }
+        let now = FMScratch.uptime()
+        #expect(pool.trim(unusedSince: now - 60) == 0)
+        #expect(pool.keptBytes == (1 << 16) * Self.floats)
+        #expect(FMScratch.releaseIdle(now: now + FMScratch.idleSeconds + 1) >= (1 << 16) * Self.floats)
+        #expect(pool.keptBytes == 0)
+    }
 }

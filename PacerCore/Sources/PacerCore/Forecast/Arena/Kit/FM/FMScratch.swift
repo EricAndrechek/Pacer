@@ -9,14 +9,23 @@ import Foundation
 /// a long weekly context and the scorer and the live forecaster calling the
 /// same network at once, that was hundreds of megabytes of dirty memory held
 /// for good, against the 1–3 GB of weights that are mapped from disk and cost
-/// nothing while unused. Now at most one workspace a network is kept, at most
-/// `keepBytes` of it: a call that needed more gives its large buffers back to
-/// the system when it returns, and the next call allocates them at once at the
-/// size they reached (`FMWorkspace`). `release()` frees the kept ones too (end
-/// of a scoring pass, memory pressure).
+/// nothing while unused. Now one workspace a network is kept, of at most
+/// `keepBytes`, and only while the network is in use: `releaseIdle` frees one
+/// unused for two minutes, `release()` all of them (end of a scoring pass,
+/// memory pressure).
+///
+/// Why not smaller. Measured on the synthetic heavy store
+/// (`RuntimeMemoryProbe`, release): one Timestral network's calls in a pass
+/// used up to 130 MB of scratch, most of them well over 48 MB. Freeing that
+/// after each call took the pass's peak footprint from ~577 MB to ~284 MB and
+/// made the pass 37–140% slower (46 s against 63–112 s): the pages of a fresh
+/// buffer are faulted in again on every call. A backfill is the one thing the
+/// arena does for hours, so while a network is busy its scratch stays warm.
 public enum FMScratch {
     /// The largest workspace kept for the next call.
-    nonisolated(unsafe) public static var keepBytes = 32 << 20
+    nonisolated(unsafe) public static var keepBytes = 160 << 20
+    /// A kept workspace unused this long is freed (`releaseIdle`).
+    public static let idleSeconds: Double = 120
     /// Workspaces kept per network.
     nonisolated(unsafe) static var keepPerNetwork = 1
     /// A workspace over `keepBytes` keeps only its buffers up to this size.
@@ -59,6 +68,15 @@ public enum FMScratch {
     /// Free every kept workspace; the next call of each network makes one.
     public static func release() { pools.forEach { $0.trim() } }
 
+    /// Free the kept workspaces of networks not called for `idleSeconds`
+    /// (the runtime's sweep, every minute). Returns the bytes freed.
+    @discardableResult
+    public static func releaseIdle(now: Double = uptime(), idleFor: Double = idleSeconds) -> Int {
+        pools.reduce(0) { $0 + $1.trim(unusedSince: now - idleFor) }
+    }
+
+    public static func uptime() -> Double { Double(clock_gettime_nsec_np(CLOCK_UPTIME_RAW)) * 1e-9 }
+
     /// Each pool's network, calls, largest workspace and the calls that
     /// grew past `keepBytes` (probes).
     public static var stats: [(network: String, calls: Int, largest: Int, overCap: Int)] {
@@ -69,6 +87,9 @@ public enum FMScratch {
 /// What `FMScratch` can ask of a pool.
 protocol FMScratchPool: AnyObject, Sendable {
     var keptBytes: Int { get }
+    /// Free what is kept when the last call returned before `t` (uptime
+    /// seconds); returns the bytes freed.
+    func trim(unusedSince t: Double) -> Int
     var stats: (network: String, calls: Int, largest: Int, overCap: Int) { get }
     func trim()
 }
@@ -134,6 +155,7 @@ final class FMWorkspacePool<W: FMWorkspaceBuffers>: FMScratchPool, @unchecked Se
     private var free: [W] = []
     private let lock = NSLock()
     private var calls = 0, largest = 0, overCap = 0
+    private var lastUsed = 0.0
 
     init() { FMScratch.register(self) }
 
@@ -149,10 +171,12 @@ final class FMWorkspacePool<W: FMWorkspaceBuffers>: FMScratchPool, @unchecked Se
             largest = max(largest, bytes)
             if bytes > FMScratch.keepBytes { overCap += 1 }
             lock.unlock()
-            // Over the cap: its large buffers go back to the system and the
-            // small ones stay, with the large ones' sizes remembered.
+            // Over the cap (rare at 160 MB): its large buffers go back to
+            // the system and the small ones stay, the large ones' sizes
+            // remembered.
             if bytes > FMScratch.keepBytes { _ = ws.shrink(above: FMScratch.slotBytes) }
             lock.lock()
+            lastUsed = FMScratch.uptime()
             if free.count < FMScratch.keepPerNetwork, ws.bytes <= FMScratch.keepBytes { free.append(ws) }
             lock.unlock()
         }
@@ -167,4 +191,13 @@ final class FMWorkspacePool<W: FMWorkspaceBuffers>: FMScratchPool, @unchecked Se
     }
 
     func trim() { lock.lock(); let gone = free; free = []; lock.unlock(); _ = gone }
+
+    func trim(unusedSince t: Double) -> Int {
+        lock.lock()
+        guard lastUsed < t, !free.isEmpty else { lock.unlock(); return 0 }
+        let gone = free
+        free = []
+        lock.unlock()
+        return gone.reduce(0) { $0 + $1.bytes }
+    }
 }
