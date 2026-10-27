@@ -93,7 +93,17 @@ struct AboutView: View {
                 .padding(.vertical, 2)
 
             VStack(spacing: 6) {
-                Text("Storage is local to this Mac. The only network egress is the OAuth poll to api.anthropic.com.")
+                Text("Storage is local to this Mac. Network: usage polls to api.anthropic.com, forecast model downloads from huggingface.co, and update checks.")
+                    .font(.caption)
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: 300)
+                // The Timestral weights' licence (Mistral AI's Modified MIT)
+                // asks for its attribution notice to travel with every copy;
+                // the LICENSE file sits beside the weights, and this is the
+                // credit a user sees. THIRD-PARTY-NOTICES.md has the rest.
+                Text("Forecast networks: Timestral © 2026 Mistral AI, Chronos-2 © Amazon, TimesFM © Google. [Notices](https://github.com/EricAndrechek/Pacer/blob/main/THIRD-PARTY-NOTICES.md)")
                     .font(.caption)
                     .multilineTextAlignment(.center)
                     .foregroundStyle(.secondary)
