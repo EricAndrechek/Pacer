@@ -30,10 +30,13 @@ public struct ArenaModelListing: Sendable, Equatable, Identifiable {
 
     public let id: String
     public let name: String
-    /// Completed cycles of this window it has been scored on.
+    /// Completed cycles of this window it has been scored on, its whole
+    /// record: what counts towards the selection floor.
     public let cycles: Int
     /// The record's typical miss (`EngineSelfEval.Accuracy.MethodStat`), only
-    /// once `cycles` reaches the selection floor; nil before.
+    /// once `cycles` reaches the selection floor; nil before. Measured over
+    /// the sheet's span (`EngineSelfEval.comparableAccuracy`), the cycles the
+    /// drawn rows' numbers cover, so the two halves of the list compare.
     public let typicalAbsError: Double?
     /// The record's pick for this window.
     public let isPick: Bool

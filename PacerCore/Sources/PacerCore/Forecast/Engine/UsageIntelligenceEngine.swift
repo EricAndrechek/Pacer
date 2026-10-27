@@ -149,7 +149,9 @@ public actor UsageIntelligenceEngine {
     /// The per-user fit derived from `features`.
     private var fit = Fit()
     /// Per-surface method track records (end-of-day, rate-limit windows),
-    /// refreshed each recompute.
+    /// refreshed each recompute. A rate-limit window's is measured over the
+    /// span its selection compares on (`EngineSelfEval.comparableAccuracy`):
+    /// what the compare sheet shows.
     private var accuracyBySurface: [String: EngineSelfEval.Accuracy] = [:]
     /// Last prediction-snapshot written per surface (signature + when) — the
     /// change/heartbeat policy that keeps the trail from growing per tick.
@@ -343,6 +345,11 @@ public actor UsageIntelligenceEngine {
         // Timed: with the arena models in the record this is a few times the
         // engine's own rows, and the phase log should say what it costs.
         let selectStarted = Date()
+        // Each window's accuracy over every method's whole record: what
+        // `makeFit` ranks the drawn arena models and the stand-in by. The
+        // sheet is shown the same numbers over one span instead
+        // (`accuracyBySurface`, below).
+        var rlAccuracy: [String: EngineSelfEval.Accuracy] = [:]
         for window in f.windows where fitsRateLimits {
             let surface = EngineSelfEval.rlSurface(window.key)
             // Current-version rows only: v1 graded the raw line, not the value shown.
@@ -352,17 +359,26 @@ public actor UsageIntelligenceEngine {
             // the stand-in ranking and the accuracy shown all read that half's
             // record. No live cycle, no phase: every cut, as before.
             let phase = params.rlSelectByPhase ? Self.livePhase(f, window: window) : nil
-            accuracyBySurface[surface] = EngineSelfEval.accuracy(surface: surface, from: recs, weekly: weekly,
-                                                                 phase: phase)
+            let whole = EngineSelfEval.accuracy(surface: surface, from: recs, weekly: weekly, phase: phase)
+            rlAccuracy[window.key] = whole
             // Only methods that can run here compete: the engine's, and the
             // arena models that forecast this window. Arena models are
             // compared with the rest over the cycles they have been scored on
             // (`arenaComparable`): their record fills in newest first.
             let roster = arena?.roster ?? .empty
             let candidates = Set(RateLimitRoster.ids(window: window, arena: roster))
-            let pickable = EngineSelfEval.arenaComparable(
-                recs.filter { candidates.contains($0.method) },
-                arenaIds: candidates.intersection(roster.selectableIds), weekly: weekly)
+            let runnable = recs.filter { candidates.contains($0.method) }
+            let arenaIds = candidates.intersection(roster.selectableIds)
+            let span = EngineSelfEval.arenaSpan(runnable, arenaIds: arenaIds, weekly: weekly)
+            let pickable = EngineSelfEval.comparable(runnable, span: span, arenaIds: arenaIds)
+            // The compare sheet's numbers, drawn rows and "More models"
+            // alike, over that same span: shown each over its own record, a
+            // model scored on the newest few dozen cycles sat beside one
+            // scored on every cycle, and the two said nothing about each
+            // other. No arena model in the running: the whole record, as
+            // before.
+            accuracyBySurface[surface] = EngineSelfEval.comparableAccuracy(
+                surface: surface, from: recs, weekly: weekly, phase: phase, since: span.start, whole: whole)
             if let pick = EngineSelfEval.bestMethod(from: pickable, complexity: Self.rlComplexities(arena: roster),
                                                     weekly: weekly, phase: phase,
                                                     tieRelative: params.rlTieRelative > 0 ? params.rlTieRelative : nil) {
@@ -371,9 +387,6 @@ public actor UsageIntelligenceEngine {
         }
         phase["rlSelect", default: 0] += Int(Date().timeIntervalSince(selectStarted) * 1000)
 
-        let rlAccuracy = Dictionary(f.windows.compactMap { w in
-            accuracyBySurface[EngineSelfEval.rlSurface(w.key)].map { (w.key, $0) }
-        }, uniquingKeysWith: { first, _ in first })
         // Each window's current-version record: the band and the cycle facts
         // read every cycle it has scored, not only the 32 days fetched (#306).
         let rlRecords = Dictionary(f.windows.map { w in
@@ -481,6 +494,9 @@ public actor UsageIntelligenceEngine {
     /// (`EngineSelfEval.surfaceEOD`, or `EngineSelfEval.rlSurface(window)`):
     /// median absolute % error and how many completed periods back it,
     /// best-first. `nil` before the first recompute or for an unscored surface.
+    /// On a rate-limit window every number covers the same cycles, the span
+    /// selection compares on (`Accuracy.span`); `periods` is still each
+    /// method's whole record.
     public func selfEvalAccuracy(surface: String = EngineSelfEval.surfaceEOD) -> EngineSelfEval.Accuracy? {
         accuracyBySurface[surface]
     }

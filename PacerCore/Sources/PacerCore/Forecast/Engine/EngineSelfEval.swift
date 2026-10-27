@@ -206,11 +206,35 @@ public enum EngineSelfEval {
             /// (percentage points for rate-limit surfaces) — what the
             /// compare-models sheet displays as "fit ±N pp".
             public let typicalAbsError: Double
+            /// Completed periods in the method's whole record: what the
+            /// sheet's list counts towards the selection floor, and the
+            /// selected model's "earned on N" footer.
             public let periods: Int
             /// The same statistic split by how far through the window the
             /// call was made: the compare sheet's per-model record. Empty on
             /// surfaces whose buckets carry no cut.
             public var byStage: [StageStat] = []
+            /// The cycles behind `typicalAbsError` and `byStage` when the
+            /// accuracy is measured over a `span` (`comparableAccuracy`): its
+            /// record inside the span. Nil: the whole record, `periods`.
+            public var spanPeriods: Int? = nil
+            /// The first cycle (`periodKey`) of its whole record, set with a
+            /// span: a record that starts after the span does is shorter than
+            /// the span (`Accuracy.partialCycles`).
+            public var firstPeriod: String? = nil
+            /// The cycles behind the numbers shown.
+            public var shownPeriods: Int { spanPeriods ?? periods }
+        }
+        /// The cycles every number in a `comparableAccuracy` is measured
+        /// over: the newest `cycles`, from `start` on.
+        public struct Span: Sendable, Equatable {
+            /// The span's first cycle (a `periodKey`).
+            public let start: String
+            /// Completed cycles in it.
+            public let cycles: Int
+            /// Whether it is every cycle the record holds: nothing narrowed
+            /// it, and each number is the method's whole record.
+            public let isWholeRecord: Bool
         }
         /// Early, middle or late in the window: cuts 0.2–0.4, 0.5–0.7 and
         /// 0.8–0.9 of the rate-limit grid (`rlCutFractions`).
@@ -226,6 +250,27 @@ public enum EngineSelfEval {
         }
         public let surface: String
         public let methods: [MethodStat]
+        /// What the numbers are measured over, for a `comparableAccuracy`;
+        /// nil: each method over its own whole record (`accuracy`).
+        public var span: Span? = nil
+
+        public func stat(_ method: String) -> MethodStat? { methods.first { $0.method == method } }
+
+        /// The cycles behind `method`'s number when its record starts after
+        /// the span does (a model still filling in, or one scored only on
+        /// recent cycles), so its row can say it was measured on fewer. Nil
+        /// when its record reaches back to the span's start, without a span,
+        /// and for a method with no number.
+        ///
+        /// Judged by where the record starts, not by its count: a method
+        /// that declined a cycle or two inside the span was still measured
+        /// on the same stretch, and a count on every such row would bury
+        /// the ones that were not.
+        public func partialCycles(_ method: String) -> Int? {
+            guard let span, let m = stat(method), m.typicalAbsError.isFinite,
+                  let first = m.firstPeriod, first > span.start else { return nil }
+            return m.shownPeriods
+        }
     }
 
     /// `weekly` picks the statistic `typicalAbsError` reports — the same one
@@ -253,6 +298,64 @@ public enum EngineSelfEval {
                          periods: periods, byStage: byStage)
         }.sorted { $0.medianAbsPctError < $1.medianAbsPctError }
         return Accuracy(surface: surface, methods: methods)
+    }
+
+    /// The accuracy the compare sheet shows: every method's numbers over the
+    /// same cycles, from `start` (the span selection compares over,
+    /// `arenaSpan`) to the newest.
+    ///
+    /// The engine's methods are scored over every cycle the store holds and
+    /// the arena models newest first, often only over the last few dozen.
+    /// Shown each over its own record, a model scored only on recent,
+    /// near-idle cycles read "within ±0%" beside an engine method's ±3%
+    /// over months, which says nothing about which is better. Over one span
+    /// the numbers are the ones selection ranked (`bestMethod` over
+    /// `arenaComparable`, with the same `phase`), so the column and the pick
+    /// can't disagree.
+    ///
+    /// `typicalAbsError`, `medianAbsPctError` and `byStage` cover the span;
+    /// `periods` stays the whole record, and `spanPeriods` and `firstPeriod`
+    /// say how much of the span each record covers. A method whose record
+    /// lies wholly before the span keeps its row, with no number.
+    ///
+    /// With no `start`, or one no later than the record's first cycle, the
+    /// span is the whole record and every number is `accuracy`'s. `whole` is
+    /// that accuracy when the caller has it already, so this costs a pass
+    /// over the span alone.
+    public static func comparableAccuracy(surface: String, from records: [Record], weekly: Bool = false,
+                                          phase: SelectionPhase? = nil, since start: String?,
+                                          whole: Accuracy? = nil) -> Accuracy {
+        let whole = whole ?? accuracy(surface: surface, from: records, weekly: weekly, phase: phase)
+        // Each record's first cycle and every cycle: periodKeys are ISO 8601
+        // instants, so their order is time order.
+        var firstPeriod: [String: String] = [:]
+        var cycles = Set<String>()
+        for r in records {
+            if firstPeriod[r.method].map({ r.periodKey < $0 }) ?? true { firstPeriod[r.method] = r.periodKey }
+            cycles.insert(r.periodKey)
+        }
+        guard let earliest = cycles.min() else { return whole }
+        var first = earliest
+        if let start, start > earliest { first = cycles.filter { $0 >= start }.min() ?? start }
+        let narrowed = first > earliest
+        let shown = narrowed
+            ? accuracy(surface: surface, from: records.filter { $0.periodKey >= first }, weekly: weekly, phase: phase)
+            : whole
+
+        let periods = Dictionary(whole.methods.map { ($0.method, $0.periods) }, uniquingKeysWith: { a, _ in a })
+        var methods = shown.methods.map { m -> Accuracy.MethodStat in
+            .init(method: m.method, medianAbsPctError: m.medianAbsPctError, typicalAbsError: m.typicalAbsError,
+                  periods: periods[m.method] ?? m.periods, byStage: m.byStage, spanPeriods: m.periods,
+                  firstPeriod: firstPeriod[m.method])
+        }
+        let listed = Set(methods.map(\.method))
+        for m in whole.methods.sorted(by: { $0.method < $1.method }) where !listed.contains(m.method) {
+            methods.append(.init(method: m.method, medianAbsPctError: .infinity, typicalAbsError: .infinity,
+                                 periods: m.periods, spanPeriods: 0, firstPeriod: firstPeriod[m.method]))
+        }
+        return Accuracy(surface: surface, methods: methods,
+                        span: .init(start: first, cycles: cycles.filter { $0 >= first }.count,
+                                    isWholeRecord: !narrowed))
     }
 
     /// The error a rate-limit model is judged by: the median, or on a
@@ -554,20 +657,40 @@ extension EngineSelfEval {
     /// span. With no arena model in the record this is the identity, which
     /// keeps selection exactly as it was.
     public static func arenaComparable(_ records: [Record], arenaIds: Set<String>, weekly: Bool) -> [Record] {
-        guard !arenaIds.isEmpty else { return records }
+        comparable(records, span: arenaSpan(records, arenaIds: arenaIds, weekly: weekly), arenaIds: arenaIds)
+    }
+
+    /// Where `arenaComparable`'s span starts and which arena models it
+    /// counts, apart from the filtering: the refit derives it once and both
+    /// selection and the sheet's numbers (`comparableAccuracy`) read it.
+    public struct ArenaSpan: Sendable, Equatable {
+        /// The first cycle compared; nil, every cycle the record holds.
+        public var start: String?
+        /// The arena models compared; nil when the record holds none, and
+        /// every method in it is compared.
+        public var eligible: Set<String>?
+    }
+
+    public static func arenaSpan(_ records: [Record], arenaIds: Set<String>, weekly: Bool) -> ArenaSpan {
+        guard !arenaIds.isEmpty else { return .init() }
         var periods: [String: Set<String>] = [:]
         for r in records where arenaIds.contains(r.method) { periods[r.method, default: []].insert(r.periodKey) }
-        guard !periods.isEmpty else { return records }
+        guard !periods.isEmpty else { return .init() }
         let floor = arenaMinPeriods(weekly: weekly)
         let losers = arenaLosers(records, arenaIds: arenaIds, weekly: weekly)
         let eligible = periods.filter { $0.value.count >= floor && !losers.contains($0.key) }
         // periodKeys are ISO 8601 instants, so their order is time order.
-        guard let start = eligible.values.compactMap({ $0.min() }).max() else {
-            return records.filter { !arenaIds.contains($0.method) }
-        }
+        // No arena model can be compared yet: none counts, over every cycle.
+        return .init(start: eligible.values.compactMap { $0.min() }.max(), eligible: Set(eligible.keys))
+    }
+
+    /// `records` narrowed to `span`: from its start, arena models only when
+    /// it counts them.
+    public static func comparable(_ records: [Record], span: ArenaSpan, arenaIds: Set<String>) -> [Record] {
+        guard let eligible = span.eligible else { return records }
         return records.filter { r in
-            guard r.periodKey >= start else { return false }
-            return !arenaIds.contains(r.method) || eligible[r.method] != nil
+            if let start = span.start, r.periodKey < start { return false }
+            return !arenaIds.contains(r.method) || eligible.contains(r.method)
         }
     }
 }
