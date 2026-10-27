@@ -104,15 +104,13 @@ protocol FMWorkspaceBuffers: AnyObject {
 }
 
 /// One call's scratch buffers, one per slot, grown on demand
-/// (Timestral, TimesFM and Chronos had three copies of this).
+/// (Timestral, TimesFM and Chronos had three identical copies of this).
 ///
-/// A slot freed by `shrink` remembers how large it was, and the next call
-/// that needs it allocates it at that size at once. A fresh workspace grew a
-/// long call's buffers in steps of half again, each step a new block whose
-/// pages were faulted in again; on a pass where one network's weekly calls
-/// needed 126 MB, dropping that workspace after each call made the whole
-/// pass a third slower. An allocation's untouched pages cost nothing, so
-/// asking for the remembered size up front costs only what the call uses.
+/// `shrink` frees the buffers over a size and remembers how large they were,
+/// so the next call that needs one allocates it at that size at once rather
+/// than growing it again in steps. The pool only shrinks a workspace that
+/// ended over `FMScratch.keepBytes`: shrinking on every call is what the
+/// probe measured as 2.4 times slower (see `FMScratch`).
 final class FMWorkspace<Slot: CaseIterable & RawRepresentable>: FMWorkspaceBuffers where Slot.RawValue == Int {
     private var ptrs = [UnsafeMutablePointer<Float>?](repeating: nil, count: Slot.allCases.count)
     private var caps = [Int](repeating: 0, count: Slot.allCases.count)
