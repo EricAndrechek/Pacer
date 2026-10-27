@@ -210,12 +210,32 @@ struct RuntimeEngineTests {
         let landed = Landed()
         let rt = Self.runtime(container, roster: [Self.peeker], config: config, landed: landed)
         _ = await rt.scorer.pass(accounts: [Self.account], now: Self.now)
-        let order = landed.batches.compactMap { $0.first?.periodKey }
+        // One batch for the pass (saved and handed over together, not per
+        // cycle: `Config.flushInterval`), in the order the cycles were scored.
+        #expect(landed.batches.count == 1)
+        var order: [String] = []
+        for n in landed.all where !order.contains(n.periodKey) { order.append(n.periodKey) }
         #expect(order.count == 3)
         #expect(order == order.sorted(by: >))
         // Exactly the three newest completed cycles.
         let engineSegments = try Self.completedResets(container)
         #expect(Set(order) == Set(engineSegments.suffix(3)))
+    }
+
+    /// Outcomes are saved and handed over in batches: at `flushOutcomes`
+    /// (here every cycle's worth) and whatever is left at the end of a pass,
+    /// every one of them stored exactly once.
+    @Test func outcomesAreSavedInBatches() async throws {
+        let container = try Self.seeded()
+        var config = Self.noSleep()
+        config.sessionCycleCap = 3
+        config.flushOutcomes = 1
+        let landed = Landed()
+        let rt = Self.runtime(container, roster: [Self.peeker], config: config, landed: landed)
+        let report = await rt.scorer.pass(accounts: [Self.account], now: Self.now)
+        #expect(landed.batches.count == 3)
+        #expect(landed.all.count == report.outcomes)
+        #expect(try Self.arenaRows(container, method: "test-peeker").count == report.outcomes)
     }
 
     static func completedResets(_ container: ModelContainer) throws -> [String] {
@@ -233,6 +253,34 @@ struct RuntimeEngineTests {
         let rt = Self.runtime(container, roster: [pinned])
         let report = await rt.scorer.pass(accounts: [Self.account], now: Self.now)
         #expect(report.forecasts == 0)
+    }
+
+    /// Missing weights are asked for again before every pass, so a download
+    /// that failed is retried in the same process; once they are here, not.
+    @Test func everyPassAsksForMissingWeights() async throws {
+        let container = try Self.seeded()
+        let pinned = ArenaModelSpec(name: "test-pinned", targets: Self.meters, weights: ["acme/net@abc"]) {
+            Peeker(context: $0)
+        }
+        final class Asked: @unchecked Sendable {
+            let lock = NSLock()
+            var calls: [[String]] = []
+            func add(_ ids: [String]) { lock.withLock { calls.append(ids) } }
+            var count: Int { lock.withLock { calls.count } }
+        }
+        let asked = Asked()
+        var config = Self.noSleep()
+        config.rescanInterval = 0.05
+        let rt = ArenaRuntime(container: container, roster: ArenaRoster(registry: [pinned]),
+                              weights: { _ in nil }, ensureWeights: { asked.add($0) }, config: config,
+                              onRecordLanded: { _, _ in }, onLiveLanded: { _ in })
+        rt.start(accounts: { [Self.account] })
+        // Background priority: on a loaded Mac a pass can wait a long while
+        // for a core, so this waits for two passes, generously.
+        for _ in 0..<12_000 where asked.count < 2 { try await Task.sleep(for: .milliseconds(10)) }
+        await rt.stop()
+        #expect(asked.count >= 2)
+        #expect(asked.lock.withLock { asked.calls.allSatisfy { $0 == ["acme/net@abc"] } })
     }
 
     @Test func stoppingEndsTheLoop() async throws {

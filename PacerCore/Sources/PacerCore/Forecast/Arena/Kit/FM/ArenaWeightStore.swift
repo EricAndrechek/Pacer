@@ -122,41 +122,31 @@ public enum ArenaWeightStore {
     /// Downloads every id in `ids` that is not on this Mac yet, one file at a
     /// time, from `https://huggingface.co/<repo>/resolve/<revision>/<file>`:
     /// never over an expensive (cellular, hotspot) or constrained (Low Data
-    /// Mode) network, at utility priority, verified against the pinned
+    /// Mode) network, at background priority, verified against the pinned
     /// SHA-256, then moved into place atomically. Ids without pins are
     /// skipped (nothing unpinned is ever fetched). Safe to call repeatedly
-    /// and from several tasks: calls are serialized, and finished ids are
-    /// skipped.
+    /// and from several tasks: calls are serialized, finished ids are
+    /// skipped, and an id that failed is retried on its own schedule
+    /// (`Downloader.backoff`), resuming where the transfer broke off.
     public static func ensureAvailable(_ ids: [String]) async {
         await downloader.run(ids)
     }
 
-    static let downloader = Downloader()
+    static let downloader = Downloader(transport: URLSessionWeightTransport())
 
-    actor Downloader {
-        private var busy = false
-        private var waiters: [CheckedContinuation<Void, Never>] = []
+    /// The network half of a download, so tests can stand in for it.
+    protocol Transport: Sendable {
+        /// `request`'s body in a temporary file the caller then owns,
+        /// continuing an earlier transfer when `resumeData` is given. A
+        /// failure that can be continued throws an `NSError` carrying
+        /// `NSURLSessionDownloadTaskResumeData`, as `URLSession` does.
+        func download(_ request: URLRequest, resumeData: Data?) async throws -> (URL, URLResponse)
+    }
 
-        func run(_ ids: [String]) async {
-            // At most one download at a time, process-wide.
-            while busy { await withCheckedContinuation { waiters.append($0) } }
-            busy = true
-            defer {
-                busy = false
-                if !waiters.isEmpty { waiters.removeFirst().resume() }
-            }
-            for id in ids where localURL(for: id) == nil {
-                guard let files = pinned[id], let rel = relativeFolder(id), let (repo, rev) = parse(id) else {
-                    Log.write("Arena", "weights \(id): not pinned, not downloaded")
-                    continue
-                }
-                if Task.isCancelled { return }
-                await Self.fetch(id: id, repo: repo, revision: rev, files: files,
-                                 into: downloadRoot.appendingPathComponent(rel, isDirectory: true))
-            }
-        }
-
-        private static func session() -> URLSession {
+    struct URLSessionWeightTransport: Transport {
+        /// One session for the process, never invalidated: the partial file
+        /// a resume continues belongs to it.
+        private static let session: URLSession = {
             let cfg = URLSessionConfiguration.ephemeral
             cfg.allowsExpensiveNetworkAccess = false
             cfg.allowsConstrainedNetworkAccess = false
@@ -166,53 +156,201 @@ public enum ArenaWeightStore {
             cfg.httpMaximumConnectionsPerHost = 1
             cfg.networkServiceType = .background
             return URLSession(configuration: cfg)
+        }()
+
+        func download(_ request: URLRequest, resumeData: Data?) async throws -> (URL, URLResponse) {
+            if let resumeData { return try await Self.session.download(resumeFrom: resumeData) }
+            return try await Self.session.download(for: request)
+        }
+    }
+
+    actor Downloader {
+        /// After the first failure an id waits a minute, then five, then
+        /// thirty, then an hour between tries for as long as the process
+        /// runs. A connection that drops mid-file is the usual failure (a
+        /// laptop changing networks), and the next try resumes it.
+        static let backoffSchedule: [TimeInterval] = [60, 5 * 60, 30 * 60]
+        static let backoffCeiling: TimeInterval = 3600
+
+        static func backoff(failures: Int) -> TimeInterval {
+            guard failures > 0 else { return 0 }
+            return failures <= backoffSchedule.count ? backoffSchedule[failures - 1] : backoffCeiling
+        }
+
+        private struct Failure { var count: Int; var retryAt: Date }
+
+        private let transport: any Transport
+        private let now: @Sendable () -> Date
+        private let sleep: @Sendable (TimeInterval) async -> Void
+        private let root: @Sendable () -> URL
+        private let pins: @Sendable (String) -> [PinnedFile]?
+        private let isPresent: @Sendable (String) -> Bool
+        private var busy = false
+        private var waiters: [CheckedContinuation<Void, Never>] = []
+        private var failures: [String: Failure] = [:]
+        /// Where a broken transfer can continue from, by `id|file`.
+        private var resumeData: [String: Data] = [:]
+        private var retry: Task<Void, Never>?
+        private var stopped = false
+
+        init(transport: any Transport,
+             now: @escaping @Sendable () -> Date = { Date() },
+             sleep: @escaping @Sendable (TimeInterval) async -> Void = { try? await Task.sleep(for: .seconds($0)) },
+             root: @escaping @Sendable () -> URL = { ArenaWeightStore.downloadRoot },
+             pins: @escaping @Sendable (String) -> [PinnedFile]? = { ArenaWeightStore.pinned[$0] },
+             isPresent: @escaping @Sendable (String) -> Bool = { ArenaWeightStore.localURL(for: $0) != nil }) {
+            self.transport = transport; self.now = now; self.sleep = sleep; self.root = root
+            self.pins = pins; self.isPresent = isPresent
+        }
+
+        /// The ids that failed and are waiting for their next try, with when
+        /// (tests, the log).
+        func pendingRetries() -> [String: Date] { failures.mapValues(\.retryAt) }
+
+        /// Wait for the scheduled retry to finish (tests).
+        func settle() async { await retry?.value }
+
+        /// No more retries (tests: a scripted clock would otherwise retry
+        /// forever).
+        func stop() {
+            stopped = true
+            retry?.cancel()
+            retry = nil
+        }
+
+        func run(_ ids: [String]) async {
+            // At most one download at a time, process-wide.
+            while busy { await withCheckedContinuation { waiters.append($0) } }
+            busy = true
+            defer {
+                busy = false
+                if !waiters.isEmpty { waiters.removeFirst().resume() }
+            }
+            // Arrived some other way (a later build bundles it): stop retrying.
+            for id in ids where isPresent(id) { failures[id] = nil }
+            for id in ids where !isPresent(id) {
+                guard let files = pins(id), let rel = relativeFolder(id), let (repo, rev) = parse(id) else {
+                    Log.write("Arena", "weights \(id): not pinned, not downloaded")
+                    continue
+                }
+                // Not yet: its retry is scheduled.
+                if let f = failures[id], f.retryAt > now() { continue }
+                if Task.isCancelled || stopped { return }
+                do {
+                    try await fetch(id: id, repo: repo, revision: rev, files: files,
+                                    into: root().appendingPathComponent(rel, isDirectory: true))
+                    failures[id] = nil
+                } catch {
+                    let count = (failures[id]?.count ?? 0) + 1
+                    let wait = Self.backoff(failures: count)
+                    failures[id] = Failure(count: count, retryAt: now().addingTimeInterval(wait))
+                    Log.write("Arena", "weights \(id): download failed (\(Self.describe(error))); "
+                              + "retrying in \(Int(wait / 60)) min")
+                }
+            }
+            scheduleRetry()
+        }
+
+        /// One task, sleeping until the earliest failed id is due, then
+        /// running every due one again; it schedules the next itself.
+        private func scheduleRetry() {
+            guard !stopped, retry == nil, let next = failures.values.map(\.retryAt).min() else { return }
+            let wait = max(0, next.timeIntervalSince(now()))
+            retry = Task.detached(priority: .background) { [weak self] in
+                guard let self else { return }
+                await self.sleep(wait)
+                await self.retryDue()
+            }
+        }
+
+        private func retryDue() async {
+            retry = nil
+            guard !stopped else { return }
+            let due = failures.filter { $0.value.retryAt <= now() }.map(\.key).sorted()
+            if due.isEmpty { scheduleRetry() } else { await run(due) }
         }
 
         /// One id: every file downloaded and verified into a staging folder,
         /// then the folder renamed into place (so `localURL` never sees half
         /// an id).
-        private static func fetch(id: String, repo: String, revision: String, files: [PinnedFile], into dest: URL) async {
+        private func fetch(id: String, repo: String, revision: String, files: [PinnedFile], into dest: URL) async throws {
             let fm = FileManager.default
             let staging = dest.deletingLastPathComponent()
                 .appendingPathComponent(".staging-\(dest.lastPathComponent)-\(UUID().uuidString)", isDirectory: true)
-            let session = session()
-            defer { session.finishTasksAndInvalidate(); try? fm.removeItem(at: staging) }
-            do {
-                try fm.createDirectory(at: staging, withIntermediateDirectories: true)
-                let started = Date()
-                for f in files {
-                    let src = URL(string: "https://huggingface.co/\(repo)/resolve/\(revision)/\(f.name)")!
-                    var req = URLRequest(url: src)
-                    req.networkServiceType = .background
-                    let (tmp, response) = try await Task(priority: .utility) {
-                        try await session.download(for: req)
+            defer { try? fm.removeItem(at: staging) }
+            try fm.createDirectory(at: staging, withIntermediateDirectories: true)
+            let started = now()
+            for f in files {
+                let src = URL(string: "https://huggingface.co/\(repo)/resolve/\(revision)/\(f.name)")!
+                var req = URLRequest(url: src)
+                req.networkServiceType = .background
+                let key = "\(id)|\(f.name)"
+                let resume = resumeData.removeValue(forKey: key)
+                let tmp: URL, response: URLResponse
+                do {
+                    let transport = self.transport, request = req
+                    (tmp, response) = try await Task.detached(priority: .background) {
+                        try await transport.download(request, resumeData: resume)
                     }.value
-                    defer { try? fm.removeItem(at: tmp) }
-                    guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-                        throw ArenaError.invalid("HTTP \((response as? HTTPURLResponse)?.statusCode ?? -1) for \(f.name)")
+                } catch {
+                    // Kept for the next try; a resume that itself fails
+                    // without new data starts that file over.
+                    if let data = (error as NSError).userInfo[NSURLSessionDownloadTaskResumeData] as? Data {
+                        resumeData[key] = data
                     }
-                    let digest = try await Task(priority: .utility) { try sha256(of: tmp) }.value
-                    guard digest == f.sha256 else {
-                        throw ArenaError.invalid("\(f.name): sha256 \(digest) is not the pinned \(f.sha256)")
-                    }
-                    try fm.moveItem(at: tmp, to: staging.appendingPathComponent(f.name))
+                    throw error
                 }
-                try fm.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
-                if fm.fileExists(atPath: dest.path) { try fm.removeItem(at: dest) }
-                try fm.moveItem(at: staging, to: dest)
-                Log.write("Arena", "weights \(id): downloaded and verified in \(Int(Date().timeIntervalSince(started))) s")
-            } catch {
-                Log.write("Arena", "weights \(id): download failed (\(error)); will retry later")
+                defer { try? fm.removeItem(at: tmp) }
+                // 206: the rest of a resumed transfer, already joined to its
+                // first part in `tmp`.
+                guard let http = response as? HTTPURLResponse, http.statusCode == 200 || http.statusCode == 206 else {
+                    throw ArenaError.invalid("HTTP \((response as? HTTPURLResponse)?.statusCode ?? -1) for \(f.name)")
+                }
+                let digest = try await Task.detached(priority: .background) { try sha256(of: tmp) }.value
+                guard digest == f.sha256 else {
+                    throw ArenaError.invalid("\(f.name): sha256 \(digest) is not the pinned \(f.sha256)")
+                }
+                try fm.moveItem(at: tmp, to: staging.appendingPathComponent(f.name))
             }
+            try fm.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if fm.fileExists(atPath: dest.path) { try fm.removeItem(at: dest) }
+            try fm.moveItem(at: staging, to: dest)
+            Log.write("Arena", "weights \(id): downloaded and verified in \(Int(now().timeIntervalSince(started))) s")
+        }
+
+        /// An error for the log without its resume blob.
+        static func describe(_ error: Error) -> String {
+            let e = error as NSError
+            guard e.domain == NSURLErrorDomain else { return "\(error)" }
+            let resumable = e.userInfo[NSURLSessionDownloadTaskResumeData] != nil
+            return "\(e.domain) \(e.code) \"\(e.localizedDescription)\"" + (resumable ? ", resumable" : "")
         }
     }
 
-    /// SHA-256 of a file, streamed (the 209M network is 837 MB).
-    static func sha256(of url: URL) throws -> String {
-        let h = try FileHandle(forReadingFrom: url)
-        defer { try? h.close() }
+    /// SHA-256 of a file, streamed (the 209M network is 837 MB): read past
+    /// the page cache (`F_NOCACHE`), so verifying a download does not push
+    /// the store and the app's own pages out of memory on a Mac short of it,
+    /// four megabytes at a time with a breath between, at whatever priority
+    /// the caller runs (the downloader: background).
+    static func sha256(of url: URL, pause: () -> Void = { usleep(2_000) }) throws -> String {
+        let fd = open(url.path, O_RDONLY)
+        guard fd >= 0 else { throw CocoaError(.fileReadNoSuchFile, userInfo: [NSFilePathErrorKey: url.path]) }
+        defer { close(fd) }
+        _ = fcntl(fd, F_NOCACHE, 1)
+        let size = 4 << 20
+        let buffer = UnsafeMutableRawBufferPointer.allocate(byteCount: size, alignment: 16_384)
+        defer { buffer.deallocate() }
         var hasher = SHA256()
-        while let chunk = try h.read(upToCount: 8 << 20), !chunk.isEmpty { hasher.update(data: chunk) }
+        while true {
+            let n = read(fd, buffer.baseAddress, size)
+            if n < 0 {
+                if errno == EINTR { continue }
+                throw CocoaError(.fileReadUnknown, userInfo: [NSFilePathErrorKey: url.path])
+            }
+            if n == 0 { break }
+            hasher.update(bufferPointer: UnsafeRawBufferPointer(rebasing: buffer[0..<n]))
+            pause()
+        }
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 }
