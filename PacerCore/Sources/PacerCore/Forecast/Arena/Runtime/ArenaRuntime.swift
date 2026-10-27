@@ -37,10 +37,17 @@ public struct ArenaEngineLink: Sendable {
     public let compareLimit: Int
     /// Ask for live projections. Returns at once; they land in `cache`.
     public let requestLive: @Sendable ([ArenaLiveRequest]) -> Void
+    /// Make one request's projections now, at the live lane's priority, and
+    /// return once they are in `cache` (or their failures are): the compare
+    /// sheet's "draw this model" (`ArenaLiveForecaster.makeNow`). Nil: none
+    /// can be made on demand.
+    public let makeLive: (@Sendable (ArenaLiveRequest) async -> Void)?
 
     public init(roster: ArenaRoster, cache: ArenaLiveCache, compareLimit: Int = 3,
-                requestLive: @escaping @Sendable ([ArenaLiveRequest]) -> Void) {
+                requestLive: @escaping @Sendable ([ArenaLiveRequest]) -> Void,
+                makeLive: (@Sendable (ArenaLiveRequest) async -> Void)? = nil) {
         self.roster = roster; self.cache = cache; self.compareLimit = compareLimit; self.requestLive = requestLive
+        self.makeLive = makeLive
     }
 }
 
@@ -52,9 +59,16 @@ public struct ArenaLiveRequest: Sendable, Hashable {
     /// is current.
     public let latestReadingAt: Date
     public let models: [String]
+    /// Cut the history here rather than at the newest it holds: an on-demand
+    /// projection is drawn beside the fit's lines, and the cache serves it
+    /// only to a cycle whose `now` is near its cut (`ArenaLiveCache.maxAge`).
+    /// Never later than the history.
+    public let cutAt: Date?
 
-    public init(binding: ArenaWindowBinding, resetsAt: Date, latestReadingAt: Date, models: [String]) {
+    public init(binding: ArenaWindowBinding, resetsAt: Date, latestReadingAt: Date, models: [String],
+                cutAt: Date? = nil) {
         self.binding = binding; self.resetsAt = resetsAt; self.latestReadingAt = latestReadingAt; self.models = models
+        self.cutAt = cutAt
     }
 }
 
@@ -913,14 +927,7 @@ public actor ArenaLiveForecaster {
                 let built = await history.built(account: account)
                 let cutMs = ArenaCut.millis(built.builtThrough)
                 let cut = ArenaHistory(store: built.store, now: cutMs, accounts: [account])
-                let runner: ArenaRunner
-                if let kept = runners[account], kept.generation == built.generation {
-                    runner = kept.runner
-                } else {
-                    runner = ArenaRunner(registry: roster.registry, services: services)
-                    runner.memoLimitValues = Self.liveMemoLimitValues
-                    runners[account] = (built.generation, runner)
-                }
+                let runner = runner(account: account, built: built)
                 for r in requests where make(r, cut: cut, asOf: ArenaTime.date(cutMs), runner: runner) {
                     changed.insert(account)
                 }
@@ -928,6 +935,35 @@ public actor ArenaLiveForecaster {
             if !changed.isEmpty { await landed(changed) }
         }
         draining = false
+    }
+
+    /// The account's kept runner while its history is the same full build.
+    private func runner(account: String, built: ArenaHistoryBuilder.Built) -> ArenaRunner {
+        if let kept = runners[account], kept.generation == built.generation { return kept.runner }
+        let runner = ArenaRunner(registry: roster.registry, services: services)
+        runner.memoLimitValues = Self.liveMemoLimitValues
+        runners[account] = (built.generation, runner)
+        return runner
+    }
+
+    /// Make `request`'s projections now and return once each is in the cache
+    /// or has failed into it: one model the compare sheet was asked to draw,
+    /// usually one the refit doesn't ask for. Urgent like every live
+    /// request, so the scorer waits; a model already made at this cut for
+    /// this cycle is not run again (`make`). Not queued behind `pending`: the
+    /// sheet is waiting on this one, and a refit's newer request for the
+    /// same window must not replace it.
+    public func makeNow(_ request: ArenaLiveRequest) async {
+        guard !request.models.isEmpty, !cancel.isSet else { return }
+        budget.beginUrgent()
+        defer { budget.endUrgent() }
+        let account = request.binding.account
+        let built = await history.built(account: account)
+        let cutMs = min(ArenaCut.millis(built.builtThrough), request.cutAt.map(ArenaCut.millis) ?? .max)
+        let cut = ArenaHistory(store: built.store, now: cutMs, accounts: [account])
+        if make(request, cut: cut, asOf: ArenaTime.date(cutMs), runner: runner(account: account, built: built)) {
+            await landed([account])
+        }
     }
 
     /// Returns whether anything new landed.
@@ -1072,7 +1108,8 @@ public final class ArenaRuntime: Sendable {
     public var link: ArenaEngineLink {
         let live = self.live
         return ArenaEngineLink(roster: roster, cache: cache, compareLimit: compareLimit,
-                               requestLive: { reqs in Task.detached(priority: .utility) { await live.submit(reqs) } })
+                               requestLive: { reqs in Task.detached(priority: .utility) { await live.submit(reqs) } },
+                               makeLive: { req in await live.makeNow(req) })
     }
 
     /// Start scoring `accounts()` in the background, and fetch any pinned
