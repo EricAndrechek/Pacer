@@ -49,8 +49,15 @@ public final class ArenaCPUBudget: @unchecked Sendable {
             sleep: { s in if s > 0 { usleep(useconds_t(min(s, 1) * 1_000_000)) } })
     }
 
-    /// CPU-seconds per second: 0.25 is a quarter of one core.
-    public let rate: Double
+    /// CPU-seconds per second: 0.25 is a quarter of one core. At most one
+    /// core: the arena's work is one thread at a time per lane, and BLAS is
+    /// held to the calling thread, so the thread clocks it is charged by
+    /// see all of it. Changed while it runs by `ArenaBudgetGovernor`.
+    public var rate: Double {
+        get { lock.lock(); defer { lock.unlock() }; return currentRate }
+        set { setRate(newValue) }
+    }
+    static func clampRate(_ r: Double) -> Double { min(1, max(0.01, r.isFinite ? r : 0.2)) }
     /// The most CPU time that may be spent ahead of the rate after a quiet
     /// spell, seconds: a short live forecast after an idle minute runs at once.
     public let burst: Double
@@ -67,6 +74,7 @@ public final class ArenaCPUBudget: @unchecked Sendable {
     private let createdAt: Double
     private let lock = NSLock()
     // Guarded by `lock`.
+    private var currentRate: Double
     private var tokens: Double
     private var refilledAt: Double
     private var marks: [UInt64: Double] = [:]
@@ -75,13 +83,29 @@ public final class ArenaCPUBudget: @unchecked Sendable {
     private var sleptTotal = 0.0
 
     public init(rate: Double, burst: Double = 2, clock: Clock = .system) {
-        self.rate = min(64, max(0.01, rate))
+        self.currentRate = Self.clampRate(rate)
         self.burst = max(0, burst)
         self.clock = clock
         self.tokens = max(0, burst)
         self.refilledAt = clock.wall()
         self.createdAt = clock.wall()
     }
+
+    /// A new rate from now on. What accrued at the old rate up to now stays
+    /// earned; on a cut the bucket gives up any credit, so the lower share
+    /// holds from the next checkpoint rather than after the burst.
+    public func setRate(_ r: Double) {
+        let now = clock.wall()
+        let new = Self.clampRate(r)
+        lock.lock(); defer { lock.unlock() }
+        tokens = min(burst, tokens + max(0, now - refilledAt) * currentRate)
+        refilledAt = now
+        if new < currentRate { tokens = min(tokens, 0) }
+        currentRate = new
+    }
+
+    /// The calling thread's CPU time, seconds, on the budget's clock.
+    public func threadCPUSeconds() -> Double { clock.threadCPU() }
 
     /// CPU seconds charged so far, and seconds slept to stay within the rate.
     public var totals: (spent: Double, slept: Double) {
@@ -143,12 +167,12 @@ public final class ArenaCPUBudget: @unchecked Sendable {
     private func needed(yieldToUrgent: Bool) -> Double {
         lock.lock(); defer { lock.unlock() }
         let now = clock.wall()
-        tokens = min(burst, tokens + max(0, now - refilledAt) * rate)
+        tokens = min(burst, tokens + max(0, now - refilledAt) * currentRate)
         refilledAt = now
         if yieldToUrgent, urgent > 0 { return Self.sleepStep }
         // Under a millisecond owed is paid: a wait the clock can't resolve
         // would never end.
-        let wait = -tokens / rate
+        let wait = -tokens / currentRate
         return wait > 0.001 ? wait : 0
     }
 }

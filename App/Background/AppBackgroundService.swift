@@ -707,8 +707,11 @@ final class AppBackgroundService {
     private func arenaRuntime() -> ArenaRuntime {
         if let arena { return arena }
         let engines = self.engines
+        // The models' measured costs persist, so a relaunch scores the cheap
+        // ones first from its first pass (`ArenaModelCosts`).
         let runtime = ArenaRuntime(
             container: container,
+            costs: .persisted(),
             onRecordLanded: { account, news in
                 let engine = await MainActor.run {
                     engines.all.first { $0.scope == .account(account) }?.engine
@@ -736,8 +739,10 @@ final class AppBackgroundService {
     /// once per launch, two minutes after the first refit: the first pass
     /// reads months of limits and turns, and launch has enough to do. At
     /// background priority and a fifth of one core in CPU time, live
-    /// projections included (`ArenaCPUBudget`), newest cycles first, resuming
-    /// after whatever an earlier launch saved.
+    /// projections included (`ArenaCPUBudget`), one full core while the Mac
+    /// is plugged in and idle (`ArenaBudgetGovernor`); the cheap models first
+    /// over the whole history, newest cycles first, resuming after whatever
+    /// an earlier launch saved.
     private func startArena() {
         guard !arenaStarted else { return }
         arenaStarted = true

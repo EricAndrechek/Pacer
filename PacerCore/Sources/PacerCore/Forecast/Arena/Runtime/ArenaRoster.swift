@@ -56,10 +56,13 @@ public struct ArenaRoster: Sendable {
     public let registry: [ArenaModelSpec]
     /// The ones that compete for a window.
     public let selectable: [ArenaModelSpec]
+    /// `registry` by name (the cost priors walk children through it).
+    public let registryByName: [String: ArenaModelSpec]
 
     public init(registry: [ArenaModelSpec]) {
         self.registry = registry
         self.selectable = registry.filter(Self.isSelectable)
+        self.registryByName = Dictionary(registry.map { ($0.name, $0) }, uniquingKeysWith: { a, _ in a })
     }
 
     /// What the app runs: every ported model.
