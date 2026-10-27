@@ -123,7 +123,9 @@ struct ProjectionCompareModal: View {
             title: "\(windowTitle) projection",
             subtitle: subtitle,
             minHeight: 480,
-            idealHeight: 580
+            // An off-screen render cannot scroll, so it draws the whole sheet
+            // (the "More models" list sits below the fold at 580).
+            idealHeight: LiveRenderMode.isActive ? 1800 : 580
         ) {
             if let data = chartData, !trajectories.isEmpty {
                 // Re-anchor every model's projection onto the live actual tail
