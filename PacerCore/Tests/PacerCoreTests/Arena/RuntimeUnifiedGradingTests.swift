@@ -562,6 +562,76 @@ struct RuntimeUnifiedGraderTests {
         #expect(acc.stat("test-peeker")?.periods == 108)
     }
 
+    /// A refit with no runtime attached (the first of a launch, or the
+    /// off-screen render) counts every model of the app's roster that has
+    /// its weights as one that can still run: the engine's seven graded anew
+    /// are not enough to switch, and it never retires anything. The board
+    /// shows the old standing, marked as being graded anew. Once the runtime
+    /// is attached and the grader has covered the arena model too, the
+    /// window switches and the old rows go.
+    @Test func noSwitchNorRetirementBeforeTheArenaModelsAreGradedAnew() async throws {
+        let container = try Fixtures.seeded(cycles: 12)
+        let ctx = ModelContext(container)
+        let surface = EngineScope.account(Fixtures.account).qualify(EngineSelfEval.rlSurface("five_hour"))
+        let prev = EngineSelfEval.previousRLGrading
+        // `naive-flat` is in the app's roster and needs no weights.
+        let methods = RateLimitRoster.engineIds + ["naive-flat"]
+        for c in 0..<12 {
+            let period = EngineSelfEval.periodKeyRL(Self.resetOf(c, of: 12))
+            for m in methods {
+                for cf in prev.cuts {
+                    ctx.insert(EngineEvalOutcome(surface: surface, method: m, bucket: prev.bucket(cf), periodKey: period,
+                                                 predicted: m == "naive-flat" ? 51 : 60, truth: 50))
+                }
+            }
+        }
+        try ctx.save()
+        func previousRows() throws -> Int {
+            try ModelContext(container).fetchCount(FetchDescriptor<EngineEvalOutcome>(
+                predicate: #Predicate { $0.bucket.contains("|v2") }))
+        }
+        let all = methods.count * prev.cuts.count * 12
+
+        // No runtime yet: the old grades pick, nothing is deleted.
+        let engine = await Fixtures.engine(container)
+        await engine.recompute(now: Fixtures.now)
+        await engine.settleRecordCleanup()
+        #expect(try previousRows() == all)
+        #expect(await engine.resolvedMethod(windowKey: "five_hour").selected == "naive-flat")
+        let early = await engine.meterModelBoard(windowKey: "five_hour", weights: { _ in nil })
+        let flat = try #require(early.rows.first { $0.id == "naive-flat" })
+        #expect(flat.status == .ranked(typicalMiss: 1, cycles: 12))
+        #expect(flat.regrading == .init(done: 0, total: 12, eta: nil))
+        #expect(early.rows.first?.id == "naive-flat")
+        for m in RateLimitRoster.engineIds {
+            let row = try #require(early.rows.first { $0.id == m })
+            guard case .ranked = row.status else { Issue.record("\(m): \(row.status)"); continue }
+            #expect(row.regrading == nil, "the refit graded \(m) anew already")
+        }
+
+        // The runtime attaches: still the old grades.
+        let rt = Fixtures.runtime(container, roster: [Self.naiveFlat], engine: engine)
+        await engine.adopt(arena: rt.link)
+        await engine.recompute(now: Fixtures.now)
+        await engine.settleRecordCleanup()
+        #expect(try previousRows() == all)
+        #expect(await engine.meterModelBoard(windowKey: "five_hour").rows.first { $0.id == "naive-flat" }?.regrading
+                == .init(done: 0, total: 12, eta: nil))
+
+        // The grader covers it under the new grading: the switch, then the
+        // old rows go.
+        _ = await rt.scorer.pass(accounts: [Fixtures.account], now: Fixtures.now)
+        await engine.recompute(now: Fixtures.now)
+        await engine.settleRecordCleanup()
+        #expect(try previousRows() == 0)
+        let after = await engine.meterModelBoard(windowKey: "five_hour")
+        #expect(after.rows.first { $0.id == "naive-flat" }?.regrading == nil)
+        #expect(after.rows.allSatisfy { $0.regrading == nil })
+    }
+
+    static let naiveFlat = ArenaModelSpec(name: "naive-flat", targets: Fixtures.meters, config: ["hours": 1],
+                                          complexity: 1) { NaiveFlat(context: $0) }
+
     /// `RuntimeEngineTests.seeded`'s reset for cycle `c` of `cycles`.
     static func resetOf(_ c: Int, of cycles: Int) -> Date {
         let liveStart = Fixtures.now.addingTimeInterval(-2 * 3600)

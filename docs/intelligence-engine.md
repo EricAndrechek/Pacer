@@ -180,7 +180,10 @@ Three layers close the loop end-to-end (2026-07):
   version, and prices and history for models that read spend); a model
   whose inputs move is graded again in place. Across the v2 → v3 bump the
   old grades keep picking until the new grading ranks the same models
-  (`rlGradingInUse`), then are retired. The compare sheet reads one value,
+  (`rlGradingInUse`: every model of the app's roster with its weights
+  here counts, the runtime attached or not), then are retired, and only by
+  an engine with the runtime attached. While they pick, the compare sheet
+  shows each model's old standing with how far its re-grading has come. The compare sheet reads one value,
   `MeterModelBoard`, built from the same ranking.
 
 The tuning loop itself lives out-of-app in `research/harness` (Python/uv):

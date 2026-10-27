@@ -199,6 +199,15 @@ public enum ModelBoardList {
         }
     }
 
+    /// A row's right column: its status (`statusText`), and while the model
+    /// is graded anew after a bump, how far that has come: "within ±4% ·
+    /// re-grading 12%". The number is still the one it is ranked by.
+    public static func statusText(for row: MeterModelBoard.Row, spanCycles: Int) -> String {
+        let text = statusText(row.status, spanCycles: spanCycles)
+        guard let r = row.regrading else { return text }
+        return text + " · re-grading \(percent(done: r.done, total: r.total))%"
+    }
+
     /// Whether the right column is a record (a number to compare) rather than
     /// a state; the sheet sets the two apart.
     public static func isRecord(_ status: MeterModelBoard.Status) -> Bool {

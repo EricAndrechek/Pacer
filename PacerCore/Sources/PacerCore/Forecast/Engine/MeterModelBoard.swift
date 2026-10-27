@@ -33,11 +33,28 @@ public struct MeterModelBoard: Sendable, Equatable {
         /// Drawn when the sheet opens: the pick and the next few ranked.
         public var drawnByDefault: Bool
         public var complexity: Int
+        /// Ranked on the previous grading while the current one is still
+        /// being filled in (a bucket-version bump): how far the new grading
+        /// of this model has come. The status stays the previous grading's
+        /// standing until the window switches. Nil otherwise.
+        public var regrading: Regrading?
 
         public init(id: String, name: String, summary: String?, status: Status, isPick: Bool,
-                    drawnByDefault: Bool, complexity: Int) {
+                    drawnByDefault: Bool, complexity: Int, regrading: Regrading? = nil) {
             self.id = id; self.name = name; self.summary = summary; self.status = status
             self.isPick = isPick; self.drawnByDefault = drawnByDefault; self.complexity = complexity
+            self.regrading = regrading
+        }
+    }
+
+    /// Cycles graded anew of the window's depth, and when the grader should
+    /// be done with them (nil: not being graded right now, or not timed yet).
+    public struct Regrading: Sendable, Equatable {
+        public var done: Int
+        public var total: Int
+        public var eta: TimeInterval?
+        public init(done: Int, total: Int, eta: TimeInterval?) {
+            self.done = done; self.total = total; self.eta = eta
         }
     }
 

@@ -929,7 +929,7 @@ struct ProjectionDetailView: View {
                         .font(.system(size: 11)).foregroundStyle(.red.opacity(0.85))
                 }
             }
-            Text(ModelBoardList.statusText(row.status, spanCycles: spanCycles))
+            Text(ModelBoardList.statusText(for: row, spanCycles: spanCycles))
                 .font(.system(size: record ? 12 : 11).monospacedDigit())
                 .foregroundStyle(record ? HierarchicalShapeStyle.secondary : .tertiary)
         }

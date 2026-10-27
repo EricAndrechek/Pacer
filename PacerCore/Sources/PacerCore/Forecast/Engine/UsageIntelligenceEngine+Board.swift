@@ -21,12 +21,14 @@ extension UsageIntelligenceEngine {
         guard let f = features, let window = f.windows.first(where: { $0.key == key }), let rf = fit.rl[key] else {
             return MeterModelBoard(windowKey: key, rows: [], cutFraction: nil, spanCycles: 0, progress: nil)
         }
-        let roster = arena?.roster ?? .standard
+        let roster = arena?.roster ?? Self.standardRoster
         let target = RateLimitRoster.arenaTarget(window: window)
         let specs = target.map { roster.specs(for: $0) } ?? []
         let account = scope.accountId
         let binding = account.flatMap { ArenaWindowBinding.make(account: $0, window: window) }
 
+        // The runtime's check; without one, the same files the app's would
+        // look at (the render), or the caller's (tests).
         let weightsPresent: (ArenaModelSpec) -> Bool
         if let arena {
             weightsPresent = arena.weightsPresent
@@ -68,6 +70,11 @@ extension UsageIntelligenceEngine {
     /// - else scoring: cycles graded of the window's depth, and when the
     ///   grader is on it, when it should be done.
     ///
+    /// While the window still ranks on the previous grading (a bump not yet
+    /// covered), a ranked model keeps that standing and carries `regrading`:
+    /// its cycles under the current grading of the depth. A model the
+    /// previous grading never ranked is scoring, against the current one.
+    ///
     /// Order: ranked by typical miss (then complexity, then name), scoring
     /// by how far along, downloading, unavailable, then well behind by miss.
     static func board(
@@ -80,6 +87,7 @@ extension UsageIntelligenceEngine {
         let current = current ?? ranking
         let depth = progress?.windowDepth[windowKey]
             ?? max(current?.depthCycles ?? 0, ranking?.depthCycles ?? 0)
+        let bridging = ranking != nil && ranking?.grading != current?.grading
         let scoring = Set(progress?.models ?? [])
         let drawn = Set(drawnIds(pick: selected, ranking: ranking, limit: drawLimit) + (shown.map { [$0] } ?? []))
         let pick = shown ?? selected
@@ -92,6 +100,7 @@ extension UsageIntelligenceEngine {
         let rows = ids.map { id -> MeterModelBoard.Row in
             let spec = specByName[id]
             let status: MeterModelBoard.Status
+            var regrading: MeterModelBoard.Regrading?
             if spec != nil, !canRunArena {
                 status = .unavailable(boardNeedsAccountReason)
             } else if let spec, !weightsPresent(spec) {
@@ -99,6 +108,10 @@ extension UsageIntelligenceEngine {
             } else if let st = ranking?.standing(id), let miss = st.typicalAbsError {
                 status = st.wellBehind ? .wellBehind(typicalMiss: miss, cycles: st.spanCycles)
                                        : .ranked(typicalMiss: miss, cycles: st.spanCycles)
+                let done = current?.standing(id)?.cycles ?? 0
+                if bridging, done < depth {
+                    regrading = .init(done: done, total: depth, eta: scoring.contains(id) ? progress?.eta : nil)
+                }
             } else {
                 let done = current?.standing(id)?.cycles ?? 0
                 if depth < minPeriods && done >= depth {
@@ -115,7 +128,8 @@ extension UsageIntelligenceEngine {
             }
             return MeterModelBoard.Row(
                 id: id, name: BurnTrajectory.displayName(id), summary: BurnTrajectory.summary(id), status: status,
-                isPick: id == pick, drawnByDefault: drawn.contains(id), complexity: complexity[id] ?? spec?.complexity ?? 3)
+                isPick: id == pick, drawnByDefault: drawn.contains(id), complexity: complexity[id] ?? spec?.complexity ?? 3,
+                regrading: regrading)
         }
 
         func key(_ r: MeterModelBoard.Row) -> (group: Int, value: Double) {

@@ -177,6 +177,23 @@ struct ModelBoardListTests {
         #expect(!ModelBoardList.isRecord(.scoring(done: 1, total: 2, eta: nil)))
     }
 
+    /// A model ranked on the previous grading while it is graded anew keeps
+    /// its number, and says how far the new grading has come.
+    @Test func aModelBeingGradedAnewKeepsItsNumber() {
+        func row(_ status: MeterModelBoard.Status, _ regrading: MeterModelBoard.Regrading?) -> MeterModelBoard.Row {
+            .init(id: "m", name: "M", summary: nil, status: status, isPick: false, drawnByDefault: false,
+                  complexity: 1, regrading: regrading)
+        }
+        let text = { (r: MeterModelBoard.Row) in ModelBoardList.statusText(for: r, spanCycles: 24) }
+        #expect(text(row(.ranked(typicalMiss: 4.2, cycles: 24), .init(done: 15, total: 120, eta: 600)))
+                == "within ±4% · re-grading 12%")
+        #expect(text(row(.wellBehind(typicalMiss: 9, cycles: 24), .init(done: 0, total: 120, eta: nil)))
+                == "within ±9% · re-grading 0%")
+        #expect(text(row(.ranked(typicalMiss: 4.2, cycles: 24), nil)) == "within ±4%")
+        #expect(text(row(.scoring(done: 3, total: 8, eta: nil), nil)) == "scoring 37%")
+        #expect(ModelBoardList.isRecord(row(.ranked(typicalMiss: 4.2, cycles: 24), .init(done: 1, total: 2, eta: nil)).status))
+    }
+
     @Test func theProgressLine() {
         #expect(ModelBoardList.progressText(.init(done: 62, total: 100, eta: 15 * 60))
             == "Scoring your history: 62% · about 15 min left")

@@ -390,16 +390,19 @@ public actor UsageIntelligenceEngine {
             let at = Self.liveFraction(f, window: window)
             let candidates = Self.rlCandidates(window: window, arena: arena)
             func rank(_ grading: EngineSelfEval.RLGrading) -> EngineSelfEval.RLRanking {
-                EngineSelfEval.rankRL(recs, grading: grading, candidates: candidates.ranked,
-                                      pickable: candidates.pickable, complexity: complexities,
+                EngineSelfEval.rankRL(recs, grading: grading, candidates: candidates, complexity: complexities,
                                       weekly: weekly, at: at, depth: EngineSelfEval.rlDepth(weekly: weekly),
                                       tieRelative: tie)
             }
             let current = rank(EngineSelfEval.rlGrading)
+            // "Can still run" is every selectable model with its weights
+            // here, the runtime attached or not: a refit before the runtime
+            // is adopted (the first of a launch) or without one (the
+            // off-screen render) must not call the engine's seven enough.
             let inUse = previousGradingRetired
                 ? current
                 : EngineSelfEval.rlGradingInUse(current: current, previous: rank(EngineSelfEval.previousRLGrading),
-                                                runnable: candidates.pickable,
+                                                runnable: candidates,
                                                 currentComplete: scope.accountId.map { arena?.gradedThrough($0) ?? false }
                                                     ?? false)
             rankings[window.key] = inUse
@@ -411,8 +414,11 @@ public actor UsageIntelligenceEngine {
         rlCurrentRankings = currentRankings
         phase["rlSelect", default: 0] += Int(Date().timeIntervalSince(selectStarted) * 1000)
         // Every window ranks on the current grading: the previous one's rows
-        // are read by nothing from here (`retirePreviousGrading`).
-        if fitsRateLimits, !previousGradingRetired, !rankings.isEmpty,
+        // are read by nothing from here (`retirePreviousGrading`). Only with
+        // the runtime attached: without it (the first refit of a launch, the
+        // off-screen render) the switch can rest on less than the app knows,
+        // and a delete is not undone.
+        if fitsRateLimits, arena != nil, !previousGradingRetired, !rankings.isEmpty,
            rankings.values.allSatisfy({ $0.grading == EngineSelfEval.rlGrading }) {
             allRows = retirePreviousGrading(allRows)
             evalRowsCache = allRows
@@ -421,7 +427,7 @@ public actor UsageIntelligenceEngine {
         // Once a day: the arena models' grades older than the shared depth
         // are ranked by nothing, and would grow the record without end.
         let today = TokenSample.formatDate(now, timeZone: calendar.timeZone)
-        if fitsRateLimits, lastDepthPruneDay != today, !rankings.isEmpty {
+        if fitsRateLimits, arena != nil, lastDepthPruneDay != today, !rankings.isEmpty {
             lastDepthPruneDay = today
             allRows = pruneBeyondDepth(allRows, rankings: rankings)
             evalRowsCache = allRows
@@ -1454,20 +1460,23 @@ public actor UsageIntelligenceEngine {
 
     /// The methods that compete on `window`: the engine's, and the arena
     /// models that forecast its meter and can run on this Mac (every pinned
-    /// weight here). Without the runtime (the off-screen render, tests) the
-    /// app's roster is ranked from the record, so the sheet shows the app's
-    /// numbers, but only the engine's methods can be picked: nothing could
-    /// draw an arena model's line.
-    static func rlCandidates(window: WindowSpec, arena: ArenaEngineLink?) -> (ranked: Set<String>, pickable: Set<String>) {
-        let engine = Set(RateLimitRoster.engineIds)
-        guard let target = RateLimitRoster.arenaTarget(window: window) else { return (engine, engine) }
-        guard let arena else {
-            return (engine.union(ArenaRoster.standard.specs(for: target).map(\.name)), engine)
-        }
-        var out = engine
-        for spec in arena.roster.specs(for: target) where arena.weightsPresent(spec) { out.insert(spec.name) }
-        return (out, out)
+    /// weight here). Without the runtime (the first refit of a launch, the
+    /// off-screen render) the app's roster and weights stand in, so the
+    /// ranking, the pick and the sheet are the app's; the pick's line is a
+    /// stand-in until a runtime makes its projection, as in the app before
+    /// it lands.
+    static func rlCandidates(window: WindowSpec, arena: ArenaEngineLink?) -> Set<String> {
+        var out = Set(RateLimitRoster.engineIds)
+        guard let target = RateLimitRoster.arenaTarget(window: window) else { return out }
+        let roster = arena?.roster ?? standardRoster
+        let present: (ArenaModelSpec) -> Bool = arena?.weightsPresent ?? { standardPresence.present($0) }
+        for spec in roster.specs(for: target) where present(spec) { out.insert(spec.name) }
+        return out
     }
+
+    /// The app's roster and its weights check, for an engine with no runtime.
+    static let standardRoster = ArenaRoster.standard
+    static let standardPresence = ArenaWeightsPresence(roster: standardRoster, weights: ArenaRuntime.defaultWeights)
 
     /// The model a window shows this refit (#301): the selected one when it
     /// can fit the live cycle, else the best-recorded model that can: the
