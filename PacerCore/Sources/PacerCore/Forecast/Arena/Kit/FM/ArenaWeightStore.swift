@@ -191,6 +191,8 @@ public enum ArenaWeightStore {
         /// Where a broken transfer can continue from, by `id|file`.
         private var resumeData: [String: Data] = [:]
         private var retry: Task<Void, Never>?
+        /// The most recent retry task, kept after it starts (`settle`).
+        private var lastRetry: Task<Void, Never>?
         private var stopped = false
 
         init(transport: any Transport,
@@ -207,8 +209,11 @@ public enum ArenaWeightStore {
         /// (tests, the log).
         func pendingRetries() -> [String: Date] { failures.mapValues(\.retryAt) }
 
-        /// Wait for the scheduled retry to finish (tests).
-        func settle() async { await retry?.value }
+        /// Wait for the scheduled retry to finish (tests). Waits on the last
+        /// one scheduled, not `retry`: a retry clears `retry` as it starts
+        /// (so the run it does can schedule the next), and awaiting `retry`
+        /// then returned while that run was still downloading.
+        func settle() async { await lastRetry?.value }
 
         /// No more retries (tests: a scripted clock would otherwise retry
         /// forever).
@@ -256,11 +261,13 @@ public enum ArenaWeightStore {
         private func scheduleRetry() {
             guard !stopped, retry == nil, let next = failures.values.map(\.retryAt).min() else { return }
             let wait = max(0, next.timeIntervalSince(now()))
-            retry = Task.detached(priority: .background) { [weak self] in
+            let task = Task.detached(priority: .background) { [weak self] in
                 guard let self else { return }
                 await self.sleep(wait)
                 await self.retryDue()
             }
+            retry = task
+            lastRetry = task
         }
 
         private func retryDue() async {

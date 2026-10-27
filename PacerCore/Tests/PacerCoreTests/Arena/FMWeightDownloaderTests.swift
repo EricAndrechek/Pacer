@@ -51,12 +51,22 @@ struct FMWeightDownloaderTests {
         }
     }
 
-    /// Wall time that only moves when the downloader sleeps.
+    /// Wall time that only moves when the downloader sleeps. `held` keeps a
+    /// sleep from returning until the test has looked at the state before it
+    /// (otherwise the scheduled retry can run before the test reads it).
     final class Clock: @unchecked Sendable {
         let lock = NSLock()
         var now = Date(timeIntervalSince1970: 1_800_000_000)
         var sleeps: [TimeInterval] = []
-        func sleep(_ s: TimeInterval) { lock.lock(); now += s; sleeps.append(s); lock.unlock() }
+        private var heldFlag = false
+        var held: Bool {
+            get { lock.lock(); defer { lock.unlock() }; return heldFlag }
+            set { lock.lock(); heldFlag = newValue; lock.unlock() }
+        }
+        func sleep(_ s: TimeInterval) async {
+            while held { try? await Task.sleep(nanoseconds: 1_000_000) }
+            lock.withLock { now += s; sleeps.append(s) }
+        }
         var date: Date { lock.lock(); defer { lock.unlock() }; return now }
     }
 
@@ -69,7 +79,7 @@ struct FMWeightDownloaderTests {
     static func downloader(_ stub: Stub, clock: Clock, root: URL,
                            present: @escaping @Sendable () -> Bool = { false }) -> ArenaWeightStore.Downloader {
         ArenaWeightStore.Downloader(
-            transport: stub, now: { clock.date }, sleep: { clock.sleep($0) }, root: { root },
+            transport: stub, now: { clock.date }, sleep: { await clock.sleep($0) }, root: { root },
             pins: { $0 == FMWeightDownloaderTests.id ? FMWeightDownloaderTests.pins : nil },
             isPresent: { id in
                 if present() { return true }
@@ -95,6 +105,7 @@ struct FMWeightDownloaderTests {
         let stub = Stub([.serve(status: 200), .fail(resume: resume), .serve(status: 200), .serve(status: 206)],
                         scratch: root)
         let clock = Clock()
+        clock.held = true
         let dl = Self.downloader(stub, clock: clock, root: root)
         defer { Task { await dl.stop() } }
         await dl.run([Self.id])
@@ -104,6 +115,7 @@ struct FMWeightDownloaderTests {
         let pending = await dl.pendingRetries()
         #expect(pending[Self.id] == clock.date.addingTimeInterval(60))
 
+        clock.held = false
         await dl.settle()
         #expect(clock.sleeps == [60])
         #expect(stub.calls.map(\.file) == ["config.json", "model.safetensors", "config.json", "model.safetensors"])
