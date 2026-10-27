@@ -134,9 +134,10 @@ import Testing
     /// The backfill's shape: the last `cycles` completed cycles of a meter,
     /// each cut at 8 points, every cut asked through the runner as the app
     /// asks, the registered model (aligned, serial).
-    static func backfill(_ store: ArenaHistoryStore, account: String, kind: String, target: ArenaTarget, cycles: Int)
-        throws -> (cuts: Int, trainings: Int, cpu: Double, wall: Double) {
-        let spec = ArenaRegistry.spec("ml-gbm-quantile")!
+    static func backfill(_ store: ArenaHistoryStore, account: String, kind: String, target: ArenaTarget, cycles: Int,
+                         align: ArenaValue? = nil) throws -> (cuts: Int, trainings: Int, cpu: Double, wall: Double) {
+        var spec = ArenaRegistry.spec("ml-gbm-quantile")!
+        if let align { spec.config.values["train_align_h"] = align }
         let log = Log()
         let services = ArenaServices(log: { _, m in log.add(m) })
         let end = store.meters.values.compactMap { $0.last?.tKnown }.max()!
@@ -171,6 +172,11 @@ import Testing
             lines.append(String(format: "  %@: %d cuts (of the last %d cycles × 8), %d trainings, %.1f CPU s, %.1f s wall (%.0f ms per cut)",
                                 kind, r.cuts, n, r.trainings, r.cpu, r.wall, 1000 * r.wall / Double(max(r.cuts, 1))))
         }
+        // The option of a week-long bucket for the weekly meters.
+        let wk = try Self.backfill(MLTimingTests.synthetic(days: 120, accounts: ["S1"], seed: 11), account: "S1",
+                                   kind: "seven_day", target: .meterSevenDay, cycles: 18,
+                                   align: ["five_hour": 24, "seven_day": 168, "weekly_scoped": 168])
+        lines.append(String(format: "  seven_day with 168 h buckets: %d cuts, %d trainings, %.1f CPU s", wk.cuts, wk.trainings, wk.cpu))
         print("ml-gbm-quantile backfill, synthetic 120 days, registered model (24 h buckets, serial):\n"
               + lines.joined(separator: "\n"))
     }
