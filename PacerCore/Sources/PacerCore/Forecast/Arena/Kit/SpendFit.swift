@@ -171,7 +171,16 @@ extension KitSpend {
         let mean = ySum / Double(n)
         let ss = KitMath.sum(y.map { ($0 - mean) * ($0 - mean) })
         let r2Interval = ss > 0 ? 1 - KitMath.sum((0..<n).map { (y[$0] - pred[$0]) * (y[$0] - pred[$0]) }) / ss : 0
-        let rowSpend = (0..<n).map { i in X[i * 5] + X[i * 5 + 1] + X[i * 5 + 2] + X[i * 5 + 3] + X[i * 5 + 4] }
+        // Summed left to right in a typed loop: the same additions as
+        // `X[b] + X[b+1] + ... + X[b+4]`, which some toolchains could not
+        // type-check in reasonable time as one expression.
+        var rowSpend = [Double](repeating: 0, count: n)
+        for i in 0..<n {
+            let b = i * 5
+            var s: Double = X[b]
+            for f in 1..<5 { s += X[b + f] }
+            rowSpend[i] = s
+        }
         let r2 = hourlyR2(rows, rowSpend: rowSpend, predicted: pred, offsetMs: offsetMs)
         let rise = ySum
         var reason: String?
