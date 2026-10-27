@@ -17,6 +17,9 @@ import Testing
     static func spec(_ edit: (inout ArenaConfig) -> Void = { _ in }) -> ArenaModelSpec {
         var s = ArenaRegistry.spec("ml-gbm-quantile")!
         s.config.values["parallel"] = true
+        // The mechanism under test, on day buckets whatever the registered
+        // weekly bucket is (`registeredAsItsModelToml` pins that).
+        s.config.values["train_align_h"] = 24
         edit(&s.config)
         return s
     }

@@ -52,7 +52,10 @@ import Testing
         }
         #expect(c.double("learning_rate", 0) == 0.05)
         // Swift-only: train once per retrain_h bucket, serially.
-        #expect(c.double("train_align_h", 0) == c.double("retrain_h", -1))
+        // Five-hour buckets are retrain_h; weekly ones 72 h (see MLModels.swift).
+        let align = c.table("train_align_h")
+        #expect(align.double("five_hour", 0) == c.double("retrain_h", -1))
+        #expect(align.double("seven_day", 0) == 72 && align.double("weekly_scoped", 0) == 72)
         #expect(c.int("train_cache_buckets", 0) == 8)
         let h = ArenaHistory(store: ArenaHistoryStore(meters: [:], spend: [:], tzOffsetMin: 0), now: 0, accounts: [])
         let (m, r) = try Self.model(h, spec: spec)

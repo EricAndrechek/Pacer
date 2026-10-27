@@ -27,7 +27,11 @@ extension ArenaRegistry {
                     // each retrain_h bucket and reuse it for every cut in it, the
                     // Python's update rule as a function of the cut; 0 trains at the
                     // cut. Keep the last train_cache_buckets buckets per meter.
-                    "train_align_h": 24,
+                    // Weekly meters take 72 h buckets: their cuts are ~19 h
+                    // apart, so 24 h retrained at nearly every cut (211 CPU s
+                    // per account on first launch); 72 h keeps a model at most
+                    // three days behind for about a third of that.
+                    "train_align_h": ["five_hour": 24, "seven_day": 72, "weekly_scoped": 72],
                     "train_cache_buckets": 8,
                 ],
                 complexity: 4
