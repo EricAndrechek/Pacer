@@ -52,6 +52,10 @@ struct RuntimeMemoryProbe {
         let env = ProcessInfo.processInfo.environment
         if env["PACER_ARENA_OLD_POOLS"] == "1" { FMScratch.keepBytes = .max; FMScratch.keepPerNetwork = 4 }
         if let mbCap = Int(env["PACER_ARENA_KEEP_MB"] ?? "") { FMScratch.keepBytes = mbCap << 20 }
+        // The runner memo as it was (top-level answers kept, cleared whole
+        // when full), to measure the LRU memo against.
+        ArenaRunner.legacyMemoForMeasurement = env["PACER_ARENA_LEGACY_MEMO"] == "1"
+        defer { ArenaRunner.legacyMemoForMeasurement = false }
         let now = Date(timeIntervalSince1970: (Date().timeIntervalSince1970 / 60).rounded(.down) * 60)
         let account = RuntimePerfProbe.account
         let container = try RuntimePerfProbe.heavyStore(days: 120, now: now)
@@ -70,9 +74,10 @@ struct RuntimeMemoryProbe {
         let clock = ContinuousClock()
         let t0 = clock.now
         let r = await rt.scorer.pass(accounts: [account], now: now)
-        print(String(format: "[mem] pass: %d cycles (phase 1 %d, phase 2 %d), %d forecasts, %d declined, %.0f s",
-                     r.cycles, r.phaseCycles[1] ?? 0, r.phaseCycles[2] ?? 0, r.forecasts, r.declined,
-                     RuntimePerfProbe.seconds(clock.now - t0)))
+        print(String(format: "[mem] pass: %d cycles (phase 1 %d, phase 2 %d), %d forecasts, %d declined, %.0f s, "
+                     + "%.1f s of CPU in forecasts%@", r.cycles, r.phaseCycles[1] ?? 0, r.phaseCycles[2] ?? 0,
+                     r.forecasts, r.declined, RuntimePerfProbe.seconds(clock.now - t0),
+                     r.modelCPUSeconds.values.reduce(0, +), ArenaRunner.legacyMemoForMeasurement ? " (old memo)" : ""))
         print("[mem] peak during the pass: \(ProcessMemory.current().summary); largest network workspace "
               + Self.mb(FMScratch.largestBytes) + ", kept up to " + Self.mb(FMScratch.keepBytes))
         for st in FMScratch.stats where st.calls > 0 {
@@ -96,9 +101,9 @@ struct RuntimeMemoryProbe {
             if cheap5 || cheapW { cheapNames.append(spec.name) }
             let cheap = (five == nil || cheap5) && (week == nil || cheapW)
             allFive += five ?? 0; allWeek += week ?? 0
-            print(String(format: "[cost] %@: five-hour %.1f ms, weekly %.1f ms warm; %.1f ms mean over %d (%@)",
+            print(String(format: "[cost] %@: five-hour %.1f ms, weekly %.1f ms warm; %.1f ms mean over %d, %.0f ms in all (%@)",
                          spec.name, five ?? -1, week ?? -1, mean, r.modelForecasts[spec.name] ?? 0,
-                         cheap ? "phase 1" : "phase 2"))
+                         (r.modelCPUSeconds[spec.name] ?? 0) * 1000, cheap ? "phase 1" : "phase 2"))
         }
         // A heavy user: 4 accounts × (180 five-hour + 18 weekly + 18 scoped
         // cycles, the scorer's caps) × 8 cuts, no pruning.

@@ -504,19 +504,40 @@ public struct ArenaChildModel {
 /// the request's `now`, and asked; a child is run by the runner with its
 /// parent's view, and its forecasts are memoized for the runner's lifetime
 /// (the arena's child cache). Not thread-safe: one runner per task.
+///
+/// **What the memo keeps.** Only what a model asks from inside itself: its
+/// children's forecasts and backtests. A forecast the runner's caller asks
+/// directly (depth 0: the scorer's cut, a live projection) is answered from
+/// the memo when it is there but never stored: the scorer asks each one once,
+/// and two dozen models' paths at every cut filled the memo with answers no
+/// one would ask for again, pushing out the child lattices that are asked at
+/// every cut. Past `memoLimitValues` the least recently used entries go, not
+/// the whole memo: clearing it whole, a weekly cycle (two dozen models × 8
+/// cuts × ~68k doubles) emptied it several times, and every calibration
+/// layer and ensemble rebuilt its nested child backtests from nothing.
 public final class ArenaRunner {
     public let registry: [String: ArenaModelSpec]
     public let services: ArenaServices
     public let seed: UInt64
     public var maxBacktestPoints: Int
     public var nPaths: Int
-    /// Memoized forecasts, keyed by model, history cut and request. Cleared
-    /// whole when it holds more than `memoLimitValues` doubles (64 MB by
-    /// default): a weekly forecast as paths is ~200 × 340 values, so a count
-    /// of entries alone let a long backfill's memo reach gigabytes.
-    private var memo: [String: ArenaForecast] = [:]
+    /// Memoized forecasts, keyed by model, history cut and request, held to
+    /// `memoLimitValues` doubles (64 MB by default) by evicting the least
+    /// recently used: a weekly forecast as paths is ~200 × 340 values, so a
+    /// count of entries alone let a long backfill's memo reach gigabytes.
+    private struct MemoEntry { let forecast: ArenaForecast; let size: Int; var used: UInt64 }
+    private var memo: [String: MemoEntry] = [:]
     private var memoValues = 0
+    private var memoTick: UInt64 = 0
+    /// How many forecasts are running on this runner's stack: 0 outside.
+    private var depth = 0
     public var memoLimitValues = 8_000_000
+    /// Doubles and entries the memo holds (tests, probes).
+    public var memoValueCount: Int { memoValues }
+    public var memoCount: Int { memo.count }
+    /// The memo as it was before (top-level answers kept, the whole memo
+    /// cleared when full), for the probes that measure the difference only.
+    nonisolated(unsafe) static var legacyMemoForMeasurement = false
 
     public init(registry: [ArenaModelSpec], services: ArenaServices = ArenaServices(), seed: UInt64 = 42,
                 maxBacktestPoints: Int = 48, nPaths: Int = 200) {
@@ -530,7 +551,12 @@ public final class ArenaRunner {
         guard let spec = registry[name] else { throw ArenaError.unknownModel(name) }
         precondition(history.now == request.now, "a model is asked at the moment it was fitted")
         let key = Self.memoKey(name, history: history, request: request)
-        if let hit = memo[key] { return hit }
+        if var hit = memo[key] {
+            memoTick &+= 1
+            hit.used = memoTick
+            memo[key] = hit
+            return hit.forecast
+        }
         // Every weights file the model's whole family of children needs, not
         // just its own: a pool whose network child is still downloading would
         // otherwise answer as its other child alone, and the engine would
@@ -540,15 +566,37 @@ public final class ArenaRunner {
         var fitted: ArenaHistory?
         let ctx = ArenaContext(spec: spec, seed: Self.deriveSeed(seed, name, request.now), services: services,
                                runner: self, history: { fitted })
+        let topLevel = depth == 0
+        depth += 1
+        defer { depth -= 1 }
         let instance = try spec.make(ctx)
         try instance.fit(history)
         fitted = history
         let fc = try instance.forecast(request)
-        let size = fc.byKey.values.reduce(0) { $0 + $1.valueCount }
-        if memoValues + size > memoLimitValues { memo.removeAll(keepingCapacity: false); memoValues = 0 }
-        memo[key] = fc
-        memoValues += size
+        if !topLevel || Self.legacyMemoForMeasurement { remember(key, fc) }
         return fc
+    }
+
+    /// Keep `fc` under `key`, then evict the least recently used entries down
+    /// to three quarters of the limit if it is over (in a batch, so a full
+    /// memo is not sorted at every insert).
+    private func remember(_ key: String, _ fc: ArenaForecast) {
+        let size = fc.byKey.values.reduce(0) { $0 + $1.valueCount }
+        guard size <= memoLimitValues else { return }
+        if Self.legacyMemoForMeasurement, memoValues + size > memoLimitValues {
+            memo.removeAll(keepingCapacity: false); memoValues = 0
+        }
+        if let old = memo[key] { memoValues -= old.size }
+        memoTick &+= 1
+        memo[key] = MemoEntry(forecast: fc, size: size, used: memoTick)
+        memoValues += size
+        guard memoValues > memoLimitValues else { return }
+        let target = memoLimitValues * 3 / 4
+        for (k, e) in memo.sorted(by: { $0.value.used < $1.value.used }) {
+            guard memoValues > target else { break }
+            memo[k] = nil
+            memoValues -= e.size
+        }
     }
 
     /// The weights `name` and its children (transitively) are pinned to.
