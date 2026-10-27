@@ -411,23 +411,8 @@ public final class TimesFMNetwork: @unchecked Sendable {
         }
     }
 
-    /// One call's scratch buffers, grown on demand and kept for the next.
-    final class Workspace: FMWorkspaceBuffers {
-        private var ptrs = [UnsafeMutablePointer<Float>?](repeating: nil, count: Slot.allCases.count)
-        private var caps = [Int](repeating: 0, count: Slot.allCases.count)
-        func buf(_ s: Slot, _ n: Int) -> UnsafeMutablePointer<Float> {
-            let i = s.rawValue
-            if caps[i] < n {
-                ptrs[i]?.deallocate()
-                let c = max(n, caps[i] * 3 / 2)
-                ptrs[i] = .allocate(capacity: c)
-                caps[i] = c
-            }
-            return ptrs[i]!
-        }
-        var bytes: Int { caps.reduce(0, +) * MemoryLayout<Float>.size }
-        deinit { for p in ptrs { p?.deallocate() } }
-    }
+    /// One call's scratch buffers (`FMWorkspace`).
+    typealias Workspace = FMWorkspace<Slot>
 
     /// See `FMScratch`: one kept, and only a small one.
     typealias WorkspacePool = FMWorkspacePool<Workspace>

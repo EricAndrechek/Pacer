@@ -51,6 +51,7 @@ struct RuntimeMemoryProbe {
     @Test func whatTheArenaKeepsAndWhatEachModelCosts() async throws {
         let env = ProcessInfo.processInfo.environment
         if env["PACER_ARENA_OLD_POOLS"] == "1" { FMScratch.keepBytes = .max; FMScratch.keepPerNetwork = 4 }
+        if let mbCap = Int(env["PACER_ARENA_KEEP_MB"] ?? "") { FMScratch.keepBytes = mbCap << 20 }
         let now = Date(timeIntervalSince1970: (Date().timeIntervalSince1970 / 60).rounded(.down) * 60)
         let account = RuntimePerfProbe.account
         let container = try RuntimePerfProbe.heavyStore(days: 120, now: now)
@@ -73,7 +74,11 @@ struct RuntimeMemoryProbe {
                      r.cycles, r.phaseCycles[1] ?? 0, r.phaseCycles[2] ?? 0, r.forecasts, r.declined,
                      RuntimePerfProbe.seconds(clock.now - t0)))
         print("[mem] peak during the pass: \(ProcessMemory.current().summary); largest network workspace "
-              + Self.mb(FMScratch.largestBytes))
+              + Self.mb(FMScratch.largestBytes) + ", kept up to " + Self.mb(FMScratch.keepBytes))
+        for st in FMScratch.stats where st.calls > 0 {
+            print("[mem]   \(st.network.split(separator: ".").dropLast().last ?? ""): \(st.calls) calls, largest "
+                  + Self.mb(st.largest) + ", \(st.overCap) over the cap")
+        }
 
         // The cost table: warm average (what phases are decided by) and the
         // mean including each runner's first forecast.
@@ -84,8 +89,12 @@ struct RuntimeMemoryProbe {
             let five = costs.measured(spec.name, weekly: false)
             let week = costs.measured(spec.name, weekly: true)
             let mean = (r.modelCPUSeconds[spec.name] ?? 0) * 1000 / Double(max(1, r.modelForecasts[spec.name] ?? 1))
-            let cheap = (five ?? .infinity) <= config.cheapCostMs && (week ?? .infinity) <= config.cheapCostMs
-            if cheap { cheapNames.append(spec.name); cheapFive += five ?? 0; cheapWeek += week ?? 0 }
+            // Phases are decided per window scale, as the scorer does.
+            let cheap5 = (five ?? .infinity) <= config.cheapCostMs, cheapW = (week ?? .infinity) <= config.cheapCostMs
+            if cheap5 { cheapFive += five ?? 0 }
+            if cheapW { cheapWeek += week ?? 0 }
+            if cheap5 || cheapW { cheapNames.append(spec.name) }
+            let cheap = (five == nil || cheap5) && (week == nil || cheapW)
             allFive += five ?? 0; allWeek += week ?? 0
             print(String(format: "[cost] %@: five-hour %.1f ms, weekly %.1f ms warm; %.1f ms mean over %d (%@)",
                          spec.name, five ?? -1, week ?? -1, mean, r.modelForecasts[spec.name] ?? 0,

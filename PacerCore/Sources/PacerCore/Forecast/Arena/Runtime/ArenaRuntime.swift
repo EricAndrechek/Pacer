@@ -378,9 +378,10 @@ public actor ArenaRecordScorer {
         // Phase 1 scores only the models that are cheap on this Mac, over
         // every cycle in depth; phase 2 the rest. Within a phase each window
         // takes its turn, newest cycles first, so every window's selection
-        // has something to go on early. One runner per account for the whole
-        // pass: a parent's child backtests over neighbouring cuts and cycles
-        // mostly repeat, and its memo answers them.
+        // has something to go on early. The account being scored keeps one
+        // runner across its turns: a parent's child backtests over
+        // neighbouring cuts and cycles mostly repeat, and its memo answers
+        // them.
         var runners: [String: RunnerSlot] = [:]
         var lastLog = SuspendingClock.now
         var planned = 0
