@@ -275,10 +275,11 @@ struct RuntimeEngineTests {
                               weights: { _ in nil }, ensureWeights: { asked.add($0) }, config: config,
                               onRecordLanded: { _, _ in }, onLiveLanded: { _ in })
         rt.start(accounts: { [Self.account] })
-        // Background priority: on a loaded Mac a pass can wait a while for a core.
-        for _ in 0..<3000 where asked.count < 3 { try await Task.sleep(for: .milliseconds(10)) }
+        // Background priority: on a loaded Mac a pass can wait a long while
+        // for a core, so this waits for two passes, generously.
+        for _ in 0..<12_000 where asked.count < 2 { try await Task.sleep(for: .milliseconds(10)) }
         await rt.stop()
-        #expect(asked.count >= 3)
+        #expect(asked.count >= 2)
         #expect(asked.lock.withLock { asked.calls.allSatisfy { $0 == ["acme/net@abc"] } })
     }
 

@@ -125,22 +125,18 @@ struct FMWeightDownloaderTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let stub = Stub([], scratch: root)   // every call fails
         let clock = Clock()
-        let arrived = Flag()
-        let dl = Self.downloader(stub, clock: clock, root: root, present: { arrived.value })
+        // The weights turn up (another copy, say) after five failed tries:
+        // the next try finds them and the retries stop. Decided inside the
+        // downloader's own sequence, so no timing in the test.
+        let dl = Self.downloader(stub, clock: clock, root: root,
+                                 present: { stub.lock.withLock { stub.calls.count >= 5 } })
         await dl.run([Self.id])
-        // Let four scheduled retries run, then make the weights appear.
-        for _ in 0..<200 {
-            if clock.lock.withLock({ clock.sleeps.count }) >= 4 { break }
-            try await Task.sleep(for: .milliseconds(5))
-        }
-        // The weights turn up (another copy, say): the next try finds them
-        // and the retries stop.
-        arrived.set()
-        for _ in 0..<400 where !(await dl.pendingRetries().isEmpty) { try await Task.sleep(for: .milliseconds(5)) }
-        #expect(Array(clock.sleeps.prefix(4)) == [60, 300, 1800, 3600])
+        for _ in 0..<12_000 where !(await dl.pendingRetries().isEmpty) { try await Task.sleep(for: .milliseconds(5)) }
+        #expect(clock.lock.withLock { clock.sleeps } == [60, 300, 1800, 3600, 3600])
         #expect(await dl.pendingRetries().isEmpty)
         await dl.stop()
         // One file tried per attempt (the first file fails each time).
+        #expect(stub.calls.count == 5)
         #expect(stub.calls.allSatisfy { $0.file == "config.json" })
     }
 
@@ -179,12 +175,5 @@ struct FMWeightDownloaderTests {
         var pauses = 0
         #expect(try ArenaWeightStore.sha256(of: f, pause: { pauses += 1 }) == Self.hex(big))
         #expect(pauses == 3)
-    }
-
-    final class Flag: @unchecked Sendable {
-        let lock = NSLock()
-        private var v = false
-        var value: Bool { lock.withLock { v } }
-        func set() { lock.withLock { v = true } }
     }
 }
