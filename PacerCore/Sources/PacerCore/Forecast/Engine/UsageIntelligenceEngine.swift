@@ -1980,13 +1980,25 @@ public actor UsageIntelligenceEngine {
         // arena models scored into it the record is several times the
         // engine's own, and materialising it through SwiftData would stretch
         // the first refit of every launch. Nil falls back to the query below.
+        //
+        // One copy of each surface, method, bucket and period string, shared
+        // by every row that names it: read row by row, each had its own four
+        // heap strings, and with the arena models in it the record is tens of
+        // thousands of rows an account, held for the engine's life.
+        var interned: [String: String] = [:]
+        func intern(_ x: String) -> String {
+            if let c = interned[x] { return c }
+            interned[x] = x
+            return x
+        }
         if let url = rawStoreURL, let raw = RawEvalReader.scopeRows(storeURL: url, suffix: scope.suffix) {
             return raw.compactMap { row in
-                guard let base = scope.unqualify(row.surface) else { return nil }
+                guard let base = scope.unqualify(row.surface).map(intern) else { return nil }
                 return (EngineEvalOutcome.makeKey(surface: base, method: row.method, bucket: row.bucket,
                                                   periodKey: row.periodKey),
                         base,
-                        EngineSelfEval.Record(method: row.method, bucket: row.bucket, periodKey: row.periodKey,
+                        EngineSelfEval.Record(method: intern(row.method), bucket: intern(row.bucket),
+                                              periodKey: intern(row.periodKey),
                                               predicted: row.predicted, truth: row.truth))
             }
         }
@@ -2002,7 +2014,7 @@ public actor UsageIntelligenceEngine {
                 predicate: #Predicate { $0.surface.contains(suffix) })
         let rows = (try? modelContext.fetch(descriptor)) ?? []
         return rows.compactMap { row in
-            guard let base = scope.unqualify(row.surface) else { return nil }
+            guard let base = scope.unqualify(row.surface).map(intern) else { return nil }
             // The *base* key, not the persisted one. `existing` is compared
             // against keys built from base surfaces, so returning the stored
             // key would never match for a scoped engine and every refit would
@@ -2010,8 +2022,8 @@ public actor UsageIntelligenceEngine {
             let key = EngineEvalOutcome.makeKey(surface: base, method: row.method,
                                                 bucket: row.bucket, periodKey: row.periodKey)
             return (key, base,
-                    EngineSelfEval.Record(method: row.method, bucket: row.bucket,
-                                          periodKey: row.periodKey,
+                    EngineSelfEval.Record(method: intern(row.method), bucket: intern(row.bucket),
+                                          periodKey: intern(row.periodKey),
                                           predicted: row.predicted, truth: row.truth))
         }
     }

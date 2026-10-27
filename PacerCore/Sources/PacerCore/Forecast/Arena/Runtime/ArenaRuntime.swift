@@ -162,8 +162,8 @@ public actor ArenaRecordScorer {
         /// layer's: 24 origins 2 h apart on five-hour windows, 8 h on weekly
         /// ones), are made once and read at every later cut and cycle: a calib
         /// forecast costs 12–25 ms on a reused runner against 86–232 ms on a
-        /// fresh one. Every account in the pass has one, so the bound is per
-        /// account: 3 M doubles, 24 MB.
+        /// fresh one. Only the account being scored keeps one, so this is
+        /// the whole bound: 3 M doubles, 24 MB.
         public var memoLimitValues = 3_000_000
         /// Cycles a window scores before the next window's turn. A
         /// window's first turn in each phase scores enough for selection
@@ -403,20 +403,20 @@ public actor ArenaRecordScorer {
                     if relief.take() { runners.removeAll() }
                     let weekly = streams[i].window.isWeeklyScale
                     let account = streams[i].account
+                    // One account's runner at a time: each holds a memo of up
+                    // to `memoLimitValues` (24 MB), and four accounts' were a
+                    // hundred megabytes for the days a first pass lasts. An
+                    // account's windows are consecutive streams, so its memo
+                    // still serves all of them in a round; what a switch costs
+                    // is a model's first forecast on the next turn.
+                    if runners.count > 1 || runners[account] == nil { runners = runners.filter { $0.key == account } }
                     let slot = runners[account] ?? {
                         let r = ArenaRunner(registry: roster.registry, services: services)
                         r.memoLimitValues = config.memoLimitValues
                         return RunnerSlot(r)
                     }()
                     runners[account] = slot
-                    defer {
-                        prune(&streams[i]); streams[i].turns += 1
-                        // An account with nothing left this phase gives up
-                        // its runner and the memo in it.
-                        if !streams.contains(where: { $0.account == account && !$0.queue.isEmpty }) {
-                            runners[account] = nil
-                        }
-                    }
+                    defer { prune(&streams[i]); streams[i].turns += 1 }
                     let perTurn = weekly ? config.weeklyCyclesPerTurn : config.sessionCyclesPerTurn
                     let turn = streams[i].turns == 0 ? max(perTurn, EngineSelfEval.arenaMinPeriods(weekly: weekly)) : perTurn
                     for _ in 0..<turn {
