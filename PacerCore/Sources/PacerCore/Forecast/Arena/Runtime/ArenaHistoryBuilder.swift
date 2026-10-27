@@ -325,8 +325,11 @@ public enum ArenaHistoryBuilder {
         /// the history's start, so a child forecast made at a past cut is
         /// still the one it would make now.
         public let generation: UUID
-        let meters: [ArenaMeterID: [ArenaReading]]
-        let spend: [ArenaSpendRow]
+        /// The store's own rows: a build used to keep its thinned rows as
+        /// well as the store's sorted copy of them, two copies of every
+        /// account's 120 days for as long as the history was cached.
+        var meters: [ArenaMeterID: [ArenaReading]] { store.meters }
+        var spend: [ArenaSpendRow] { store.spend.values.first ?? [] }
     }
 
     /// `account`'s history from `now - depthDays` to `now`.
@@ -351,7 +354,7 @@ public enum ArenaHistoryBuilder {
                               pricing: pricing ?? Self.pricing(container: container),
                               mode: mode ?? PacerPreferences.costMode(), pace: pace)
         let store = makeStore(account: account, meters: meters, spend: spend, now: now, since: since)
-        return Built(store: store, builtThrough: now, generation: UUID(), meters: meters, spend: spend)
+        return Built(store: store, builtThrough: now, generation: UUID())
     }
 
     static func makeStore(account: String, meters: [ArenaMeterID: [ArenaReading]], spend: [ArenaSpendRow],
@@ -403,7 +406,7 @@ public enum ArenaHistoryBuilder {
                                mode: mode ?? PacerPreferences.costMode(), pace: pace)
         let spend = kept + reread
         return Built(store: makeStore(account: account, meters: meters, spend: spend, now: now, since: since),
-                     builtThrough: now, generation: built.generation, meters: meters, spend: spend)
+                     builtThrough: now, generation: built.generation)
     }
 
     /// The live tables only (new rows never land in the archive).

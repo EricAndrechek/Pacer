@@ -718,7 +718,7 @@ public final class TimestralNetwork: @unchecked Sendable {
     }
 
     /// One call's scratch buffers, grown on demand and kept for the next.
-    final class Workspace {
+    final class Workspace: FMWorkspaceBuffers {
         private var ptrs = [UnsafeMutablePointer<Float>?](repeating: nil, count: Slot.allCases.count)
         private var caps = [Int](repeating: 0, count: Slot.allCases.count)
         func buf(_ s: Slot, _ n: Int) -> UnsafeMutablePointer<Float> {
@@ -735,16 +735,6 @@ public final class TimestralNetwork: @unchecked Sendable {
         deinit { for p in ptrs { p?.deallocate() } }
     }
 
-    /// Workspaces for concurrent callers: one per call in flight, kept for reuse.
-    final class WorkspacePool: @unchecked Sendable {
-        private var free: [Workspace] = []
-        private let lock = NSLock()
-        func with<T>(_ body: (Workspace) throws -> T) rethrows -> T {
-            lock.lock()
-            let ws = free.popLast() ?? Workspace()
-            lock.unlock()
-            defer { lock.lock(); if free.count < 4 { free.append(ws) }; lock.unlock() }
-            return try body(ws)
-        }
-    }
+    /// See `FMScratch`: one kept, and only a small one.
+    typealias WorkspacePool = FMWorkspacePool<Workspace>
 }

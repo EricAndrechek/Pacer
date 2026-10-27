@@ -236,6 +236,12 @@ public enum FMSeries {
             while order.count > Self.capacity { entries[order.removeFirst()] = nil }
             return e
         }
+
+        /// Rows held, every entry (memory accounting).
+        var count: Int { lock.lock(); defer { lock.unlock() }; return entries.values.reduce(0) { $0 + $1.tKnown.count } }
+
+        /// For memory pressure: every series can be rebuilt from its store.
+        func removeAll() { lock.lock(); entries.removeAll(); order.removeAll(); lock.unlock() }
     }
 
     static let storeSeriesCache = StoreSeriesCache()

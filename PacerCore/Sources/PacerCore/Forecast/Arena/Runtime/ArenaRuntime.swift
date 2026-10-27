@@ -70,7 +70,8 @@ final class ArenaCancelFlag: @unchecked Sendable {
 
 /// Drops what the arena keeps that can be made again when macOS reports
 /// memory pressure: the runners' forecast memos (up to 24 MB an account in a
-/// pass, 16 MB an account live) and the calibration layer's network cache.
+/// pass, 16 MB an account live), the calibration layer's network cache and
+/// the networks' kept scratch buffers (`FMScratch`).
 /// On a Mac short of memory those pages were what got compressed and swapped,
 /// and touching them again is a page-in on whatever thread asks.
 final class ArenaMemoryRelief: @unchecked Sendable {
@@ -83,6 +84,8 @@ final class ArenaMemoryRelief: @unchecked Sendable {
         source.setEventHandler { [source] in
             let level = source.data.contains(.critical) ? "critical" : "warning"
             FMCalCutCache.shared.removeAll()
+            FMScratch.release()
+            FMSeries.storeSeriesCache.removeAll()
             flag.set(true)
             Task.detached(priority: .utility) {
                 await live.dropRunners()
@@ -200,6 +203,8 @@ public actor ArenaRecordScorer {
     private let services: ArenaServices
     private let budget: ArenaCPUBudget
     private let costs: ArenaModelCosts
+    /// Every registered model's place in the registry (`DoneKey`).
+    private let modelIndex: [String: UInt16]
     private let cancel: ArenaCancelFlag
     /// Set on memory pressure: the pass drops its runners (and their memos)
     /// at the next window's turn.
@@ -229,6 +234,8 @@ public actor ArenaRecordScorer {
          landed: @escaping @Sendable (String, [EngineSelfEval.NewOutcome]) async -> Void) {
         self.container = container; self.roster = roster; self.history = history; self.services = services
         self.budget = budget; self.costs = costs; self.cancel = cancel; self.config = config; self.calendar = calendar
+        self.modelIndex = Dictionary(roster.registry.enumerated().map { ($0.element.name, UInt16($0.offset)) },
+                                     uniquingKeysWith: { a, _ in a })
         self.landed = landed
     }
 
@@ -287,9 +294,28 @@ public actor ArenaRecordScorer {
         let cycles: [BurnTrajectory.Cycle]
         /// The current phase's cycles still to visit, newest first.
         var queue: [BurnTrajectory.Cycle] = []
-        var existing: Set<String>
+        /// What is already scored, arena models only, as small integers: a
+        /// pass lasts days on a first launch, and this as strings (every
+        /// method, ~90 characters a key) was megabytes a window.
+        var existing: Set<DoneKey>
+        /// Each cycle's place in `cycles`, by period key.
+        let periodIndex: [String: UInt16]
         /// Turns this window has had in the current phase.
         var turns = 0
+    }
+
+    /// One (model, cut, cycle) of a window's record, by index: the model in
+    /// the registry, the cut in `Config.cuts`, the cycle among the window's
+    /// completed cycles in depth (`periodIndex`).
+    struct DoneKey: Hashable { let model: UInt16; let cut: UInt8; let period: UInt16 }
+
+    private func doneKey(_ s: Stream, _ model: String, cut: Int, period: String) -> DoneKey? {
+        guard let m = modelIndex[model], let p = s.periodIndex[period] else { return nil }
+        return DoneKey(model: m, cut: UInt8(cut), period: p)
+    }
+
+    private func isDone(_ s: Stream, _ model: String, cut: Int, period: String) -> Bool {
+        doneKey(s, model, cut: cut, period: period).map { s.existing.contains($0) } ?? false
     }
 
     /// The two phases of a pass: the cheap models over every cycle in depth,
@@ -320,8 +346,8 @@ public actor ArenaRecordScorer {
     /// Whether any of `models` is missing at any cut of `cycle`.
     private func needs(_ s: Stream, _ cycle: BurnTrajectory.Cycle, models: [ArenaModelSpec]) -> Bool {
         let period = EngineSelfEval.periodKeyRL(cycle.resetsAt)
-        for cf in config.cuts {
-            for m in models where !s.existing.contains(Self.key(s.surface, m.name, cf, period)) { return true }
+        for ci in config.cuts.indices {
+            for m in models where !isDone(s, m.name, cut: ci, period: period) { return true }
         }
         return false
     }
@@ -383,7 +409,14 @@ public actor ArenaRecordScorer {
                         return RunnerSlot(r)
                     }()
                     runners[account] = slot
-                    defer { prune(&streams[i]); streams[i].turns += 1 }
+                    defer {
+                        prune(&streams[i]); streams[i].turns += 1
+                        // An account with nothing left this phase gives up
+                        // its runner and the memo in it.
+                        if !streams.contains(where: { $0.account == account && !$0.queue.isEmpty }) {
+                            runners[account] = nil
+                        }
+                    }
                     let perTurn = weekly ? config.weeklyCyclesPerTurn : config.sessionCyclesPerTurn
                     let turn = streams[i].turns == 0 ? max(perTurn, EngineSelfEval.arenaMinPeriods(weekly: weekly)) : perTurn
                     for _ in 0..<turn {
@@ -418,6 +451,10 @@ public actor ArenaRecordScorer {
             log(report, phase: phase, of: planned, since: started, done: true)
         }
         await flush()
+        // Nothing runs a network until the next pass or refit: its kept
+        // scratch is only memory now (`FMScratch`).
+        runners.removeAll()
+        FMScratch.release()
         MemoryHygiene.relieve()
         return report
     }
@@ -513,10 +550,29 @@ public actor ArenaRecordScorer {
             let surface = EngineScope.account(account).qualify(EngineSelfEval.rlSurface(window.key))
             let stored = storedRecords(surface: surface,
                                        periods: completed.map { EngineSelfEval.periodKeyRL($0.resetsAt) })
-            let existing = Set(stored.map {
-                EngineEvalOutcome.makeKey(surface: surface, method: $0.method, bucket: $0.bucket, periodKey: $0.periodKey)
-            })
-            let records = stored.filter { EngineSelfEval.isCurrentRLBucket($0.bucket) }
+            var periodIndex: [String: UInt16] = [:]
+            for (i, c) in completed.enumerated() { periodIndex[EngineSelfEval.periodKeyRL(c.resetsAt)] = UInt16(i) }
+            let cutIndex = Dictionary(config.cuts.enumerated().map { (EngineSelfEval.rlBucket($0.element), $0.offset) },
+                                      uniquingKeysWith: { a, _ in a })
+            let arenaNames = Set(available.map(\.name))
+            var existing = Set<DoneKey>()
+            for r in stored where arenaNames.contains(r.method) {
+                guard let m = modelIndex[r.method], let c = cutIndex[r.bucket], let p = periodIndex[r.periodKey]
+                else { continue }
+                existing.insert(DoneKey(model: m, cut: UInt8(c), period: p))
+            }
+            // One copy of each method name and period key, shared by every
+            // record that names it: read from SQLite, each row had its own.
+            var interned: [String: String] = [:]
+            func intern(_ x: String) -> String {
+                if let c = interned[x] { return c }
+                interned[x] = x
+                return x
+            }
+            let records = stored.filter { EngineSelfEval.isCurrentRLBucket($0.bucket) }.map {
+                EngineSelfEval.Record(method: intern($0.method), bucket: intern($0.bucket), periodKey: intern($0.periodKey),
+                                      predicted: $0.predicted, truth: $0.truth)
+            }
             let losers = EngineSelfEval.arenaLosers(records, arenaIds: Set(available.map(\.name)),
                                                     weekly: window.isWeeklyScale)
             if !losers.isEmpty {
@@ -527,15 +583,21 @@ public actor ArenaRecordScorer {
             guard !models.isEmpty else { continue }
             let wanted = models.count * config.cuts.count
             let todo = completed.filter { c in
-                let period = EngineSelfEval.periodKeyRL(c.resetsAt)
-                let have = config.cuts.reduce(0) { n, cf in
-                    n + models.filter { existing.contains(Self.key(surface, $0.name, cf, period)) }.count
+                guard let p = periodIndex[EngineSelfEval.periodKeyRL(c.resetsAt)] else { return false }
+                var have = 0
+                for ci in config.cuts.indices {
+                    for m in models {
+                        if let mi = modelIndex[m.name], existing.contains(DoneKey(model: mi, cut: UInt8(ci), period: p)) {
+                            have += 1
+                        }
+                    }
                 }
                 return have < wanted
             }
             guard !todo.isEmpty else { continue }
             out.append(Stream(account: account, window: window, binding: binding, models: models, records: records,
-                              store: store, surface: surface, cycles: Array(todo), existing: existing))
+                              store: store, surface: surface, cycles: Array(todo), existing: existing,
+                              periodIndex: periodIndex))
         }
         return out
     }
@@ -553,7 +615,7 @@ public actor ArenaRecordScorer {
         let period = EngineSelfEval.periodKeyRL(cycle.resetsAt)
         let baseSurface = EngineSelfEval.rlSurface(s.window.key)
         var out: [EngineSelfEval.NewOutcome] = []
-        for cf in config.cuts {
+        for (ci, cf) in config.cuts.enumerated() {
             guard !cancel.isSet else { return out }
             let cutNow = cycle.cycleStart.addingTimeInterval(duration * cf)
             let seen = cycle.samples.filter { $0.at <= cutNow }
@@ -561,8 +623,7 @@ public actor ArenaRecordScorer {
             // the same cuts.
             guard seen.count >= 3 else { continue }
             let missing = models.filter {
-                let k = Self.key(s.surface, $0.name, cf, period)
-                return !s.existing.contains(k) && !declined.contains(k)
+                !isDone(s, $0.name, cut: ci, period: period) && !declined.contains(Self.key(s.surface, $0.name, cf, period))
             }
             guard !missing.isEmpty else { continue }
             let partial = BurnTrajectory.PartialCycle(samples: seen, now: cutNow, cycleStart: cycle.cycleStart,
@@ -601,7 +662,7 @@ public actor ArenaRecordScorer {
                     out.append(EngineSelfEval.NewOutcome(
                         surface: baseSurface, method: spec.name, bucket: EngineSelfEval.rlBucket(cf),
                         periodKey: period, predicted: shown, truth: truth))
-                    s.existing.insert(k)
+                    if let done = doneKey(s, spec.name, cut: ci, period: period) { s.existing.insert(done) }
                 } catch ArenaError.cancelled {
                     timed = false
                     return out
