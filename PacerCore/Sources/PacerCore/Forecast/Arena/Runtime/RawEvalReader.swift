@@ -25,6 +25,8 @@ enum RawEvalReader {
         let periodKey: String
         let predicted: Double
         let truth: Double
+        /// `EngineEvalOutcome.inputs`; nil when the row has none.
+        var inputs: String? = nil
     }
 
     /// Every row of one scope: surfaces ending in `suffix` (`#<account>`), or
@@ -37,10 +39,19 @@ enum RawEvalReader {
                      binds: [.int(suffix.unicodeScalars.count), .text(suffix)])
     }
 
-    /// One surface's rows for these periods.
-    static func surfaceRows(storeURL: URL, surface: String, periods: [String]) -> [Row]? {
+    /// One surface's rows for these periods; with `bucketSuffix`, only the
+    /// buckets ending in it (one grading's, `|v3`), so the scorer does not
+    /// materialise the rows of a grading it no longer writes.
+    static func surfaceRows(storeURL: URL, surface: String, periods: [String], bucketSuffix: String? = nil) -> [Row]? {
         guard !periods.isEmpty else { return [] }
-        guard let rows = query(storeURL, "WHERE ZSURFACE = ?1", binds: [.text(surface)]) else { return nil }
+        let rows: [Row]?
+        if let bucketSuffix {
+            rows = query(storeURL, "WHERE ZSURFACE = ?1 AND substr(ZBUCKET, -length(?2)) = ?2",
+                         binds: [.text(surface), .text(bucketSuffix)])
+        } else {
+            rows = query(storeURL, "WHERE ZSURFACE = ?1", binds: [.text(surface)])
+        }
+        guard let rows else { return nil }
         let wanted = Set(periods)
         return rows.filter { wanted.contains($0.periodKey) }
     }
@@ -54,7 +65,9 @@ enum RawEvalReader {
             return nil
         }
         defer { sqlite3_close(db) }
-        let sql = "SELECT ZSURFACE, ZMETHOD, ZBUCKET, ZPERIODKEY, ZPREDICTED, ZTRUTH FROM ZENGINEEVALOUTCOME "
+        // A store opened before `inputs` existed has no ZINPUTS column until
+        // SwiftData migrates it: the prepare fails, and the caller falls back.
+        let sql = "SELECT ZSURFACE, ZMETHOD, ZBUCKET, ZPERIODKEY, ZPREDICTED, ZTRUTH, ZINPUTS FROM ZENGINEEVALOUTCOME "
             + whereClause
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let stmt else { return nil }
@@ -73,7 +86,8 @@ enum RawEvalReader {
             guard let surface = text(stmt, 0), let method = text(stmt, 1),
                   let bucket = text(stmt, 2), let period = text(stmt, 3) else { return nil }
             out.append(Row(surface: surface, method: method, bucket: bucket, periodKey: period,
-                           predicted: sqlite3_column_double(stmt, 4), truth: sqlite3_column_double(stmt, 5)))
+                           predicted: sqlite3_column_double(stmt, 4), truth: sqlite3_column_double(stmt, 5),
+                           inputs: text(stmt, 6)))
         }
         return out
     }

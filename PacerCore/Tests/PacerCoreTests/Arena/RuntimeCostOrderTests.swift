@@ -159,7 +159,7 @@ struct RuntimeCostOrderTests {
         let order = landed.all.map(\.outcome)
         let lastCheap = try #require(order.lastIndex { $0.method == "test-peeker" })
         let spunEarly = order[...lastCheap].filter { $0.method == "test-spinner" }
-        #expect(spunEarly.count <= config.cuts.count)
+        #expect(spunEarly.count <= config.grading.cuts.count)
         #expect(Set(order.filter { $0.method == "test-spinner" }.map(\.periodKey)).count == 10)
         let timed = try #require(costs.measured("test-spinner", weekly: false))
         #expect(timed > config.cheapCostMs)
@@ -207,7 +207,7 @@ struct RuntimeCostOrderTests {
         for (account, o) in landed.all where !visits.contains(where: { $0 == (account, o.periodKey) }) {
             visits.append((account, o.periodKey))
         }
-        let need = EngineSelfEval.arenaMinPeriods(weekly: false)
+        let need = EngineSelfEval.rlMinPeriods(weekly: false)
         #expect(visits.count == 2 * 14)
         #expect(visits.prefix(need).allSatisfy { $0.0 == "acct-first" })
         #expect(visits.dropFirst(need).prefix(need).allSatisfy { $0.0 == "acct-second" })
@@ -217,38 +217,46 @@ struct RuntimeCostOrderTests {
     }
 }
 
-/// The compare sheet's arena rows: the pick, then the best-recorded others,
-/// counting only models with the cycles selection needs behind them. The
-/// cheap models are scored first, so for hours a heavy one has a cycle or two,
-/// and an error from one cycle must not list it ahead of a real record.
-@Suite("Arena runtime: the compare list needs a record")
+/// The window's drawn arena models: the pick, then the best-ranked others,
+/// counting only models ranked over the shared span (`rlMinPeriods` cycles
+/// graded). The cheap models are graded first, so for hours a heavy one has a
+/// cycle or two, and an error from one cycle must not draw it ahead of a real
+/// record.
+@Suite("Arena runtime: the drawn models need a record")
 struct RuntimeCompareListTests {
 
-    static func stat(_ m: String, err: Double, periods: Int) -> EngineSelfEval.Accuracy.MethodStat {
-        .init(method: m, medianAbsPctError: err, typicalAbsError: err, periods: periods)
+    /// `periods` cycles ending at the newest, missing by `err` at every cut.
+    static func rows(_ m: String, err: Double, periods: Int) -> [EngineSelfEval.Record] {
+        (0..<periods).flatMap { i in
+            EngineSelfEval.rlCutFractions.map { cut in
+                EngineSelfEval.Record(method: m, bucket: EngineSelfEval.rlBucket(cut),
+                                      periodKey: EngineSelfEval.periodKeyRL(Date(timeIntervalSince1970: 1_800_000_000
+                                                                                 - Double(i) * 18000)),
+                                      predicted: 50 + err, truth: 50)
+            }
+        }
     }
 
-    @Test func aModelWithTooFewCyclesIsNotListed() {
+    @Test func aModelWithTooFewCyclesIsNotDrawn() {
         let names = ["arena-a", "arena-b", "arena-c", "arena-d"]
         let roster = ArenaRoster(registry: names.map { n in
             ArenaModelSpec(name: n, targets: RuntimeEngineTests.meters) { RuntimeEngineTests.Peeker(context: $0) }
         })
         let link = ArenaEngineLink(roster: roster, cache: ArenaLiveCache(), compareLimit: 3, requestLive: { _ in })
         for (kind, weekly) in [(RateLimitWindowKind.fiveHour, false), (.sevenDay, true)] {
-            let need = EngineSelfEval.arenaMinPeriods(weekly: weekly)
-            let accuracy = EngineSelfEval.Accuracy(surface: "rl", methods: [
-                Self.stat("arena-a", err: 0.5, periods: 1),          // best error, one cycle
-                Self.stat("arena-b", err: 2, periods: need),
-                Self.stat("arena-c", err: 3, periods: need + 5),
-                Self.stat("arena-d", err: 1, periods: need - 1),
-            ])
+            let need = EngineSelfEval.rlMinPeriods(weekly: weekly)
+            let records = Self.rows("arena-a", err: 0.5, periods: 1)          // best error, one cycle
+                + Self.rows("arena-b", err: 2, periods: need)
+                + Self.rows("arena-c", err: 3, periods: need + 5)
+                + Self.rows("arena-d", err: 1, periods: need - 1)
+            let ranking = EngineSelfEval.rankRL(records, weekly: weekly, at: nil, depth: EngineSelfEval.rlDepth(weekly: weekly))
             let listed = UsageIntelligenceEngine.arenaRoster(window: .fixed(kind), account: "acct", arena: link,
-                                                             pick: nil, accuracy: accuracy).models.map(\.id)
+                                                             pick: nil, ranking: ranking).models.map(\.id)
             #expect(listed == ["arena-b", "arena-c"])
             // The pick is drawn whatever its record (selection already
-            // required one, through `arenaComparable`).
+            // required one).
             let withPick = UsageIntelligenceEngine.arenaRoster(window: .fixed(kind), account: "acct", arena: link,
-                                                               pick: "arena-a", accuracy: accuracy).models.map(\.id)
+                                                               pick: "arena-a", ranking: ranking).models.map(\.id)
             #expect(withPick == ["arena-a", "arena-b", "arena-c"])
         }
     }

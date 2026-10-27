@@ -11,7 +11,7 @@ import Foundation
 /// together, cycle by cycle, the cheap models' records grew at the heavy
 /// ones' pace: 61 of 413 cycles in 8.7 hours on a heavy store, so almost
 /// nothing had the cycles behind it selection needs
-/// (`EngineSelfEval.arenaMinPeriods`) and the user saw no difference for
+/// (`EngineSelfEval.rlMinPeriods`) and the user saw no difference for
 /// days. The cheap ones alone cover the same history in a small fraction of
 /// that.
 ///

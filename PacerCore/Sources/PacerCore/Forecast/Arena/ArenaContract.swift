@@ -395,13 +395,17 @@ public struct ArenaModelSpec: Sendable {
     /// Near-tie break for the engine's per-user pick: simpler wins (1–5,
     /// as `BurnTrajectory.Model.complexity`).
     public var complexity: Int
+    /// The port's own version. Bump it when a change to the port changes
+    /// what it forecasts: every grade it (or a parent of it) has in the
+    /// record is then graded again (`ArenaGradeInputs`), in the background.
+    public var version: Int
     public var make: @Sendable (ArenaContext) throws -> any ArenaModel
 
     public init(name: String, targets: Set<ArenaTarget>, children: [String] = [], config: ArenaConfig = [:],
-                weights: [String] = [], complexity: Int = 3,
+                weights: [String] = [], complexity: Int = 3, version: Int = 1,
                 make: @escaping @Sendable (ArenaContext) throws -> any ArenaModel) {
         self.name = name; self.targets = targets; self.children = children; self.config = config
-        self.weights = weights; self.complexity = complexity; self.make = make
+        self.weights = weights; self.complexity = complexity; self.version = version; self.make = make
     }
 }
 

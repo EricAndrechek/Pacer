@@ -22,10 +22,25 @@ public struct ArenaScoringProgress: Sendable, Equatable {
     /// The models this phase is still scoring for the account, by id, sorted.
     public let models: [String]
     public let updatedAt: Date
+    /// Each of the account's windows' completed cycles in the shared depth
+    /// (`EngineSelfEval.rlDepth`), by window key: how many cycles every model
+    /// will have been graded on there.
+    public let windowDepth: [String: Int]
+    /// Wall seconds per cycle graded since the phase began, every account's
+    /// cycles counted: the pace the estimate is made from. Nil until one is.
+    public let secondsPerCycle: Double?
 
-    public init(phase: Phase, cyclesDone: Int, cyclesTotal: Int, models: [String], updatedAt: Date) {
+    /// How long until the phase is done with this account, at the measured
+    /// pace (the CPU budget's sleeps included), counting the other windows'
+    /// cycles graded in between (each window takes its turn); nil before any
+    /// cycle has been timed.
+    public let eta: TimeInterval?
+
+    public init(phase: Phase, cyclesDone: Int, cyclesTotal: Int, models: [String], updatedAt: Date,
+                windowDepth: [String: Int] = [:], secondsPerCycle: Double? = nil, eta: TimeInterval? = nil) {
         self.phase = phase; self.cyclesDone = cyclesDone; self.cyclesTotal = cyclesTotal
         self.models = models; self.updatedAt = updatedAt
+        self.windowDepth = windowDepth; self.secondsPerCycle = secondsPerCycle; self.eta = eta
     }
 
     /// Done over planned, 0 to 1.
@@ -39,8 +54,32 @@ public final class ArenaScoringProgressBoard: @unchecked Sendable {
 
     private let lock = NSLock()
     private var byAccount: [String: ArenaScoringProgress] = [:]
+    /// The accounts a pass has graded through, with the pass's fingerprint
+    /// (`ArenaRecordScorer.fingerprint`): a later pass under other inputs
+    /// replaces it.
+    private var gradedThrough: [String: String] = [:]
+    private var currentFingerprint: String?
 
     public init() {}
+
+    /// Whether a pass under the current grading and inputs has graded every
+    /// cycle of `account`'s depth.
+    public func isGradedThrough(account: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard let f = gradedThrough[account] else { return false }
+        return f == currentFingerprint
+    }
+
+    func setCurrentFingerprint(_ fingerprint: String) {
+        lock.lock(); defer { lock.unlock() }
+        currentFingerprint = fingerprint
+    }
+
+    func setGradedThrough(accounts: some Sequence<String>, fingerprint: String) {
+        lock.lock(); defer { lock.unlock() }
+        currentFingerprint = fingerprint
+        for a in accounts { gradedThrough[a] = fingerprint }
+    }
 
     /// The account's progress while the scorer still has work for it; nil
     /// once it has none (or before its first pass has planned any).
