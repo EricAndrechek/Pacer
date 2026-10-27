@@ -156,6 +156,9 @@ struct RuntimeUnifiedRankingTests {
         #expect(r.standing("thin")?.isRanked == false)
         // Ranked, then well behind, then the unranked.
         #expect(r.standings.map(\.method) == ["best", "close", "steady-loser", "far", "thin"])
+        // Over too few cycles nothing is judged well behind.
+        let short = Self.rank(Self.records("best", 0..<10) { _, _ in 2 } + Self.records("far", 0..<10) { _, _ in 9 })
+        #expect(short.standing("far")?.wellBehind == false)
         #expect(EngineSelfEval.binomialUpperTail(n: 20, k: 0) == 1)
         #expect(abs(EngineSelfEval.binomialUpperTail(n: 2, k: 2) - 0.25) < 1e-12)
         #expect(EngineSelfEval.binomialUpperTail(n: 30, k: 30) < 1e-8)
@@ -229,15 +232,16 @@ struct RuntimeUnifiedRankingTests {
 
     @Test func theBoardListsEveryModelRankedThenTheRest() throws {
         let engineIds = ["linear-recent", "recent-rate", "saturating"]
-        // 15 cycles: too few for the sign test, so well behind is the margin.
-        let rows = Self.records("linear-recent", 0..<15) { _, _ in 3 } + Self.records("recent-rate", 0..<15) { _, _ in 9 }
-            + Self.records("saturating", 0..<15) { _, _ in 2.5 }
-            + Self.records("a-best", 0..<15) { _, _ in 1 } + Self.records("a-second", 0..<15) { _, _ in 1.5 }
-            + Self.records("a-third", 0..<15) { _, _ in 2 } + Self.records("a-new", 12..<15) { _, _ in 0.1 }
+        // 17 cycles: enough to judge (`wellBehindMinSpan`), too few for the
+        // sign test, so well behind is the margin.
+        let rows = Self.records("linear-recent", 0..<17) { _, _ in 3 } + Self.records("recent-rate", 0..<17) { _, _ in 9 }
+            + Self.records("saturating", 0..<17) { _, _ in 2.5 }
+            + Self.records("a-best", 0..<17) { _, _ in 1 } + Self.records("a-second", 0..<17) { _, _ in 1.5 }
+            + Self.records("a-third", 0..<17) { _, _ in 2 } + Self.records("a-new", 14..<17) { _, _ in 0.1 }
         let ranking = Self.rank(rows, at: 0.4)
         let specs = ["a-best", "a-second", "a-third", "a-new", "a-net", "a-silent", "a-broken"].map { Self.spec($0) }
-        let progress = ArenaScoringProgress(phase: .cheap, cyclesDone: 3, cyclesTotal: 15, models: ["a-new"],
-                                            updatedAt: Date(), windowDepth: ["five_hour": 15], secondsPerCycle: 2,
+        let progress = ArenaScoringProgress(phase: .cheap, cyclesDone: 3, cyclesTotal: 17, models: ["a-new"],
+                                            updatedAt: Date(), windowDepth: ["five_hour": 17], secondsPerCycle: 2,
                                             eta: 74)
         let board = UsageIntelligenceEngine.board(
             windowKey: "five_hour", weekly: false, ranking: ranking, current: ranking, engineIds: engineIds,
@@ -249,12 +253,12 @@ struct RuntimeUnifiedRankingTests {
         #expect(board.rows.count == engineIds.count + specs.count)
         #expect(board.rows.map(\.id) == ["a-best", "a-second", "a-third", "saturating",
                                          "a-new", "a-silent", "a-net", "a-broken", "linear-recent", "recent-rate"])
-        #expect(status("a-best") == .ranked(typicalMiss: 1, cycles: 15))
-        #expect(status("saturating") == .ranked(typicalMiss: 2.5, cycles: 15))
-        #expect(status("linear-recent") == .wellBehind(typicalMiss: 3, cycles: 15))
-        #expect(status("recent-rate") == .wellBehind(typicalMiss: 9, cycles: 15))
-        #expect(status("a-new") == .scoring(done: 3, total: 15, eta: 74))
-        #expect(status("a-silent") == .scoring(done: 0, total: 15, eta: nil))
+        #expect(status("a-best") == .ranked(typicalMiss: 1, cycles: 17))
+        #expect(status("saturating") == .ranked(typicalMiss: 2.5, cycles: 17))
+        #expect(status("linear-recent") == .wellBehind(typicalMiss: 3, cycles: 17))
+        #expect(status("recent-rate") == .wellBehind(typicalMiss: 9, cycles: 17))
+        #expect(status("a-new") == .scoring(done: 3, total: 17, eta: 74))
+        #expect(status("a-silent") == .scoring(done: 0, total: 17, eta: nil))
         #expect(status("a-net") == .downloading(fraction: nil))
         #expect(status("a-broken") == .unavailable("no forecast this cycle"))
         #expect(board.rows.filter(\.isPick).map(\.id) == ["a-best"])
@@ -262,8 +266,8 @@ struct RuntimeUnifiedRankingTests {
         // fewer than four others are ranked ahead of it.
         #expect(board.rows.filter(\.drawnByDefault).map(\.id) == ["a-best", "a-second", "a-third", "saturating",
                                                                    "linear-recent"])
-        #expect(board.spanCycles == 15 && board.cutFraction == 0.4)
-        #expect(board.progress == .init(done: 3, total: 15, eta: 74))
+        #expect(board.spanCycles == 17 && board.cutFraction == 0.4)
+        #expect(board.progress == .init(done: 3, total: 17, eta: 74))
         #expect(board.rows.first { $0.id == "linear-recent" }?.name == BurnTrajectory.displayName("linear-recent"))
 
         // The grader is through: a model with nothing graded declined every cycle.

@@ -621,14 +621,17 @@ extension EngineSelfEval {
     /// at p < 0.001 over at least 20 cycles where they differ) while a fifth
     /// or more behind. The first is the margin no near-tie band (5%) comes
     /// near; the second catches a model that is consistently, not just on
-    /// average, worse. Display only: it is still graded on every cycle, and
-    /// can climb back.
+    /// average, worse. Neither is judged over fewer than twice the floor of
+    /// cycles (`wellBehindMinSpan`): on the owner's record a weekly span of
+    /// four cycles put thirty of thirty-five models "well behind" on noise.
+    /// Display only: it is still graded on every cycle, and can climb back.
     static let wellBehindRatio = 1.5
     static let wellBehindMargin = 1.0
     static let wellBehindCoverage = 0.9
     static let wellBehindSignTestP = 0.001
     static let wellBehindSignTestMinCycles = 20
     static let wellBehindSignTestRatio = 1.2
+    static func wellBehindMinSpan(weekly: Bool) -> Int { 2 * rlMinPeriods(weekly: weekly) }
 
     /// One window's record ranked the way selection and the compare sheet
     /// read it: every method over the same cycles (`span`), at the same point
@@ -787,7 +790,8 @@ extension EngineSelfEval {
         }
         let bestScores = best.map { cycleScores($0.id) } ?? [:]
         func isWellBehind(_ r: Row) -> Bool {
-            guard let t = r.typical, let best, r.method != best.id else { return false }
+            guard let t = r.typical, let best, r.method != best.id,
+                  span.count >= wellBehindMinSpan(weekly: weekly) else { return false }
             if t > best.err * wellBehindRatio + wellBehindMargin,
                Double(r.spanCycles) >= wellBehindCoverage * Double(span.count) { return true }
             guard t >= best.err * wellBehindSignTestRatio else { return false }
