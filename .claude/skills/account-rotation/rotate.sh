@@ -150,9 +150,15 @@ read_metrics() {
   U5=(); R5=(); U7=(); B5=(); A5=(); B7=(); A7=()
   while read -r kind acct win val; do
     case "$kind:$win" in
-      used:five_hour)  U5[$acct]=$val;;
+      # The live estimate counts tokens since the last poll; whole-percent
+      # polls lag it by up to a point (2026-10-28 15:08Z: polled 98%, live
+      # 99.1% at a 99% limit, and the controller saw room that wasn't there).
+      # Either may only raise the figure.
+      used:five_hour|live:five_hour)
+        { [ -z "${U5[$acct]:-}" ] || [ "$val" -gt "${U5[$acct]}" ]; } && U5[$acct]=$val;;
       reset:five_hour) R5[$acct]=$val;;
-      used:seven_day)  U7[$acct]=$val;;
+      used:seven_day|live:seven_day)
+        { [ -z "${U7[$acct]:-}" ] || [ "$val" -gt "${U7[$acct]}" ]; } && U7[$acct]=$val;;
       recent:five_hour) B5[$acct]=$val;;
       model:five_hour) [ -n "${B5[$acct]:-}" ] || B5[$acct]=$val;;
       age:five_hour)   A5[$acct]=$val;;
@@ -163,6 +169,8 @@ read_metrics() {
   done < <(printf '%s\n' "$body" | awk -F'"' '
     /^pacer_rate_limit_used_ratio\{account="[^"]+",window="(five_hour|seven_day)"\}/ {
       split($0, v, " "); printf "used %s %s %d\n", substr($2,1,8), $4, v[2]*100 + 0.5 }
+    /^pacer_rate_limit_live_used_ratio\{account="[^"]+",window="(five_hour|seven_day)"\}/ {
+      split($0, v, " "); printf "live %s %s %d\n", substr($2,1,8), $4, v[2]*100 + 0.5 }
     /^pacer_rate_limit_reset_seconds\{account="[^"]+",window="five_hour"\}/ {
       split($0, v, " "); printf "reset %s %s %d\n", substr($2,1,8), $4, v[2] }
     /^pacer_rate_limit_recent_burn_percent_per_hour\{account="[^"]+",window="five_hour"\}/ {
@@ -357,7 +365,9 @@ while :; do
          && [ $(( pr > cr ? pr - cr : cr - pr )) -le 900 ] && [ "${P5[$k]}" -gt "${U5[$k]:-0}" ]; then
         U5[$k]=${P5[$k]}
       fi
-      [ -n "${U7[$k]:-}" ] && [ "${P7[$k]:-0}" -gt "${U7[$k]}" ] && U7[$k]=${P7[$k]}
+    done
+    for k in "${!P7[@]}"; do
+      [ -n "${U7[$k]:-}" ] && [ "${P7[$k]}" -gt "${U7[$k]}" ] && U7[$k]=${P7[$k]}
     done
     for k in "${!R5[@]}"; do RESET_AT[$k]=$(( now + R5[$k] )); done
     for k in "${!R7[@]}"; do RESET7_AT[$k]=$(( now + R7[$k] )); done

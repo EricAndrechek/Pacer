@@ -290,6 +290,21 @@ ACTIVE_SINCE_OVERRIDE=$(( $(date +%s) - 600 )) API=http://127.0.0.1:$port t "S2 
 sed -i '' 's/ 25$/ 5/' "$T/www/metrics"
 ACTIVE_SINCE_OVERRIDE=$(( NOW - 2400 )) API=http://127.0.0.1:$port t "S3 slot 3 burns only 5: quiet" \
   '^[0-9:]{8} no switch:' 1 "$ST"
+# --- Pacer's live estimate (tokens since the last poll) may only raise a figure ---
+# EARLY=0 and no burn: the 7d limit is 99, so a polled 98% has room and a live
+# 99.1% has none.
+cat >"$T/www/metrics" <<'EOF'
+pacer_rate_limit_used_ratio{account="acc1acc0-0000",window="seven_day"} 0.98
+pacer_rate_limit_live_used_ratio{account="acc1acc0-0000",window="seven_day"} 0.991
+EOF
+AUTO=1 API=http://127.0.0.1:$port t "V1 live 7d 99.1% over a polled 98%: 7-day switch" 'WOULD SWITCH → 3 .*\[7-day: 1 at 99%' \
+  1 "1:20:200:98:ok 3:20:250:40:ok $SPENT" 'EARLY=0'
+cat >"$T/www/metrics" <<'EOF'
+pacer_rate_limit_live_used_ratio{account="acc1acc0-0000",window="seven_day"} 0.95
+pacer_rate_limit_used_ratio{account="acc1acc0-0000",window="seven_day"} 0.98
+EOF
+AUTO=1 API=http://127.0.0.1:$port t "V2 a lower live estimate never lowers a reading" '^[0-9:]{8} no switch: 1 at 20%' \
+  1 "1:20:200:98:ok 3:20:250:40:ok $SPENT" 'EARLY=0'
 kill "$srv" 2>/dev/null
 
 if [ -e "$T/switched" ]; then
