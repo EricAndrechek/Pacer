@@ -621,16 +621,10 @@ struct ProjectionDetailView: View {
         }
     }
 
-    /// One-line legend; when the dashboard's pick isn't the single most
-    /// accurate model (the selector treats models within ±1.5 points as tied
-    /// and prefers the simpler one), say so — otherwise the list invites
-    /// "why isn't the best one picked?".
+    /// One-line legend (`ModelBoardList.legend`): every mark on the chart,
+    /// and the tie rule when the pick isn't the top row.
     private var legendText: String {
-        var s = "Solid — actual · dashed — projections from now · shaded — the models' spread · the highlighted model drives the dashboard. Click a model to draw or hide its line."
-        if let board, ModelBoardList.pickIsNotFirst(board) {
-            s += " Models within ±1.5 points are treated as tied — the simplest of the tied models is used."
-        }
-        return s
+        ModelBoardList.legend(pickIsNotFirst: board.map(ModelBoardList.pickIsNotFirst) ?? false)
     }
 
     private var chart: some View {
@@ -917,7 +911,7 @@ struct ProjectionDetailView: View {
         return ModelListRow(
             modelId: row.id, name: row.name, summary: row.summary, windowDuration: durationSeconds,
             stat: stat(row.id), marker: marker, accent: accent, isSelected: row.isPick,
-            note: ModelBoardList.lineNote(state), onTap: tap,
+            note: ModelBoardList.lineNote(state) ?? ModelBoardList.behindNote(row), onTap: tap,
             tapHelp: ModelBoardList.rowHelp(state, isFull: selection.isFull)
         ) {
             if let crossAt {

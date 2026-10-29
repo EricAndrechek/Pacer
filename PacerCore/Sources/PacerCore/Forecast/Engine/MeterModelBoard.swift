@@ -38,12 +38,15 @@ public struct MeterModelBoard: Sendable, Equatable {
         /// of this model has come. The status stays the previous grading's
         /// standing until the window switches. Nil otherwise.
         public var regrading: Regrading?
+        /// Which test put a well-behind row there; nil on every other row.
+        public var behind: EngineSelfEval.RLRanking.WellBehind?
 
         public init(id: String, name: String, summary: String?, status: Status, isPick: Bool,
-                    drawnByDefault: Bool, complexity: Int, regrading: Regrading? = nil) {
+                    drawnByDefault: Bool, complexity: Int, regrading: Regrading? = nil,
+                    behind: EngineSelfEval.RLRanking.WellBehind? = nil) {
             self.id = id; self.name = name; self.summary = summary; self.status = status
             self.isPick = isPick; self.drawnByDefault = drawnByDefault; self.complexity = complexity
-            self.regrading = regrading
+            self.regrading = regrading; self.behind = behind
         }
     }
 

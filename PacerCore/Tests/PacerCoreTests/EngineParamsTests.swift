@@ -37,13 +37,14 @@ struct EngineParamsTests {
         #expect(p.conformalBlockMinCycles == 40)
         #expect(p.rlCutKernelHalfWidth == 0.2)
         #expect(p.rlTieRelative == 0.05)
+        #expect(p.rlDisagreementPoints == 2)
     }
 
     @Test func versionTagMatchesPythonHarness() {
         // research/harness/pacer_replay.py `Params().version_tag()` computes
         // the same FNV-1a over the same canonical string; this pin catches
         // either side drifting. Update BOTH when a knob is added/changed.
-        #expect(EngineParams.current.versionTag == "v1-481cca04")
+        #expect(EngineParams.current.versionTag == "v1-5e0f894b")
     }
 
     @Test func paramsRoundTripThroughJSON() throws {

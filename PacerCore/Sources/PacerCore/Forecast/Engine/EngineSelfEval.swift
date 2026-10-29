@@ -650,6 +650,8 @@ extension EngineSelfEval {
             public let typicalAbsError: Double?
             /// Clearly behind the best (`wellBehindRatio`).
             public let wellBehind: Bool
+            /// Which test put it there, for its row; nil when not well behind.
+            public var behind: WellBehind? = nil
             public let complexity: Int
             /// Over the span, every cut counted the same: what the old
             /// accuracy rows showed (`Accuracy`).
@@ -657,6 +659,16 @@ extension EngineSelfEval {
             public let byStage: [Accuracy.StageStat]
 
             public var isRanked: Bool { typicalAbsError != nil }
+        }
+
+        /// Why a ranked model is well behind the best.
+        public enum WellBehind: Sendable, Equatable {
+            /// Its typical miss is more than half again the best's plus a
+            /// point (`wellBehindRatio`); the best's typical miss.
+            case missesMore(thanBest: Double)
+            /// It did worse than the best on `worse` of the `of` cycles where
+            /// the two differed: consistently, not just on average.
+            case losesMostCycles(worse: Int, of: Int)
         }
 
         public let grading: RLGrading
@@ -707,18 +719,31 @@ extension EngineSelfEval {
     /// - Each eligible method's typical miss over the span, each cut's
     ///   errors weighted by its closeness to `at` (`cutWeight`); the pick is
     ///   the simplest within the near-tie band of the best (`bestMethod`).
+    /// - With `disagreement` (points), only the moments where the models'
+    ///   forecasts spread at least that far count. Where every model said
+    ///   the same, the meter's outcome tells nothing about which is better,
+    ///   and on an account with quiet cycles those moments outnumber the
+    ///   rest: every miss read ±0 and the simplest model won whatever the
+    ///   record said. A method with no such moment near `at` is ranked on
+    ///   all of its moments, so a window where everyone always agreed ranks
+    ///   as it would without the filter.
     ///
     /// `candidates` limits the methods ranked (the ones that can run on this
     /// window); nil ranks every method in the record. `pickable` limits the
     /// pick further (nil: any ranked method).
     public static func rankRL(_ records: [Record], grading: RLGrading = rlGrading, candidates: Set<String>? = nil,
                               pickable: Set<String>? = nil, complexity: [String: Int] = [:], weekly: Bool,
-                              at x: Double?, depth: Int? = nil, tieRelative: Double? = nil) -> RLRanking {
+                              at x: Double?, depth: Int? = nil, tieRelative: Double? = nil,
+                              disagreement: Double? = nil) -> RLRanking {
         let x = grading.clamp(x)
         struct Graded { let cut: Double; let error: Double; let pct: Double }
+        struct Moment: Hashable { let period: String; let cut: Double }
         var cutOf: [String: Double] = [:]
         var byMethod: [String: [String: [Graded]]] = [:]
         var allPeriods = Set<String>()
+        // The lowest and highest forecast at each moment, over the methods
+        // ranked: how far the models disagreed there.
+        var spread: [Moment: (lo: Double, hi: Double)] = [:]
         for r in records where r.truth > 0 && grading.contains(bucket: r.bucket) {
             if let candidates, !candidates.contains(r.method) { continue }
             let cut: Double
@@ -730,6 +755,15 @@ extension EngineSelfEval {
             allPeriods.insert(r.periodKey)
             byMethod[r.method, default: [:]][r.periodKey, default: []]
                 .append(Graded(cut: cut, error: abs(r.predicted - r.truth), pct: r.absPctError))
+            if disagreement != nil {
+                let m = Moment(period: r.periodKey, cut: cut)
+                spread[m] = spread[m].map { (min($0.lo, r.predicted), max($0.hi, r.predicted)) }
+                    ?? (r.predicted, r.predicted)
+            }
+        }
+        func disagreed(_ period: String, _ cut: Double) -> Bool {
+            guard let disagreement, let s = spread[Moment(period: period, cut: cut)] else { return true }
+            return s.hi - s.lo >= disagreement
         }
         // periodKeys are ISO 8601 instants, so their order is time order.
         var periods = allPeriods.sorted()
@@ -752,29 +786,42 @@ extension EngineSelfEval {
                      let byStage: [Accuracy.StageStat] }
         var rows: [Row] = []
         for (m, byPeriod) in byMethod where cycles[m] != nil {
-            var pairs: [(error: Double, weight: Double)] = []
-            var pcts: [Double] = []
-            var stages: [Accuracy.Stage: [Double]] = [:]
+            // Every moment, and the ones where the models disagreed (the
+            // same lists without `disagreement`); the numbers come from the
+            // second wherever it has any.
+            var pairs: [(error: Double, weight: Double)] = [], keptPairs: [(error: Double, weight: Double)] = []
+            var pcts: [Double] = [], keptPcts: [Double] = []
+            var stages: [Accuracy.Stage: [Double]] = [:], keptStages: [Accuracy.Stage: [Double]] = [:]
             var inSpan = 0
             for p in span {
                 guard let gs = byPeriod[p] else { continue }
                 inSpan += 1
                 for g in gs {
-                    pairs.append((g.error, cutWeight(g.cut, at: x)))
+                    let pair = (error: g.error, weight: cutWeight(g.cut, at: x))
+                    let stage = Accuracy.Stage(cut: g.cut)
+                    pairs.append(pair)
                     pcts.append(g.pct)
-                    stages[Accuracy.Stage(cut: g.cut), default: []].append(g.error)
+                    stages[stage, default: []].append(g.error)
+                    guard disagreed(p, g.cut) else { continue }
+                    keptPairs.append(pair)
+                    keptPcts.append(g.pct)
+                    keptStages[stage, default: []].append(g.error)
                 }
             }
             var typical: Double?
             if eligible.contains(m), inSpan > 0 {
-                let t = typicalError(pairs, weekly: weekly)
+                // Infinite when no kept moment weighs anything near `at`.
+                let kept = typicalError(keptPairs, weekly: weekly)
+                let t = kept.isFinite ? kept : typicalError(pairs, weekly: weekly)
                 typical = t.isFinite ? t : nil
             }
             let byStage = Accuracy.Stage.allCases.compactMap { stage -> Accuracy.StageStat? in
-                guard let errs = stages[stage], !errs.isEmpty else { return nil }
+                guard let errs = keptStages[stage].flatMap({ $0.isEmpty ? nil : $0 }) ?? stages[stage],
+                      !errs.isEmpty else { return nil }
                 return .init(stage: stage, typicalAbsError: typicalError(errs, weekly: weekly), scores: errs.count)
             }
-            rows.append(Row(method: m, spanCycles: inSpan, typical: typical, pct: median(pcts), byStage: byStage))
+            rows.append(Row(method: m, spanCycles: inSpan, typical: typical,
+                            pct: median(keptPcts.isEmpty ? pcts : keptPcts), byStage: byStage))
         }
 
         let ranked = rows.compactMap { r in r.typical.map { (id: r.method, err: $0) } }
@@ -782,11 +829,15 @@ extension EngineSelfEval {
                                  tieRelative: tieRelative)
         let best = ranked.min { ($0.err, $0.id) < ($1.err, $1.id) }
 
+        // A cycle's score is over its moments where the models disagreed; a
+        // cycle with none is left out (everyone said the same there).
         func cycleScores(_ m: String) -> [String: Double] {
             var out: [String: Double] = [:]
             guard let byPeriod = byMethod[m] else { return out }
             for p in span {
-                guard let gs = byPeriod[p] else { continue }
+                guard let all = byPeriod[p] else { continue }
+                let gs = all.filter { disagreed(p, $0.cut) }
+                guard !gs.isEmpty else { continue }
                 var w = 0.0, s = 0.0
                 for g in gs { let k = cutWeight(g.cut, at: x); w += k; s += k * g.error }
                 out[p] = w > 0 ? s / w : gs.reduce(0) { $0 + $1.error } / Double(gs.count)
@@ -794,25 +845,30 @@ extension EngineSelfEval {
             return out
         }
         let bestScores = best.map { cycleScores($0.id) } ?? [:]
-        func isWellBehind(_ r: Row) -> Bool {
+        func wellBehind(_ r: Row) -> RLRanking.WellBehind? {
             guard let t = r.typical, let best, r.method != best.id,
-                  span.count >= wellBehindMinSpan(weekly: weekly) else { return false }
+                  span.count >= wellBehindMinSpan(weekly: weekly) else { return nil }
             if t > best.err * wellBehindRatio + wellBehindMargin,
-               Double(r.spanCycles) >= wellBehindCoverage * Double(span.count) { return true }
-            guard t >= best.err * wellBehindSignTestRatio else { return false }
+               Double(r.spanCycles) >= wellBehindCoverage * Double(span.count) { return .missesMore(thanBest: best.err) }
+            guard t >= best.err * wellBehindSignTestRatio else { return nil }
             var worse = 0, better = 0
             for (p, s) in cycleScores(r.method) {
                 guard let b = bestScores[p] else { continue }
                 if s > b { worse += 1 } else if s < b { better += 1 }
             }
             let n = worse + better
-            return n >= wellBehindSignTestMinCycles && binomialUpperTail(n: n, k: worse) < wellBehindSignTestP
+            guard n >= wellBehindSignTestMinCycles, binomialUpperTail(n: n, k: worse) < wellBehindSignTestP
+            else { return nil }
+            return .losesMostCycles(worse: worse, of: n)
         }
 
         let standings = rows.map { r in
-            RLRanking.Standing(method: r.method, cycles: cycles[r.method] ?? 0, spanCycles: r.spanCycles,
-                               firstPeriod: first[r.method], typicalAbsError: r.typical, wellBehind: isWellBehind(r),
-                               complexity: complexity[r.method] ?? 3, medianAbsPctError: r.pct, byStage: r.byStage)
+            let behind = wellBehind(r)
+            return RLRanking.Standing(method: r.method, cycles: cycles[r.method] ?? 0, spanCycles: r.spanCycles,
+                                      firstPeriod: first[r.method], typicalAbsError: r.typical,
+                                      wellBehind: behind != nil, behind: behind,
+                                      complexity: complexity[r.method] ?? 3, medianAbsPctError: r.pct,
+                                      byStage: r.byStage)
         }.sorted { a, b in
             func group(_ s: RLRanking.Standing) -> Int { s.isRanked ? (s.wellBehind ? 1 : 0) : 2 }
             if group(a) != group(b) { return group(a) < group(b) }

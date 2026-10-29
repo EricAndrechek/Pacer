@@ -101,6 +101,7 @@ extension UsageIntelligenceEngine {
             let spec = specByName[id]
             let status: MeterModelBoard.Status
             var regrading: MeterModelBoard.Regrading?
+            var behind: EngineSelfEval.RLRanking.WellBehind?
             if spec != nil, !canRunArena {
                 status = .unavailable(boardNeedsAccountReason)
             } else if let spec, !weightsPresent(spec) {
@@ -108,6 +109,7 @@ extension UsageIntelligenceEngine {
             } else if let st = ranking?.standing(id), let miss = st.typicalAbsError {
                 status = st.wellBehind ? .wellBehind(typicalMiss: miss, cycles: st.spanCycles)
                                        : .ranked(typicalMiss: miss, cycles: st.spanCycles)
+                behind = st.wellBehind ? st.behind : nil
                 let done = current?.standing(id)?.cycles ?? 0
                 if bridging, done < depth {
                     regrading = .init(done: done, total: depth, eta: scoring.contains(id) ? progress?.eta : nil)
@@ -129,7 +131,7 @@ extension UsageIntelligenceEngine {
             return MeterModelBoard.Row(
                 id: id, name: BurnTrajectory.displayName(id), summary: BurnTrajectory.summary(id), status: status,
                 isPick: id == pick, drawnByDefault: drawn.contains(id), complexity: complexity[id] ?? spec?.complexity ?? 3,
-                regrading: regrading)
+                regrading: regrading, behind: behind)
         }
 
         func key(_ r: MeterModelBoard.Row) -> (group: Int, value: Double) {

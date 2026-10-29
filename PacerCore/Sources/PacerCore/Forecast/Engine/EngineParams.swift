@@ -70,6 +70,14 @@ public struct EngineParams: Sendable, Equatable, Codable {
     /// The selection near-tie band as a fraction of the best model's typical
     /// error. 0 restores the absolute 1.5 pp band.
     public var rlTieRelative: Double = 0.05
+    /// Rank on the moments where the models' forecasts spread at least this
+    /// many points (`EngineSelfEval.rankRL`'s `disagreement`); 0 counts every
+    /// moment. Where every model said the same, the outcome tells nothing
+    /// about which is better, and on quiet accounts those moments put every
+    /// model at ±0, so the simplest won whatever the record said. Chosen
+    /// from a walk-forward replay of the owner's record through the shipping
+    /// ranking (`RankingReplayProbe`) on 2026-10-29.
+    public var rlDisagreementPoints: Double = 2
 
     public init() {}
 
@@ -97,6 +105,7 @@ public struct EngineParams: Sendable, Equatable, Codable {
             "conformalBlockMinCycles=\(conformalBlockMinCycles)",
             "rlCutKernelHalfWidth=\(g(rlCutKernelHalfWidth))",
             "rlTieRelative=\(g(rlTieRelative))",
+            "rlDisagreementPoints=\(g(rlDisagreementPoints))",
         ].joined(separator: ";")
     }
 

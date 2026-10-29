@@ -1,5 +1,7 @@
 """Selection, the stand-in rule, conformal bands, paths and version tags,
 against research/harness/pacer_replay.py where it has the same function."""
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
@@ -19,8 +21,12 @@ T0 = 1_790_000_000.0
 
 
 def test_version_tags_are_the_ones_the_app_recorded(pr):
-    assert SHIPPING.version_tag() == "v1-c13c3f81"
+    # Today's app tag, and the harness hashes the same knobs.
+    assert SHIPPING.version_tag() == "v1-5e0f894b"
     assert SHIPPING.canonical() == pr.Params().canonical()
+    # Before the disagreement filter, and before the matched point.
+    assert replace(SHIPPING, rl_disagreement_points=None).version_tag() == "v1-481cca04"
+    assert VERSIONS["v1-c13c3f81"].version_tag() == "v1-c13c3f81"
     eight = ";".join(SHIPPING.canonical().split(";")[:8])
     assert fnv_tag(eight) == "v1-6109fa45"
     legacy = eight.replace("conformalBlockMinCycles", "shadowPromotionMinPeriods=15;conformalBlockMinCycles")

@@ -70,6 +70,39 @@ struct ModelBoardListTests {
         #expect(!ModelBoardList.pickIsNotFirst(b))
     }
 
+    /// The legend names every mark on the chart, and the tie rule the
+    /// engine actually uses, not a number of its own.
+    @Test func theLegendSaysTheRealTieRule() {
+        let marks = "Solid — actual · dashed — projections from now · grey dashed — even pace to the reset · "
+            + "shaded — the models' spread · the highlighted model drives the dashboard. "
+            + "Click a model to draw or hide its line."
+        #expect(ModelBoardList.legend(pickIsNotFirst: false) == marks)
+        #expect(ModelBoardList.legend(pickIsNotFirst: true, tieRelative: 0.05) == marks
+            + " Models whose typical miss is within 5% of the best's count as tied, and the simplest of them is used.")
+        #expect(ModelBoardList.legend(pickIsNotFirst: true, tieRelative: 0).hasSuffix(
+            "within 1.5 points of the best's count as tied, and the simplest of them is used."))
+        // The default is the shipping rule.
+        #expect(ModelBoardList.legend(pickIsNotFirst: true)
+            == ModelBoardList.legend(pickIsNotFirst: true, tieRelative: EngineParams.current.rlTieRelative))
+    }
+
+    /// A well-behind row says which test put it there; no other row does.
+    @Test func aWellBehindRowSaysWhy() {
+        func behind(_ miss: Double, _ why: EngineSelfEval.RLRanking.WellBehind?) -> String? {
+            var r = Self.row("arena-y", .wellBehind(typicalMiss: miss, cycles: 24))
+            r.behind = why
+            return ModelBoardList.behindNote(r)
+        }
+        #expect(behind(9, .missesMore(thanBest: 5)) == "misses 1.8× as much as the best")
+        #expect(behind(20, .missesMore(thanBest: 5)) == "misses 4× as much as the best")
+        #expect(behind(2, .missesMore(thanBest: 0)) == "misses more than the best, which is almost never off")
+        #expect(behind(11, .losesMostCycles(worse: 31, of: 40)) == "worse than the best on 31 of 40 cycles")
+        #expect(behind(9, nil) == nil)
+        var ranked = Self.row("arena-a", .ranked(typicalMiss: 1.8, cycles: 24))
+        ranked.behind = .losesMostCycles(worse: 31, of: 40)
+        #expect(ModelBoardList.behindNote(ranked) == nil)
+    }
+
     // MARK: - Lines
 
     @Test func theSheetOpensWithThePickAndTheNextFour() {

@@ -182,6 +182,40 @@ public enum ModelBoardList {
     /// The collapsed group's heading.
     public static func wellBehindTitle(_ count: Int) -> String { "Well behind (\(count))" }
 
+    /// Under a well-behind row's name, which test put it there: "misses
+    /// 1.8× as much as the best" or "worse than the best on 31 of 40
+    /// cycles". Nil on every other row.
+    public static func behindNote(_ row: MeterModelBoard.Row) -> String? {
+        guard case let .wellBehind(miss, _) = row.status, let why = row.behind else { return nil }
+        switch why {
+        case let .missesMore(best):
+            // A best that is almost never off has no ratio worth printing.
+            guard best >= 0.05 else { return "misses more than the best, which is almost never off" }
+            let times = miss / best
+            return String(format: times < 3 ? "misses %.1f× as much as the best" : "misses %.0f× as much as the best",
+                          times)
+        case let .losesMostCycles(worse, of):
+            return "worse than the best on \(worse) of \(of) cycles"
+        }
+    }
+
+    /// The line above the list: every mark on the chart, and, when the pick
+    /// is not the top row, the tie rule that chose it
+    /// (`EngineSelfEval.pickWithinTie`; `EngineParams.rlTieRelative`, 0 for
+    /// the absolute 1.5-point band).
+    public static func legend(pickIsNotFirst: Bool,
+                              tieRelative: Double = EngineParams.current.rlTieRelative) -> String {
+        var s = "Solid — actual · dashed — projections from now · grey dashed — even pace to the reset · "
+            + "shaded — the models' spread · the highlighted model drives the dashboard. "
+            + "Click a model to draw or hide its line."
+        guard pickIsNotFirst else { return s }
+        let band = tieRelative > 0
+            ? "within \(Int((tieRelative * 100).rounded()))% of the best's"
+            : "within 1.5 points of the best's"
+        s += " Models whose typical miss is \(band) count as tied, and the simplest of them is used."
+        return s
+    }
+
     /// The right column: the typical miss, or where the model stands.
     /// "within ±2% · 12 cycles" when a record covers fewer than the column's
     /// cycles; "scoring 62% · 15 min left"; "downloading 41%"; the reason a

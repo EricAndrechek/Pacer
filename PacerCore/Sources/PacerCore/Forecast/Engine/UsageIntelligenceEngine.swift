@@ -380,6 +380,7 @@ public actor UsageIntelligenceEngine {
         let params = EngineParams.current
         let complexities = Self.rlComplexities(arena: arena?.roster ?? .empty)
         let tie = params.rlTieRelative > 0 ? params.rlTieRelative : nil
+        let disagreement = params.rlDisagreementPoints > 0 ? params.rlDisagreementPoints : nil
         // Timed: with the arena models in the record this is a few times the
         // engine's own rows, and the phase log should say what it costs.
         let selectStarted = Date()
@@ -392,7 +393,7 @@ public actor UsageIntelligenceEngine {
             func rank(_ grading: EngineSelfEval.RLGrading) -> EngineSelfEval.RLRanking {
                 EngineSelfEval.rankRL(recs, grading: grading, candidates: candidates, complexity: complexities,
                                       weekly: weekly, at: at, depth: EngineSelfEval.rlDepth(weekly: weekly),
-                                      tieRelative: tie)
+                                      tieRelative: tie, disagreement: disagreement)
             }
             let current = rank(EngineSelfEval.rlGrading)
             // "Can still run" is every selectable model with its weights

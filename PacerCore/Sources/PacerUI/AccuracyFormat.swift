@@ -50,12 +50,17 @@ public enum PacerAccuracyFormat {
         }
     }
 
-    /// The heading's tooltip.
-    public static func columnHelp(spanCycles n: Int) -> String {
+    /// The heading's tooltip, naming the moments the numbers count
+    /// (`EngineParams.rlDisagreementPoints`, 0 for every moment).
+    public static func columnHelp(spanCycles n: Int,
+                                  disagreement: Double = EngineParams.current.rlDisagreementPoints) -> String {
         let what = "How far each model's call of the final has typically been off at this point in the window, "
-            + "in percentage points; lower is better"
-        guard n > 0 else { return what + "." }
+            + "in percentage points; lower is better."
+        let counted = disagreement > 0
+            ? " Counted where the models' calls differed by \(String(format: "%g", disagreement)) points or more."
+            : ""
+        guard n > 0 else { return what + counted }
         let over = n == 1 ? "your last completed cycle" : "your last \(n) completed cycles"
-        return "\(what). Over \(over); a model scored on fewer says how many."
+        return "\(what)\(counted) Over \(over); a model scored on fewer says how many."
     }
 }

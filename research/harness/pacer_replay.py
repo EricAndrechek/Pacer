@@ -72,6 +72,10 @@ class Params:
     rl_cut_kernel_half_width: float = 0.2    # the app's matched-point ranking (not implemented here)
     rl_selection_recency: int = 0            # rank on the last N scored periods; 0 = all-time
     rl_tie_relative: float = 0.05            # tie band relative to the best; 0 = absolute 1.5 pp
+    # The app ranks on the moments where the models' forecasts spread at
+    # least this many points (2026-10-29, EngineParams.rlDisagreementPoints;
+    # chosen by the app's RankingReplayProbe). Not implemented here.
+    rl_disagreement_points: float = 2.0
 
     def canonical(self) -> str:
         def g(v: float) -> str:
@@ -88,6 +92,7 @@ class Params:
             f"conformalBlockMinCycles={self.conformal_block_min_cycles}",
             f"rlCutKernelHalfWidth={g(self.rl_cut_kernel_half_width)}",
             f"rlTieRelative={g(self.rl_tie_relative)}",
+            f"rlDisagreementPoints={g(self.rl_disagreement_points)}",
         ])
 
     def version_tag(self) -> str:

@@ -154,6 +154,10 @@ struct RuntimeUnifiedRankingTests {
         #expect(r.standing("steady-loser")?.wellBehind == true)
         #expect(r.standing("best")?.wellBehind == false)
         #expect(r.standing("thin")?.isRanked == false)
+        // Which test put each there, for its row.
+        #expect(r.standing("far")?.behind == .missesMore(thanBest: 2))
+        #expect(r.standing("steady-loser")?.behind == .losesMostCycles(worse: 40, of: 40))
+        #expect(r.standing("close")?.behind == nil && r.standing("best")?.behind == nil)
         // Ranked, then well behind, then the unranked.
         #expect(r.standings.map(\.method) == ["best", "close", "steady-loser", "far", "thin"])
         // Over too few cycles nothing is judged well behind.
@@ -162,6 +166,57 @@ struct RuntimeUnifiedRankingTests {
         #expect(EngineSelfEval.binomialUpperTail(n: 20, k: 0) == 1)
         #expect(abs(EngineSelfEval.binomialUpperTail(n: 2, k: 2) - 0.25) < 1e-12)
         #expect(EngineSelfEval.binomialUpperTail(n: 30, k: 30) < 1e-8)
+    }
+
+    // MARK: Disagreement
+
+    /// Moments where every model said the same don't decide the pick. With
+    /// them counted, quiet cycles put every model at ±0 and the simplest
+    /// won whatever the busy cycles said.
+    @Test func onlyTheMomentsWhereTheModelsDisagreedRank() {
+        // 30 cycles: four in five quiet (both spot on), the rest busy, where
+        // "good" is off by a point and "simple" by six.
+        let busy: (Int) -> Bool = { $0 % 5 == 0 }
+        let rows = Self.records("simple", 0..<30) { p, _ in busy(p) ? 6 : 0 }
+            + Self.records("good", 0..<30) { p, _ in busy(p) ? 1 : 0 }
+        let complexity = ["simple": 1, "good": 4]
+        func rank(_ d: Double?) -> EngineSelfEval.RLRanking {
+            EngineSelfEval.rankRL(rows, complexity: complexity, weekly: false, at: 0.5,
+                                  depth: EngineSelfEval.rlDepth(weekly: false), tieRelative: 0.05, disagreement: d)
+        }
+        let all = rank(nil)
+        #expect(all.standing("good")?.typicalAbsError == 0 && all.standing("simple")?.typicalAbsError == 0)
+        #expect(all.pick == "simple")
+
+        let busyOnly = rank(2)
+        #expect(busyOnly.standing("good")?.typicalAbsError == 1)
+        #expect(busyOnly.standing("simple")?.typicalAbsError == 6)
+        #expect(busyOnly.pick == "good")
+        // Every cycle still counts toward the record and the span.
+        #expect(busyOnly.standing("good")?.cycles == 30)
+        #expect(busyOnly.span?.cycles == 30)
+        #expect(busyOnly.standing("good")?.byStage.allSatisfy { $0.typicalAbsError == 1 } == true)
+
+        // A spread under the threshold is agreement: here every moment, so
+        // the window ranks as it would without the filter.
+        let agreed = rank(6)
+        #expect(agreed.pick == "simple")
+        #expect(agreed.standing("good")?.typicalAbsError == 0)
+    }
+
+    /// The cycle-by-cycle test reads only the cycles where the models
+    /// disagreed: quiet ones, where the two tie or differ by a hair, are
+    /// not evidence either way.
+    @Test func wellBehindCountsOnlyCyclesWithDisagreement() {
+        // 60 cycles, a third busy. On busy ones "loser" is two points worse;
+        // on quiet ones it is a hundredth better, so counted, the quiet
+        // cycles would outvote the busy ones.
+        let busy: (Int) -> Bool = { $0 % 3 == 0 }
+        let rows = Self.records("best", 0..<60) { p, _ in busy(p) ? 4 : 0.02 }
+            + Self.records("loser", 0..<60) { p, _ in busy(p) ? 6 : 0.01 }
+        let r = EngineSelfEval.rankRL(rows, weekly: false, at: 0.5, depth: EngineSelfEval.rlDepth(weekly: false),
+                                      tieRelative: 0.05, disagreement: 1)
+        #expect(r.standing("loser")?.behind == .losesMostCycles(worse: 20, of: 20))
     }
 
     // MARK: The bump

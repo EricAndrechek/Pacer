@@ -44,11 +44,16 @@ struct AccuracyFormatTests {
         #expect(PacerAccuracyFormat.columnTitle(spanCycles: 24) == "TYPICAL MISS, LAST 24 CYCLES")
 
         let what = "How far each model's call of the final has typically been off at this point in the window, "
-            + "in percentage points; lower is better"
-        #expect(PacerAccuracyFormat.columnHelp(spanCycles: 0) == what + ".")
-        #expect(PacerAccuracyFormat.columnHelp(spanCycles: 1)
-            == what + ". Over your last completed cycle; a model scored on fewer says how many.")
+            + "in percentage points; lower is better."
+        let counted = " Counted where the models' calls differed by 2 points or more."
+        #expect(PacerAccuracyFormat.columnHelp(spanCycles: 0, disagreement: 2) == what + counted)
+        #expect(PacerAccuracyFormat.columnHelp(spanCycles: 1, disagreement: 2)
+            == what + counted + " Over your last completed cycle; a model scored on fewer says how many.")
+        #expect(PacerAccuracyFormat.columnHelp(spanCycles: 24, disagreement: 2)
+            == what + counted + " Over your last 24 completed cycles; a model scored on fewer says how many.")
+        // Without the filter, no such sentence; the default is the engine's.
+        #expect(PacerAccuracyFormat.columnHelp(spanCycles: 0, disagreement: 0) == what)
         #expect(PacerAccuracyFormat.columnHelp(spanCycles: 24)
-            == what + ". Over your last 24 completed cycles; a model scored on fewer says how many.")
+            == PacerAccuracyFormat.columnHelp(spanCycles: 24, disagreement: EngineParams.current.rlDisagreementPoints))
     }
 }
