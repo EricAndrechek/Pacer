@@ -59,12 +59,16 @@ NOW=$(date +%s)
 t() {
   local name=$1 want=$2 act=$3 accts=$4 conf=${5:-} last=${6:-} also=${7:-}
   local d out line ok=1
+  # ONLY=<name prefix> runs just the scenarios whose name starts with it.
+  [ -n "${ONLY:-}" ] && [[ $name != "$ONLY"* ]] && return
   n=$(( n + 1 )); d=$T/c$n; mkdir -p "$d/state"
-  printf '%s\n' "$conf" >"$d/conf"
+  # The cap tests below assert a 90% ceiling; AUTO=1 leaves WEEK_MAX at its
+  # default (auto) for the weekly-burn tests.
+  { [ -n "${AUTO:-}" ] || echo 'WEEK_MAX=90'; printf '%s\n' "$conf"; } >"$d/conf"
   [ -n "$last" ] && printf '%s\n' "$last" >"$d/state/last_switch"
   out=$(PATH="$T/bin:$PATH" FAKE_DIR=$T FAKE_ACT=$act FAKE_ACCTS=$accts \
         ROTATE_CONF=$d/conf ROTATE_STATE=$d/state PACER_API=${API:-http://127.0.0.1:1} \
-        BURN_OVERRIDE=${BURN:-} "$ROT" dry 2>&1)
+        BURN_OVERRIDE=${BURN:-} BURN7_OVERRIDE=${BURN7:-} "$ROT" dry 2>&1)
   line=$(printf '%s\n' "$out" | grep -E '^[0-9:]{8} (WOULD SWITCH|HOLD|no switch:|WARN)' | tail -1)
   printf '%s\n' "$line" | grep -qE -- "$want" || ok=0
   if [ -n "$also" ]; then printf '%s\n' "$out" | grep -qE -- "$also" || ok=0; fi
@@ -137,6 +141,26 @@ t "9b stagger skips 3 at 7d 89 (1 point of weekly room): picks 2" 'WOULD SWITCH 
   1 "1:40:100:30:ok 2:0:-:0:ok:8640 3:0:-:89:ok:4320 4:0:-:100:ok"
 t "9c 7-day avoids a target stagger would leave: picks idle 2" 'WOULD SWITCH → 2 .*\[7-day: 3 at 90%' \
   3 "1:12:144:87:ok:7200 2:0:-:0:ok:8640 3:4:297:90:ok:4320 4:0:-:100:ok"
+# An idle account under its weekly cap by less than STAGGER of weekly burn is
+# not started by a stagger: 2.3 %/h x 150 min = 6 points > 2 of room.
+AUTO=1 BURN7=2.3 t "9e stagger skips idle 1 with 2 weekly points (bar 6)" '^[0-9:]{8} no switch: 2 at 40%' \
+  2 "1:0:-:88:ok:6600 2:40:149:36:ok:9300 3:13:100:97:ok:3900 4:0:-:100:ok" 'WEEK_MAX_1=90'
+AUTO=1 BURN7=0.3 t "9f stagger takes idle 1 when 2 points last 150 min" 'WOULD SWITCH → 1 .*\[stagger: 1 is idle' \
+  2 "1:0:-:88:ok:6600 2:40:149:36:ok:9300 3:13:100:97:ok:3900 4:0:-:100:ok" 'WEEK_MAX_1=90'
+# Expiring 5h room is only worth a switch if the week can pay for it until the
+# reset: 2 weekly points at 2.5 %/h last 48 min, but 44 min of burn needs 2
+# and the bar is strict (2026-10-22 22:25Z: 66 points of 5h room on an
+# account 2 points under its weekly limit).
+AUTO=1 BURN=20 BURN7=2.5 t "9g expiring skips 5h room the week cannot pay for" '^[0-9:]{8} no switch: 4 at 15%' \
+  4 "1:0:-:90:ok 2:31:44:95:ok:7680 3:0:-:97:ok:2300 4:15:214:6:ok:9720" 'WEEK_MAX_1=90'
+AUTO=1 BURN=20 BURN7=2.5 t "9h expiring takes it when the week has room" 'WOULD SWITCH → 2 .*\[expiring: 2 has' \
+  4 "1:0:-:90:ok 2:31:44:90:ok:7680 3:0:-:97:ok:2300 4:15:214:6:ok:9720" 'WEEK_MAX_1=90'
+# A window that resets before the burn could fill it rides out its reset
+# instead of switching away a minute early: 96% + 24%/h x (1 + 5) min < 100.
+BURN=24 t "L1 at the switch point, resets in 1m: rides it out" '^[0-9:]{8} no switch: 1 at 96% rides out its reset' \
+  1 "1:96:1:30:ok 2:0:-:20:ok 3:0:-:100:ok 4:0:-:100:ok"
+BURN=24 t "L2 at the switch point, resets in 30m: switches" 'WOULD SWITCH → 2 .*\[limit: 1 at 96%' \
+  1 "1:96:30:30:ok 2:0:-:20:ok 3:0:-:100:ok 4:0:-:100:ok"
 t "9d limit keeps a target expiring within 45m (stagger yields there)" 'WOULD SWITCH → 3 .*\[limit: 1 at 95%' \
   1 "1:95:200:30:ok 2:0:-:10:ok:8640 3:50:30:20:ok:600 4:0:-:100:ok"
 t "10a missing 5h reading is not room" '^[0-9:]{8} HOLD 1 .*2: -% room -, reset unknown, 7d 10% \[no reading\]' \
@@ -176,6 +200,36 @@ t "10k near the limit, no target: early HOLD" '^[0-9:]{8} HOLD 1 at 91% \(switch
 t "10l nothing to do: no switch" '^[0-9:]{8} no switch: 1 at 50% < switch point 93%.*best target 3 at 20%' \
   1 "1:50:200:30:ok 3:20:250:40:ok $SPENT"
 
+# --- the weekly limit from the weekly burn (WEEK_MAX=auto, the default) ----------
+# Burn 5 %/h: safe7 = 100 - 1 = 99, limit 97; a target needs ceil(5*20/60) = 2.
+AUTO=1 BURN7=5 t "W1 auto 5%/h: limit 97 in the status line" '^[0-9:]{8} no switch:' \
+  1 "1:50:200:88:ok 3:20:250:40:ok $SPENT" "" "" '1: 5h 50% .* 7d 88% \(lim 97\)'
+AUTO=1 BURN7=5 t "W2 auto 5%/h: target at 96 blocked (96 >= 97-2)" '^[0-9:]{8} HOLD 1 .*3: 0% room 93, idle, 7d 96% \[7d room 1 <= 2 \(20 min at 5%/h\)\]' \
+  1 "1:95:26:63:ok 3:0:-:96:ok $SPENT"
+AUTO=1 BURN7=5 t "W2b auto 5%/h: target at 94 allowed" 'WOULD SWITCH → 3 .*\[limit:' \
+  1 "1:95:26:63:ok 3:0:-:94:ok $SPENT"
+AUTO=1 BURN7=5 t "W3 auto: active at its limit moves (7-day rule)" 'WOULD SWITCH → 2 .*\[7-day: 1 at 97% on its 7d' \
+  1 "1:30:200:97:ok 2:50:120:10:ok 4:0:-:100:ok"
+AUTO=1 t "W4 auto, no Pacer: limit 99 - EARLY = 97" '^[0-9:]{8} no switch:' \
+  1 "1:50:200:90:ok 3:20:250:40:ok $SPENT" "" "" '1: 5h 50% .* 7d 90% \(lim 97\)'
+AUTO=1 t "W4b auto, no Pacer: target at 95 (need 1) allowed" 'WOULD SWITCH → 3 .*\[limit:' \
+  1 "1:95:26:63:ok 3:0:-:95:ok $SPENT"
+AUTO=1 t "W4c auto, no Pacer: target at 96 (96 >= 97-1) blocked" '^[0-9:]{8} HOLD 1 .*7d room 1 <= 1' \
+  1 "1:95:26:63:ok 3:0:-:96:ok $SPENT"
+# WEEK_MAX_1=90 with a 7d burn: need7 = ceil(9*20/60) = 3 blocks slot 1 at 88
+# (90-88 = 2 <= 3); at 1 %/h need7 = 1 and it passes.
+AUTO=1 BURN7=9 t "W5 WEEK_MAX_1=90, 9%/h: slot 1 at 88 blocked" '^[0-9:]{8} HOLD 3 .*1: 0% room 93, idle, 7d 88% \[7d room 2 <= 3 \(20 min at 9%/h\)\]' \
+  3 "1:0:-:88:ok 3:95:100:50:ok $SPENT" 'WEEK_MAX_1=90'
+AUTO=1 BURN7=1 t "W5b WEEK_MAX_1=90, 1%/h: slot 1 at 88 allowed" 'WOULD SWITCH → 1 .*\[limit:' \
+  3 "1:0:-:88:ok 3:95:100:50:ok $SPENT" 'WEEK_MAX_1=90'
+# A conf value the arithmetic can't read falls back to its default with a
+# WARN, instead of killing the loop.
+AUTO=1 t "C1 unreadable conf values fall back to defaults" 'WOULD SWITCH → 1 .*\[limit:' \
+  3 "1:0:-:88:ok 3:95:100:50:ok $SPENT" $'EARLY=2x\nWEEK_MAX=bogus\nWEEK_MAX_1=nine' \
+  '' 'WARN rotate.conf: ignoring.*EARLY=2x.*WEEK_MAX=bogus.*WEEK_MAX_1=nine'
+AUTO=1 t "W6 numeric WEEK_MAX in the conf is a fixed cap" '^[0-9:]{8} HOLD 1 .*\[7d cap 80%' \
+  1 "1:95:26:63:ok 3:0:-:85:ok $SPENT" 'WEEK_MAX=80'
+
 # --- the post-switch reading gap: WARN only after GAP_WARN_SECS (unit check of the helper;
 # a dry pass holds no state, so the loop itself cannot be driven twice)
 gw=$(bash -c 'DRY=0; '"$(sed -n '/^GAP_WARN_SECS=/p;/^gap_warn_due()/,/^}/p' "$ROT")"'
@@ -204,6 +258,9 @@ mkdir -p "$T/www"
 cat >"$T/www/metrics" <<'EOF'
 pacer_rate_limit_recent_burn_percent_per_hour{account="acc1acc0-0000",window="five_hour"} 45.2
 pacer_rate_limit_sample_age_seconds{account="acc1acc0-0000",window="five_hour"} 0
+pacer_rate_limit_burn_percent_per_hour{account="acc1acc0-0000",window="seven_day"} 3.5
+pacer_rate_limit_recent_burn_percent_per_hour{account="acc1acc0-0000",window="seven_day"} 9.0
+pacer_rate_limit_sample_age_seconds{account="acc1acc0-0000",window="seven_day"} 0
 EOF
 port=$(( 20000 + RANDOM % 20000 ))
 python3 -I -m http.server "$port" --bind 127.0.0.1 --directory "$T/www" >/dev/null 2>&1 &
@@ -214,6 +271,40 @@ API=http://127.0.0.1:$port t "M1 Pacer burn 45: room 13 < 15 HOLD" '^[0-9:]{8} H
   1 "1:94:26:63:ok 3:80:180:77:ok $SPENT" "" "" 'burn 45%/h \(pacer\): a target needs 15 points'
 API=http://127.0.0.1:$port t "M2 Pacer burn 45: room 15 bridges" 'WOULD SWITCH → 3 .*\[bridge:.*\(room 15 ≥ 15 for 20 min at 45%/h' \
   1 "1:94:26:63:ok 3:78:180:77:ok $SPENT"
+# The 7d burn is read from the same file (recent preferred): 9 %/h, reading 0 s
+# old: safe7 = 99, limit 97, need7 = 3.
+AUTO=1 API=http://127.0.0.1:$port t "M3 Pacer 7d burn 9: limit 97, need 3" '^[0-9:]{8} no switch:' \
+  1 "1:50:200:88:ok 3:20:250:40:ok $SPENT" "" "" '7d 88% \(lim 97\).*7d burn 9\.000%/h \(pacer\): a target needs 3 points of 7d room'
+# --- stale login: a non-active slot keeps burning while the active one is quiet ---
+cat >"$T/www/metrics" <<'EOF'
+pacer_rate_limit_recent_burn_percent_per_hour{account="acc1acc0-0000",window="five_hour"} 2
+pacer_rate_limit_recent_burn_percent_per_hour{account="acc3acc0-0000",window="five_hour"} 25
+EOF
+ST="1:30:200:40:ok 3:60:150:40:ok 4:10:250:40:ok"
+# The detour is never the burning slot (3); minutes are a range because a slow
+# machine can run this minutes after NOW was taken.
+ACTIVE_SINCE_OVERRIDE=$(( $(date +%s) - 2400 )) API=http://127.0.0.1:$port t "S1 slot 3 burns 25, active 2, 40m: WARN" \
+  '^[0-9:]{8} WARN slot 3 \(acc3acc0\) is still burning 25%/h while active 1 burns 2%/h for 4[0-9]m.*re-apply with: cswap switch 4; cswap switch 1$' 1 "$ST"
+ACTIVE_SINCE_OVERRIDE=$(( $(date +%s) - 600 )) API=http://127.0.0.1:$port t "S2 same, active changed 10m ago: quiet" \
+  '^[0-9:]{8} no switch:' 1 "$ST"
+sed -i '' 's/ 25$/ 5/' "$T/www/metrics"
+ACTIVE_SINCE_OVERRIDE=$(( NOW - 2400 )) API=http://127.0.0.1:$port t "S3 slot 3 burns only 5: quiet" \
+  '^[0-9:]{8} no switch:' 1 "$ST"
+# --- Pacer's live estimate (tokens since the last poll) may only raise a figure ---
+# EARLY=0 and no burn: the 7d limit is 99, so a polled 98% has room and a live
+# 99.1% has none.
+cat >"$T/www/metrics" <<'EOF'
+pacer_rate_limit_used_ratio{account="acc1acc0-0000",window="seven_day"} 0.98
+pacer_rate_limit_live_used_ratio{account="acc1acc0-0000",window="seven_day"} 0.991
+EOF
+AUTO=1 API=http://127.0.0.1:$port t "V1 live 7d 99.1% over a polled 98%: 7-day switch" 'WOULD SWITCH → 3 .*\[7-day: 1 at 99%' \
+  1 "1:20:200:98:ok 3:20:250:40:ok $SPENT" 'EARLY=0'
+cat >"$T/www/metrics" <<'EOF'
+pacer_rate_limit_live_used_ratio{account="acc1acc0-0000",window="seven_day"} 0.95
+pacer_rate_limit_used_ratio{account="acc1acc0-0000",window="seven_day"} 0.98
+EOF
+AUTO=1 API=http://127.0.0.1:$port t "V2 a lower live estimate never lowers a reading" '^[0-9:]{8} no switch: 1 at 20%' \
+  1 "1:20:200:98:ok 3:20:250:40:ok $SPENT" 'EARLY=0'
 kill "$srv" 2>/dev/null
 
 if [ -e "$T/switched" ]; then

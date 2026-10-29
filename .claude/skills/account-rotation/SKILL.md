@@ -62,7 +62,7 @@ After a reboot nothing is running until someone runs `start` again.
 
 **Thresholds are in `rotate.conf`** (start from `rotate.conf.example`),
 re-read every loop: an edit applies within a minute, no restart. Per-slot 7d
-ceilings (`WEEK_MAX_<slot>`), never-target slots (`EXCLUDE`) and the reserve
+caps (`WEEK_MAX_<slot>`), never-target slots (`EXCLUDE`) and the reserve
 live there. Never edit `rotate.sh` or `watch.sh` in place while they run (bash
 reads scripts as it goes): write `<file>.new`, `chmod +x`, `mv` it over (the
 running process keeps the old inode), or `stop`, edit, `dry`, `start`.
@@ -86,7 +86,7 @@ the controller would bridge onto a sliver again. With no burn from Pacer,
 | rule | when | to |
 |---|---|---|
 | limit | active 5h at its switch point and some target meets the bar | the best-ranked target. There is no "GAP below the active" test: any target with the bar's room beats pausing every session, a nearly full one bridges, and this rule or stagger brings the login back later |
-| 7-day | active 7d >= its WEEK_MAX | the best-ranked target |
+| 7-day | active 7d >= its 7d limit (see below) | the best-ranked target |
 | expiring | another account's running 5h window resets within `EXPIRE_WINDOW`, before the active's own, and has room for the bar (at least `EXPIRE_MIN_PTS`), **and the room is spendable**: burn x minutes to its reset / 60 >= `EXPIRE_MIN_PTS` | that account: use it or lose it. Blocked while the active's own room is about to expire first |
 | stagger | active window has <= `STAGGER` left and another account is idle (5h at 0%) | that idle account, soonest 7d reset first |
 | reserve | **off** unless `RESERVE_SLOT` is set: active at its limit and nothing else qualifies | the reserve, up to `RESERVE_WEEK_MAX`; past that, one `ERROR` line and the owner decides |
@@ -107,10 +107,19 @@ switch, not two (two cache rewrites in every busy session). Inside
 `MIN_SWITCH_GAP`, unless its 5h window has reset since or its use has fallen.
 The last switch is kept on disk, so a stop/start does not forget it.
 
+**The 7d limit comes from the weekly burn**, like the 5h switch point. With
+`WEEK_MAX=auto` (the default) it is `safe7 - EARLY`, where `safe7` is 100 minus
+the active account's 7d burn x (reading age + 5 min) / 3600, at least 1 point
+(99 with no burn from Pacer). The active account's 7d burn is used for every
+target too, since the workload moves with the switch. `WEEK_MAX=<n>` fixes it
+for all slots and `WEEK_MAX_<slot>=<n>` for one; both win over auto.
+
 A target also needs: not in `EXCLUDE`, `usageStatus` ok, both readings present
-(a missing figure is never read as 0%), and 7d at least `WEEK_ROOM_MIN` (3)
-points below its ceiling: one point of weekly room is a few minutes of work,
-then a second switch off it.
+(a missing figure is never read as 0%), and 7d below its 7d limit by more than
+`need7` = `max(WEEK_ROOM_MIN, BRIDGE_MIN_MINUTES of the active 7d burn)` points
+(`WEEK_ROOM_MIN` defaults to 1): a point of weekly room is a few minutes of
+work, then a second switch off it. The status line shows each slot's limit
+(`7d 92% (lim 97)`).
 
 Readings: `cswap list --json` (fresh, every account, a quarter of a second);
 Pacer's `/metrics` may only *raise* a figure, and only for the same window. A
@@ -145,6 +154,7 @@ still start it as `watch.sh 150 room` by hand.
 | `stuck:` lines | a main session stopped on a usage limit | if there is room now, nudge it; else wait for `hold over` |
 | `ERROR …` | a switch failed, or the reserve hit its cap | `cswap status`; retry by hand only onto real room; reserve cap -> the owner |
 | `WARN …` | readings failed (for the active account: only after 300 s of no reading; shorter gaps right after a switch are normal and just hold) | `cswap list` by hand, then `rotate.sh status` |
+| `WARN slot S … is still burning X%/h while active A burns Y%/h` | a non-active slot keeps burning (>= `STALE_BURN`) while the active one is quiet, `STALE_AFTER` s after the active slot last changed: running sessions probably hold S's old login | run the `cswap switch <slot with room>; cswap switch A` it names, then check a few minutes later that S's burn fell; if it did not, something off this Mac uses S |
 | `controller NOT running` | it died | `rotate.sh start "restart after …"`, read `state/rotate.out` |
 | `feedback:` lines | an agent ran `pacer feedback` (a Pacer bug or missing flag) | reproduce, fix in a Pacer branch, reply to the reporter if it's a live session |
 | `heartbeat` | nothing happened for the heartbeat | `burn.py 60`; message any new heavy waste pattern; relaunch |
@@ -163,6 +173,14 @@ every `hold over` or `SWITCH`:
 
 `claude agents --json` state `blocked` means a session is waiting on the
 owner's input, not stopped by a limit. Don't nudge it.
+
+### Lesson: `/login` does not move running sessions
+
+`/login` updates the default login, but running sessions keep the token they
+started with, so they go on billing the old account while Pacer (which follows
+the default login) credits the new one and their gates say GO toward the wrong
+limit. `cswap switch` reaches them within ~30 s. The stale-login WARN above
+catches it; a switch away and back re-applies the login.
 
 ## Other sessions
 
