@@ -72,13 +72,20 @@ jobs:
   arena-models:
     # The on-device forecast models (Forecast/Arena) against the arena's
     # parity fixtures: networks, Monte-Carlo models and their ensembles, which
-    # are CPU-heavy in a Debug build. One image is enough here: the models are
-    # arithmetic, and the macOS-version split is covered by the job above.
+    # are CPU-heavy in a Debug build. On both images, like the job above: it
+    # skips these suites, so this is the only place the networks run, and
+    # Pacer ships one binary to macOS 15 and up. The models are arithmetic,
+    # but the weight store and the runtime go through Foundation, whose
+    # behaviour has moved between releases (URL directory-ness, AGENTS.md).
     # The bundled Timestral networks are fetched (pinned, SHA-256 checked) so
     # their parity runs too; the downloaded sizes skip without their weights.
-    name: Forecast model parity
-    runs-on: macos-26
+    name: Forecast model parity (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-26]
     steps:
       - uses: actions/checkout@v5
 
@@ -89,9 +96,9 @@ jobs:
             ~/Library/Caches/org.swift.swiftpm
             ~/.swiftpm
             PacerCore/.build
-          key: spm-macos-26-${{ runner.arch }}-${{ hashFiles('PacerCore/Package.swift', 'PacerCore/Package.resolved') }}
+          key: spm-${{ matrix.os }}-${{ runner.arch }}-${{ hashFiles('PacerCore/Package.swift', 'PacerCore/Package.resolved') }}
           restore-keys: |
-            spm-macos-26-${{ runner.arch }}-
+            spm-${{ matrix.os }}-${{ runner.arch }}-
 
       - name: Cache forecast weights
         uses: actions/cache@v6
