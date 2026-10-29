@@ -2,18 +2,20 @@ import Foundation
 import Testing
 @testable import PacerCore
 
-/// Rate-limit model selection by half of the window, with a relative tie band
-/// (#305). Adopted on full history: the 5-hour median miss 3.82 → 3.57 pp.
-@Suite("Rate-limit selection by half of the window")
-struct RLPhaseSelectionTests {
+/// Rate-limit model selection matched to the live point of the window: each
+/// cut's errors weighted by its closeness to how far through the window the
+/// live cycle is (`EngineSelfEval.cutWeight`), which replaced the early/late
+/// halves (#305), with the relative tie band.
+@Suite("Rate-limit selection at the live point of the window")
+struct RLMatchedPointSelectionTests {
 
-    /// `early` wins the 20–40% cuts and `late` wins the 50–90% cuts, over
+    /// `early` wins the cuts before half way and `late` the rest, over
     /// `periods` cycles.
     static func records(early: String, late: String, periods: Int = 4) -> [EngineSelfEval.Record] {
         var out: [EngineSelfEval.Record] = []
         for p in 0..<periods {
             let key = "2026-09-\(String(format: "%02d", p + 1))T00:00:00Z"
-            for cut in [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9] {
+            for cut in EngineSelfEval.rlCutFractions {
                 let bucket = EngineSelfEval.rlBucket(cut)
                 let earlyWins = cut < 0.5
                 out.append(.init(method: early, bucket: bucket, periodKey: key, predicted: earlyWins ? 51 : 58, truth: 50))
@@ -23,16 +25,16 @@ struct RLPhaseSelectionTests {
         return out
     }
 
-    @Test func eachHalfPicksTheModelThatReadsItBest() {
+    @Test func eachPointOfTheWindowPicksTheModelThatReadsItBest() {
         let recs = Self.records(early: "recent-rate", late: "saturating")
         let cx = UsageIntelligenceEngine.rlComplexities()
-        #expect(EngineSelfEval.bestMethod(from: recs, complexity: cx, phase: .early, tieRelative: 0.05) == "recent-rate")
-        #expect(EngineSelfEval.bestMethod(from: recs, complexity: cx, phase: .late, tieRelative: 0.05) == "saturating")
+        #expect(EngineSelfEval.bestMethod(from: recs, complexity: cx, at: 0.2, tieRelative: 0.05) == "recent-rate")
+        #expect(EngineSelfEval.bestMethod(from: recs, complexity: cx, at: 0.8, tieRelative: 0.05) == "saturating")
     }
 
-    @Test func theAccuracyShownIsTheHalfThePickRead() throws {
+    @Test func theAccuracyShownIsThePointThePickRead() throws {
         let recs = Self.records(early: "recent-rate", late: "saturating")
-        let late = EngineSelfEval.accuracy(surface: "rl-five_hour", from: recs, phase: .late)
+        let late = EngineSelfEval.accuracy(surface: "rl-five_hour", from: recs, at: 0.85)
         let stat = try #require(late.methods.first { $0.method == "saturating" })
         #expect(stat.typicalAbsError == 0.5)       // its late-cut miss, not the all-cuts median
         #expect(stat.periods == 4)
@@ -52,7 +54,7 @@ struct RLPhaseSelectionTests {
         #expect(EngineSelfEval.bestMethod(from: all, complexity: cx, tieRelative: 0.05) == "saturating")
     }
 
-    @Test func theLiveCycleSaysWhichHalfItIsIn() {
+    @Test func theLiveCycleSaysHowFarThroughItIs() throws {
         let now = Date(timeIntervalSince1970: 1_752_000_000)
         let window: TimeInterval = 5 * 3600
         func features(elapsed: Double) -> EngineFeatures {
@@ -65,7 +67,9 @@ struct RLPhaseSelectionTests {
                                         daily: [], hourly: [], rate: rows, lastArrivalAt: nil)
         }
         let spec = WindowSpec.fixed(.fiveHour)
-        #expect(UsageIntelligenceEngine.livePhase(features(elapsed: 0.3), window: spec) == .early)
-        #expect(UsageIntelligenceEngine.livePhase(features(elapsed: 0.7), window: spec) == .late)
+        let early = try #require(UsageIntelligenceEngine.liveFraction(features(elapsed: 0.3), window: spec))
+        let late = try #require(UsageIntelligenceEngine.liveFraction(features(elapsed: 0.7), window: spec))
+        #expect(abs(early - 0.3) < 0.01)
+        #expect(abs(late - 0.7) < 0.01)
     }
 }

@@ -62,10 +62,56 @@ jobs:
 
       # Standalone SPM package — no Xcode project required for the
       # PacerCore + PacerUI tests. Runs in well under a minute on the
-      # standard runner.
+      # standard runner. The forecast-model port suites run in their own job
+      # (arena-models, below): beside everything else on a 3-core runner they
+      # starved timing-sensitive tests and pushed this job past its timeout.
       - name: Run PacerCore tests
         working-directory: PacerCore
-        run: swift test --parallel
+        run: swift test --parallel --skip "$(../bin/arena-model-tests.sh)"
+
+  arena-models:
+    # The on-device forecast models (Forecast/Arena) against the arena's
+    # parity fixtures: networks, Monte-Carlo models and their ensembles, which
+    # are CPU-heavy in a Debug build. On both images, like the job above: it
+    # skips these suites, so this is the only place the networks run, and
+    # Pacer ships one binary to macOS 15 and up. The models are arithmetic,
+    # but the weight store and the runtime go through Foundation, whose
+    # behaviour has moved between releases (URL directory-ness, AGENTS.md).
+    # The bundled Timestral networks are fetched (pinned, SHA-256 checked) so
+    # their parity runs too; the downloaded sizes skip without their weights.
+    name: Forecast model parity (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-26]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Cache Swift packages
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/Library/Caches/org.swift.swiftpm
+            ~/.swiftpm
+            PacerCore/.build
+          key: spm-${{ matrix.os }}-${{ runner.arch }}-${{ hashFiles('PacerCore/Package.swift', 'PacerCore/Package.resolved') }}
+          restore-keys: |
+            spm-${{ matrix.os }}-${{ runner.arch }}-
+
+      - name: Cache forecast weights
+        uses: actions/cache@v6
+        with:
+          path: Vendor/ForecastWeights
+          key: forecast-weights-${{ hashFiles('bin/fetch-forecast-weights.sh') }}
+
+      - name: Fetch forecast weights
+        run: bin/fetch-forecast-weights.sh --verify
+
+      - name: Run forecast model tests
+        working-directory: PacerCore
+        run: swift test --parallel --filter "$(../bin/arena-model-tests.sh)"
 
   app-build:
     name: App + widgets verify build

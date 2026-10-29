@@ -84,6 +84,20 @@ public actor UsageIntelligenceEngine {
         self.scope = scope
         evalRowsCache = nil
         recordBackfill = .idle
+        previousGradingRetired = false
+        rlRankings = [:]
+        rlCurrentRankings = [:]
+    }
+
+    /// The ported arena models (`ArenaRuntime`), when the app runs them. They
+    /// compete for each window the engine fits, scored by the background
+    /// scorer into this engine's record and drawn from live projections it
+    /// never waits for (`ArenaCachedBurnModel`). Nil: the engine's own roster
+    /// only, as before.
+    private(set) var arena: ArenaEngineLink?
+
+    public func adopt(arena: ArenaEngineLink?) {
+        self.arena = arena
     }
 
     /// Whether an engine of this scope fits rate-limit windows itself (#303).
@@ -126,17 +140,50 @@ public actor UsageIntelligenceEngine {
     /// objects while the UI waited on the same store, and under load that
     /// phase alone went from 0.5 s to 6 s per scope (#152).
     ///
-    /// Safe to hold because nothing else writes these rows: the engine is the
-    /// only writer, and `EngineHost` keeps one engine per scope.
+    /// Safe to hold because the engine is the only writer of its own
+    /// methods' rows, and `EngineHost` keeps one engine per scope. The arena
+    /// scorer writes the arena models' rows, under their own method ids, and
+    /// hands each batch it saves to `ingestArenaOutcomes`, so they join this
+    /// cache without a re-read.
     private var evalRowsCache: [EvalRow]?
 
     /// The most recent feature snapshot, or nil before the first recompute.
-    private var features: EngineFeatures?
+    private(set) var features: EngineFeatures?
     /// The per-user fit derived from `features`.
-    private var fit = Fit()
+    private(set) var fit = Fit()
     /// Per-surface method track records (end-of-day, rate-limit windows),
-    /// refreshed each recompute.
+    /// refreshed each recompute. A rate-limit window's is its ranking's
+    /// (`rlRankings`): every method over the same span, at the live point.
     private var accuracyBySurface: [String: EngineSelfEval.Accuracy] = [:]
+    /// Each rate-limit window's record, ranked as selection read it this
+    /// refit (`EngineSelfEval.rankRL`), under the grading in use
+    /// (`rlGradingInUse`): what the pick, the drawn models and the compare
+    /// sheet's board (`meterModelBoard`) all come from.
+    private(set) var rlRankings: [String: EngineSelfEval.RLRanking] = [:]
+    /// The same under the current grading, while a window still ranks on
+    /// the previous one: how far the new grading has come, for the board.
+    private(set) var rlCurrentRankings: [String: EngineSelfEval.RLRanking] = [:]
+    /// Whether the previous grading's rows have been dropped from memory and
+    /// the store this launch: once every window ranks on the current one,
+    /// nothing reads them.
+    private var previousGradingRetired = false
+    /// Local day of the last prune past the shared depth (`pruneBeyondDepth`).
+    private var lastDepthPruneDay: String?
+    /// The background deletes `retirePreviousGrading` and `pruneBeyondDepth`
+    /// started, chained, so tests can wait for them (`settleRecordCleanup`).
+    private var recordCleanup: Task<Void, Never>?
+
+    /// Wait for the store deletes the refits have started (tests).
+    public func settleRecordCleanup() async { await recordCleanup?.value }
+
+    /// Run `work` in the background after any cleanup already queued.
+    private func queueRecordCleanup(_ work: @escaping @Sendable () -> Void) {
+        let previous = recordCleanup
+        recordCleanup = Task.detached(priority: .background) {
+            await previous?.value
+            work()
+        }
+    }
     /// Last prediction-snapshot written per surface (signature + when) — the
     /// change/heartbeat policy that keeps the trail from growing per tick.
     /// In-memory only: a relaunch writes one fresh row per surface, which
@@ -191,6 +238,16 @@ public actor UsageIntelligenceEngine {
         var cyclesObserved: Int = 0
         var cyclesPeakOver90: Int = 0
         var cyclesHit100: Int = 0
+        /// Every method the compare sheet lists for this window: the
+        /// engine's, then the arena models in `roster` (the pick and the best
+        /// recorded few, `ArenaEngineLink.compareLimit`).
+        var knownIds: [String] = RateLimitRoster.engineIds
+        var complexities: [String: Int] = RateLimitRoster.engineComplexities
+        /// The arena models in `roster`, the window's arena identity, and
+        /// where their live projections land.
+        var arenaIds: [String] = []
+        var arenaBinding: ArenaWindowBinding?
+        var arenaCache: ArenaLiveCache?
     }
 
     // MARK: - Recompute (called on the scan tick)
@@ -262,16 +319,21 @@ public actor UsageIntelligenceEngine {
                            calendar: calendar, now: now)
             }
         }
-        let existing = Set(allRows.map { $0.key })
-        let newEOD = EngineSelfEval.newOutcomesEOD(periods: f.dailyPeriods, calendar: calendar, existingKeys: existing)
+        // Only the engine's own methods are scored here, so only their keys
+        // are looked up: the arena models' rows (most of a record once they
+        // compete) would only make this set several times larger every refit.
+        let engineMethods = Self.engineMethodIds
+        let graded = timed("existing") { Self.gradedKeys(allRows, methods: engineMethods) }
+        let newEOD = EngineSelfEval.newOutcomesEOD(periods: f.dailyPeriods, calendar: calendar,
+                                                   existingKeys: graded.keys)
         persist(newEOD, now: now)
         // Cycles that completed inside the 32 days just read. Everything older
         // is `backfillRateLimitRecordIfNeeded`'s, which runs on its own.
         let newRL = fitsRateLimits
-            ? newRLOutcomes(features: f, calendar: calendar, now: now, existingKeys: existing)
+            ? newRLOutcomes(features: f, calendar: calendar, now: now, existingKeys: graded.keys)
             : []
         persist(newRL, now: now)
-        allRows.append(contentsOf: (newEOD + newRL).map(Self.evalRow))
+        allRows = Self.merging(allRows, newEOD + newRL, replacing: !graded.stale.isEmpty)
         evalRowsCache = allRows
         let bySurface = Dictionary(grouping: allRows, by: { $0.surface })
         func records(_ surface: String) -> [EngineSelfEval.Record] {
@@ -304,45 +366,96 @@ public actor UsageIntelligenceEngine {
             : nil
 
         // Pick each rate-limit window's outlook model from its accumulated
-        // record (the diurnal model now competes here on realized accuracy).
-        // Iterates the generic window SET — fixed 5h/7d plus any scoped
-        // per-model windows — each keyed by its own surface, so scoped windows
-        // can never pollute the fixed windows' selection.
+        // record. Every model competes the same way, the engine's curve fits
+        // and the arena's ports alike: graded on the same cuts of the same
+        // cycles, ranked over the same span at the point of the window the
+        // live cycle is at, by the same statistic and floor
+        // (`EngineSelfEval.rankRL`). Iterates the generic window SET — fixed
+        // 5h/7d plus any scoped per-model windows — each keyed by its own
+        // surface, so scoped windows can never pollute the fixed windows'
+        // selection.
         var rlSelection: [String: String] = [:]
+        var rankings: [String: EngineSelfEval.RLRanking] = [:]
+        var currentRankings: [String: EngineSelfEval.RLRanking] = [:]
         let params = EngineParams.current
+        let complexities = Self.rlComplexities(arena: arena?.roster ?? .empty)
+        let tie = params.rlTieRelative > 0 ? params.rlTieRelative : nil
+        let disagreement = params.rlDisagreementPoints > 0 ? params.rlDisagreementPoints : nil
+        // Timed: with the arena models in the record this is a few times the
+        // engine's own rows, and the phase log should say what it costs.
+        let selectStarted = Date()
         for window in f.windows where fitsRateLimits {
             let surface = EngineSelfEval.rlSurface(window.key)
-            // Current-version rows only: v1 graded the raw line, not the value shown.
-            let recs = records(surface).filter { EngineSelfEval.isCurrentRLBucket($0.bucket) }
-            let weekly = WindowSpec.isWeeklyScale(duration: window.duration)
-            // Which half of its window the live cycle is in (#305): the pick,
-            // the stand-in ranking and the accuracy shown all read that half's
-            // record. No live cycle, no phase: every cut, as before.
-            let phase = params.rlSelectByPhase ? Self.livePhase(f, window: window) : nil
-            accuracyBySurface[surface] = EngineSelfEval.accuracy(surface: surface, from: recs, weekly: weekly,
-                                                                 phase: phase)
-            if let pick = EngineSelfEval.bestMethod(from: recs, complexity: Self.rlComplexities(),
-                                                    weekly: weekly, phase: phase,
-                                                    tieRelative: params.rlTieRelative > 0 ? params.rlTieRelative : nil) {
-                rlSelection[window.key] = pick
+            let weekly = window.isWeeklyScale
+            let recs = records(surface)
+            let at = Self.liveFraction(f, window: window)
+            let candidates = Self.rlCandidates(window: window, arena: arena)
+            func rank(_ grading: EngineSelfEval.RLGrading) -> EngineSelfEval.RLRanking {
+                EngineSelfEval.rankRL(recs, grading: grading, candidates: candidates, complexity: complexities,
+                                      weekly: weekly, at: at, depth: EngineSelfEval.rlDepth(weekly: weekly),
+                                      tieRelative: tie, disagreement: disagreement)
             }
+            let current = rank(EngineSelfEval.rlGrading)
+            // "Can still run" is every selectable model with its weights
+            // here, the runtime attached or not: a refit before the runtime
+            // is adopted (the first of a launch) or without one (the
+            // off-screen render) must not call the engine's seven enough.
+            let inUse = previousGradingRetired
+                ? current
+                : EngineSelfEval.rlGradingInUse(current: current, previous: rank(EngineSelfEval.previousRLGrading),
+                                                runnable: candidates,
+                                                currentComplete: scope.accountId.map { arena?.gradedThrough($0) ?? false }
+                                                    ?? false)
+            rankings[window.key] = inUse
+            currentRankings[window.key] = current
+            accuracyBySurface[surface] = inUse.accuracy(surface: surface)
+            if let pick = inUse.pick { rlSelection[window.key] = pick }
+        }
+        rlRankings = rankings
+        rlCurrentRankings = currentRankings
+        phase["rlSelect", default: 0] += Int(Date().timeIntervalSince(selectStarted) * 1000)
+        // Every window ranks on the current grading: the previous one's rows
+        // are read by nothing from here (`retirePreviousGrading`). Only with
+        // the runtime attached: without it (the first refit of a launch, the
+        // off-screen render) the switch can rest on less than the app knows,
+        // and a delete is not undone.
+        if fitsRateLimits, arena != nil, !previousGradingRetired, !rankings.isEmpty,
+           rankings.values.allSatisfy({ $0.grading == EngineSelfEval.rlGrading }) {
+            allRows = retirePreviousGrading(allRows)
+            evalRowsCache = allRows
         }
 
-        let rlAccuracy = Dictionary(f.windows.compactMap { w in
-            accuracyBySurface[EngineSelfEval.rlSurface(w.key)].map { (w.key, $0) }
-        }, uniquingKeysWith: { first, _ in first })
-        // Each window's current-version record: the band and the cycle facts
-        // read every cycle it has scored, not only the 32 days fetched (#306).
+        // Once a day: the arena models' grades older than the shared depth
+        // are ranked by nothing, and would grow the record without end.
+        let today = TokenSample.formatDate(now, timeZone: calendar.timeZone)
+        if fitsRateLimits, arena != nil, lastDepthPruneDay != today, !rankings.isEmpty {
+            lastDepthPruneDay = today
+            allRows = pruneBeyondDepth(allRows, rankings: rankings)
+            evalRowsCache = allRows
+        }
+
+        // Each window's record under the grading it ranks on: the band and
+        // the cycle facts read every cycle it has graded, not only the 32
+        // days fetched (#306).
         let rlRecords = Dictionary(f.windows.map { w in
-            (w.key, records(EngineSelfEval.rlSurface(w.key)).filter { EngineSelfEval.isCurrentRLBucket($0.bucket) })
+            let grading = rankings[w.key]?.grading ?? EngineSelfEval.rlGrading
+            return (w.key, records(EngineSelfEval.rlSurface(w.key)).filter { grading.contains(bucket: $0.bucket) })
         }, uniquingKeysWith: { first, _ in first })
+        // What `makeFit` ranks the stand-in by: each window's ranking.
+        let rlAccuracy = Dictionary(rankings.map { ($0.key, $0.value.accuracy(surface: EngineSelfEval.rlSurface($0.key))) },
+                                    uniquingKeysWith: { a, _ in a })
         let previousFit = self.fit
         self.fit = timed("makeFit") {
             Self.carryClaimStreaks(
                 f, into: Self.makeFit(f, eodPools: pools, rlSelection: rlSelection, rlAccuracy: rlAccuracy,
-                                      rateLimits: fitsRateLimits, rlRecords: rlRecords),
+                                      rateLimits: fitsRateLimits, rlRecords: rlRecords, rlRankings: rankings,
+                                      arena: arena, arenaAccount: scope.accountId),
                 from: previousFit)
         }
+
+        // The arena models this fit can draw: their projections are made off
+        // this actor and land in the cache for the next ask.
+        if let arena { requestArenaLive(f, arena: arena) }
 
         // Prediction trail: record what this refit would tell the user —
         // the live answers with their bands, residual evidence, and version
@@ -433,6 +546,9 @@ public actor UsageIntelligenceEngine {
     /// (`EngineSelfEval.surfaceEOD`, or `EngineSelfEval.rlSurface(window)`):
     /// median absolute % error and how many completed periods back it,
     /// best-first. `nil` before the first recompute or for an unscored surface.
+    /// On a rate-limit window every number covers the same cycles, the span
+    /// selection compares on (`Accuracy.span`); `periods` is still each
+    /// method's whole record.
     public func selfEvalAccuracy(surface: String = EngineSelfEval.surfaceEOD) -> EngineSelfEval.Accuracy? {
         accuracyBySurface[surface]
     }
@@ -440,10 +556,11 @@ public actor UsageIntelligenceEngine {
     /// Roster complexities for a rate-limit window — so the persisted-scoreboard
     /// pick can break near-ties toward the simpler model. Window-agnostic (every
     /// window shares the one roster), so it takes no window argument.
-    static func rlComplexities() -> [String: Int] {
-        var c = Dictionary(uniqueKeysWithValues: BurnTrajectory.defaultModels.map { ($0.id, $0.complexity) })
-        c["diurnal-rate"] = 3
-        return c
+    /// Every method the engine scores itself, end of day and rate limit.
+    static let engineMethodIds = Set(RateLimitRoster.engineIds + EngineSelfEval.eodCandidates.map(\.id))
+
+    static func rlComplexities(arena: ArenaRoster = .empty) -> [String: Int] {
+        RateLimitRoster.complexities(arena: arena)
     }
 
     // MARK: - Full-history record pass
@@ -456,9 +573,14 @@ public actor UsageIntelligenceEngine {
     /// model the record has never seen. A tuning change (`EngineParams`) is
     /// deliberately not here: the pass only fills keys that are missing, and
     /// never re-scores ones that exist.
+    ///
+    /// The engine's own methods only. The arena models are scored by
+    /// `ArenaRecordScorer`, off this actor, with its own resumable pass:
+    /// naming them here would rerun this pass on the actor every time a
+    /// model is ported, to add nothing.
     static var recordBackfillFingerprint: String {
-        let models = (BurnTrajectory.defaultModels.map(\.id) + ["diurnal-rate"]).sorted()
-        return "v1|\(EngineSelfEval.rlBucketVersion)|" + models.joined(separator: ",")
+        let models = RateLimitRoster.engineIds.sorted().map { "\($0)=\(RateLimitRoster.engineInputs($0))" }
+        return "v2|\(EngineSelfEval.rlBucketVersion)|" + models.joined(separator: ",")
     }
 
     /// Score every completed rate-limit cycle the store holds (the live
@@ -517,13 +639,13 @@ public actor UsageIntelligenceEngine {
             var start = 0
             while start < completed.count {
                 let range = start..<min(start + batch, completed.count)
-                var rows = evalRowsCache ?? fetchEvalRows()
+                let rows = evalRowsCache ?? fetchEvalRows()
+                let graded = Self.gradedKeys(rows, methods: Self.engineMethodIds)
                 let news = EngineSelfEval.newOutcomesRL(
                     window: window.key, cycles: completed, activityGrid: f.activityGrid, calendar: calendar,
-                    existingKeys: Set(rows.map(\.key)), includeDiurnal: true, indices: range)
+                    existingKeys: graded.keys, includeDiurnal: true, indices: range)
                 persist(news, now: now)
-                rows.append(contentsOf: news.map(Self.evalRow))
-                evalRowsCache = rows
+                evalRowsCache = Self.merging(rows, news, replacing: !graded.stale.isEmpty)
                 added += news.count
                 batches += 1
                 start = range.upperBound
@@ -546,7 +668,38 @@ public actor UsageIntelligenceEngine {
         (key: EngineEvalOutcome.makeKey(surface: n.surface, method: n.method, bucket: n.bucket, periodKey: n.periodKey),
          surface: n.surface,
          record: EngineSelfEval.Record(method: n.method, bucket: n.bucket, periodKey: n.periodKey,
-                                       predicted: n.predicted, truth: n.truth))
+                                       predicted: n.predicted, truth: n.truth, inputs: n.inputs))
+    }
+
+    /// The keys of `methods`' rows already graded as they would be now, and
+    /// the current-grading keys graded with older inputs
+    /// (`RateLimitRoster.engineInputs`): those are graded again. End-of-day
+    /// rows and rows of other gradings are never stale here.
+    static func gradedKeys(_ rows: [EvalRow], methods: Set<String>) -> (keys: Set<String>, stale: Set<String>) {
+        var keys = Set<String>(), stale = Set<String>()
+        for row in rows where methods.contains(row.record.method) {
+            if EngineSelfEval.isCurrentRLBucket(row.record.bucket),
+               row.record.inputs != RateLimitRoster.engineInputs(row.record.method) {
+                stale.insert(row.key)
+            } else {
+                keys.insert(row.key)
+            }
+        }
+        return (keys, stale)
+    }
+
+    /// `rows` with `news` added; with `replacing`, a new grade takes the place
+    /// of the row with its key (a re-grade), as the store's upsert did.
+    static func merging(_ rows: [EvalRow], _ news: [EngineSelfEval.NewOutcome], replacing: Bool) -> [EvalRow] {
+        guard !news.isEmpty else { return rows }
+        var out = rows
+        let added = news.map(Self.evalRow)
+        if replacing {
+            let keys = Set(added.map(\.key))
+            out.removeAll { keys.contains($0.key) }
+        }
+        out.append(contentsOf: added)
+        return out
     }
 
     // MARK: - Ask (the typed question → Estimate contract)
@@ -992,49 +1145,9 @@ public actor UsageIntelligenceEngine {
         let statFor = { (id: String) -> EngineSelfEval.Accuracy.MethodStat? in
             accuracy?.methods.first { $0.method == id }
         }
-        let scored: [BurnTrajectory.ScoredTrajectory] = rf.roster.compactMap { model -> BurnTrajectory.ScoredTrajectory? in
-            guard let projection = model.fit(current) else { return nil }
-            // Anchor to the live value (same rule as `burnOutlook`): smoothed
-            // fits sit under a spiking last sample, and an un-anchored curve
-            // starts BELOW the user's current dot on the chart. Shift up only.
-            let anchor = max(0, current.usedNow - projection(f.now))
-            // Crossing walked at the 5-minute sampling cadence — same walk as
-            // `burnOutlook`, so the chart's marker and the tile's ETA agree.
-            var crossing: Date?
-            if current.usedNow < 100 {
-                var t = f.now.addingTimeInterval(5 * 60)
-                while t <= current.resetsAt {
-                    if projection(t) + anchor >= 100 { crossing = t; break }
-                    t = t.addingTimeInterval(5 * 60)
-                }
-            }
-            // The trajectory ENDS at the crossing: a dashed line pinned at
-            // 100% for the rest of the window is noise — the curve already
-            // said everything at the moment it touched the cap. The first
-            // point is pinned to the live value so the dashed line continues
-            // the solid one without a step.
-            var points: [BurnTrajectory.Sample] = [.init(at: f.now, usedPercentage: current.usedNow)]
-            for i in 1...sampleCount {
-                let date = f.now.addingTimeInterval(span * Double(i) / Double(sampleCount))
-                if let crossing, date >= crossing {
-                    points.append(.init(at: crossing, usedPercentage: 100))
-                    break
-                }
-                // Floored at the live reading, as the shown value is
-                // (`BurnTrajectory.displayedAtReset`): a meter does not fall
-                // inside a window, and a fit whose slope turned negative (the
-                // Kalman filter after a jump then a flat stretch, #312) drew a
-                // line falling to 22% under a 60% reading. Now every line ends
-                // at the value that model would show.
-                points.append(.init(at: date, usedPercentage: min(100, max(current.usedNow, projection(date) + anchor))))
-            }
-            let stat = statFor(model.id)
-            return BurnTrajectory.ScoredTrajectory(
-                modelId: model.id, complexity: model.complexity,
-                trajectory: .init(modelId: model.id, points: points, crossesFullAt: crossing),
-                typicalAbsError: stat?.typicalAbsError ?? .infinity,
-                coverage: stat == nil ? 0 : 1,
-                isSelected: model.id == rf.resolvedId)
+        let scored: [BurnTrajectory.ScoredTrajectory] = rf.roster.compactMap { model in
+            scoredTrajectory(model, f, current: current, sampleCount: sampleCount, stat: statFor(model.id),
+                             isSelected: model.id == rf.resolvedId)
         }
 
         // `isSelected` is the model `makeFit` resolved for this cycle, the
@@ -1049,9 +1162,9 @@ public actor UsageIntelligenceEngine {
         // and went with the cycle.
         let fitted = Set(scored.map(\.modelId))
         let recorded = Set(accuracy?.methods.map(\.method) ?? [])
-        let known = (BurnTrajectory.defaultModels.map(\.id) + ["diurnal-rate"])
+        let known = rf.knownIds
             .filter { id in rf.roster.contains { $0.id == id } || recorded.contains(id) }
-        let complexities = Self.rlComplexities()
+        let complexities = rf.complexities
         let unavailable = known.filter { !fitted.contains($0) }.map { id -> BurnTrajectory.ScoredTrajectory in
             let stat = statFor(id)
             return BurnTrajectory.ScoredTrajectory(
@@ -1059,10 +1172,63 @@ public actor UsageIntelligenceEngine {
                 trajectory: .init(modelId: id, points: [], crossesFullAt: nil),
                 typicalAbsError: stat?.typicalAbsError ?? .infinity,
                 coverage: stat == nil ? 0 : 1, isSelected: false,
-                unavailableReason: Self.unavailableReason(inRoster: rf.roster.contains { $0.id == id },
-                                                          current: current))
+                unavailableReason: rf.arenaIds.contains(id)
+                    ? Self.arenaUnavailableReason(rf, id: id)
+                    : Self.unavailableReason(inRoster: rf.roster.contains { $0.id == id }, current: current))
         }
         return scored + unavailable
+    }
+
+    /// One model's forward line for the live cycle, as the compare sheet and
+    /// the pace chart draw it: anchored up to the live value, walked for the
+    /// cap crossing, floored at the reading. Nil when the model declines.
+    static func scoredTrajectory(
+        _ model: BurnTrajectory.Model, _ f: EngineFeatures, current: BurnTrajectory.PartialCycle, sampleCount: Int,
+        stat: EngineSelfEval.Accuracy.MethodStat?, isSelected: Bool
+    ) -> BurnTrajectory.ScoredTrajectory? {
+        let span = current.resetsAt.timeIntervalSince(f.now)
+        guard span > 0 else { return nil }
+        guard let projection = model.fit(current) else { return nil }
+        // Anchor to the live value (same rule as `burnOutlook`): smoothed
+        // fits sit under a spiking last sample, and an un-anchored curve
+        // starts BELOW the user's current dot on the chart. Shift up only.
+        let anchor = max(0, current.usedNow - projection(f.now))
+        // Crossing walked at the 5-minute sampling cadence — same walk as
+        // `burnOutlook`, so the chart's marker and the tile's ETA agree.
+        var crossing: Date?
+        if current.usedNow < 100 {
+            var t = f.now.addingTimeInterval(5 * 60)
+            while t <= current.resetsAt {
+                if projection(t) + anchor >= 100 { crossing = t; break }
+                t = t.addingTimeInterval(5 * 60)
+            }
+        }
+        // The trajectory ENDS at the crossing: a dashed line pinned at
+        // 100% for the rest of the window is noise — the curve already
+        // said everything at the moment it touched the cap. The first
+        // point is pinned to the live value so the dashed line continues
+        // the solid one without a step.
+        var points: [BurnTrajectory.Sample] = [.init(at: f.now, usedPercentage: current.usedNow)]
+        for i in 1...sampleCount {
+            let date = f.now.addingTimeInterval(span * Double(i) / Double(sampleCount))
+            if let crossing, date >= crossing {
+                points.append(.init(at: crossing, usedPercentage: 100))
+                break
+            }
+            // Floored at the live reading, as the shown value is
+            // (`BurnTrajectory.displayedAtReset`): a meter does not fall
+            // inside a window, and a fit whose slope turned negative (the
+            // Kalman filter after a jump then a flat stretch, #312) drew a
+            // line falling to 22% under a 60% reading. Now every line ends
+            // at the value that model would show.
+            points.append(.init(at: date, usedPercentage: min(100, max(current.usedNow, projection(date) + anchor))))
+        }
+        return BurnTrajectory.ScoredTrajectory(
+            modelId: model.id, complexity: model.complexity,
+            trajectory: .init(modelId: model.id, points: points, crossesFullAt: crossing),
+            typicalAbsError: stat?.typicalAbsError ?? .infinity,
+            coverage: stat == nil ? 0 : 1,
+            isSelected: isSelected)
     }
 
     /// Why a known model has no line this cycle: the conditions its `fit`
@@ -1174,7 +1340,9 @@ public actor UsageIntelligenceEngine {
     /// (empty = median-of-all-candidates, the safe cold-start prior).
     static func makeFit(_ f: EngineFeatures, eodPools: [Int: [String]] = [:], rlSelection: [String: String] = [:],
                         rlAccuracy: [String: EngineSelfEval.Accuracy] = [:], rateLimits: Bool = true,
-                        rlRecords: [String: [EngineSelfEval.Record]] = [:]) -> Fit {
+                        rlRecords: [String: [EngineSelfEval.Record]] = [:],
+                        rlRankings: [String: EngineSelfEval.RLRanking] = [:],
+                        arena: ArenaEngineLink? = nil, arenaAccount: String? = nil) -> Fit {
         var fit = Fit()
         fit.eodPools = eodPools
         fit.eodRemainder = eodRemainderCalibrator(periods: f.dailyPeriods, calendar: f.calendar, pools: eodPools)
@@ -1216,6 +1384,15 @@ public actor UsageIntelligenceEngine {
                 roster.append(DiurnalBurnModel(rate: table, calendar: f.calendar))
             }
 
+            // Arena models join as live projections made off the actor
+            // (`ArenaCachedBurnModel`): those among the pick and the next
+            // ranked few (`ArenaEngineLink.compareLimit`), the models the
+            // sheet draws by default, so each refit asks for a bounded number
+            // of forecasts. With no ranking yet none are.
+            let arenaPart = Self.arenaRoster(window: window, account: arenaAccount, arena: arena,
+                                             pick: rlSelection[key], ranking: rlRankings[key])
+            roster += arenaPart.models
+
             // Prefer the accumulated per-user track record (`rlSelection`);
             // fall back to a cold on-the-fly backtest, then a hardcoded default
             // (diurnal for weekly-cadence windows — it works off the activity
@@ -1252,25 +1429,55 @@ public actor UsageIntelligenceEngine {
             let over90 = finals.values.filter { $0 >= 90 }.count
             let hit100 = finals.values.filter { $0 >= 100 }.count
 
-            fit.rl[key] = RateLimitFit(
+            var rf = RateLimitFit(
                 roster: roster, selectedId: selectedId, resolvedId: resolvedId,
                 calibrators: model.map {
                     stratifiedRLCalibrators(model: $0, history: history, duration: duration, calendar: f.calendar,
-                                            records: rlRecords[key] ?? [])
+                                            records: rlRecords[key] ?? [],
+                                            grading: rlRankings[key]?.grading ?? EngineSelfEval.rlGrading)
                 } ?? [:],
                 duration: duration, historyCount: finals.count,
                 cyclesObserved: finals.count, cyclesPeakOver90: over90, cyclesHit100: hit100)
+            if let binding = arenaPart.binding, let arena {
+                rf.arenaIds = arenaPart.models.map(\.id)
+                rf.knownIds = RateLimitRoster.engineIds + rf.arenaIds
+                rf.complexities = Self.rlComplexities(arena: arena.roster)
+                rf.arenaBinding = binding
+                rf.arenaCache = arena.cache
+            }
+            fit.rl[key] = rf
         }
         return fit
     }
 
-    /// The half of its window the live cycle is in, nil when there is none.
-    static func livePhase(_ f: EngineFeatures, window: WindowSpec) -> EngineSelfEval.SelectionPhase? {
+    /// How far through its window the live cycle is (0…1), the point ranking
+    /// is matched to (`EngineSelfEval.cutWeight`); nil when there is none.
+    static func liveFraction(_ f: EngineFeatures, window: WindowSpec) -> Double? {
         guard let samples = f.rateLimit[window.key] else { return nil }
         let (current, _) = BurnTrajectory.segment(samples: samples, duration: window.duration, now: f.now)
         guard let current, current.durationHours > 0 else { return nil }
-        return .init(cut: current.nowHours / current.durationHours)
+        return min(1, max(0, current.nowHours / current.durationHours))
     }
+
+    /// The methods that compete on `window`: the engine's, and the arena
+    /// models that forecast its meter and can run on this Mac (every pinned
+    /// weight here). Without the runtime (the first refit of a launch, the
+    /// off-screen render) the app's roster and weights stand in, so the
+    /// ranking, the pick and the sheet are the app's; the pick's line is a
+    /// stand-in until a runtime makes its projection, as in the app before
+    /// it lands.
+    static func rlCandidates(window: WindowSpec, arena: ArenaEngineLink?) -> Set<String> {
+        var out = Set(RateLimitRoster.engineIds)
+        guard let target = RateLimitRoster.arenaTarget(window: window) else { return out }
+        let roster = arena?.roster ?? standardRoster
+        let present: (ArenaModelSpec) -> Bool = arena?.weightsPresent ?? { standardPresence.present($0) }
+        for spec in roster.specs(for: target) where present(spec) { out.insert(spec.name) }
+        return out
+    }
+
+    /// The app's roster and its weights check, for an engine with no runtime.
+    static let standardRoster = ArenaRoster.standard
+    static let standardPresence = ArenaWeightsPresence(roster: standardRoster, weights: ArenaRuntime.defaultWeights)
 
     /// The model a window shows this refit (#301): the selected one when it
     /// can fit the live cycle, else the best-recorded model that can: the
@@ -1453,8 +1660,15 @@ public actor UsageIntelligenceEngine {
         duration: TimeInterval,
         calendar: Calendar,
         records: [EngineSelfEval.Record] = [],
-        cutFractions: [Double] = [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+        grading: EngineSelfEval.RLGrading = EngineSelfEval.rlGrading
     ) -> [String: ConformalCalibrator] {
+        // The grading's cuts inside 0.2–0.9 of the window: the range the
+        // bands' coverage was validated on (eight cuts, 2026-07). The cuts
+        // the current grading adds at the ends (0.1, 0.175, 0.925) feed
+        // ranking; a cycle's first tenth overshoots wildly and would widen
+        // every early band, so they stay out of it until the harness
+        // re-validates coverage with them.
+        let cutFractions = grading.cuts.filter { Self.isBandCut($0) }
         // (period, cut) → (cycle start, residual), from the history walk, then
         // overridden and extended by the record.
         var cases: [String: [Double: (cycleStart: Date, residual: Double)]] = [:]
@@ -1475,8 +1689,8 @@ public actor UsageIntelligenceEngine {
                 cases[period, default: [:]][cf] = (cycle.cycleStart, residual)
             }
         }
-        for r in records where r.method == model.id && r.truth > 0 && EngineSelfEval.isCurrentRLBucket(r.bucket) {
-            guard let cf = EngineSelfEval.rlCutFraction(r.bucket),
+        for r in records where r.method == model.id && r.truth > 0 && grading.contains(bucket: r.bucket) {
+            guard let cf = EngineSelfEval.rlCutFraction(r.bucket), Self.isBandCut(cf),
                   let reset = EngineSelfEval.periodDateRL(r.periodKey) else { continue }
             cases[r.periodKey, default: [:]][cf] = (reset.addingTimeInterval(-duration), r.truth - r.predicted)
         }
@@ -1506,6 +1720,9 @@ public actor UsageIntelligenceEngine {
         }
         return out
     }
+
+    /// Whether a graded cut feeds the rate-limit bands (`stratifiedRLCalibrators`).
+    static func isBandCut(_ cf: Double) -> Bool { cf >= 0.2 - 1e-9 && cf <= 0.9 + 1e-9 }
 
     /// A rate-limit band, clamped to what the value at reset can actually be:
     /// never above 100, and never below `floor`, the usage the meter already
@@ -1903,6 +2120,34 @@ public actor UsageIntelligenceEngine {
     /// `persist` on the way out — so everything between them works in base
     /// surface ids and needs no notion of accounts at all.
     private func fetchEvalRows() -> [EvalRow] {
+        // Raw SQLite first, as the limit reads do (`RawEvalReader`): with the
+        // arena models scored into it the record is several times the
+        // engine's own, and materialising it through SwiftData would stretch
+        // the first refit of every launch. Nil falls back to the query below.
+        //
+        // One copy of each surface, method, bucket and period string, shared
+        // by every row that names it: read row by row, each had its own four
+        // heap strings, and with the arena models in it the record is tens of
+        // thousands of rows an account, held for the engine's life.
+        var interned: [String: String] = [:]
+        func intern(_ x: String) -> String {
+            if let c = interned[x] { return c }
+            interned[x] = x
+            return x
+        }
+        if let url = rawStoreURL, let raw = RawEvalReader.scopeRows(storeURL: url, suffix: scope.suffix) {
+            return raw.compactMap { row in
+                guard Self.isRead(surface: row.surface, bucket: row.bucket),
+                      let base = scope.unqualify(row.surface).map(intern) else { return nil }
+                return (EngineEvalOutcome.makeKey(surface: base, method: row.method, bucket: row.bucket,
+                                                  periodKey: row.periodKey),
+                        base,
+                        EngineSelfEval.Record(method: intern(row.method), bucket: intern(row.bucket),
+                                              periodKey: intern(row.periodKey),
+                                              predicted: row.predicted, truth: row.truth,
+                                              inputs: row.inputs.map(intern)))
+            }
+        }
         // Only this scope's rows reach memory. A scoped surface id ends in
         // `#<account>` and a global one has no `#` (`EngineScope.suffix`), so
         // `contains` narrows the fetch; `unqualify` below still makes the
@@ -1915,7 +2160,8 @@ public actor UsageIntelligenceEngine {
                 predicate: #Predicate { $0.surface.contains(suffix) })
         let rows = (try? modelContext.fetch(descriptor)) ?? []
         return rows.compactMap { row in
-            guard let base = scope.unqualify(row.surface) else { return nil }
+            guard Self.isRead(surface: row.surface, bucket: row.bucket),
+                  let base = scope.unqualify(row.surface).map(intern) else { return nil }
             // The *base* key, not the persisted one. `existing` is compared
             // against keys built from base surfaces, so returning the stored
             // key would never match for a scoped engine and every refit would
@@ -1923,10 +2169,22 @@ public actor UsageIntelligenceEngine {
             let key = EngineEvalOutcome.makeKey(surface: base, method: row.method,
                                                 bucket: row.bucket, periodKey: row.periodKey)
             return (key, base,
-                    EngineSelfEval.Record(method: row.method, bucket: row.bucket,
-                                          periodKey: row.periodKey,
-                                          predicted: row.predicted, truth: row.truth))
+                    EngineSelfEval.Record(method: intern(row.method), bucket: intern(row.bucket),
+                                          periodKey: intern(row.periodKey),
+                                          predicted: row.predicted, truth: row.truth,
+                                          inputs: row.inputs.map(intern)))
         }
+    }
+
+    /// Whether a stored row is one this engine reads: an end-of-day row, or a
+    /// rate-limit row of the current or previous grading. v1 rate-limit rows
+    /// (the raw line, before #300) are skipped on the way in, so the
+    /// in-memory record holds only what selection, the bands and the sheet
+    /// can use; the previous grading's go too once nothing ranks on them
+    /// (`retirePreviousGrading`).
+    static func isRead(surface: String, bucket: String) -> Bool {
+        guard surface.hasPrefix("rl-") else { return true }
+        return EngineSelfEval.isReadRLBucket(bucket)
     }
 
     /// Replay the end-of-day scoreboard from `from` on the history as it is
@@ -1977,7 +2235,7 @@ public actor UsageIntelligenceEngine {
             modelContext.insert(EngineEvalOutcome(
                 surface: scope.qualify(n.surface), method: n.method, bucket: n.bucket,
                 periodKey: n.periodKey,
-                predicted: n.predicted, truth: n.truth, recordedAt: now))
+                predicted: n.predicted, truth: n.truth, recordedAt: now, inputs: n.inputs))
         }
         try? modelContext.save()
     }
@@ -1999,5 +2257,229 @@ public actor UsageIntelligenceEngine {
                 includeDiurnal: true)
         }
         return out
+    }
+}
+
+// MARK: - Arena models
+
+extension UsageIntelligenceEngine {
+
+    /// One window's arena models for this fit: those among the models the
+    /// sheet draws by default, the pick and the `compareLimit` ranked after
+    /// it (`drawnIds`). Each is an `ArenaCachedBurnModel`: it draws a
+    /// projection made off this actor and declines until one has landed, so
+    /// nothing here waits on a model. The engine's own methods among them
+    /// are drawn from the fit, as always.
+    static func arenaRoster(window: WindowSpec, account: String?, arena: ArenaEngineLink?, pick: String?,
+                            ranking: EngineSelfEval.RLRanking?)
+        -> (binding: ArenaWindowBinding?, models: [ArenaCachedBurnModel]) {
+        guard let arena, let account, let binding = ArenaWindowBinding.make(account: account, window: window)
+        else { return (nil, []) }
+        let specs = Dictionary(arena.roster.specs(for: binding.target).map { ($0.name, $0) },
+                               uniquingKeysWith: { a, _ in a })
+        guard !specs.isEmpty else { return (binding, []) }
+        let chosen = drawnIds(pick: pick, ranking: ranking, limit: arena.compareLimit).filter { specs[$0] != nil }
+        return (binding, chosen.compactMap { specs[$0] }.map {
+            ArenaCachedBurnModel(spec: $0, binding: binding, cache: arena.cache)
+        })
+    }
+
+    /// The models a window draws by default, in order: the pick, then the
+    /// next `limit` by rank. The well-behind ones come last in the ranking,
+    /// so they are drawn only when fewer than `limit` others are ranked.
+    static func drawnIds(pick: String?, ranking: EngineSelfEval.RLRanking?, limit: Int) -> [String] {
+        var out = pick.map { [$0] } ?? []
+        let want = limit + out.count
+        for s in ranking?.standings ?? [] where out.count < want && s.isRanked && s.method != pick {
+            out.append(s.method)
+        }
+        return out
+    }
+
+    /// Why an arena model has no line this cycle, in the sheet's terms.
+    static func arenaUnavailableReason(_ rf: RateLimitFit, id: String) -> String {
+        guard let binding = rf.arenaBinding, let cache = rf.arenaCache else { return "still computing" }
+        return cache.failure(.init(account: binding.account, windowKey: binding.windowKey, model: id))
+            ?? "still computing"
+    }
+
+    /// Ask the runtime for this fit's arena projections. Returns at once.
+    func requestArenaLive(_ f: EngineFeatures, arena: ArenaEngineLink) {
+        var requests: [ArenaLiveRequest] = []
+        for (key, rf) in fit.rl {
+            guard let binding = rf.arenaBinding, !rf.arenaIds.isEmpty, let samples = f.rateLimit[key] else { continue }
+            let (current, _) = BurnTrajectory.segment(samples: samples, duration: rf.duration, now: f.now)
+            guard let current, current.resetsAt > f.now, let last = current.samples.last else { continue }
+            requests.append(ArenaLiveRequest(binding: binding, resetsAt: current.resetsAt,
+                                             latestReadingAt: last.at, models: rf.arenaIds))
+        }
+        if !requests.isEmpty { arena.requestLive(requests) }
+    }
+
+    /// Outcomes the arena scorer just saved for this scope (base surfaces),
+    /// joined to the in-memory record so the next refit selects with them,
+    /// without re-reading the table. Returns how many were new to it.
+    ///
+    /// A re-grade (`NewOutcome.inputs` moved) has the key of the row it
+    /// replaces, in the store and here.
+    @discardableResult
+    public func ingestArenaOutcomes(_ news: [EngineSelfEval.NewOutcome]) -> Int {
+        // Not read yet: the first refit's fetch includes them (saved first).
+        guard var rows = evalRowsCache, !news.isEmpty else { return 0 }
+        let surfaces = Set(news.map(\.surface))
+        var index: [String: Int] = [:]
+        for (i, row) in rows.enumerated() where surfaces.contains(row.surface) { index[row.key] = i }
+        var added = 0
+        for n in news {
+            let row = Self.evalRow(n)
+            if let i = index[row.key] {
+                rows[i] = row
+            } else {
+                index[row.key] = rows.count
+                rows.append(row)
+                added += 1
+            }
+        }
+        evalRowsCache = rows
+        return added
+    }
+
+    /// Drop the previous grading's rate-limit rows (and v1's) from memory,
+    /// and from the store in the background: every window of this scope now
+    /// ranks on the current grading, and nothing else reads them. Without
+    /// this, every bucket-version bump would leave a full copy of the record
+    /// behind for good. Once per launch.
+    func retirePreviousGrading(_ rows: [EvalRow]) -> [EvalRow] {
+        previousGradingRetired = true
+        let kept = rows.filter { !$0.surface.hasPrefix("rl-") || EngineSelfEval.isCurrentRLBucket($0.record.bucket) }
+        let surfaces = Set(rows.lazy.filter { $0.surface.hasPrefix("rl-") }.map { self.scope.qualify($0.surface) })
+        guard kept.count < rows.count || !surfaces.isEmpty else { return kept }
+        let container = modelContainer
+        let label = scopeLabel
+        let dropped = rows.count - kept.count
+        queueRecordCleanup {
+            let removed = Self.deletePreviousGradings(container: container, surfaces: surfaces)
+            if removed > 0 || dropped > 0 {
+                Log.write("Engine", "record \(label): retired \(removed) row(s) of earlier gradings "
+                          + "(\(dropped) held in memory)")
+            }
+        }
+        return kept
+    }
+
+    /// Drop, from memory and (in the background) from the store, the arena
+    /// models' current-grading rows for cycles older than each window's
+    /// shared depth (`RLRanking.depthStart`). Nothing ranks them, and the
+    /// grader never goes back that far, so without this the record grows by
+    /// every model's grades of every cycle for good: about a megabyte a day
+    /// for a heavy account. The engine's own methods keep their whole
+    /// history: it is the record of every cycle, which the cycle facts and
+    /// the bands read, and it grows by seven models' grades a cycle.
+    func pruneBeyondDepth(_ rows: [EvalRow], rankings: [String: EngineSelfEval.RLRanking]) -> [EvalRow] {
+        let engine = Self.engineMethodIds
+        var cutoffs: [String: String] = [:]
+        for (key, r) in rankings where r.grading == EngineSelfEval.rlGrading {
+            if let start = r.depthStart, r.depthCycles >= EngineSelfEval.rlDepth(weekly: r.weekly) {
+                cutoffs[EngineSelfEval.rlSurface(key)] = start
+            }
+        }
+        guard !cutoffs.isEmpty else { return rows }
+        var pruned: [String: String] = [:]
+        let kept = rows.filter { row in
+            guard let cutoff = cutoffs[row.surface], row.record.periodKey < cutoff,
+                  !engine.contains(row.record.method), EngineSelfEval.isCurrentRLBucket(row.record.bucket)
+            else { return true }
+            pruned[row.surface] = cutoff
+            return false
+        }
+        guard !pruned.isEmpty else { return rows }
+        let container = modelContainer, label = scopeLabel, dropped = rows.count - kept.count
+        let targets = pruned.map { (self.scope.qualify($0.key), $0.value) }
+        queueRecordCleanup {
+            let removed = Self.deleteBeyondDepth(container: container, cutoffs: targets)
+            Log.write("Engine", "record \(label): pruned \(removed) arena grade(s) past the shared depth "
+                      + "(\(dropped) held in memory)")
+        }
+        return kept
+    }
+
+    /// Delete each surface's current-grading rows older than its cutoff,
+    /// but the engine's own methods'.
+    static func deleteBeyondDepth(container: ModelContainer, cutoffs: [(surface: String, cutoff: String)]) -> Int {
+        let context = ModelContext(container)
+        let engine = Array(engineMethodIds)
+        let grading = EngineSelfEval.rlGrading
+        let buckets = grading.cuts.map(grading.bucket)
+        var removed = 0
+        for (surface, cutoff) in cutoffs {
+            let predicate = #Predicate<EngineEvalOutcome> {
+                $0.surface == surface && $0.periodKey < cutoff && buckets.contains($0.bucket)
+                    && !engine.contains($0.method)
+            }
+            removed += (try? context.fetchCount(FetchDescriptor(predicate: predicate))) ?? 0
+            try? context.delete(model: EngineEvalOutcome.self, where: predicate)
+        }
+        try? context.save()
+        return removed
+    }
+
+    /// Every bucket a rate-limit row was ever written under but the current
+    /// grading's: the previous grading's, and v1's (no version suffix).
+    static var retiredRLBuckets: [String] {
+        let prev = EngineSelfEval.previousRLGrading
+        return prev.cuts.map(prev.bucket) + prev.cuts.map { "cut=\(String(format: "%.2f", $0))" }
+    }
+
+    /// Delete `surfaces`' rows of the retired buckets, in a context of its
+    /// own. Returns how many. A delete per surface, by predicate on the
+    /// (surface, bucket) index.
+    static func deletePreviousGradings(container: ModelContainer, surfaces: Set<String>) -> Int {
+        let context = ModelContext(container)
+        let buckets = retiredRLBuckets
+        var removed = 0
+        for surface in surfaces.sorted() {
+            let predicate = #Predicate<EngineEvalOutcome> { $0.surface == surface && buckets.contains($0.bucket) }
+            removed += (try? context.fetchCount(FetchDescriptor(predicate: predicate))) ?? 0
+            try? context.delete(model: EngineEvalOutcome.self, where: predicate)
+        }
+        try? context.save()
+        return removed
+    }
+
+    /// Live projections landed: a window whose record picks an arena model
+    /// that had none at the refit (so a stand-in was drawn) now draws the
+    /// pick, with the band from the pick's own residuals. Returns whether
+    /// anything changed, so the caller has the surfaces ask again.
+    @discardableResult
+    public func refreshArenaResolution() -> Bool {
+        guard arena != nil, let f = features else { return false }
+        var changed = false
+        for (key, rf) in fit.rl {
+            guard let selected = rf.selectedId, rf.arenaIds.contains(selected), rf.resolvedId != selected,
+                  let samples = f.rateLimit[key],
+                  let model = rf.roster.first(where: { $0.id == selected }) else { continue }
+            let (current, history) = BurnTrajectory.segment(samples: samples, duration: rf.duration, now: f.now)
+            guard let current, model.fit(current) != nil else { continue }
+            let surface = EngineSelfEval.rlSurface(key)
+            let grading = rlRankings[key]?.grading ?? EngineSelfEval.rlGrading
+            let records = (evalRowsCache ?? [])
+                .filter { $0.surface == surface && grading.contains(bucket: $0.record.bucket) }
+                .map(\.record)
+            var next = rf
+            next.resolvedId = selected
+            next.calibrators = Self.stratifiedRLCalibrators(model: model, history: history, duration: rf.duration,
+                                                            calendar: f.calendar, records: records, grading: grading)
+            fit.rl[key] = next
+            changed = true
+        }
+        return changed
+    }
+
+    /// Which arena models a window's fit holds (tests, the probe).
+    public func arenaModelIds(windowKey: String) -> [String] { fit.rl[windowKey]?.arenaIds ?? [] }
+
+    /// What the fit shows for a window, and what the record picked.
+    public func resolvedMethod(windowKey: String) -> (selected: String?, resolved: String?) {
+        (fit.rl[windowKey]?.selectedId, fit.rl[windowKey]?.resolvedId)
     }
 }

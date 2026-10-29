@@ -30,8 +30,21 @@ struct ProjectionCompareModal: View {
     @State private var scopedPoints: [ScopedSamplePoint] = []
     @State private var scopedLatest: ScopedWindowRow?
     @State private var actualsLoaded = false
+    /// The lines the window's fit projects this cycle (the engine's methods,
+    /// the pick and the best few arena models), and why any it knows has none.
     @State private var trajectories: [BurnTrajectory.ScoredTrajectory] = []
+    /// Each model's record, for the info popovers and the pick's footer.
     @State private var accuracy: EngineSelfEval.Accuracy?
+    /// Every model for this meter, best first, with where each stands: the
+    /// list. Re-read on every refresh and once a minute while the sheet is
+    /// open, so scoring progress and its time left move.
+    @State private var board: MeterModelBoard?
+    /// The models drawn: this sheet's only, never persisted, started again
+    /// when its window or account changes (`ModelBoardList.LineSelection`).
+    @State private var lines = ModelBoardList.LineSelection()
+    /// The drawn models the fit does not project, made on demand
+    /// (`ArenaExtraLines`); kept in step with `lines` by `syncExtras`.
+    @State private var extras = ArenaExtraLines()
     @State private var loaded = false
     /// How close the live meter has been today (#318), recomputed with the
     /// actuals; nil without a live fit or enough readings.
@@ -52,6 +65,20 @@ struct ProjectionCompareModal: View {
 
     private var isFixed: Bool {
         windowKey == RateLimitWindowName.fiveHour || windowKey == RateLimitWindowName.sevenDay
+    }
+
+    /// What the lines belong to (`ArenaExtraLines.key`): an answer asked
+    /// for under another key is dropped.
+    private var extrasKey: String { ArenaExtraLines.key(account: limitAccountId, windowKey: windowKey) }
+
+    /// The drawn lines, in draw order (the pick last, on top): the fit's own
+    /// where it has one, else the one made on demand.
+    private var drawnLines: [BurnTrajectory.ScoredTrajectory] {
+        guard let board else { return [] }
+        var byId: [String: BurnTrajectory.ScoredTrajectory] = [:]
+        for t in extras.lines { byId[t.modelId] = t }
+        for t in trajectories where t.canProject { byId[t.modelId] = t }
+        return ModelBoardList.drawOrder(lines.ids, board: board).compactMap { byId[$0] }
     }
 
     private var duration: TimeInterval {
@@ -109,7 +136,7 @@ struct ProjectionCompareModal: View {
         // Filled in after the modal is on screen and read inside
         // `PacerModalContent`'s stored closure, so read here too (#140;
         // AGENTS.md, "SwiftUI state and data flow").
-        let _ = (trajectories, accuracy, loaded, actualsLoaded, liveReview)
+        let _ = (trajectories, accuracy, board, lines, loaded, actualsLoaded, liveReview, extras)
         // Read here, by value, so a poll written by any context reloads the
         // actuals (`RateLimitWriteSignal`).
         let writes = RateLimitWriteSignal.shared.generation
@@ -120,25 +147,36 @@ struct ProjectionCompareModal: View {
             title: "\(windowTitle) projection",
             subtitle: subtitle,
             minHeight: 480,
-            idealHeight: 580
+            // An off-screen render cannot scroll, so it draws the whole sheet
+            // (the list, about forty rows, runs far below the fold at 580).
+            idealHeight: LiveRenderMode.isActive ? 2000 : 580
         ) {
             if let data = chartData, !trajectories.isEmpty {
-                // Re-anchor every model's projection onto the live actual tail
+                // Re-anchor every drawn projection onto the live actual tail
                 // so the dashed lines (and the "now" rule) branch from exactly
                 // where the solid line ends — the engine's snapshot origin is
                 // otherwise stale, leaving the whole fan starting below and to
                 // the left of the current dot.
+                let drawn = drawnLines
                 let overlays = data.tip.map { tail in
-                    trajectories.map { $0.reanchored(toTime: tail.time, value: tail.value) }
-                } ?? trajectories
+                    drawn.map { $0.reanchored(toTime: tail.time, value: tail.value) }
+                } ?? drawn
                 ProjectionDetailView(
                     cycleStart: data.cycleStart,
                     resetsAt: data.resetsAt,
                     durationSeconds: duration,
                     actual: data.points,
                     live: data.live,
-                    trajectories: overlays,
+                    lines: overlays,
                     accuracy: accuracy,
+                    board: board,
+                    selection: lines,
+                    projected: Set(trajectories.filter(\.canProject).map(\.modelId)),
+                    noLineReasons: Dictionary(
+                        trajectories.compactMap { t in t.unavailableReason.map { (t.modelId, $0) } },
+                        uniquingKeysWith: { a, _ in a }),
+                    extras: extras,
+                    onToggle: { toggleLine($0) },
                     liveReadout: readout?.isEstimate == true ? readout : nil,
                     liveReview: liveReview
                 )
@@ -151,8 +189,28 @@ struct ProjectionCompareModal: View {
                     .frame(maxWidth: .infinity, minHeight: 200)
             }
         }
-        .task { await refresh() }
         .task(id: writes) { await loadActuals() }
+        // A new window or account starts again: its own list and default
+        // lines, and any answer still on its way for the old one is dropped
+        // (`ArenaExtraLines`, `ModelBoardList.LineSelection`).
+        .onChange(of: extrasKey, initial: true) { _, key in
+            extras.follow(key: key)
+            if lines.key != key {
+                lines = ModelBoardList.LineSelection(key: key)
+                board = nil
+            }
+        }
+        // Everything on open and on a new window or account; then the list
+        // once a minute while the sheet is open: scoring moves between
+        // refits, and its time left with it.
+        .task(id: extrasKey) {
+            await refresh()
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(60))
+                guard !Task.isCancelled else { return }
+                await refreshBoard()
+            }
+        }
         .onChange(of: livePercent) { _, _ in Task { await refresh() } }
         .onReceive(NotificationCenter.default.publisher(for: .pacerEngineDidRecompute)) { _ in
             Task { await refresh() }
@@ -218,22 +276,85 @@ struct ProjectionCompareModal: View {
             loaded = true
             return
         }
-        let key = windowKey
+        let key = windowKey, asked = extrasKey
         let live = readout?.live
-        let computed = await askEngine { () -> ([BurnTrajectory.ScoredTrajectory], EngineSelfEval.Accuracy?) in
-            (await engine.rateLimitTrajectories(windowKey: key, live: live),
-             await engine.selfEvalAccuracy(surface: EngineSelfEval.rlSurface(key)))
+        typealias Answer = (trajectories: [BurnTrajectory.ScoredTrajectory], accuracy: EngineSelfEval.Accuracy?,
+                            board: MeterModelBoard)
+        let computed = await askEngine { () -> Answer in
+            let trajectories = await engine.rateLimitTrajectories(windowKey: key, live: live)
+            let accuracy = await engine.selfEvalAccuracy(surface: EngineSelfEval.rlSurface(key))
+            return (trajectories, accuracy, await engine.meterModelBoard(windowKey: key))
         }
-        trajectories = computed.0
-        accuracy = computed.1
+        // An engine ask can take seconds behind a refit: the sheet may show
+        // another window or account by now.
+        guard asked == extrasKey else { return }
+        trajectories = computed.trajectories
+        accuracy = computed.accuracy
+        take(computed.board)
         loaded = true
+        await refreshExtras(engine: engine, key: asked, live: live)
+    }
+
+    /// The list alone, on the minute tick: no lines are refitted.
+    private func refreshBoard() async {
+        guard let engine = engines?.engine(forAccount: limitAccountId) else { return }
+        let key = windowKey, asked = extrasKey, live = readout?.live
+        let next = await askEngine { await engine.meterModelBoard(windowKey: key) }
+        guard asked == extrasKey else { return }
+        take(next)
+        await refreshExtras(engine: engine, key: asked, live: live)
+    }
+
+    /// A new board: the lines follow it (its defaults, until a click), and
+    /// the on-demand ones follow the lines.
+    private func take(_ next: MeterModelBoard) {
+        board = next
+        lines.follow(next, key: extrasKey)
+        syncExtras()
+    }
+
+    /// Ask on demand for exactly the drawn models the fit does not project.
+    private func syncExtras() {
+        let projected = Set(trajectories.filter(\.canProject).map(\.modelId))
+        extras.sync(ModelBoardList.onDemand(lines.ids, projected: projected,
+                                            engineIds: Set(RateLimitRoster.engineIds)))
+    }
+
+    /// A row was clicked: draw its line or stop drawing it. At the cap
+    /// nothing changes (the list says so).
+    private func toggleLine(_ id: String) {
+        guard lines.toggle(id) != .refused else { return }
+        syncExtras()
+        guard let engine = engines?.engine(forAccount: limitAccountId) else { return }
+        let key = extrasKey, live = readout?.live
+        Task { await refreshExtras(engine: engine, key: key, live: live) }
+    }
+
+    /// The on-demand lines from the cache, then whichever have none made now
+    /// (once each, at live priority; a heavy network takes seconds) and asked
+    /// again. Every answer is checked against the selection's key after each
+    /// wait: the sheet may have moved to another window or account meanwhile
+    /// (`ArenaExtraLines.apply`).
+    private func refreshExtras(engine: UsageIntelligenceEngine, key: String, live: LiveMeterValue?) async {
+        let ids = extras.ids
+        guard !ids.isEmpty, extras.key == key else { return }
+        let window = windowKey
+        let first = await askEngine { await engine.arenaOnDemand(windowKey: window, models: ids, live: live) }
+        guard extras.apply(first) else { return }
+        let todo = extras.takeToMake()
+        guard !todo.isEmpty else { return }
+        if let make = first.make { await askEngine { await make(todo) } }
+        guard extras.finished(todo, key: key) else { return }
+        let again = extras.ids
+        let second = await askEngine { await engine.arenaOnDemand(windowKey: window, models: again, live: live) }
+        extras.apply(second)
     }
 }
 
-/// The compare-models content: the actual usage curve with **every**
-/// candidate forecaster's projection overlaid and labelled, plus each
-/// model's backtest accuracy. Chrome (title, subtitle, close) comes from
-/// the enclosing `PacerModalContent`.
+/// The compare-models content: the actual usage curve with the drawn
+/// models' projections overlaid, then every model for the meter in one list,
+/// best first, each a row that draws or hides its line. Chrome (title,
+/// subtitle, close) comes from the enclosing `PacerModalContent`.
 struct ProjectionDetailView: View {
     let cycleStart: Date
     let resetsAt: Date
@@ -243,11 +364,25 @@ struct ProjectionDetailView: View {
     /// reading, where the projections start. Nil: the line ends at the
     /// reading.
     var live: PaceChartView.Data.Point? = nil
-    let trajectories: [BurnTrajectory.ScoredTrajectory]
-    /// Per-method scored record for this window (completed cycles + median
-    /// miss) — powers the selected model's earned-record footer. Nil until
-    /// the engine has scored a cycle.
+    /// The drawn lines, re-anchored, in draw order. The chart, its domain and
+    /// spread are built from these.
+    let lines: [BurnTrajectory.ScoredTrajectory]
+    /// Per-method scored record for this window — the info popovers and the
+    /// pick's earned-record footer. Nil until the engine has scored a cycle.
     let accuracy: EngineSelfEval.Accuracy?
+    /// Every model for the meter, best first (`MeterModelBoard`): the list.
+    var board: MeterModelBoard? = nil
+    /// Which models are drawn (`ModelBoardList.LineSelection`).
+    var selection = ModelBoardList.LineSelection()
+    /// The models the window's fit projects itself this cycle.
+    var projected: Set<String> = []
+    /// Why the fit has no line for a model it knows ("nothing used yet this
+    /// cycle").
+    var noLineReasons: [String: String] = [:]
+    /// Where each line made on demand stands.
+    var extras = ArenaExtraLines()
+    /// A row was clicked: draw its line or hide it.
+    var onToggle: ((String) -> Void)? = nil
     /// The live meter's estimate and the reading under it (#318), for the
     /// line under the chart; nil when the number is the reading.
     var liveReadout: LiveMeterReadout? = nil
@@ -255,7 +390,13 @@ struct ProjectionDetailView: View {
     /// it has been today; nil without a live fit.
     var liveReview: LiveMeterDrift.Review? = nil
 
-    /// Stable per-model colors for the lines and the legend swatches.
+    /// Whether the "Well behind" group is open: closed each time the sheet
+    /// opens, open in `make render-live`, which cannot click it (a render of
+    /// the sheet is for looking at what it lists).
+    @State private var wellBehindExpanded = false
+    private var showsWellBehind: Bool { wellBehindExpanded || LiveRenderMode.isActive }
+
+    /// Stable per-model colors for the lines and the list's swatches.
     private static let palette: [String: Color] = [
         "linear-recent": .blue,
         "recency-weighted": .green,
@@ -265,17 +406,30 @@ struct ProjectionDetailView: View {
         "diurnal-rate": .teal,
         "recent-rate": .indigo,
     ]
-    private func color(_ id: String) -> Color { Self.palette[id] ?? .gray }
+    private func color(_ id: String) -> Color { Self.palette[id] ?? Self.arenaColor(id) }
 
-    /// The models with a line this cycle. The chart, its domain and spread are
-    /// built from these; the table lists every model (#307).
-    private var projecting: [BurnTrajectory.ScoredTrajectory] { trajectories.filter(\.canProject) }
+    /// A ported arena model's colour: picked from its id with a hash that is
+    /// the same on every launch (`hashValue` is seeded per process), so a
+    /// model keeps its colour, and from hues the engine's models don't use.
+    private static let arenaPalette: [Color] = [.cyan, .mint, .brown, .red, .yellow,
+                                                Color(red: 0.55, green: 0.45, blue: 0.85)]
+    private static func arenaColor(_ id: String) -> Color {
+        let h = id.unicodeScalars.reduce(5381) { ($0 &* 33 &+ Int($1.value)) & 0x7fff_ffff }
+        return arenaPalette[h % arenaPalette.count]
+    }
+
+    /// The model on the dashboard.
+    private var pickId: String? { board.flatMap(ModelBoardList.pick)?.id }
+
+    /// Every line on the chart. The domain, the spread and the marks read
+    /// these.
+    private var chartLines: [BurnTrajectory.ScoredTrajectory] { lines.filter(\.canProject) }
 
     // MARK: - Zoom domain
 
     /// The instant all trajectories branch from (their shared first point).
     private var trajectoryNow: Date? {
-        projecting.first?.trajectory.points.first?.at
+        chartLines.first?.trajectory.points.first?.at
     }
 
     /// Chart x-axis right edge: the latest `at` across all trajectories' last
@@ -283,7 +437,7 @@ struct ProjectionDetailView: View {
     /// resetsAt. Falls back to resetsAt when trajectories are empty.
     private var xEnd: Date {
         guard let now = trajectoryNow,
-              let rawEnd = projecting.compactMap({ $0.trajectory.points.last?.at }).max()
+              let rawEnd = chartLines.compactMap({ $0.trajectory.points.last?.at }).max()
         else { return resetsAt }
         let span = rawEnd.timeIntervalSince(now)
         // Degenerate at the cap: every trajectory has collapsed to its origin
@@ -322,7 +476,7 @@ struct ProjectionDetailView: View {
     /// Highest value across filtered actuals + all trajectories.
     private var dataMax: Double {
         let actMax = filteredActuals.map(\.value).max() ?? 0
-        let trajMax = projecting.flatMap { $0.trajectory.points.map(\.usedPercentage) }.max() ?? 0
+        let trajMax = chartLines.flatMap { $0.trajectory.points.map(\.usedPercentage) }.max() ?? 0
         return max(actMax, trajMax)
     }
 
@@ -340,81 +494,11 @@ struct ProjectionDetailView: View {
     /// the plot empty under the lines.
     private var yMin: Double {
         let actMin = filteredActuals.map(\.value).min() ?? 0
-        let trajMin = projecting.flatMap { $0.trajectory.points.map(\.usedPercentage) }.min() ?? 0
+        let trajMin = chartLines.flatMap { $0.trajectory.points.map(\.usedPercentage) }.min() ?? 0
         let minVisible = min(actMin, trajMin)
         guard minVisible > 30 else { return 0 }
         let pad = max(2, (dataMax - minVisible) * 0.1)
         return max(0, floor((minVisible - pad) / 5) * 5)
-    }
-
-    // MARK: - Envelope
-
-    /// One shared time step for the min/max fan envelope.
-    struct EnvelopeStep {
-        let t: Date
-        let lo: Double
-        let hi: Double
-    }
-
-    /// ~24 linearly-spaced steps from trajectoryNow → xEnd. For each step,
-    /// interpolate every trajectory's value (clamping at 100 once capped).
-    /// Values past a trajectory's last point extend at that last value, so
-    /// stepping to xEnd (which may be before resetsAt) is correct.
-    private var envelopeSteps: [EnvelopeStep] {
-        guard let now = trajectoryNow, !projecting.isEmpty else { return [] }
-        let span = xEnd.timeIntervalSince(now)
-        guard span > 0 else { return [] }
-        let steps = 24
-        return (0...steps).compactMap { i in
-            let frac = Double(i) / Double(steps)
-            let t = now.addingTimeInterval(span * frac)
-            var vals: [Double] = []
-            for st in projecting {
-                vals.append(interpolatedValue(st.trajectory.points, at: t))
-            }
-            guard !vals.isEmpty else { return nil }
-            return EnvelopeStep(t: t, lo: vals.min()!, hi: vals.max()!)
-        }
-    }
-
-    /// Linear interpolation of a trajectory's usedPercentage at time t.
-    /// Past the last point: treat as its last value (typically 100 at cap).
-    private func interpolatedValue(_ points: [BurnTrajectory.Sample], at t: Date) -> Double {
-        guard !points.isEmpty else { return 100 }
-        if t <= points.first!.at { return points.first!.usedPercentage }
-        if t >= points.last!.at  { return points.last!.usedPercentage }
-        for i in 1..<points.count {
-            let a = points[i - 1], b = points[i]
-            if t >= a.at && t <= b.at {
-                let span = b.at.timeIntervalSince(a.at)
-                guard span > 0 else { return a.usedPercentage }
-                let frac = t.timeIntervalSince(a.at) / span
-                return a.usedPercentage + frac * (b.usedPercentage - a.usedPercentage)
-            }
-        }
-        return points.last!.usedPercentage
-    }
-
-    // MARK: - Ranked list (visual order = descending value at right edge)
-
-    /// Models ordered by their value at the chart's right edge, descending
-    /// (highest line on chart = first row). Capped trajectories whose last
-    /// point is 100 are sorted earliest-cap-first among ties. The selected
-    /// model keeps its highlight but does not jump the order.
-    private var ranked: [BurnTrajectory.ScoredTrajectory] {
-        // Models without a line go last, keeping the engine's order.
-        projecting.sorted { a, b in
-            let aVal = a.trajectory.points.last?.usedPercentage ?? 0
-            let bVal = b.trajectory.points.last?.usedPercentage ?? 0
-            if aVal != bVal { return aVal > bVal }
-            // tie-break: earlier cap crossing first
-            switch (a.trajectory.crossesFullAt, b.trajectory.crossesFullAt) {
-            case (let ac?, let bc?): return ac < bc
-            case (.some, .none):     return true
-            case (.none, .some):     return false
-            default:                 return false
-            }
-        } + trajectories.filter { !$0.canProject }
     }
 
     // MARK: - Body
@@ -480,30 +564,22 @@ struct ProjectionDetailView: View {
             liveLine
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
-            accuracyTable
+            // Above the list: it is about the lines, and the list runs long.
             Text(legendText)
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
+            if let board { modelList(board) }
         }
     }
 
-    /// One-line legend; when the dashboard's pick isn't the single most
-    /// accurate model (the selector treats models within ±1.5 points as tied
-    /// and prefers the simpler one), say so — otherwise the list invites
-    /// "why isn't the best one picked?".
+    /// One-line legend (`ModelBoardList.legend`): every mark on the chart,
+    /// and the tie rule when the pick isn't the top row.
     private var legendText: String {
-        var s = "Solid — actual · dashed — projections from now · shaded — the models' spread · the highlighted model drives the dashboard."
-        let best = projecting.filter { $0.typicalAbsError.isFinite }.min { $0.typicalAbsError < $1.typicalAbsError }
-        if let best, let selected = trajectories.first(where: { $0.isSelected }),
-           selected.modelId != best.modelId {
-            s += " Models within ±1.5 points are treated as tied — the simplest of the tied models is used."
-        }
-        return s
+        ModelBoardList.legend(pickIsNotFirst: board.map(ModelBoardList.pickIsNotFirst) ?? false)
     }
 
     private var chart: some View {
         Chart {
-            envelopeMarks
             paceMarks
             actualMarks
             trajectoryMarks
@@ -516,21 +592,6 @@ struct ProjectionDetailView: View {
     }
 
     // MARK: - Chart marks
-
-    /// Filled envelope band spanning the per-step min/max across all trajectories.
-    /// Drawn first so it sits behind all lines.
-    @ChartContentBuilder private var envelopeMarks: some ChartContent {
-        ForEach(Array(envelopeSteps.enumerated()), id: \.offset) { _, step in
-            AreaMark(
-                x: .value("t", step.t),
-                yStart: .value("lo", step.lo),
-                yEnd: .value("hi", step.hi),
-                series: .value("s", "envelope")
-            )
-            .foregroundStyle(Color.secondary.opacity(0.08))
-            .interpolationMethod(.monotone)
-        }
-    }
 
     /// The 0→100 ideal-burn reference, drawn across the visible window.
     ///
@@ -646,13 +707,13 @@ struct ProjectionDetailView: View {
         let dash: [CGFloat]
     }
     private var styledLines: [StyledLine] {
-        projecting.map { st in
+        chartLines.map { st in
             StyledLine(
                 id: st.modelId,
                 points: st.trajectory.points,
-                color: color(st.modelId).opacity(st.isSelected ? 1.0 : 0.75),
-                width: st.isSelected ? 2.6 : 1.8,
-                dash: st.isSelected ? [6, 3] : [4, 4])
+                color: color(st.modelId).opacity(st.modelId == pickId ? 1.0 : 0.75),
+                width: st.modelId == pickId ? 2.6 : 1.8,
+                dash: st.modelId == pickId ? [6, 3] : [4, 4])
         }
     }
 
@@ -668,31 +729,47 @@ struct ProjectionDetailView: View {
         }
     }
 
-    // MARK: - Accuracy table
+    // MARK: - Model list
 
-    /// The selected model's earned record — how many completed cycles back
-    /// it. The miss itself already sits in the row's "within ±N%" column
-    /// (no number twice); the footer adds the depth of evidence behind the
-    /// pick. Only claim a record once it's meaningfully sized (≥ 5 cycles).
+    /// The pick's earned record — how many completed cycles back it. The
+    /// miss itself already sits in its row (no number twice); the footer adds
+    /// the depth of evidence behind the pick. Only claim a record once it's
+    /// meaningfully sized (≥ 5 cycles).
     private var selectedRecordText: String? {
-        guard let selected = trajectories.first(where: { $0.isSelected }),
-              let stat = accuracy?.methods.first(where: { $0.method == selected.modelId }),
-              stat.periods >= 5
-        else { return nil }
-        return "Selected: \(BurnTrajectory.displayName(selected.modelId)) — "
+        guard let pickId, let stat = stat(pickId), stat.periods >= 5 else { return nil }
+        return "Selected: \(BurnTrajectory.displayName(pickId)) — "
             + "earned on \(stat.periods) of your completed cycles."
     }
 
-    private var accuracyTable: some View {
+    /// Every model, one row each, best first; the well-behind ones under a
+    /// collapsed heading at the bottom.
+    @ViewBuilder
+    private func modelList(_ board: MeterModelBoard) -> some View {
+        let sections = ModelBoardList.sections(board)
         VStack(alignment: .leading, spacing: 0) {
-            // Column headers make the right-hand number self-explanatory —
-            // it's how far each model's final-value calls have missed on
-            // this user's completed cycles.
+            // While the scorer works through history: the rows' "scoring"
+            // states are why the list is still moving.
+            if let progress = board.progress {
+                Text(ModelBoardList.progressText(progress))
+                    .font(.system(size: 11).monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 10)
+                    .padding(.bottom, 6)
+            }
+            if selection.isFull {
+                Text(ModelBoardList.capNote)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 10)
+                    .padding(.bottom, 6)
+            }
+            // The right-hand heading names the cycles every number covers,
+            // once, so no row has to.
             HStack {
                 Text("MODEL")
                 Spacer()
-                Text("TYPICAL ACCURACY, PAST CYCLES")
-                    .help("Typical |shown final − actual final| at this half of the window (first or second) across your completed cycles (median; mean on weekly windows), in percentage points — lower is better")
+                Text(PacerAccuracyFormat.columnTitle(spanCycles: board.spanCycles))
+                    .help(PacerAccuracyFormat.columnHelp(spanCycles: board.spanCycles))
             }
             .font(.system(size: 9, weight: .semibold, design: .rounded))
             .foregroundStyle(.tertiary)
@@ -700,60 +777,25 @@ struct ProjectionDetailView: View {
             .padding(.horizontal, 10)
             .padding(.bottom, 4)
 
-            ForEach(Array(ranked.enumerated()), id: \.element.id) { idx, st in
-                HStack(spacing: 10) {
-                    RoundedRectangle(cornerRadius: 2)
-                        .fill(color(st.modelId).opacity(st.canProject ? 1 : 0.35))
-                        .frame(width: 14, height: 4)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(BurnTrajectory.displayName(st.modelId))
-                            .font(.system(size: 13, weight: st.isSelected ? .semibold : .regular))
-                        if let reason = st.unavailableReason {
-                            Text("can't project yet · \(reason)")
-                                .font(.system(size: 10))
-                                .foregroundStyle(.tertiary)
-                        }
+            rows(sections.main, spanCycles: board.spanCycles)
+
+            if !sections.wellBehind.isEmpty {
+                Button { wellBehindExpanded.toggle() } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: showsWellBehind ? "chevron.down" : "chevron.right")
+                            .font(.system(size: 8, weight: .semibold))
+                            .frame(width: 14)
+                        Text(ModelBoardList.wellBehindTitle(sections.wellBehind.count))
                     }
-                    if let summary = BurnTrajectory.summary(st.modelId) {
-                        PacerInfoButton(help: summary) {
-                            ModelInfoContent(
-                                modelId: st.modelId, windowDuration: durationSeconds,
-                                stat: accuracy?.methods.first { $0.method == st.modelId })
-                        }
-                    }
-                    if st.isSelected {
-                        Text("on the dashboard").font(.system(size: 10, weight: .semibold))
-                            .padding(.horizontal, 6).padding(.vertical, 2)
-                            .background(Capsule().fill(color(st.modelId).opacity(0.18)))
-                            .foregroundStyle(color(st.modelId))
-                    }
-                    Spacer()
-                    if let crossAt = st.trajectory.crossesFullAt {
-                        // Counts down on the shared minute schedule while the
-                        // sheet stays open.
-                        TimelineView(PacerReadAge.Schedule()) { context in
-                            Text("limit \(pacerRelative(crossAt, style: .short, now: context.date))")
-                                .help(pacerRelativeExact(crossAt))
-                                .font(.system(size: 11)).foregroundStyle(.red.opacity(0.85))
-                        }
-                    }
-                    Text(st.typicalAbsError.isFinite
-                         ? String(format: "within ±%.0f%%", st.typicalAbsError)
-                         : "—")
-                        .font(.system(size: 12).monospacedDigit())
-                        .foregroundStyle(.secondary)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .contentShape(Rectangle())
                 }
-                .padding(.vertical, 7)
+                .buttonStyle(.plain)
                 .padding(.horizontal, 10)
-                .background(
-                    st.isSelected
-                        ? RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            .fill(color(st.modelId).opacity(0.07))
-                        : nil
-                )
-                if idx != ranked.indices.last {
-                    Divider().opacity(0.25).padding(.leading, 34)
-                }
+                .padding(.top, 10)
+                .padding(.bottom, 2)
+                if showsWellBehind { rows(sections.wellBehind, spanCycles: board.spanCycles) }
             }
 
             if let record = selectedRecordText {
@@ -764,6 +806,174 @@ struct ProjectionDetailView: View {
                     .padding(.top, 8)
             }
         }
+    }
+
+    @ViewBuilder
+    private func rows(_ rows: [MeterModelBoard.Row], spanCycles: Int) -> some View {
+        ForEach(Array(rows.enumerated()), id: \.element.id) { idx, row in
+            modelRow(row, spanCycles: spanCycles)
+            if idx != rows.indices.last {
+                Divider().opacity(0.25).padding(.leading, 34)
+            }
+        }
+    }
+
+    /// Where a row's line stands: drawn, being made, asked for with none
+    /// this cycle, or hidden.
+    private func lineState(_ id: String) -> ModelBoardList.LineState {
+        ModelBoardList.lineState(
+            selected: selection.contains(id), hasLine: chartLines.contains { $0.modelId == id },
+            onDemand: !projected.contains(id) && !RateLimitRoster.engineIds.contains(id),
+            extras: extras.state(id), reason: noLineReasons[id])
+    }
+
+    /// One model: its swatch (filled when drawn, faint when not), name, info,
+    /// and its record or where it stands. A click draws or hides its line;
+    /// a model whose network is still downloading has none to draw.
+    private func modelRow(_ row: MeterModelBoard.Row, spanCycles: Int) -> some View {
+        let state = lineState(row.id)
+        let accent = color(row.id)
+        let canDraw = ModelBoardList.canDraw(row)
+        let marker: ModelListMarker = switch state {
+        case .drawn: .swatch(accent)
+        case .computing: .computing
+        case .noLine: .swatch(accent.opacity(0.35))
+        case .hidden: canDraw ? .off(accent) : .none
+        }
+        let tap: (() -> Void)? = canDraw ? onToggle.map { toggle in { toggle(row.id) } } : nil
+        let crossAt = state == .drawn ? chartLines.first { $0.modelId == row.id }?.trajectory.crossesFullAt : nil
+        let record = ModelBoardList.isRecord(row.status)
+        return ModelListRow(
+            modelId: row.id, name: row.name, summary: row.summary, windowDuration: durationSeconds,
+            stat: stat(row.id), marker: marker, accent: accent, isSelected: row.isPick,
+            note: ModelBoardList.lineNote(state) ?? ModelBoardList.behindNote(row), onTap: tap,
+            tapHelp: ModelBoardList.rowHelp(state, isFull: selection.isFull)
+        ) {
+            if let crossAt {
+                // Counts down on the shared minute schedule while the
+                // sheet stays open.
+                TimelineView(PacerReadAge.Schedule()) { context in
+                    Text("limit \(pacerRelative(crossAt, style: .short, now: context.date))")
+                        .help(pacerRelativeExact(crossAt))
+                        .font(.system(size: 11)).foregroundStyle(.red.opacity(0.85))
+                }
+            }
+            Text(ModelBoardList.statusText(for: row, spanCycles: spanCycles))
+                .font(.system(size: record ? 12 : 11).monospacedDigit())
+                .foregroundStyle(record ? HierarchicalShapeStyle.secondary : .tertiary)
+        }
+    }
+
+    private func stat(_ id: String) -> EngineSelfEval.Accuracy.MethodStat? {
+        accuracy?.methods.first { $0.method == id }
+    }
+}
+
+/// What a model list row shows where a line's swatch goes.
+private enum ModelListMarker {
+    /// Drawn: the line's colour.
+    case swatch(Color)
+    /// Can be drawn, and isn't: the colour it would have, faint.
+    case off(Color)
+    /// Nothing to draw; the space stays, so names align.
+    case none
+    /// Its projection is being made.
+    case computing
+}
+
+/// One row of the compare sheet's model list: the line's swatch, the name
+/// (with why it has no line, when it hasn't), its info button, the "on the
+/// dashboard" badge, then whatever the list puts on the right. Every model's
+/// row is this one, so no kind of model can drift from the rest.
+private struct ModelListRow<Trailing: View>: View {
+    let modelId: String
+    let name: String
+    let summary: String?
+    let windowDuration: TimeInterval
+    let stat: EngineSelfEval.Accuracy.MethodStat?
+    let marker: ModelListMarker
+    /// The model's colour, for the badge and the selected row's tint.
+    let accent: Color
+    var isSelected = false
+    var note: String? = nil
+    /// What a click does (draw or hide its line). The info button inside
+    /// keeps its own click.
+    var onTap: (() -> Void)? = nil
+    var tapHelp: String? = nil
+    @ViewBuilder let trailing: () -> Trailing
+    @State private var hovering = false
+
+    var body: some View {
+        if let onTap {
+            row
+                .background(hovering ? RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(Color.primary.opacity(0.05)) : nil)
+                .contentShape(Rectangle())
+                .onTapGesture(perform: onTap)
+                .onHover { hovering = $0 }
+                .help(tapHelp ?? "")
+                .accessibilityAddTraits(.isButton)
+                .accessibilityValue(isDrawnMarker ? "drawn" : "hidden")
+                .accessibilityAction(named: tapHelp ?? "Toggle", onTap)
+        } else {
+            row
+        }
+    }
+
+    @ViewBuilder
+    private var markerView: some View {
+        switch marker {
+        case let .swatch(color):
+            RoundedRectangle(cornerRadius: 2).fill(color).frame(width: 14, height: 4)
+        case let .off(color):
+            RoundedRectangle(cornerRadius: 2).fill(color.opacity(0.2)).frame(width: 14, height: 4)
+        case .none:
+            Color.clear.frame(width: 14, height: 4)
+        case .computing:
+            ProgressView().controlSize(.mini).frame(width: 14, height: 14)
+        }
+    }
+
+    private var isDrawnMarker: Bool {
+        switch marker {
+        case .swatch, .computing: return true
+        case .off, .none: return false
+        }
+    }
+
+    private var row: some View {
+        HStack(spacing: 10) {
+            markerView
+            VStack(alignment: .leading, spacing: 1) {
+                Text(name)
+                    .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
+                if let note {
+                    Text(note)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            if let summary {
+                PacerInfoButton(help: summary) {
+                    ModelInfoContent(modelId: modelId, windowDuration: windowDuration, stat: stat)
+                }
+            }
+            if isSelected {
+                Text("on the dashboard").font(.system(size: 10, weight: .semibold))
+                    .padding(.horizontal, 6).padding(.vertical, 2)
+                    .background(Capsule().fill(accent.opacity(0.18)))
+                    .foregroundStyle(accent)
+            }
+            Spacer()
+            trailing()
+        }
+        .padding(.vertical, 7)
+        .padding(.horizontal, 10)
+        .background(
+            isSelected
+                ? RoundedRectangle(cornerRadius: 7, style: .continuous).fill(accent.opacity(0.07))
+                : nil
+        )
     }
 }
 
@@ -778,7 +988,12 @@ struct ModelInfoGallery: View {
     @State private var accuracy: EngineSelfEval.Accuracy?
 
     var body: some View {
-        let ids = BurnTrajectory.defaultModels.map(\.id) + ["diurnal-rate"]
+        // The engine's methods, then every arena model that forecasts this
+        // window, recorded or not: the gallery shows what the sheet lists.
+        let target: ArenaTarget? = windowKey == RateLimitWindowName.fiveHour ? .meterFiveHour
+            : windowKey == RateLimitWindowName.sevenDay ? .meterSevenDay : nil
+        let ids = RateLimitRoster.engineIds
+            + (target.map { ArenaRoster.standard.specs(for: $0).map(\.name).sorted() } ?? [])
         LazyVGrid(columns: [GridItem(.adaptive(minimum: 300, maximum: 330), alignment: .top)],
                   alignment: .leading, spacing: 12) {
             ForEach(ids, id: \.self) { id in
@@ -818,7 +1033,9 @@ private struct ModelInfoContent: View {
             }
             if let stat, !stat.byStage.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("TYPICAL ACCURACY, \(stat.periods) PAST CYCLES")
+                    // The cycles the stages cover: the sheet's span, headed
+                    // as the list's column is.
+                    Text(PacerAccuracyFormat.columnTitle(spanCycles: stat.shownPeriods))
                         .font(.system(size: 9, weight: .semibold, design: .rounded))
                         .foregroundStyle(.tertiary)
                         .tracking(0.5)
@@ -826,7 +1043,7 @@ private struct ModelInfoContent: View {
                         HStack {
                             Text(Self.label(s.stage))
                             Spacer()
-                            Text(String(format: "within ±%.0f%%", s.typicalAbsError))
+                            Text(PacerAccuracyFormat.within(s.typicalAbsError))
                                 .monospacedDigit()
                                 .foregroundStyle(.secondary)
                         }

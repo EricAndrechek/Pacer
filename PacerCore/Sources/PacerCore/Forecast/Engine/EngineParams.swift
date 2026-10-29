@@ -61,14 +61,23 @@ public struct EngineParams: Sendable, Equatable, Codable {
 
     // MARK: Rate-limit model selection (#305)
 
-    /// Select each window's model separately for the first and second half of
-    /// the window, from the record's cuts in that half. Adopted 2026-10-20 with
-    /// `rlTieRelative` on full history (live cache plus archive): 5h median
-    /// 3.82 → 3.57 pp, fold-robust, coverage 0.779; 7d mean 8.57 → 8.18.
-    public var rlSelectByPhase: Bool = true
+    /// Rank each window's models at the point of the window the live cycle is
+    /// at: an error graded at a cut counts `1 − |cut − now| / width`
+    /// (`EngineSelfEval.cutWeight`). Replaced selecting by half of the window
+    /// (#305, `rlSelectByPhase`) on 2026-10-27, from a walk-forward replay of
+    /// the owner's record; 0 counts every cut the same.
+    public var rlCutKernelHalfWidth: Double = 0.2
     /// The selection near-tie band as a fraction of the best model's typical
     /// error. 0 restores the absolute 1.5 pp band.
     public var rlTieRelative: Double = 0.05
+    /// Rank on the moments where the models' forecasts spread at least this
+    /// many points (`EngineSelfEval.rankRL`'s `disagreement`); 0 counts every
+    /// moment. Where every model said the same, the outcome tells nothing
+    /// about which is better, and on quiet accounts those moments put every
+    /// model at ±0, so the simplest won whatever the record said. Chosen
+    /// from a walk-forward replay of the owner's record through the shipping
+    /// ranking (`RankingReplayProbe`) on 2026-10-29.
+    public var rlDisagreementPoints: Double = 2
 
     public init() {}
 
@@ -94,8 +103,9 @@ public struct EngineParams: Sendable, Equatable, Codable {
             "linearRecentLookbackFraction=\(g(linearRecentLookbackFraction))",
             "recencyHalfLifeFraction=\(g(recencyHalfLifeFraction))",
             "conformalBlockMinCycles=\(conformalBlockMinCycles)",
-            "rlSelectByPhase=\(rlSelectByPhase ? 1 : 0)",
+            "rlCutKernelHalfWidth=\(g(rlCutKernelHalfWidth))",
             "rlTieRelative=\(g(rlTieRelative))",
+            "rlDisagreementPoints=\(g(rlDisagreementPoints))",
         ].joined(separator: ";")
     }
 

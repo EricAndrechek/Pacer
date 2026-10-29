@@ -61,13 +61,21 @@ class Params:
     linear_recent_lookback_fraction: float = 0.3
     recency_half_life_fraction: float = 0.15
     conformal_block_min_cycles: int = 40
-    # Rate-limit selection knobs (#305). Phase selection and the relative tie
-    # were adopted 2026-10-20 (EngineParams.rlSelectByPhase / rlTieRelative)
-    # and are in `canonical()`. Recency is still harness-only, kept out of
-    # `canonical()` until a value is adopted.
+    # Rate-limit selection knobs (#305). The relative tie was adopted
+    # 2026-10-20 (EngineParams.rlTieRelative); phase selection then too, and
+    # replaced on 2026-10-27 by ranking at the live point of the window
+    # (EngineParams.rlCutKernelHalfWidth, a triangular weight on each cut).
+    # This harness still selects by phase: `rl_select_by_phase` is
+    # harness-only now, and only the app's values are in `canonical()`, so
+    # the version tag stays pinned to the app's. Recency is harness-only too.
     rl_select_by_phase: bool = True          # select early (<50%) and late cuts separately
+    rl_cut_kernel_half_width: float = 0.2    # the app's matched-point ranking (not implemented here)
     rl_selection_recency: int = 0            # rank on the last N scored periods; 0 = all-time
     rl_tie_relative: float = 0.05            # tie band relative to the best; 0 = absolute 1.5 pp
+    # The app ranks on the moments where the models' forecasts spread at
+    # least this many points (2026-10-29, EngineParams.rlDisagreementPoints;
+    # chosen by the app's RankingReplayProbe). Not implemented here.
+    rl_disagreement_points: float = 2.0
 
     def canonical(self) -> str:
         def g(v: float) -> str:
@@ -82,8 +90,9 @@ class Params:
             f"linearRecentLookbackFraction={g(self.linear_recent_lookback_fraction)}",
             f"recencyHalfLifeFraction={g(self.recency_half_life_fraction)}",
             f"conformalBlockMinCycles={self.conformal_block_min_cycles}",
-            f"rlSelectByPhase={int(self.rl_select_by_phase)}",
+            f"rlCutKernelHalfWidth={g(self.rl_cut_kernel_half_width)}",
             f"rlTieRelative={g(self.rl_tie_relative)}",
+            f"rlDisagreementPoints={g(self.rl_disagreement_points)}",
         ])
 
     def version_tag(self) -> str:

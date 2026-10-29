@@ -302,7 +302,9 @@ public enum BurnTrajectory {
         case "kalman-trend": return "Smoothed trend (Kalman filter)"
         case "recent-rate": return "Latest pace, held"
         case "diurnal-rate": return "Your daily rhythm"
-        default: return modelId
+        // A ported arena model: named from its parts (`ArenaModelNames`), so
+        // the sheet never shows a folder name.
+        default: return ArenaModelNames.displayName(modelId) ?? modelId
         }
     }
 
@@ -316,7 +318,7 @@ public enum BurnTrajectory {
         case "kalman-trend": return "A filter that tracks your level and pace through noisy readings."
         case "recent-rate": return "Your most recent rise, held at the same pace until the reset."
         case "diurnal-rate": return "Your usual pace at each hour of each weekday, added up to the reset."
-        default: return nil
+        default: return ArenaModelNames.summary(modelId)
         }
     }
 
@@ -353,7 +355,9 @@ public enum BurnTrajectory {
                 + "left until the reset, so quiet nights and weekends add little. One scale factor matches it to "
                 + "this window's pace so far."
         default:
-            return nil
+            // Arena models describe themselves in one line; their numbers
+            // live in their ports, not in `EngineParams`.
+            return ArenaModelNames.summary(modelId)
         }
     }
 

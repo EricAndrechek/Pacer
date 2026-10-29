@@ -24,8 +24,17 @@ class Params:
     linear_recent_lookback_fraction: float = 0.3
     recency_half_life_fraction: float = 0.15
     conformal_block_min_cycles: int = 40
-    rl_select_by_phase: bool = True        # adopted 2026-10-20 (#305)
+    # The app ranks at the live point of the window since 2026-10-27
+    # (`rlCutKernelHalfWidth`, replacing phase selection) and on the moments
+    # where the models disagreed since 2026-10-29 (`rlDisagreementPoints`).
+    # Neither is ported: this engine still selects by phase. They are hashed
+    # so the tag is the app's; None gives an older canonical string
+    # (`rlSelectByPhase` in the kernel's place; no disagreement key).
+    rl_cut_kernel_half_width: float | None = 0.2
     rl_tie_relative: float = 0.05          # adopted 2026-10-20; 0 = absolute 1.5 pp band
+    rl_disagreement_points: float | None = 2.0
+    # How this engine selects: hashed only while the kernel is None.
+    rl_select_by_phase: bool = True        # adopted 2026-10-20 (#305)
     # --- harness-only selection knob (not hashed until adopted) -------------
     rl_selection_recency: int = 0          # rank on the last N scored periods; 0 = all-time
     # --- engine constants that are code, not EngineParams --------------------
@@ -50,9 +59,11 @@ class Params:
             f"linearRecentLookbackFraction={g(self.linear_recent_lookback_fraction)}",
             f"recencyHalfLifeFraction={g(self.recency_half_life_fraction)}",
             f"conformalBlockMinCycles={self.conformal_block_min_cycles}",
-            f"rlSelectByPhase={int(self.rl_select_by_phase)}",
+            f"rlSelectByPhase={int(self.rl_select_by_phase)}" if self.rl_cut_kernel_half_width is None
+            else f"rlCutKernelHalfWidth={g(self.rl_cut_kernel_half_width)}",
             f"rlTieRelative={g(self.rl_tie_relative)}",
-        ])
+        ] + ([] if self.rl_disagreement_points is None
+             else [f"rlDisagreementPoints={g(self.rl_disagreement_points)}"]))
 
     def version_tag(self) -> str:
         return fnv_tag(self.canonical())
@@ -69,8 +80,14 @@ def fnv_tag(canonical: str) -> str:
 
 SHIPPING = Params()
 
-# The tags in the records of what the app did, and the knobs behind them.
-# - v1-c13c3f81: today's EngineParams (phase selection, relative tie).
+# The engine this kit reproduces: the app's knobs up to 2026-10-27.
+PHASE_ENGINE = replace(SHIPPING, rl_cut_kernel_half_width=None, rl_disagreement_points=None)
+
+# The tags in the records of what the app did that this kit reproduces, and
+# the knobs behind them. The app's later tags (v1-481cca04 with the matched
+# point, v1-5e0f894b with the disagreement filter too) select in a way not
+# ported here, so their records are left out of the parity check.
+# - v1-c13c3f81: phase selection, relative tie.
 # - v1-6109fa45: the #311 engine before the two selection knobs existed: its
 #   canonical string had only the first eight keys (pinned in the tests), and
 #   selection was all-cuts with the absolute 1.5 pp tie band.
@@ -82,9 +99,9 @@ SHIPPING = Params()
 #   and no launch backfill. `legacy_engine` reproduces those differences for
 #   the parity check only (kit/engine/parity.py); no model uses it.
 VERSIONS: dict[str, Params] = {
-    "v1-c13c3f81": SHIPPING,
-    "v1-6109fa45": replace(SHIPPING, rl_select_by_phase=False, rl_tie_relative=0.0),
-    "v1-4c0cc586": replace(SHIPPING, rl_select_by_phase=False, rl_tie_relative=0.0, zero_anchor=False,
+    "v1-c13c3f81": PHASE_ENGINE,
+    "v1-6109fa45": replace(PHASE_ENGINE, rl_select_by_phase=False, rl_tie_relative=0.0),
+    "v1-4c0cc586": replace(PHASE_ENGINE, rl_select_by_phase=False, rl_tie_relative=0.0, zero_anchor=False,
                            legacy_engine=True),
 }
 LEGACY_VERSIONS = frozenset({"v1-4c0cc586"})
