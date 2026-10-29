@@ -92,9 +92,6 @@ public enum PacerPreferenceKeys {
     /// "Mute until reset" from an alert's button: window key → when the mute
     /// ends (`AlertMutes`).
     public static let alertMutes             = "pacer.notifications.mutedUntil"
-    /// Experiment: attach a small usage gauge picture to window alerts.
-    /// Off by default; toggled from Settings → Notification test.
-    public static let alertGaugeImage        = "pacer.notifications.gaugeImage"
     public static let costMode               = "pacer.display.costMode"
     /// Time-range selector shared by Projects, Models, and any future
     /// "rolling N-day" view. Persisted so the user's last-chosen window

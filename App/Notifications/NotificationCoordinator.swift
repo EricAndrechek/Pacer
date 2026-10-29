@@ -74,11 +74,9 @@ public final class NotificationCoordinator {
         // (owner, 2026-10-29). Pacer never had the Time Sensitive entitlement,
         // so `.timeSensitive` was never honoured as such anyway.
         content.interruptionLevel = .active
-        // The window alerts' buttons and, with the experiment on, a gauge, so
-        // the test shows what a real warning looks like. No window key: "Mute
-        // until reset" has nothing to mute here.
+        // The window alerts' buttons, so the test shows what a real warning
+        // looks like. No window key: "Mute until reset" has nothing to mute.
         content.categoryIdentifier = Self.windowCategory
-        if let gauge = Self.gaugeAttachment(percent: 72) { content.attachments = [gauge] }
         let request = UNNotificationRequest(
             identifier: "pacer.test.\(Int(Date().timeIntervalSince1970))",
             content: content,
@@ -224,7 +222,7 @@ public final class NotificationCoordinator {
         content.sound = .default
         content.interruptionLevel = .active
         await postWindowAlert(content, windowKey: windowKey, resetsAt: resetsAt,
-                              percent: currentPct, dedupKey: highest.key)
+                              dedupKey: highest.key)
     }
 
     /// Identifier for the "Pacer paused" banner. Shared between the
@@ -389,7 +387,7 @@ public final class NotificationCoordinator {
 
         // Into the window's slot: the reset notice is the window's latest news.
         await postWindowAlert(content, windowKey: windowKey, resetsAt: resetsAt,
-                              percent: currentPct, dedupKey: cycleKey)
+                              dedupKey: cycleKey)
         markNotified(key: cycleKey, in: context)
     }
 
@@ -503,7 +501,7 @@ public final class NotificationCoordinator {
         // heads-up to imminent replaces the heads-up and alerts again, rather
         // than stacking a second banner beside it (owner, 2026-10-29).
         await postWindowAlert(
-            content, windowKey: windowKey, resetsAt: resetsAt, percent: usedPct,
+            content, windowKey: windowKey, resetsAt: resetsAt,
             dedupKey: "\(cycleKey).t\(tier.rawValue).\(Int(projectedFullAt.timeIntervalSince1970))")
         markBurnNotified(key: cycleKey,
                          state: .init(tier: tier, etaUnix: projectedFullAt.timeIntervalSince1970),
@@ -573,7 +571,7 @@ public final class NotificationCoordinator {
         content.interruptionLevel = .active
 
         await postWindowAlert(content, windowKey: windowKey, resetsAt: detection.resetsAt,
-                              percent: detection.droppedTo, dedupKey: cycleKey)
+                              dedupKey: cycleKey)
         markNotified(key: cycleKey, in: context)
     }
 

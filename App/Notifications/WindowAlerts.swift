@@ -1,9 +1,6 @@
 import AppKit
-import SwiftUI
-import UniformTypeIdentifiers
 @preconcurrency import UserNotifications
 import PacerCore
-import PacerUI
 
 extension Notification.Name {
     /// An alert's "Open Pacer" button, or a click on the alert itself.
@@ -50,13 +47,10 @@ extension NotificationCoordinator {
     /// which used to be the identifier and so said which threshold and cycle
     /// fired; it still should.
     func postWindowAlert(_ content: UNMutableNotificationContent, windowKey: String,
-                         resetsAt: Date?, percent: Double?, dedupKey: String) async {
+                         resetsAt: Date?, dedupKey: String) async {
         content.categoryIdentifier = Self.windowCategory
         content.userInfo = AlertSlot.userInfo(windowKey: windowKey, window: Self.window(of: windowKey),
                                               resetsAt: resetsAt)
-        if let percent, let gauge = Self.gaugeAttachment(percent: percent) {
-            content.attachments = [gauge]
-        }
         let request = UNNotificationRequest(
             identifier: AlertSlot.identifier(windowKey: windowKey), content: content, trigger: nil)
         await post(request, logAs: dedupKey)
@@ -124,35 +118,6 @@ extension NotificationCoordinator {
     /// `five_hour#<account>` → `five_hour`.
     static func window(of windowKey: String) -> String {
         windowKey.split(separator: "#", maxSplits: 1).first.map(String.init) ?? windowKey
-    }
-
-    // MARK: - Gauge picture (experiment)
-
-    /// A small usage gauge as the alert's attachment, when the experiment is
-    /// on. The same `CircularGauge` the dashboard and widgets draw, so its
-    /// colour is `UsageBand`'s, not a copy of it.
-    static func gaugeAttachment(percent: Double) -> UNNotificationAttachment? {
-        guard PacerSettings.store.bool(forKey: PacerSettings.Key.alertGaugeImage) else { return nil }
-        let dark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        let view = CircularGauge(reading: percent, lineWidth: 9,
-                                 labelFont: .system(size: 20, weight: .semibold, design: .rounded))
-            .frame(width: 80, height: 80)
-            .padding(10)
-            .environment(\.colorScheme, dark ? .dark : .light)
-        let renderer = ImageRenderer(content: view)
-        renderer.scale = 2
-        guard let image = renderer.cgImage,
-              let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])
-        else { return nil }
-        // The system moves the file into its own store when the request is
-        // added, so a fresh name each time and no cleanup of our own.
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("pacer-alert-gauges")
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let url = dir.appendingPathComponent("\(UUID().uuidString).png")
-        guard (try? png.write(to: url)) != nil else { return nil }
-        return try? UNNotificationAttachment(
-            identifier: "gauge", url: url,
-            options: [UNNotificationAttachmentOptionsTypeHintKey: UTType.png.identifier])
     }
 }
 
