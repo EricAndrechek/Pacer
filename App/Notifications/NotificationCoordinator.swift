@@ -70,13 +70,15 @@ public final class NotificationCoordinator {
         content.title = "Pacer test notification"
         content.body = "Notifications are working. Real warnings fire when a window crosses your threshold."
         content.sound = .default
-        // .timeSensitive lets the banner break through Focus modes and
-        // — more importantly here — increases the odds that macOS
-        // displays it as a popup rather than silently routing it to
-        // Notification Center. Users still need "Banners" or "Alerts"
-        // selected in System Settings → Notifications → Pacer; the
-        // Settings UI now points at that with a helper button.
-        content.interruptionLevel = .timeSensitive
+        // `.active`, like every Pacer alert: none asks to break through Focus
+        // (owner, 2026-10-29). Pacer never had the Time Sensitive entitlement,
+        // so `.timeSensitive` was never honoured as such anyway.
+        content.interruptionLevel = .active
+        // The window alerts' buttons and, with the experiment on, a gauge, so
+        // the test shows what a real warning looks like. No window key: "Mute
+        // until reset" has nothing to mute here.
+        content.categoryIdentifier = Self.windowCategory
+        if let gauge = Self.gaugeAttachment(percent: 72) { content.attachments = [gauge] }
         let request = UNNotificationRequest(
             identifier: "pacer.test.\(Int(Date().timeIntervalSince1970))",
             content: content,
@@ -199,31 +201,30 @@ public final class NotificationCoordinator {
         estimated: Bool = false,
         context: ModelContext
     ) async {
-        // Ascending iteration — banners arrive in the order the user crossed
-        // them (50% before 75% before 90%) when one sample crosses several.
         // Already-notified thresholds are dropped against every key the
         // cycle has had (`RateLimitAlertRules.thresholdKeys`).
         let toPost = RateLimitAlertRules.toPost(
             windowKey: windowKey, previous: previousPct, current: currentPct, thresholds: thresholds,
             resetsAt: resetsAt, notified: { alreadyNotified(key: $0, in: context) })
-        guard !toPost.isEmpty else { return }
-        for (threshold, cycleKey) in toPost {
-            await requestAuthorizationIfNeeded()
-            let content = UNMutableNotificationContent()
-            content.title = "Pacer rate-limit warning"
-            content.body = RateLimitAlertRules.thresholdBody(
-                label: label, percent: currentPct, threshold: threshold, estimated: estimated)
-            content.sound = .default
-            content.interruptionLevel = .timeSensitive
-
-            let request = UNNotificationRequest(
-                identifier: cycleKey,
-                content: content,
-                trigger: nil
-            )
-            await post(request)
-            markNotified(key: cycleKey, in: context)
+        guard let highest = toPost.last else { return }
+        // Every crossed threshold is marked, but only the highest is posted.
+        // They share one slot, so posting 90% and then 95% a few milliseconds
+        // apart would show a banner and immediately replace it — exactly the
+        // burst an account switch onto a busy account used to produce.
+        for (_, cycleKey) in toPost { markNotified(key: cycleKey, in: context) }
+        if isMuted(windowKey: windowKey) {
+            Log.write("Notify", "muted \(highest.key)")
+            return
         }
+        await requestAuthorizationIfNeeded()
+        let content = UNMutableNotificationContent()
+        content.title = "Pacer rate-limit warning"
+        content.body = RateLimitAlertRules.thresholdBody(
+            label: label, percent: currentPct, threshold: highest.threshold, estimated: estimated)
+        content.sound = .default
+        content.interruptionLevel = .active
+        await postWindowAlert(content, windowKey: windowKey, resetsAt: resetsAt,
+                              percent: currentPct, dedupKey: highest.key)
     }
 
     /// Identifier for the "Pacer paused" banner. Shared between the
@@ -323,6 +324,7 @@ public final class NotificationCoordinator {
         }
         content.sound = nil // quiet — informational, not urgent
         content.interruptionLevel = .passive
+        content.categoryIdentifier = Self.generalCategory
 
         let request = UNNotificationRequest(identifier: key, content: content, trigger: nil)
         await post(request)
@@ -352,8 +354,6 @@ public final class NotificationCoordinator {
         context: ModelContext
     ) async {
         let defaults = PacerSettings.store
-        guard defaults.bool(forKey: PacerSettings.Key.notificationsEnabled) else { return }
-        guard defaults.bool(forKey: PacerSettings.Key.notifyOnReset) else { return }
         // Readings only: the alert monitor never passes an estimate here, so
         // an estimate that climbed and was corrected down cannot read as a
         // window that fell. Without the resetsAt advance (the same cycle's
@@ -362,6 +362,13 @@ public final class NotificationCoordinator {
         guard RateLimitAlertRules.isReset(previousPct: previousPct, currentPct: currentPct,
                                           previousResetsAt: previousResetsAt, resetsAt: resetsAt),
               let resetsAt else { return }
+        // The old cycle's warning is no longer true, whether or not the user
+        // wants a reset notice: clear it (and its mute) before the settings
+        // gates. `sweepStaleWindowAlerts` catches the resets this never sees.
+        let windowKey = Self.scopedKey(window, account: account)
+        windowDidReset(windowKey: windowKey)
+        guard defaults.bool(forKey: PacerSettings.Key.notificationsEnabled) else { return }
+        guard defaults.bool(forKey: PacerSettings.Key.notifyOnReset) else { return }
 
         let cycleKey = "notif.reset.\(Self.scopedKey(window, account: account))."
             + ISO8601DateFormatter().string(from: resetsAt)
@@ -380,8 +387,9 @@ public final class NotificationCoordinator {
         content.sound = nil  // informational — no need to startle
         content.interruptionLevel = .passive
 
-        let request = UNNotificationRequest(identifier: cycleKey, content: content, trigger: nil)
-        await post(request)
+        // Into the window's slot: the reset notice is the window's latest news.
+        await postWindowAlert(content, windowKey: windowKey, resetsAt: resetsAt,
+                              percent: currentPct, dedupKey: cycleKey)
         markNotified(key: cycleKey, in: context)
     }
 
@@ -409,6 +417,7 @@ public final class NotificationCoordinator {
     /// live in the scoped caller (`ScopedRateLimitAlerts.shouldWarnBurnRate`).
     public func handleBurnRateWarning(
         window: String,
+        account: String? = nil,
         projection: BurnRate.Projection,
         resetsAt: Date?,
         usedPct: Double,
@@ -439,6 +448,17 @@ public final class NotificationCoordinator {
             imminentSeconds: imminentMinutes * 60,
             rearmEnabled: rearm
         ) else { return }
+
+        let windowKey = Self.scopedKey(window, account: account)
+        if isMuted(windowKey: windowKey, now: now) {
+            // Recorded as sent, so unmuting by reset starts a clean cycle
+            // rather than delivering this cycle's warning late.
+            markBurnNotified(key: cycleKey,
+                             state: .init(tier: tier, etaUnix: projectedFullAt.timeIntervalSince1970),
+                             in: context)
+            Log.write("Notify", "muted \(cycleKey).t\(tier.rawValue)")
+            return
+        }
 
         await requestAuthorizationIfNeeded()
         let content = UNMutableNotificationContent()
@@ -477,14 +497,14 @@ public final class NotificationCoordinator {
         parts.append(status + ".")
         content.body = parts.joined(separator: " — ").replacingOccurrences(of: " — You're", with: ". You're")
         content.sound = .default
-        content.interruptionLevel = tier == .imminent ? .timeSensitive : .active
+        content.interruptionLevel = .active
 
-        // Distinct identifier per tier so an escalation doesn't silently
-        // replace the earlier banner in Notification Center.
-        let request = UNNotificationRequest(
-            identifier: "\(cycleKey).t\(tier.rawValue).\(Int(projectedFullAt.timeIntervalSince1970))",
-            content: content, trigger: nil)
-        await post(request)
+        // The window's slot, like its threshold alerts: an escalation from
+        // heads-up to imminent replaces the heads-up and alerts again, rather
+        // than stacking a second banner beside it (owner, 2026-10-29).
+        await postWindowAlert(
+            content, windowKey: windowKey, resetsAt: resetsAt, percent: usedPct,
+            dedupKey: "\(cycleKey).t\(tier.rawValue).\(Int(projectedFullAt.timeIntervalSince1970))")
         markBurnNotified(key: cycleKey,
                          state: .init(tier: tier, etaUnix: projectedFullAt.timeIntervalSince1970),
                          in: context)
@@ -523,16 +543,24 @@ public final class NotificationCoordinator {
     /// cycle. A later cycle has a different anchor and fires fresh.
     public func handleGlobalRateLimitReset(
         window: String,
+        account: String? = nil,
         detection: GlobalRateLimitReset.Detection,
         context: ModelContext
     ) async {
         let defaults = PacerSettings.store
-        guard defaults.bool(forKey: PacerSettings.Key.notificationsEnabled) else { return }
-        guard defaults.bool(forKey: PacerSettings.Key.notifyGlobalReset) else { return }
-
         let anchorKey = detection.resetsAt.map { ISO8601DateFormatter().string(from: $0) } ?? "noreset"
         let cycleKey = "notif.globalreset.\(window).\(anchorKey)"
         if alreadyNotified(key: cycleKey, in: context) {
+            return
+        }
+        // An early reset is still a reset: the warning and its mute end here,
+        // whether or not the user wants to be told about it. Once per cycle,
+        // so a warning posted after the reset is not cleared on the next poll.
+        let windowKey = Self.scopedKey(window, account: account)
+        windowDidReset(windowKey: windowKey)
+        guard defaults.bool(forKey: PacerSettings.Key.notificationsEnabled),
+              defaults.bool(forKey: PacerSettings.Key.notifyGlobalReset) else {
+            markNotified(key: cycleKey, in: context)
             return
         }
 
@@ -542,10 +570,10 @@ public final class NotificationCoordinator {
         content.title = "Pacer: \(label) limit reset early"
         content.body = "Anthropic appears to have reset limits ahead of schedule — \(label) usage dropped from \(Int(detection.droppedFrom.rounded()))% to \(Int(detection.droppedTo.rounded()))% without your reset day moving. You've got headroom again."
         content.sound = .default
-        content.interruptionLevel = .timeSensitive
+        content.interruptionLevel = .active
 
-        let request = UNNotificationRequest(identifier: cycleKey, content: content, trigger: nil)
-        await post(request)
+        await postWindowAlert(content, windowKey: windowKey, resetsAt: detection.resetsAt,
+                              percent: detection.droppedTo, dedupKey: cycleKey)
         markNotified(key: cycleKey, in: context)
     }
 
@@ -572,7 +600,8 @@ public final class NotificationCoordinator {
         content.title = "Pacer spend warning"
         content.body = String(format: "Today's cost reached $%.2f (threshold $%.2f).", currentCost, threshold)
         content.sound = .default
-        content.interruptionLevel = .timeSensitive
+        content.interruptionLevel = .active
+        content.categoryIdentifier = Self.generalCategory
 
         let request = UNNotificationRequest(identifier: key, content: content, trigger: nil)
         await post(request)
@@ -618,7 +647,8 @@ public final class NotificationCoordinator {
             pacerCost(limit)
         )
         content.sound = .default
-        content.interruptionLevel = .timeSensitive
+        content.interruptionLevel = .active
+        content.categoryIdentifier = Self.generalCategory
 
         let request = UNNotificationRequest(identifier: key, content: content, trigger: nil)
         await post(request)
@@ -656,7 +686,8 @@ public final class NotificationCoordinator {
             threshold: threshold
         )
         content.sound = .default
-        content.interruptionLevel = .timeSensitive
+        content.interruptionLevel = .active
+        content.categoryIdentifier = Self.generalCategory
 
         let request = UNNotificationRequest(identifier: key, content: content, trigger: nil)
         await post(request)
@@ -687,14 +718,16 @@ public final class NotificationCoordinator {
 
     /// Every alert banner goes out through here and leaves a line in the log.
     /// Without one, "why didn't I get an alert?" had no answer short of
-    /// reading the dedup rows. The identifier is the dedup key, so the line
-    /// says which window, threshold and cycle fired.
-    private func post(_ request: UNNotificationRequest) async {
+    /// reading the dedup rows. `logAs` is the dedup key when it differs from
+    /// the identifier (a window's slot), so the line still says which window,
+    /// threshold and cycle fired.
+    func post(_ request: UNNotificationRequest, logAs dedupKey: String? = nil) async {
+        let what = dedupKey.map { "\(request.identifier) (\($0))" } ?? request.identifier
         do {
             try await center.add(request)
-            Log.write("Notify", "posted \(request.identifier)")
+            Log.write("Notify", "posted \(what)")
         } catch {
-            Log.write("Notify", "could not post \(request.identifier): \(error)")
+            Log.write("Notify", "could not post \(what): \(error)")
         }
     }
 

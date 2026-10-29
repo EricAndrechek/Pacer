@@ -1565,6 +1565,10 @@ private struct DailySummaryCard: View {
 
 private struct NotificationTestCard: View {
     @State private var testStatus: TestStatus = .idle
+    /// Experiment (owner, 2026-10-29): whether window alerts carry a small
+    /// gauge picture. Here beside the test button so it can be tried at once.
+    @AppStorage(PacerSettings.Key.alertGaugeImage, store: PacerSettings.store)
+    private var gaugeImage = false
 
     enum TestStatus: Equatable {
         case idle, sending, sent, denied, failed(String)
@@ -1582,17 +1586,20 @@ private struct NotificationTestCard: View {
 
     var body: some View {
         PacerCard("Notification test") {
-            HStack {
-                Button("Send test notification") {
-                    Task { await sendTestNotification() }
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Button("Send test notification") {
+                        Task { await sendTestNotification() }
+                    }
+                    .disabled(testStatus == .sending)
+                    if let label = testLabel {
+                        Text(label)
+                            .font(.caption)
+                            .foregroundStyle(testColor)
+                    }
+                    Spacer()
                 }
-                .disabled(testStatus == .sending)
-                if let label = testLabel {
-                    Text(label)
-                        .font(.caption)
-                        .foregroundStyle(testColor)
-                }
-                Spacer()
+                Toggle("Gauge picture in alerts (experiment)", isOn: $gaugeImage)
             }
         }
     }
