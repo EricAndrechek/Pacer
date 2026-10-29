@@ -74,7 +74,7 @@ struct ModelBoardListTests {
     /// engine actually uses, not a number of its own.
     @Test func theLegendSaysTheRealTieRule() {
         let marks = "Solid — actual · dashed — projections from now · grey dashed — even pace to the reset · "
-            + "shaded — the models' spread · the highlighted model drives the dashboard. "
+            + "the highlighted model drives the dashboard. "
             + "Click a model to draw or hide its line."
         #expect(ModelBoardList.legend(pickIsNotFirst: false) == marks)
         #expect(ModelBoardList.legend(pickIsNotFirst: true, tieRelative: 0.05) == marks

@@ -206,7 +206,7 @@ public enum ModelBoardList {
     public static func legend(pickIsNotFirst: Bool,
                               tieRelative: Double = EngineParams.current.rlTieRelative) -> String {
         var s = "Solid — actual · dashed — projections from now · grey dashed — even pace to the reset · "
-            + "shaded — the models' spread · the highlighted model drives the dashboard. "
+            + "the highlighted model drives the dashboard. "
             + "Click a model to draw or hide its line."
         guard pickIsNotFirst else { return s }
         let band = tieRelative > 0

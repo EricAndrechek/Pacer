@@ -501,55 +501,6 @@ struct ProjectionDetailView: View {
         return max(0, floor((minVisible - pad) / 5) * 5)
     }
 
-    // MARK: - Envelope
-
-    /// One shared time step for the min/max fan envelope.
-    struct EnvelopeStep {
-        let t: Date
-        let lo: Double
-        let hi: Double
-    }
-
-    /// ~24 linearly-spaced steps from trajectoryNow → xEnd. For each step,
-    /// interpolate every trajectory's value (clamping at 100 once capped).
-    /// Values past a trajectory's last point extend at that last value, so
-    /// stepping to xEnd (which may be before resetsAt) is correct.
-    private var envelopeSteps: [EnvelopeStep] {
-        let lines = chartLines
-        guard let now = trajectoryNow, !lines.isEmpty else { return [] }
-        let span = xEnd.timeIntervalSince(now)
-        guard span > 0 else { return [] }
-        let steps = 24
-        return (0...steps).compactMap { i in
-            let frac = Double(i) / Double(steps)
-            let t = now.addingTimeInterval(span * frac)
-            var vals: [Double] = []
-            for st in lines {
-                vals.append(interpolatedValue(st.trajectory.points, at: t))
-            }
-            guard !vals.isEmpty else { return nil }
-            return EnvelopeStep(t: t, lo: vals.min()!, hi: vals.max()!)
-        }
-    }
-
-    /// Linear interpolation of a trajectory's usedPercentage at time t.
-    /// Past the last point: treat as its last value (typically 100 at cap).
-    private func interpolatedValue(_ points: [BurnTrajectory.Sample], at t: Date) -> Double {
-        guard !points.isEmpty else { return 100 }
-        if t <= points.first!.at { return points.first!.usedPercentage }
-        if t >= points.last!.at  { return points.last!.usedPercentage }
-        for i in 1..<points.count {
-            let a = points[i - 1], b = points[i]
-            if t >= a.at && t <= b.at {
-                let span = b.at.timeIntervalSince(a.at)
-                guard span > 0 else { return a.usedPercentage }
-                let frac = t.timeIntervalSince(a.at) / span
-                return a.usedPercentage + frac * (b.usedPercentage - a.usedPercentage)
-            }
-        }
-        return points.last!.usedPercentage
-    }
-
     // MARK: - Body
 
     /// Anthropic's readings against the live estimate just before each, over
@@ -629,7 +580,6 @@ struct ProjectionDetailView: View {
 
     private var chart: some View {
         Chart {
-            envelopeMarks
             paceMarks
             actualMarks
             trajectoryMarks
@@ -642,21 +592,6 @@ struct ProjectionDetailView: View {
     }
 
     // MARK: - Chart marks
-
-    /// Filled envelope band spanning the per-step min/max across all trajectories.
-    /// Drawn first so it sits behind all lines.
-    @ChartContentBuilder private var envelopeMarks: some ChartContent {
-        ForEach(Array(envelopeSteps.enumerated()), id: \.offset) { _, step in
-            AreaMark(
-                x: .value("t", step.t),
-                yStart: .value("lo", step.lo),
-                yEnd: .value("hi", step.hi),
-                series: .value("s", "envelope")
-            )
-            .foregroundStyle(Color.secondary.opacity(0.08))
-            .interpolationMethod(.monotone)
-        }
-    }
 
     /// The 0→100 ideal-burn reference, drawn across the visible window.
     ///
