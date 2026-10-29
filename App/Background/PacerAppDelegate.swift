@@ -444,6 +444,17 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         Self.observeExternalWindowRequests()
 
         NotificationCoordinator.shared.clearCollectionPausedNotification()
+        // Here, in the normal launch path and before this method returns: the
+        // delegate has to be in place by then to receive the click that
+        // launched us, and the diagnostic modes above never get here, so a
+        // second process of the bundle never claims the user's alert clicks.
+        NotificationCoordinator.shared.installAlertHandling()
+        NotificationCoordinator.shared.sweepStaleWindowAlerts()
+        NotificationCenter.default.addObserver(
+            forName: .pacerOpenMainWindow, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { _ = self?.ensureMainWindowVisible() }
+        }
         // If the bundle was just replaced under us (Sparkle auto-update
         // or `make install`), the old widget extension is still running
         // its now-stale binary and chronod won't relaunch it on its own.

@@ -89,6 +89,9 @@ public enum PacerPreferenceKeys {
     /// time of day (default 9 PM local).
     public static let notifyDailySummary     = "pacer.notifications.dailySummary"
     public static let dailySummaryHour       = "pacer.notifications.dailySummaryHour"
+    /// "Mute until reset" from an alert's button: window key → when the mute
+    /// ends (`AlertMutes`).
+    public static let alertMutes             = "pacer.notifications.mutedUntil"
     public static let costMode               = "pacer.display.costMode"
     /// Time-range selector shared by Projects, Models, and any future
     /// "rolling N-day" view. Persisted so the user's last-chosen window

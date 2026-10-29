@@ -169,6 +169,10 @@ final class AlertMonitor {
                 Self.readLimits(container: container, fallbackAccount: fallbackAccount)
             }.value
             await judge(snapshot)
+            // Every reading is also a chance to clear the banners of windows
+            // that have reset, by the clock alone: polls keep arriving on an
+            // idle machine, and the reset rule needs a busy cycle before it.
+            NotificationCoordinator.shared.sweepStaleWindowAlerts()
             limitsInFlight = false
             if limitsAgain { limitsAgain = false; evaluateLimits() }
         }

@@ -98,6 +98,7 @@ public enum PacerSettings {
         public static let burnRateImminentMinutes = PacerPreferenceKeys.burnRateImminentMinutes
         public static let notifyDailySummary     = PacerPreferenceKeys.notifyDailySummary
         public static let dailySummaryHour       = PacerPreferenceKeys.dailySummaryHour
+        public static let alertMutes             = PacerPreferenceKeys.alertMutes
         public static let costMode               = PacerPreferenceKeys.costMode
         public static let timeRange              = PacerPreferenceKeys.timeRange
         public static let projectsSort           = PacerPreferenceKeys.projectsSort

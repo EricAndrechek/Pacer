@@ -917,7 +917,7 @@ final class AppBackgroundService {
                     in: context, account: account, window: check.window,
                     lookback: check.lookback, highWatermark: check.highWatermark,
                     minAnchorLead: check.minAnchorLead
-                ).map { (window: check.window, detection: $0) }
+                ).map { (window: check.window, account: account, detection: $0) }
             }
         }.value
         guard !detections.isEmpty else { return }
@@ -926,6 +926,7 @@ final class AppBackgroundService {
         for found in detections {
             await NotificationCoordinator.shared.handleGlobalRateLimitReset(
                 window: found.window,
+                account: found.account,
                 detection: found.detection,
                 context: context
             )
@@ -955,6 +956,9 @@ final class AppBackgroundService {
         // Code is spending, and the all-accounts engine fits no rate limits of
         // its own (#303). Captured once, so a switch mid-check can't mix two.
         let engine = engines.rateLimitEngine
+        // Which account's window slot the warning lands in, and which mute it
+        // honours: the active login's, the one the engine fits.
+        let account = Account.activeId(in: context)
         for window in RateLimitWindowKind.allCases {
             // The engine's claim: the latest-plausible crossing, at or above
             // the level floor, confirmed across two consecutive refits (#304),
@@ -971,6 +975,7 @@ final class AppBackgroundService {
             let duration = PaceMath.windowDuration(for: window.rawValue) ?? 1
             await NotificationCoordinator.shared.handleBurnRateWarning(
                 window: window.rawValue,
+                account: account,
                 projection: projection,
                 resetsAt: outlook.resetsAt,
                 usedPct: outlook.usedPct,
@@ -980,7 +985,7 @@ final class AppBackgroundService {
                 context: context
             )
         }
-        await checkScopedBurnRateWarnings(context: context)
+        await checkScopedBurnRateWarnings(context: context, account: account)
     }
 
     /// Burn-rate warnings for **scoped per-model windows** (a "Fable · weekly"
@@ -1004,7 +1009,7 @@ final class AppBackgroundService {
     /// Dormancy falls out for free: `scopedWindows()` only lists identities
     /// present in the latest poll, so a vanished window is never evaluated (its
     /// alert rules are kept, untouched) and resumes when it reappears.
-    private func checkScopedBurnRateWarnings(context: ModelContext) async {
+    private func checkScopedBurnRateWarnings(context: ModelContext, account: String?) async {
         let engine = engines.rateLimitEngine   // see checkBurnRateWarning
         let scopedSpecs = await engine.scopedWindows()
         guard !scopedSpecs.isEmpty else { return }
@@ -1033,6 +1038,7 @@ final class AppBackgroundService {
             let durationHours = spec.duration / 3600
             await NotificationCoordinator.shared.handleBurnRateWarning(
                 window: identity,
+                account: account,
                 projection: projection,
                 resetsAt: outlook.resetsAt,
                 usedPct: outlook.usedPct,
