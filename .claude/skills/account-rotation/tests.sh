@@ -305,6 +305,13 @@ pacer_rate_limit_used_ratio{account="acc1acc0-0000",window="seven_day"} 0.98
 EOF
 AUTO=1 API=http://127.0.0.1:$port t "V2 a lower live estimate never lowers a reading" '^[0-9:]{8} no switch: 1 at 20%' \
   1 "1:20:200:98:ok 3:20:250:40:ok $SPENT" 'EARLY=0'
+# A last line that raises nothing must not make the whole read count as failed.
+cat >"$T/www/metrics" <<'EOF'
+pacer_rate_limit_used_ratio{account="acc1acc0-0000",window="seven_day"} 0.991
+pacer_rate_limit_live_used_ratio{account="acc1acc0-0000",window="seven_day"} 0.95
+EOF
+AUTO=1 API=http://127.0.0.1:$port t "V3 the last metrics line raises nothing: the read still counts" 'WOULD SWITCH → 3 .*\[7-day: 1 at 99%' \
+  1 "1:20:200:98:ok 3:20:250:40:ok $SPENT" 'EARLY=0'
 # --- cswap drops a 5h window: Pacer's reading stands in if under an hour old ---
 cat >"$T/www/metrics" <<'EOF'
 pacer_rate_limit_used_ratio{account="acc1acc0-0000",window="five_hour"} 0.97

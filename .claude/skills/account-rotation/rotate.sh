@@ -155,10 +155,10 @@ read_metrics() {
       # 99.1% at a 99% limit, and the controller saw room that wasn't there).
       # Either may only raise the figure.
       used:five_hour|live:five_hour)
-        { [ -z "${U5[$acct]:-}" ] || [ "$val" -gt "${U5[$acct]}" ]; } && U5[$acct]=$val;;
+        if [ -z "${U5[$acct]:-}" ] || [ "$val" -gt "${U5[$acct]}" ]; then U5[$acct]=$val; fi;;
       reset:five_hour) R5[$acct]=$val;;
       used:seven_day|live:seven_day)
-        { [ -z "${U7[$acct]:-}" ] || [ "$val" -gt "${U7[$acct]}" ]; } && U7[$acct]=$val;;
+        if [ -z "${U7[$acct]:-}" ] || [ "$val" -gt "${U7[$acct]}" ]; then U7[$acct]=$val; fi;;
       recent:five_hour) B5[$acct]=$val;;
       model:five_hour) [ -n "${B5[$acct]:-}" ] || B5[$acct]=$val;;
       age:five_hour)   A5[$acct]=$val;;
@@ -185,6 +185,11 @@ read_metrics() {
       split($0, v, " "); printf "model %s %s %.3f\n", substr($2,1,8), $4, v[2] }
     /^pacer_rate_limit_sample_age_seconds\{account="[^"]+",window="seven_day"\}/ {
       split($0, v, " "); printf "age %s %s %d\n", substr($2,1,8), $4, v[2] }')
+  # The loop's status is its last command's: a reading that raised nothing used
+  # to end it on a false test, the caller took that as "Pacer unreachable", and
+  # every Pacer figure was dropped (2026-10-28 to 10-31, unseen by the tests,
+  # whose last line always raised). Reaching here means the read worked.
+  return 0
 }
 # Every account's 5h/7d from cswap's own cache, kept fresh by its menu bar app.
 # The primary source: under memory pressure Pacer's API stopped answering at all
