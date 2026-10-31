@@ -189,6 +189,10 @@ t "10h a passed 7d reset counts as 0%" 'WOULD SWITCH → 2 .*\[limit:' \
   1 "1:95:26:63:ok 2:0:-:99:ok:-5 3:0:-:99:ok 4:0:-:100:ok"
 t "10i no active reading: WARN, hold" '^[0-9:]{8} WARN no reading for the active account 1' \
   1 "1:null:-:63:ok 2:0:-:10:ok"
+t "10i' no active 5h but the 7d is past its cap: 7-day switch" 'WOULD SWITCH → 2 .*\[7-day: 1 at 91% on its 7d' \
+  1 "1:null:-:91:ok 2:0:-:10:ok 3:0:-:99:ok 4:0:-:100:ok" 'WEEK_MAX_1=90'
+t "10i'' no active 5h, 7d under its cap: still hold" '^[0-9:]{8} WARN no reading for the active account 1' \
+  1 "1:null:-:89:ok 2:0:-:10:ok 3:0:-:99:ok 4:0:-:100:ok" 'WEEK_MAX_1=90'
 t "10j login expiry ERROR (1 day) and WARN (3)" '^[0-9:]{8} no switch:' \
   1 "1:50:200:30:ok 2:0:-:99:ok:8640:600 4:0:-:100:ok:8640:2880" "" "" \
   'ERROR login for slot 2 .*expires in (9h59m|10h00m)'

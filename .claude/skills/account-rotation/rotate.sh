@@ -520,6 +520,15 @@ while :; do
   fi
 
   mine=$(eff5 "$actid"); mywk=$(eff7 "$actid"); myleft=$(left5 "$actid"); at=$(switch_at "$actid")
+  # A missing 5h must not hide a spent week. cswap drops an idle-looking
+  # login's 5h for hours while light use still moves its 7d (2026-10-31: 85%
+  # to 87% of a 90% cap, no 5h all day), and the hold below came before the
+  # 7-day rule, so the cap would have been passed without a switch. Over its
+  # weekly limit, leaving is right whatever the 5h says; carry on with it as
+  # "no window running" so only the moves away can fire.
+  if [ "$mine" = - ] && [ "$mywk" != - ] && [ "$mywk" -ge "$(wkmax "$act")" ]; then
+    mine=0; myleft=-
+  fi
   if [ "$mine" = - ] || [ "$mywk" = - ]; then
     gap_warn_due "$now" && say "WARN no reading for the active account $act; holding"; [ "$DRY" = 1 ] && exit 1; sleep 60; continue
   fi
