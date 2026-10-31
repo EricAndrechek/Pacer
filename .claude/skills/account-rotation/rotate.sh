@@ -332,11 +332,16 @@ if [ "$DRY" = 0 ]; then
 fi
 # A missing reading for the active account is normal for a loop or two after a
 # switch (cswap reads the new login); only a gap of GAP_WARN_SECS is worth a WARN.
-GAP_WARN_SECS=300; missing_since=0
-# gap_warn_due NOW: track the first-missing time; true once it has lasted long enough.
+GAP_WARN_SECS=300; missing_since=0; gap_said=0
+# gap_warn_due NOW: track the first-missing time; true once it has lasted long
+# enough, then again every 10 min. An idle login with no 5h window open reads
+# "no 5h" from cswap for hours, and a WARN every minute woke the supervisor
+# every minute (2026-10-31) for a hold that cost nothing.
 gap_warn_due() {
-  [ "$missing_since" = 0 ] && missing_since=$1
-  [ "$DRY" = 1 ] || [ $(( $1 - missing_since )) -ge "$GAP_WARN_SECS" ]
+  [ "$missing_since" = 0 ] && { missing_since=$1; gap_said=0; }
+  [ "$DRY" = 1 ] && return 0
+  [ $(( $1 - missing_since )) -ge "$GAP_WARN_SECS" ] && [ $(( $1 - gap_said )) -ge 600 ] || return 1
+  gap_said=$1
 }
 last_status=0; hold_since=0; hold_said=0; hold_burn=0; rsv_err=0
 # The accounts this loop's decision pass would switch to, for the heartbeat
