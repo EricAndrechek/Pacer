@@ -392,6 +392,15 @@ while :; do
     for k in "${!CR7[@]}"; do R7[$k]=${CR7[$k]}; done
     for k in "${!P5[@]}"; do
       pr=${PR5[$k]:-}; cr=${R5[$k]:-}
+      # cswap can drop an account's 5h window altogether while its 7d stays
+      # fresh (2026-10-31: the active account at 3% with 3h to go read "no
+      # 5h" and the controller held blind). Pacer polls on its own; take its
+      # figure then, but only a reading under an hour old: an older one says
+      # nothing about now, and a missing figure is never room.
+      if [ -z "${U5[$k]:-}" ] && [ -n "${A5[$k]:-}" ] && [ "${A5[$k]}" -le 3600 ]; then
+        U5[$k]=${P5[$k]}; [ -n "$pr" ] && [ -z "$cr" ] && R5[$k]=$pr
+        continue
+      fi
       if [ -n "$pr" ] && [ -n "$cr" ] && [ "$pr" -gt 0 ] && [ "$cr" -gt 0 ] \
          && [ $(( pr > cr ? pr - cr : cr - pr )) -le 900 ] && [ "${P5[$k]}" -gt "${U5[$k]:-0}" ]; then
         U5[$k]=${P5[$k]}

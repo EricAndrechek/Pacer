@@ -305,6 +305,17 @@ pacer_rate_limit_used_ratio{account="acc1acc0-0000",window="seven_day"} 0.98
 EOF
 AUTO=1 API=http://127.0.0.1:$port t "V2 a lower live estimate never lowers a reading" '^[0-9:]{8} no switch: 1 at 20%' \
   1 "1:20:200:98:ok 3:20:250:40:ok $SPENT" 'EARLY=0'
+# --- cswap drops a 5h window: Pacer's reading stands in if under an hour old ---
+cat >"$T/www/metrics" <<'EOF'
+pacer_rate_limit_used_ratio{account="acc1acc0-0000",window="five_hour"} 0.97
+pacer_rate_limit_reset_seconds{account="acc1acc0-0000",window="five_hour"} 5400
+pacer_rate_limit_sample_age_seconds{account="acc1acc0-0000",window="five_hour"} 600
+EOF
+API=http://127.0.0.1:$port t "F1 cswap has no 5h, Pacer says 97% (10 min old): switch" 'WOULD SWITCH → 3 .*\[limit: 1 at 97%' \
+  1 "1:null:-:40:ok 3:20:250:40:ok $SPENT"
+sed -i '' 's/ 600$/ 7200/' "$T/www/metrics"
+API=http://127.0.0.1:$port t "F2 Pacer's 5h is 2 h old: still no reading" '^[0-9:]{8} WARN no reading for the active account 1' \
+  1 "1:null:-:40:ok 3:20:250:40:ok $SPENT"
 kill "$srv" 2>/dev/null
 
 # --- the heartbeat Pacer reads (Skills/pacer/reference.md, "Rotation") -------------
