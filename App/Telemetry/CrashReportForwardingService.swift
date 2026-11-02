@@ -90,8 +90,15 @@ final class CrashReportForwardingService {
                 watermark = advance(watermark, to: candidate.modified, store: store)
                 continue
             }
+            // The same release string the app's own events carry, so a widget
+            // or CLI crash sits under the release it shipped in (dev builds
+            // report "@dev", as the app does).
             let parsed = CrashReportForwarder.report(fromIPS: text, release: { version, build in
+                #if DEBUG
+                TelemetryController.release
+                #else
                 version.isEmpty ? nil : "com.ericandrechek.pacer@\(version)+\(build)"
+                #endif
             }, environment: environment)
             // The app's own crashes belong to the SDK; an unparseable report
             // (still being written, hand-edited) is skipped for good.
@@ -103,7 +110,7 @@ final class CrashReportForwardingService {
                 watermark = advance(watermark, to: candidate.modified, store: store)
                 continue
             }
-            guard let envelope = SentryEnvelope.event(report.eventJSON) else {
+            guard let envelope = SentryEnvelope.event(withIdentity(report.eventJSON)) else {
                 watermark = advance(watermark, to: candidate.modified, store: store)
                 continue
             }
@@ -125,6 +132,23 @@ final class CrashReportForwardingService {
             store.set(sent, forKey: sentKey)
             watermark = advance(watermark, to: candidate.modified, store: store)
         }
+    }
+
+    /// The Mac's Sentry install id (what the SDK attaches to the app's own
+    /// events, from `<cacheDirectoryPath>/INSTALLATION`) and IP inference, so a
+    /// forwarded crash counts against the same Mac and location as the app's.
+    nonisolated private static func withIdentity(_ eventJSON: Data) -> Data {
+        guard var event = (try? JSONSerialization.jsonObject(with: eventJSON)) as? [String: Any] else {
+            return eventJSON
+        }
+        var user: [String: Any] = ["ip_address": "{{auto}}"]
+        let file = URL(fileURLWithPath: TelemetryController.cacheDirectory).appendingPathComponent("INSTALLATION")
+        if let id = try? String(contentsOf: file, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
+           !id.isEmpty {
+            user["id"] = id
+        }
+        event["user"] = user
+        return (try? JSONSerialization.data(withJSONObject: event)) ?? eventJSON
     }
 
     nonisolated private static func advance(_ current: Date, to date: Date, store: UserDefaults) -> Date {
