@@ -76,9 +76,28 @@ final class DailyCheckIn {
     /// through `applicationShouldTerminate`, so it counts as clean.
     private static func recordLaunch() {
         let store = PacerPreferences.store
+        launchOrigin.record(store: store)
         if store.bool(forKey: runningKey) { store.set(store.integer(forKey: uncleanKey) + 1, forKey: uncleanKey) }
         store.set(store.integer(forKey: launchesKey) + 1, forKey: launchesKey)
         store.set(true, forKey: runningKey)
+    }
+
+    /// How this process was launched. Captured in `applicationWillFinishLaunching`
+    /// because `currentAppleEvent` is only the launch event that early; read
+    /// by `recordLaunch` once telemetry has started. Main-thread only.
+    private static var launchOrigin = LaunchOrigin.manual
+
+    static func captureLaunchOrigin() {
+        let event = NSAppleEventManager.shared().currentAppleEvent
+        // kAEOpenApplication carrying keyAELaunchedAsLogInItem is what
+        // launchd's login-item launch sends.
+        let saysLogin = event?.eventID == AEEventID(kAEOpenApplication)
+            && event?.paramDescriptor(forKeyword: AEKeyword(keyAEPropData))?.enumCodeValue
+                == OSType(keyAELaunchedAsLogInItem)
+        launchOrigin = LaunchOrigin.classify(
+            appleEventSaysLogin: saysLogin,
+            loginItemEnabled: SMAppService.mainApp.status == .enabled,
+            secondsSinceBoot: ProcessInfo.processInfo.systemUptime)
     }
 
     /// Called from the terminate path once everything has flushed.
@@ -190,6 +209,10 @@ final class DailyCheckIn {
         a["lifecycle.unclean_exits"] = .int(store.integer(forKey: uncleanKey))
         store.set(0, forKey: launchesKey)
         store.set(0, forKey: uncleanKey)
+        // Since the last check-in, by how the launch happened.
+        let origins = LaunchOrigin.drain(store: store)
+        a["lifecycle.launches_login"] = .int(origins.login)
+        a["lifecycle.launches_manual"] = .int(origins.manual)
         a["lifecycle.uptime_hours"] = .double((Date().timeIntervalSince(launchedAt) / 360).rounded() / 10)
         a["lifecycle.login_item"] = .bool(SMAppService.mainApp.status == .enabled)
         // Sparkle records its last check in the app's own defaults; reading it

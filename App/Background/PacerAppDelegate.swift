@@ -312,6 +312,9 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// unwanted noise.
     func applicationWillFinishLaunching(_ notification: Notification) {
         NSWindow.allowsAutomaticWindowTabbing = false
+        // The launch Apple event is only current this early; the check-in
+        // tallies login vs by-hand launches from it (once telemetry starts).
+        DailyCheckIn.captureLaunchOrigin()
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
