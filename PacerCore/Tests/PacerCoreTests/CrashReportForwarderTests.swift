@@ -52,6 +52,14 @@ struct CrashReportForwarderTests {
         #expect(!json.contains("alice"))
     }
 
+    @Test("the event id survives scrubbing: 32 lowercase hex, as Sentry requires")
+    func eventId() throws {
+        let ev = try event()
+        let id = try #require(ev["event_id"] as? String)
+        #expect(id.count == 32)
+        #expect(id.allSatisfy { $0.isHexDigit && !$0.isUppercase })
+    }
+
     @Test("reports for other processes are ignored")
     func otherProcess() {
         let other = Self.ips.replacingOccurrences(of: "\"procName\":\"pacer\"", with: "\"procName\":\"Safari\"")

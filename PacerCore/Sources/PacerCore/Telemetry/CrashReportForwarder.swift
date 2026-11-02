@@ -91,7 +91,6 @@ public enum CrashReportForwarder {
         let os = (body["osVersion"] as? [String: Any]) ?? [:]
         let train = (os["train"] as? String) ?? ""
         var event: [String: Any] = [
-            "event_id": UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased(),
             "timestamp": (capture ?? Date()).timeIntervalSince1970,
             "platform": "cocoa",
             "level": "fatal",
@@ -113,7 +112,11 @@ public enum CrashReportForwarder {
             ],
         ]
         if let release = release(version, build) { event["release"] = release }
-        let scrubbed = TelemetryScrubber.scrub(event, home: home)
+        var scrubbed = TelemetryScrubber.scrub(event, home: home)
+        // Added after scrubbing: an event id is 32 hex characters, exactly the
+        // shape the scrubber removes as a token, and Sentry rejects the whole
+        // envelope without it (HTTP 400, found on a real forward 2026-11-02).
+        scrubbed["event_id"] = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
         guard let data = try? JSONSerialization.data(withJSONObject: scrubbed) else { return nil }
         return Report(incidentId: incident, processName: name, appVersion: version,
                       buildVersion: build, captureTime: capture, eventJSON: data)

@@ -80,7 +80,11 @@ final class CrashReportForwardingService {
         var sent = store.stringArray(forKey: sentKey) ?? []
 
         var posted = 0
-        for candidate in candidates(after: watermark) {
+        let found = candidates(after: watermark)
+        // One line per scan: the only way to tell "nothing to send" from "the
+        // send failed" on someone's Mac (Pacer.err.log).
+        defer { Log.write("Telemetry", "crash reports: \(found.count) new, \(posted) forwarded") }
+        for candidate in found {
             guard posted < maxPerRun else { break }
             guard let text = readText(candidate.url) else {
                 watermark = advance(watermark, to: candidate.modified, store: store)
@@ -104,10 +108,15 @@ final class CrashReportForwardingService {
                 continue
             }
             let request = SentryEnvelope.request(envelope, dsn: dsn, timeout: 10)
-            guard let (_, response) = try? await URLSession.shared.data(for: request),
-                  (response as? HTTPURLResponse)?.statusCode == 200 else {
+            let response = try? await URLSession.shared.data(for: request)
+            let status = (response?.1 as? HTTPURLResponse)?.statusCode
+            guard status == 200 else {
                 // Network down or refused: stop here so the report is tried
                 // again next time instead of being skipped by the watermark.
+                // Sentry's error body says which field it rejected; it echoes
+                // the payload's structure, not its contents.
+                let detail = response.map { String(decoding: $0.0.prefix(300), as: UTF8.self) } ?? ""
+                Log.write("Telemetry", "crash report forward failed: HTTP \(status.map(String.init) ?? "none") \(detail)")
                 break
             }
             posted += 1
