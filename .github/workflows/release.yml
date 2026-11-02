@@ -189,6 +189,45 @@ jobs:
             build \
             | (xcbeautify --renderer github-actions || cat)
 
+      - name: Upload debug symbols to Sentry
+        # Crash reports from this release are symbolicated against these
+        # dSYMs (docs/telemetry-plan.md). The release string is read from the
+        # built app, so it is exactly what TelemetryController reports.
+        # Skipped on dry runs and when the secret is absent (forks); never
+        # fails the release: without it, crashes arrive unsymbolicated.
+        if: github.event_name == 'push' && github.event.inputs.dry_run != 'true'
+        continue-on-error: true
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: ericandrechek
+          SENTRY_PROJECT: pacer
+          SENTRY_CLI_VERSION: 3.8.2
+        run: |
+          set -euo pipefail
+          if [ -z "${SENTRY_AUTH_TOKEN}" ]; then
+            echo "::notice::SENTRY_AUTH_TOKEN not set; skipping dSYM upload"
+            exit 0
+          fi
+          export INSTALL_DIR="${RUNNER_TEMP}/sentry-cli"
+          mkdir -p "${INSTALL_DIR}"
+          curl -sSfL https://sentry.io/get-cli/ | sh
+          export PATH="${INSTALL_DIR}:${PATH}"
+          sentry-cli --version
+
+          APP="$(find build -name "Pacer.app" -path "*/Build/Products/Release/*" | head -1)"
+          PRODUCTS="$(dirname "${APP}")"
+          VER="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${APP}/Contents/Info.plist")"
+          BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "${APP}/Contents/Info.plist")"
+          RELEASE="com.ericandrechek.pacer@${VER}+${BUILD}"
+          echo "Release ${RELEASE}; dSYMs:"
+          find "${PRODUCTS}" -maxdepth 1 -name "*.dSYM"
+
+          sentry-cli debug-files upload --wait "${PRODUCTS}"
+          sentry-cli releases new "${RELEASE}"
+          sentry-cli releases set-commits "${RELEASE}" --local || \
+            echo "::warning::set-commits failed; suspect commits will be missing"
+          sentry-cli releases finalize "${RELEASE}"
+
       - name: Sign the bundle
         env:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -234,6 +273,15 @@ jobs:
             done
             sign "" "${SPARKLE}"
           fi
+
+          # Every other embedded framework (Sentry, since the telemetry work).
+          # Plain frameworks with no nested helpers: one signature each. An
+          # unsigned framework fails notarization, so a new package that
+          # embeds one is covered without remembering to come back here.
+          while IFS= read -r fw; do
+            [ "$(basename "${fw}")" = "Sparkle.framework" ] && continue
+            sign "" "${fw}"
+          done < <(find "${APP_PATH}/Contents/Frameworks" -maxdepth 1 -name "*.framework" -type d)
 
           # Any other dylibs Xcode emitted (PacerCore products, etc).
           while IFS= read -r dylib; do
