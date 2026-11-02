@@ -253,6 +253,19 @@ final class DailyCheckIn {
             let peak = rate.lazy.filter { $0.window == window }.map(\.usedPercentage).max() ?? 0
             a["usage.\(window).peak_band"] = .int(TelemetryBands.percentBand(peak))
             a["usage.\(window).hit_100"] = .bool(peak >= 100)
+            // Whether the app ever told the user "you will hit this limit" on
+            // yesterday, from the snapshot trail the engine already writes
+            // (`hitClaimed` is what the chip and alerts said). Together with
+            // `hit_100` it says if the claim and the outcome agreed. A probe
+            // fetch, one row at most, once a day.
+            let surface = "rl-\(window)"
+            var claimed = FetchDescriptor<PredictionSnapshot>(predicate: #Predicate {
+                $0.surface == surface && $0.hitClaimed == true
+                    && $0.recordedAt >= startOfYesterday && $0.recordedAt < startOfToday
+            })
+            claimed.fetchLimit = 1
+            let forecastHit = ((try? context.fetchCount(claimed)) ?? 0) > 0
+            a["usage.\(window).forecast_hit"] = .bool(forecastHit)
         }
         let rows = (try? context.fetch(FetchDescriptor<DailyAggregate>(
             predicate: #Predicate { $0.date == yesterdayKey }))) ?? []
