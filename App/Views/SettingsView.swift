@@ -71,6 +71,9 @@ struct SettingsView: View {
                     ClaudeSkillCard()
                     CommandLineCard()
                 }
+                SettingsSection("Privacy") {
+                    TelemetryCard()
+                }
             }
             .padding(.horizontal, 24)
             .padding(.top, 18)
@@ -2727,6 +2730,28 @@ private struct LabeledControlRow<Control: View>: View {
 /// and require a bearer token. Editing port/host/token is staged in `@State`
 /// drafts and committed via "Save & restart" (so a half-typed port doesn't
 /// thrash the listener); the enable toggle applies immediately.
+/// The two telemetry toggles (docs/telemetry-plan.md). Both default to on;
+/// `TelemetryController` reads them on every send, so a change applies at once.
+/// Terse by design: the README's privacy section lists exactly what is sent.
+private struct TelemetryCard: View {
+    @AppStorage(PacerSettings.Key.telemetryCrashReports, store: PacerSettings.store)
+    private var crashReports: Bool = true
+    @AppStorage(PacerSettings.Key.telemetryUsageData, store: PacerSettings.store)
+    private var usageData: Bool = true
+
+    var body: some View {
+        PacerCard("Sharing with Pacer", content: {
+            VStack(alignment: .leading, spacing: 10) {
+                Toggle("Send crash reports", isOn: $crashReports)
+                Toggle("Share usage data", isOn: $usageData)
+                Link("What is sent",
+                     destination: URL(string: "https://github.com/ericandrechek/Pacer#privacy")!)
+                    .font(.caption)
+            }
+        })
+    }
+}
+
 private struct APIServerCard: View {
     @AppStorage(PacerSettings.Key.apiEnabled, store: PacerSettings.store)
     private var enabled: Bool = false

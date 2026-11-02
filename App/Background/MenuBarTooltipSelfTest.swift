@@ -38,7 +38,7 @@ import PacerCore
 enum MenuBarTooltipSelfTest {
 
     static var isActive: Bool {
-        ProcessInfo.processInfo.environment["PACER_TOOLTIP_SELFTEST"] == "1"
+        LaunchMode.isActive(.tooltipSelfTest)
     }
 
     /// Where the PNG lands. `PACER_TOOLTIP_SELFTEST_DIR` or the working

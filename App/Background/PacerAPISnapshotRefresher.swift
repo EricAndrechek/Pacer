@@ -324,6 +324,14 @@ final class PacerAPISnapshotRefresher: @unchecked Sendable {
             let ms = Int(elapsed * 1000)
             switch result {
             case .success:
+                // Every build lands in a bucket (a counter add, no I/O); only
+                // a slow one is also sent on its own, as a distribution
+                // point. Builds run on every scan that changes the numbers,
+                // so one metric per build would be most of the quota.
+                TelemetryCounters.add("api.snapshot_ms.\(TelemetryBands.durationBucket(ms: ms))")
+                if elapsed >= Self.slowBuild {
+                    Telemetry.distribution("api.snapshot_ms", Double(ms), unit: .millisecond)
+                }
                 if outcome.first {
                     Log.write("HTTPServer", "snapshot ready in \(ms) ms")
                 } else if job.urgent {

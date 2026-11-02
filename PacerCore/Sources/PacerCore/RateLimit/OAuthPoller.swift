@@ -1494,14 +1494,65 @@ public actor OAuthPoller: TokenPoolTesting {
         }
     }
 
+    // MARK: - Stalled lanes (telemetry)
+
+    /// A lane that was polled before, whose credential is still good and that
+    /// is not cooling down, yet has not been polled for this long: the
+    /// scheduler is starving it (or deferring to another client for good).
+    /// Longer than `externalYieldMax` twice over, so ordinary yielding to
+    /// cswap never counts.
+    static let stalledLaneAfter: TimeInterval = 30 * 60
+
+    /// How many of these lanes are stalled. Pure, for tests.
+    static func stalledLaneCount(lastPolledAt: [Date?], expiresAt: [Date?], cooldownUntil: [Date?],
+                                 now: Date, after threshold: TimeInterval = stalledLaneAfter) -> Int {
+        var n = 0
+        for i in lastPolledAt.indices {
+            guard let last = lastPolledAt[i], now.timeIntervalSince(last) >= threshold else { continue }
+            if let exp = expiresAt[i], exp <= now { continue }
+            if let cool = cooldownUntil[i], cool > now { continue }
+            n += 1
+        }
+        return n
+    }
+
+    private var lastStalledNoteAt: Date?
+
+    /// After each poll: tally `oauth.lane_stalled` when a lane has gone quiet,
+    /// at most once an hour. A loop over a handful of lanes and a counter add;
+    /// nothing is sent from here (the check-in sends the tally).
+    private func noteStalledLanes(now: Date) {
+        if let last = lastStalledNoteAt, now.timeIntervalSince(last) < 3_600 { return }
+        let n = Self.stalledLaneCount(
+            lastPolledAt: lanes.map { $0.state.lastPolledAt },
+            expiresAt: lanes.map { $0.credential.expiresAt },
+            cooldownUntil: lanes.map { $0.state.cooldownUntil },
+            now: now)
+        guard n > 0 else { return }
+        lastStalledNoteAt = now
+        TelemetryCounters.add("oauth.lane_stalled", n)
+    }
+
     // MARK: - One poll
 
     @discardableResult
     private func pollLane(_ idx: Int) async -> PollOutcome {
         guard idx < lanes.count else { return .credentialsNotFound }
         let credential = lanes[idx].credential
+        let polledAt = Date()
         let result = await client.fetchUsage(using: credential)
         let now = clock.now()
+        // Every poll is tallied (the check-in's outcome rates: 401/429...),
+        // but only slow ones are sent as timings: a poll a minute per lane on
+        // every Mac would spend the free plan's metric quota on normal polls.
+        let outcomeClass = Self.telemetryOutcome(result)
+        let pollMs = Date().timeIntervalSince(polledAt) * 1000
+        TelemetryCounters.add("oauth.poll.\(outcomeClass)")
+        TelemetryCounters.add(pollMs < 1000 ? "oauth.poll_ms.lt1s" : pollMs < 5000 ? "oauth.poll_ms.1_5s" : "oauth.poll_ms.gt5s")
+        if pollMs >= 2000 {
+            Telemetry.distribution("oauth.poll_ms", pollMs, unit: .millisecond,
+                                   attributes: ["outcome": .string(outcomeClass)])
+        }
         lastPollAt = now
         // Guard: the lane array can change across the await (rediscovery
         // never runs concurrently on the same actor, but be defensive).
@@ -1515,6 +1566,7 @@ public actor OAuthPoller: TokenPoolTesting {
         let previousLane = lastPolledLaneId
         let outcome = await apply(result: result, laneIndex: idx, now: now)
         lastOutcome = outcome
+        noteStalledLanes(now: now)
         lastPolledLaneId = idx < lanes.count
             ? Self.laneId(lanes[idx].credential.accessToken) : nil
         // Log a change of lane as well as a change of outcome. Deduping on the
@@ -1532,6 +1584,29 @@ public actor OAuthPoller: TokenPoolTesting {
         // cooldown) so it survives a restart.
         await saveAllLaneMeta()
         return outcome
+    }
+
+    /// A poll's outcome as a small enumerable label: `ok`, `401`, `403`,
+    /// `429`, `5xx`, `http_other`, `transport`, `expired`, `schema_mismatch`,
+    /// or `credentials` (nothing to poll with, or the keychain refused).
+    /// Never the body or an error description.
+    nonisolated static func telemetryOutcome(_ result: Result<RateLimitSnapshot, OAuthClientError>) -> String {
+        switch result {
+        case .success: return "ok"
+        case .failure(let error):
+            switch error {
+            case .unauthorized: return "401"
+            case .rateLimited: return "429"
+            case .http(let status, _):
+                if status == 403 { return "403" }
+                return (500..<600).contains(status) ? "5xx" : "http_other"
+            case .transport: return "transport"
+            case .tokenExpired: return "expired"
+            case .responseSchemaMismatch: return "schema_mismatch"
+            case .credentialsNotFound, .keychainAccessDenied, .keychainMalformed, .keychainStatus:
+                return "credentials"
+            }
+        }
     }
 
     /// Is a poll whose org resolved to `org` part of the active account?

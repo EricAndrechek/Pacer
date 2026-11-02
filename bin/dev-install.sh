@@ -237,6 +237,13 @@ if [ -d "${SPARKLE_FW}" ]; then
     sign "" "${SPARKLE_FW}"
 fi
 
+# Every other embedded framework (Sentry, since the telemetry work): one
+# signature each. Mirrors release.yml.
+while IFS= read -r fw; do
+    [ "$(basename "${fw}")" = "Sparkle.framework" ] && continue
+    sign "" "${fw}"
+done < <(find "${BUILD_OUTPUT}/Contents/Frameworks" -maxdepth 1 -name "*.framework" -type d)
+
 # PacerCore resource bundles ride along inside the app and the widget
 # extension; sign them so the parent seals don't break later.
 for bundle in \

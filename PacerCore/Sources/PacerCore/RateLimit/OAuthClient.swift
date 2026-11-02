@@ -393,6 +393,7 @@ public struct OAuthClient: Sendable {
         // Layer 3 (or first-ever read): the only prompt-risking step.
         guard allowKeyRead else { return (working(), nil) }
         guard case .success(let key) = desktop.readKey() else {
+            CredentialTelemetry.noteOnce("desktop", "key_unreadable")
             return (working(), nil)
         }
         let creds = desktop.profileCredentials(fromBlobs: blobs, keyPassword: key)
@@ -469,8 +470,11 @@ public struct OAuthClient: Sendable {
             let fingerprint = desktop.cacheFingerprint()
             if desktopGate.shouldRead(fingerprint: fingerprint) {
                 desktopGate.record(fingerprint: fingerprint)
-                if case .success(let creds) = desktop.readAll() {
-                    candidates.append(contentsOf: creds)
+                switch desktop.readAll() {
+                case .success(let creds): candidates.append(contentsOf: creds)
+                // Gated by the fingerprint above, so this tallies a changed
+                // cache that still would not read, not every poll.
+                case .failure(let error): CredentialTelemetry.note("desktop", error.telemetryKind)
                 }
             }
         }
@@ -526,13 +530,25 @@ public struct OAuthClient: Sendable {
         // dynamically — see `UsageLimit.parse` — so new models/kinds/groups
         // flow through with no code change. Tolerant: a bad item is
         // dropped, never fails the whole decode.
+        let limits = UsageLimit.parse(top["limits"])
+        // Format drift: a limits[] kind this Mac has never seen. Reported
+        // once per kind per Mac (`FormatDrift`), so a poll a minute costs a
+        // set lookup per limit.
+        for kind in Set(limits.map(\.kind)) { FormatDrift.noteUsageEndpointKind(kind) }
+        // A window that used to arrive and no longer does.
+        for key in ["five_hour", "seven_day"] where top[key] == nil {
+            if FormatDrift.firstSighting("window_missing", key) {
+                Telemetry.count("format.usage_endpoint",
+                                attributes: ["kind": .string(key), "change": .string("window_missing")])
+            }
+        }
         return RateLimitSnapshot(
             sampledAt: sampledAt,
             fiveHour: decodeWindow(top["five_hour"]),
             sevenDay: decodeWindow(top["seven_day"]),
             extraUsageCents: Self.decodeExtraUsage(top["extra_usage"]),
             organizationId: organizationId,
-            limits: UsageLimit.parse(top["limits"])
+            limits: limits
         )
     }
 

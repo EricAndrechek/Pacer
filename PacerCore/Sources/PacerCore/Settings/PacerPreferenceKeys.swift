@@ -121,6 +121,14 @@ public enum PacerPreferenceKeys {
     /// read-only. Off stops it for anyone who would rather Pacer not read
     /// another tool's credentials. See `ParkedCredentialStore`.
     public static let switcherCredentialsEnabled = "pacer.switcher.credentialsEnabled"
+    /// Opt-out: send crash reports, app hangs, macOS diagnostics and problem
+    /// reports to Pacer's Sentry project. On by default (decided 2026-10-21);
+    /// a missing value means on. Read live by every send hook, so turning it
+    /// off stops sending immediately. See docs/telemetry-plan.md.
+    public static let telemetryCrashReports = "pacer.telemetry.crashReports"
+    /// Opt-out: send usage data (daily check-in, sessions, performance and
+    /// feature-use metrics). On by default; a missing value means on.
+    public static let telemetryUsageData = "pacer.telemetry.usageData"
     /// Set when the user dismisses the first-run "Also track Claude Desktop"
     /// nudge with "Not now" — so it never reappears. The feature itself stays
     /// reachable in Settings → Authentication; this only silences the banner.
@@ -264,6 +272,16 @@ public enum PacerPreferences {
     /// (key absent → on); only an explicit off disables it.
     public static func switcherCredentialsEnabled(from store: UserDefaults = store) -> Bool {
         (store.object(forKey: PacerPreferenceKeys.switcherCredentialsEnabled) as? Bool) ?? true
+    }
+
+    /// Both telemetry toggles default to on: an absent value is "on", so a
+    /// reset or a fresh install never silently turns them off or on wrongly.
+    public static func telemetryCrashReportsEnabled(from store: UserDefaults = store) -> Bool {
+        (store.object(forKey: PacerPreferenceKeys.telemetryCrashReports) as? Bool) ?? true
+    }
+
+    public static func telemetryUsageDataEnabled(from store: UserDefaults = store) -> Bool {
+        (store.object(forKey: PacerPreferenceKeys.telemetryUsageData) as? Bool) ?? true
     }
 
     /// Default port for the local API/metrics server. 7223 = "PACE" on a

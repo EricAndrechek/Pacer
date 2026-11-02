@@ -28,7 +28,7 @@ import PacerCore
 enum ArchiveRoundTrip {
 
     static var isActive: Bool {
-        ProcessInfo.processInfo.environment["PACER_ARCHIVE_ROUNDTRIP"] == "1"
+        LaunchMode.isActive(.archiveRoundTrip)
     }
 
     /// How many recent days to verify. Enough to be meaningful, bounded so the

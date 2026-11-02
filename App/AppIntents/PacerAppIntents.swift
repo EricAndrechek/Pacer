@@ -61,6 +61,7 @@ struct GetUsageIntent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog & ReturnsValue<Double> {
+        TelemetryCounters.add("intent.\(Self.self)")
         let snap = try PacerSnapshotBuilder.build()
         guard let pct = snap.limits.fiveHour?.usedPercent else {
             // A 7-day reading with no 5-hour one: the account has no 5-hour
@@ -86,6 +87,7 @@ struct GetSevenDayUsageIntent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog & ReturnsValue<Double> {
+        TelemetryCounters.add("intent.\(Self.self)")
         let snap = try PacerSnapshotBuilder.build()
         guard let pct = snap.limits.sevenDay?.usedPercent else {
             return .result(value: 0, dialog: "7-day usage is unavailable — no rate-limit samples yet.")
@@ -105,6 +107,7 @@ struct GetTodayCostIntent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog & ReturnsValue<Double> {
+        TelemetryCounters.add("intent.\(Self.self)")
         let cost = try PacerSnapshotBuilder.build().cost.todayUSD
         return .result(value: cost, dialog: "Today's Claude Code cost is \(pacerCostExact(cost)).")
     }
@@ -121,6 +124,7 @@ struct GetWeekCostIntent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog & ReturnsValue<Double> {
+        TelemetryCounters.add("intent.\(Self.self)")
         let cost = try PacerSnapshotBuilder.build().cost.weekUSD
         return .result(value: cost, dialog: "This week's Claude Code cost is \(pacerCostExact(cost)).")
     }
@@ -137,6 +141,7 @@ struct GetMonthCostIntent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog & ReturnsValue<Double> {
+        TelemetryCounters.add("intent.\(Self.self)")
         let cost = try PacerSnapshotBuilder.build().cost.monthUSD
         return .result(value: cost, dialog: "This month's Claude Code cost is \(pacerCostExact(cost)).")
     }
@@ -153,6 +158,7 @@ struct GetTodayTokensIntent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog & ReturnsValue<Int> {
+        TelemetryCounters.add("intent.\(Self.self)")
         let tokens = try PacerSnapshotBuilder.build().tokens.todayTotal
         return .result(value: tokens, dialog: "You've used \(tokens.formatted()) tokens today.")
     }
@@ -169,6 +175,7 @@ struct GetProjectedTodayCostIntent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog & ReturnsValue<Double> {
+        TelemetryCounters.add("intent.\(Self.self)")
         let snap = try PacerSnapshotBuilder.build()
         if let projected = snap.cost.projectedTodayUSD {
             return .result(value: projected, dialog: "Projected to spend \(pacerCostExact(projected)) today.")
@@ -190,6 +197,7 @@ struct GetFiveHourResetIntent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog & ReturnsValue<Date> {
+        TelemetryCounters.add("intent.\(Self.self)")
         let limits = try PacerSnapshotBuilder.build().limits
         guard let resetsAt = limits.fiveHour?.resetsAt else {
             throw limits.fiveHour == nil && limits.sevenDay != nil
@@ -211,6 +219,7 @@ struct GetWillHitLimitIntent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog & ReturnsValue<Bool> {
+        TelemetryCounters.add("intent.\(Self.self)")
         let limits = try PacerSnapshotBuilder.build().limits
         // Every window, named by its own label — the 5-hour and 7-day blocks
         // and any scoped per-model cap. This asked about exactly two until the
@@ -241,6 +250,7 @@ struct GetPaceStatusIntent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog & ReturnsValue<String> {
+        TelemetryCounters.add("intent.\(Self.self)")
         let pace = try PacerSnapshotBuilder.build().pace
         guard let status = pace.status else {
             return .result(value: "unknown",
@@ -267,6 +277,7 @@ struct GetPacerSnapshotIntent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog & ReturnsValue<String> {
+        TelemetryCounters.add("intent.\(Self.self)")
         let snap = try PacerSnapshotBuilder.build()
         let json = try snap.encodedJSON()
         // No 5-hour limit on the account → leave it out rather than "5h —".
@@ -294,6 +305,7 @@ struct RefreshScanIntent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog {
+        TelemetryCounters.add("intent.\(Self.self)")
         NotificationCenter.default.post(
             name: .pacerRequestImmediateScan,
             object: nil

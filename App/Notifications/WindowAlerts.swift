@@ -145,9 +145,11 @@ final class AlertResponder: NSObject, UNUserNotificationCenterDelegate, Sendable
         await MainActor.run {
             switch action {
             case NotificationCoordinator.muteAction:
+                TelemetryCounters.add("ui.alert.mute")
                 // The test alert carries no window: nothing to mute.
                 if let windowKey { NotificationCoordinator.shared.mute(windowKey: windowKey, resetsAt: resetsAt) }
             case NotificationCoordinator.openAction, UNNotificationDefaultActionIdentifier:
+                TelemetryCounters.add(action == UNNotificationDefaultActionIdentifier ? "ui.alert.click" : "ui.alert.open")
                 NotificationCenter.default.post(name: .pacerOpenMainWindow, object: nil)
             default:
                 break

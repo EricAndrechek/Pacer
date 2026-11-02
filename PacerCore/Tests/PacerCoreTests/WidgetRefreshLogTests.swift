@@ -114,4 +114,43 @@ struct WidgetRefreshLogTests {
         #expect(WidgetRefreshLog.shortName("Widget") == "Widget")
         #expect(WidgetRefreshLog.shortName("Custom") == "Custom")
     }
+
+    @Test func msRoundTripsAndOldLinesStillParse() throws {
+        let timed = WidgetRefreshLog.Entry(at: Self.now, event: .timeline, kind: WidgetKinds.paceGauges,
+                                           family: "systemMedium", next: Self.now.addingTimeInterval(300), ms: 41)
+        let line = WidgetRefreshLog.line(timed)
+        #expect(line.hasSuffix(" next=2026-09-21T14:18:20Z ms=41"))
+        let back = try #require(WidgetRefreshLog.parse(line))
+        #expect(back.ms == 41)
+        #expect(back.next == Self.now.addingTimeInterval(300))
+
+        let snap = WidgetRefreshLog.Entry(at: Self.now, event: .snapshot, kind: WidgetKinds.todayCost,
+                                          family: "systemSmall", next: nil, ms: 7)
+        #expect(WidgetRefreshLog.parse(WidgetRefreshLog.line(snap))?.ms == 7)
+
+        // Written before the field existed.
+        let old = try #require(WidgetRefreshLog.parse(
+            "2026-09-21T14:13:20.000Z timeline PaceGaugesWidget systemSmall next=2026-09-21T14:18:20Z"))
+        #expect(old.ms == nil)
+        #expect(old.next != nil)
+    }
+
+    @Test func durationsGroupByKindAndFamilyInWindow() {
+        func e(_ dt: TimeInterval, _ kind: String, _ family: String, _ ms: Int?) -> WidgetRefreshLog.Entry {
+            .init(at: Self.now.addingTimeInterval(dt), event: .timeline, kind: kind, family: family,
+                  next: nil, ms: ms)
+        }
+        let entries = [
+            e(-100, WidgetKinds.paceGauges, "systemSmall", 10),
+            e(-50, WidgetKinds.paceGauges, "systemSmall", 30),
+            e(-50, WidgetKinds.paceGauges, "systemMedium", 20),
+            e(-50, WidgetKinds.todayCost, "systemSmall", nil),       // old line: skipped
+            e(-9_000, WidgetKinds.paceGauges, "systemSmall", 999),   // before the window
+        ]
+        let out = WidgetRefreshLog.durations(entries: entries, since: Self.now.addingTimeInterval(-3_600))
+        #expect(out.map(\.kind) == ["PaceGauges", "PaceGauges"])
+        #expect(out.map(\.family) == ["systemMedium", "systemSmall"])
+        #expect(out[1].ms.sorted() == [10, 30])
+        #expect(out[1].count == 2)
+    }
 }

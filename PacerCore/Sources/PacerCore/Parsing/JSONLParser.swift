@@ -51,9 +51,14 @@ public enum JSONLLineParser {
         rootPath: String? = nil,
         fixedProjectPath: String? = nil
     ) -> [ParsedUsageEntry] {
-        guard !line.isEmpty,
-              let raw = try? decoder.decode(RawJSONLine.self, from: line),
-              let entry = entry(from: raw, aliases: aliases, rootPath: rootPath,
+        guard !line.isEmpty else { return [] }
+        guard let raw = try? decoder.decode(RawJSONLine.self, from: line) else {
+            // A complete line that does not decode: real corruption, or a
+            // token field whose shape changed. Rare, so one tally add each.
+            TelemetryCounters.add("data.malformed_line")
+            return []
+        }
+        guard let entry = entry(from: raw, aliases: aliases, rootPath: rootPath,
                                 fixedProjectPath: fixedProjectPath)
         else { return [] }
         return expand(entry, iterations: raw.message?.usage?.iterations)

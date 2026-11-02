@@ -94,6 +94,22 @@ if confirm_overwrite NOTARY_ISSUER_ID; then
     printf '%s' "${ISSUER_ID}" | gh secret set NOTARY_ISSUER_ID --repo "${REPO}"
 fi
 
+# Optional: Sentry dSYM upload (docs/telemetry-plan.md). Without it the
+# release still ships; crash reports from it just arrive unsymbolicated.
+echo
+echo "----- Optional: SENTRY_AUTH_TOKEN -----"
+echo "Create an organization token at"
+echo "  https://ericandrechek.sentry.io/settings/auth-tokens/"
+echo "(org tokens carry the fixed CI scopes sentry-cli needs to upload"
+echo "debug files and create releases). Leave empty to skip."
+if confirm_overwrite SENTRY_AUTH_TOKEN; then
+    read -r -s -p "Sentry org auth token: " SENTRY_TOKEN
+    echo
+    if [ -n "${SENTRY_TOKEN}" ]; then
+        printf '%s' "${SENTRY_TOKEN}" | gh secret set SENTRY_AUTH_TOKEN --repo "${REPO}"
+    fi
+fi
+
 # 3. Final check
 echo
 echo "----- 3/3: Done -----"

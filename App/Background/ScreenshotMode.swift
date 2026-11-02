@@ -39,7 +39,7 @@ enum ScreenshotMode {
 
     /// True when launched for a screenshot run.
     static var isActive: Bool {
-        ProcessInfo.processInfo.environment["PACER_SCREENSHOT_MODE"] == "1"
+        LaunchMode.isActive(.screenshot)
     }
 
     /// `LayoutShiftProbe` records each named view's frame (window points,

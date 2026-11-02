@@ -46,14 +46,17 @@ struct LiveSessionProvider: TimelineProvider {
     }
 
     func getSnapshot(in context: Context, completion: @escaping (LiveSessionEntry) -> Void) {
-        WidgetRefreshRecord.snapshot(WidgetKinds.liveSession, context)
-        completion(currentEntry())
+        let began = WidgetRefreshRecord.begin()
+        let entry = currentEntry()
+        WidgetRefreshRecord.snapshot(WidgetKinds.liveSession, context, since: began)
+        completion(entry)
     }
 
     func getTimeline(in context: Context, completion: @escaping (Timeline<LiveSessionEntry>) -> Void) {
+        let began = WidgetRefreshRecord.begin()
         let entry = currentEntry()
         let nextRefresh = PacerClock.now.addingTimeInterval(300)
-        WidgetRefreshRecord.timeline(WidgetKinds.liveSession, context, next: nextRefresh)
+        WidgetRefreshRecord.timeline(WidgetKinds.liveSession, context, next: nextRefresh, since: began)
         completion(Timeline(entries: [entry], policy: .after(nextRefresh)))
     }
 

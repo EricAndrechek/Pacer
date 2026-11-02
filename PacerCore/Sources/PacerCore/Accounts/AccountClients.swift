@@ -145,6 +145,16 @@ public struct AccountClients: Sendable, Equatable {
         return "\(base) (\(others.joined(separator: ", ")))"
     }
 
+    /// How many distinct clients of each kind exist on this Mac (a Desktop
+    /// install or a pinned profile counts once however many accounts it has
+    /// held). Counts only, for the daily check-in: a client id is a folder
+    /// path and a label can name a person's slot, so neither ever leaves.
+    public func clientCountsByKind() -> [Kind: Int] {
+        var ids: [Kind: Set<String>] = [:]
+        for entry in entries { ids[entry.kind, default: []].insert(entry.clientId) }
+        return ids.mapValues(\.count)
+    }
+
     /// The (account, client) pairs active at `now`, for telling whether the
     /// active set moved.
     public func activePairs(at now: Date) -> Set<String> {

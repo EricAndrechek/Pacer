@@ -65,6 +65,12 @@ packages:
     # See docs/releasing.md for the keypair + secrets setup.
     url: https://github.com/sparkle-project/Sparkle
     from: 2.6.0
+  Sentry:
+    # Crash reports and usage telemetry (docs/telemetry-plan.md). App target
+    # only: the widget and the CLI never run the SDK; their crashes reach
+    # Sentry through the app (CrashReportForwarder).
+    url: https://github.com/getsentry/sentry-cocoa
+    from: 9.30.2
 
 targets:
   Pacer:
@@ -153,8 +159,14 @@ targets:
         # time. The `[Memory] … launch` log line says whether it took.
         LSEnvironment:
           MallocSpaceEfficient: "1"
+        # Where crash reports and usage data go (docs/telemetry-plan.md). The
+        # DSN is a public client key by design: it can only send, not read.
+        # Building from source under your own account? Set it empty and the
+        # app never starts telemetry.
+        PacerSentryDSN: $(PACER_SENTRY_DSN)
     settings:
       base:
+        PACER_SENTRY_DSN: https://4538a70956bdb802f903aa6ceba5ba32@o4506596663427072.ingest.us.sentry.io/4512290674049024
         PRODUCT_BUNDLE_IDENTIFIER: com.ericandrechek.pacer
         PRODUCT_NAME: Pacer
         CODE_SIGN_ENTITLEMENTS: App/Pacer.entitlements
@@ -168,6 +180,13 @@ targets:
         # analytical engine.
         SWIFT_OBJC_BRIDGING_HEADER: App/Archive/PacerArchiveBridge.h
         OTHER_LDFLAGS: $(inherited) -lc++ -Wl,-dead_strip
+      configs:
+        # Explicit, because release.yml uploads these dSYMs to Sentry: crash
+        # reports from a release are symbolicated against them. Xcode's
+        # default for Release is the same; this keeps a future default change
+        # from silently shipping releases whose crashes can't be read.
+        Release:
+          DEBUG_INFORMATION_FORMAT: dwarf-with-dsym
     dependencies:
       - package: PacerCore
         product: PacerCore
@@ -175,6 +194,8 @@ targets:
         product: PacerUI
       - package: Sparkle
         product: Sparkle
+      - package: Sentry
+        product: Sentry
       - target: PacerWidgets
       # The `pacer` command line (#194), at
       # Contents/Helpers/PacerCLI.app/Contents/MacOS/pacer. Unsigned here like
@@ -257,8 +278,18 @@ targets:
       - path: CLI
         excludes:
           - "pacer.entitlements"
+          - "Info.plist"   # generated below; not a Swift source
+    # The rest of the Info.plist is generated (GENERATE_INFOPLIST_FILE); this
+    # supplement carries the one key Xcode has no INFOPLIST_KEY_ alias for.
+    # `pacer feedback` reads the DSN from here, as the app does (a public
+    # client key that can only send; empty means feedback stays local).
+    info:
+      path: CLI/Info.plist
+      properties:
+        PacerSentryDSN: $(PACER_SENTRY_DSN)
     settings:
       base:
+        PACER_SENTRY_DSN: https://4538a70956bdb802f903aa6ceba5ba32@o4506596663427072.ingest.us.sentry.io/4512290674049024
         PRODUCT_NAME: PacerCLI
         EXECUTABLE_NAME: pacer
         PRODUCT_BUNDLE_IDENTIFIER: com.ericandrechek.pacer.cli

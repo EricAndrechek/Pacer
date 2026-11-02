@@ -9,6 +9,14 @@ import Foundation
 
 extension UsageIntelligenceEngine {
 
+    /// The scoped (per-model) windows this engine currently forecasts, as
+    /// `(window key, telemetry kind)`. For the daily check-in's accuracy
+    /// metrics: the key goes back into `meterModelBoard`, the kind is the only
+    /// part that is sent. Empty before the first refit.
+    public func scopedWindowKinds() -> [(key: String, kind: String)] {
+        (features?.windows ?? []).compactMap { w in w.telemetryKind.map { (w.key, $0) } }
+    }
+
     /// Every model for `windowKey`'s meter (`MeterModelBoard`). Empty rows
     /// before the first refit, and for a window this engine does not fit.
     ///

@@ -225,6 +225,43 @@ These are subtle, easy to miss, and break user-visible numbers:
   lags by hours and has fewer categories than JSONL. Use only as a
   sanity-check probe.
 
+## Telemetry — what Pacer may send, and how
+
+Pacer sends crash reports and usage data to its Sentry project, both on by
+default, each with a Settings → Privacy toggle (decided 2026-10-21; plan and
+every signal in `docs/telemetry-plan.md`; README "Privacy" is the short public
+promise). Read this before adding any signal.
+
+- **The doors.** PacerCore code reports through `Telemetry` (count,
+  distribution, gauge, after-the-fact `Span`, breadcrumb) or, for anything
+  frequent, `TelemetryCounters.add`, which the daily check-in drains. Both are
+  no-ops until the app installs its Sentry sink. Never `import Sentry` outside
+  `App/Telemetry/`: the widget and the CLI link PacerCore and must never run the
+  SDK.
+- **Never sent, under any toggle:** account ids (they are org ids), emails, org
+  or project names, paths, prompts, costs, exact token counts, error
+  descriptions (use domain + code), `Log.write` lines. Attributes are our own
+  enumerable values (model id, window kind, plan tier, phase, version, outcome
+  class). Usage levels go in bands (`TelemetryBands`).
+- **Everything leaving goes through `TelemetryScrubber`.** The send hooks in
+  `TelemetryController` and the CLI's feedback path apply it; do not add a send
+  path that skips it.
+- **Only the user's own app sends.** `LaunchMode.isNormalLaunch` gates it:
+  screenshot, render, probe and self-test runs, tests, and `PACER_TELEMETRY=off`
+  never start Sentry. A new diagnostic mode goes in `LaunchMode`, nowhere else.
+- **Hot paths stay hot.** Nothing new per scan cycle, per click or per forecast
+  but a `TelemetryCounters.add`. Report the slow ones (`logIfInteresting`),
+  rebuilds, refits, passes, downloads. Quota-eating reports have a `DailyCap`.
+- **Toggles are read on every send**, not at start. Respect that in new sinks.
+- **The widget and the CLI** report through the App Group: the CLI appends to
+  `CLIRunLog`, the widget adds `ms=` to `WidgetRefreshLog`, and the app forwards
+  their macOS crash reports (`CrashReportForwarder`). Do not give them the SDK.
+- **Changing what is sent** means updating the signal list in
+  `docs/telemetry-plan.md` in the same commit. The README "Privacy" section is
+  deliberately short (Eric's call, 2026-11-02); touch it only if a new kind of
+  data starts leaving (it promises: never prompts, projects, files, accounts or
+  costs).
+
 ## Look at the UI yourself — `make render-live`
 
 Pacer can render its own cards, against the real store, to PNGs:

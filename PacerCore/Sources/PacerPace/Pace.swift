@@ -18,12 +18,20 @@ public struct PaceIO: @unchecked Sendable {
     /// race to refresh a verdict naps while the winner writes it (#266).
     /// Separate from `sleep`, which opens Pacer's stream on first use.
     public var nap: (TimeInterval) -> Void
+    /// Where `pacer feedback` may send. Off by default, so a test (or any
+    /// caller that builds its own `PaceIO`) never reaches the network.
+    public var telemetry: PaceTelemetry
+    /// Where this run's answers came from, for the run log: the app's local
+    /// API, the store directly, or (never asked) neither.
+    public var source: () -> CLIRunLog.Source
 
     public init(out: @escaping (String) -> Void, err: @escaping (String) -> Void,
                 now: @escaping () -> Date, sleep: @escaping (TimeInterval) -> Void,
                 get: @escaping (URLRequest) -> PaceResponse?,
                 gitBranch: @escaping (String) -> String?,
-                nap: @escaping (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) }) {
+                nap: @escaping (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) },
+                telemetry: PaceTelemetry = .off,
+                source: @escaping () -> CLIRunLog.Source = { .none }) {
         self.out = out
         self.err = err
         self.now = now
@@ -31,6 +39,8 @@ public struct PaceIO: @unchecked Sendable {
         self.get = get
         self.gitBranch = gitBranch
         self.nap = nap
+        self.telemetry = telemetry
+        self.source = source
     }
 
     /// The real thing: stdout, stderr, the wall clock, URLSession and git.
@@ -48,6 +58,7 @@ public struct PaceIO: @unchecked Sendable {
         if base.hasSuffix("/") { base.removeLast() }
         let stream = PaceStream(apiBase: base,
                                 token: environment["PACE_TOKEN"].flatMap { $0.isEmpty ? nil : $0 })
+        let tracker = PaceSourceTracker()
         return PaceIO(
             out: { FileHandle.standardOutput.write(Data($0.utf8)) },
             err: { FileHandle.standardError.write(Data($0.utf8)) },
@@ -55,8 +66,106 @@ public struct PaceIO: @unchecked Sendable {
             sleep: { seconds in
                 if let stream { stream.sleep(seconds) } else { Thread.sleep(forTimeInterval: seconds) }
             },
-            get: { request in PaceHTTP.get(request) ?? offline?.answer(request) },
-            gitBranch: PaceHTTP.gitBranch)
+            get: { request in
+                if let response = PaceHTTP.get(request) {
+                    tracker.note(.api)
+                    return response
+                }
+                let answer = offline?.answer(request)
+                if answer != nil { tracker.note(.offline) }
+                return answer
+            },
+            gitBranch: PaceHTTP.gitBranch,
+            telemetry: .live(),
+            source: { tracker.value })
+    }
+}
+
+/// Which way a run's reads were answered. The API wins when both happened
+/// (a retry after the port came up), since that is what a caller sees.
+final class PaceSourceTracker: @unchecked Sendable {
+    private let lock = NSLock()
+    private var seen: CLIRunLog.Source = .none
+    func note(_ source: CLIRunLog.Source) {
+        lock.withLock { if seen != .api { seen = source } }
+    }
+    var value: CLIRunLog.Source { lock.withLock { seen } }
+}
+
+final class PaceFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+    func set() { lock.withLock { value = true } }
+    var isSet: Bool { lock.withLock { value } }
+}
+
+/// What `pacer feedback` needs to send a report to Sentry, all injectable.
+/// The CLI never starts the Sentry SDK (it must stay a fast offline process);
+/// it posts one hand-built envelope (`SentryEnvelope`), once, on request.
+public struct PaceTelemetry: @unchecked Sendable {
+    /// The public client key, from the CLI bundle's `PacerSentryDSN`. Nil or
+    /// empty means this build sends nothing (a source build with no account).
+    public var dsn: String?
+    public var release: String?
+    public var environment: String
+    public var installId: String?
+    /// The Settings toggle for crash reports. Feedback is a report the user
+    /// types themselves, but the same switch is the one "send nothing" control
+    /// people know to look for, so it covers this too.
+    public var enabled: () -> Bool
+    /// One POST; true only for a 2xx. Waits at most ~3 s.
+    public var send: (URLRequest) -> Bool
+
+    public init(dsn: String?, release: String?, environment: String, installId: String?,
+                enabled: @escaping () -> Bool, send: @escaping (URLRequest) -> Bool) {
+        self.dsn = dsn
+        self.release = release
+        self.environment = environment
+        self.installId = installId
+        self.enabled = enabled
+        self.send = send
+    }
+
+    public static let off = PaceTelemetry(dsn: nil, release: nil, environment: "production",
+                                          installId: nil, enabled: { false }, send: { _ in false })
+
+    public static func live() -> PaceTelemetry {
+        let info = Pace.cliBundle?.infoDictionary ?? [:]
+        let version = info["CFBundleShortVersionString"] as? String ?? "0"
+        let build = info["CFBundleVersion"] as? String ?? "0"
+        #if DEBUG
+        let environment = "development"
+        #else
+        let environment = "production"
+        #endif
+        // The same install id the app's Sentry uses, so a report and the
+        // app's check-in can be told to be one install without any account.
+        let installId = (try? PacerStore.sharedContainerURL()
+            .appendingPathComponent("Sentry/INSTALLATION"))
+            .flatMap { try? String(contentsOf: $0, encoding: .utf8) }
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .flatMap { $0.isEmpty ? nil : $0 }
+        return PaceTelemetry(
+            dsn: info["PacerSentryDSN"] as? String,
+            release: "com.ericandrechek.pacer@\(version)+\(build)",
+            environment: environment, installId: installId,
+            enabled: { PacerPreferences.telemetryCrashReportsEnabled(from: PacerPreferences.store) },
+            send: { request in
+                let session = URLSession(configuration: .ephemeral)
+                defer { session.finishTasksAndInvalidate() }
+                let done = DispatchSemaphore(value: 0)
+                let success = PaceFlag()
+                session.dataTask(with: request) { _, response, error in
+                    if error == nil, let status = (response as? HTTPURLResponse)?.statusCode,
+                       (200..<300).contains(status) {
+                        success.set()
+                    }
+                    done.signal()
+                }.resume()
+                // The request's own timeout is 3 s; this bounds a stuck connect.
+                _ = done.wait(timeout: .now() + 3.5)
+                return success.isSet
+            })
     }
 }
 
@@ -97,6 +206,32 @@ public enum Pace {
         }
     }
 
+    /// `run`, with a start and an end line in the CLI run log (`CLIRunLog`),
+    /// so the app can report what the command line does without the CLI
+    /// itself talking to anything: two appended lines, no SDK, no store.
+    /// Arguments are never logged, only the subcommand name when it is one we
+    /// define. Help is not a run worth counting.
+    public static func runLogged(_ arguments: [String],
+                                 environment: [String: String] = ProcessInfo.processInfo.environment,
+                                 io: PaceIO = .standard,
+                                 logURL: URL? = CLIRunLog.defaultURL()) -> Int32 {
+        let sub = arguments.first ?? "report"
+        // After `feedback` everything is the report's text, `--help` included.
+        let asksHelp = sub != "feedback" && arguments.contains { $0 == "-h" || $0 == "--help" }
+        guard !asksHelp, sub != "help", logURL != nil else {
+            return run(arguments, environment: environment, io: io)
+        }
+        let name = CLIRunLog.safeName(sub, known: Set(subcommands).union(["feedback", "help"]))
+        let id = CLIRunLog.newRunId()
+        CLIRunLog.recordStart(runId: id, subcommand: name, to: logURL)
+        let began = DispatchTime.now().uptimeNanoseconds
+        let code = run(arguments, environment: environment, io: io)
+        let ms = Int((DispatchTime.now().uptimeNanoseconds &- began) / 1_000_000)
+        CLIRunLog.recordEnd(runId: id, subcommand: name, exitCode: code, milliseconds: ms,
+                            source: io.source(), to: logURL)
+        return code
+    }
+
     /// For the "unknown subcommand" message.
     static let subcommands = ["report", "json", "accounts", "sessions", "gate", "status", "wait", "safecap", "feedback"]
 
@@ -108,20 +243,24 @@ public enum Pace {
     /// `Bundle.main` is the link's folder rather than `PacerCLI.app`, so the
     /// bundle is found again from the executable's real path.
     static var version: String {
-        func read(_ bundle: Bundle?) -> String? {
-            guard let short = bundle?.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
-            else { return nil }
-            let build = bundle?.object(forInfoDictionaryKey: "CFBundleVersion") as? String
-            return build.map { "\(short) (\($0))" } ?? short
-        }
-        if let main = read(.main) { return main }
+        guard let bundle = cliBundle,
+              let short = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        else { return "unknown" }
+        let build = bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+        return build.map { "\(short) (\($0))" } ?? short
+    }
+
+    /// The `PacerCLI.app` this process runs from: `Bundle.main` when it has a
+    /// version, else found again from the executable's real path.
+    static var cliBundle: Bundle? {
+        if Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") != nil { return .main }
         var path = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
-        guard proc_pidpath(getpid(), &path, UInt32(path.count)) > 0 else { return "unknown" }
+        guard proc_pidpath(getpid(), &path, UInt32(path.count)) > 0 else { return nil }
         let executable = URL(fileURLWithPath: String(
             decoding: path.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self))
         // …/PacerCLI.app/Contents/MacOS/pacer
         let app = executable.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        return read(Bundle(url: app)) ?? "unknown"
+        return Bundle(url: app)
     }
 
     /// `pacer --help`.
@@ -158,9 +297,13 @@ public enum Pace {
                              20=beyond --max-wait (checkpoint & stop) 2=no Pacer.
                              A login switch resumes only onto a login with
                              --resume-headroom left below that window's limit
-      feedback "TEXT"        report a wrong verdict or a missing flag: saved to
-                             ~/.claude/pace/feedback.jsonl, with a link to file
-                             it on GitHub. Nothing is sent anywhere
+      feedback [--local] "TEXT"
+                             report a wrong verdict or a missing flag: saved to
+                             ~/.claude/pace/feedback.jsonl and sent to Pacer's
+                             issue tracker (the text only, scrubbed of paths
+                             and names). --local, PACER_FEEDBACK=local, or
+                             Settings > Privacy > crash reports off keeps it on
+                             this machine, with a link to file it on GitHub
 
     Flags:
       --model NAME|auto|all  which per-model caps bind (account-wide windows
@@ -1332,8 +1475,18 @@ final class PaceRun {
     /// Pacer (#268) rather than worked around in an agent's memory, where the
     /// workaround outlives the fix. One JSON line in a local inbox, and a
     /// pre-filled GitHub issue link for the user to open if they choose.
-    /// Nothing leaves the machine: no request, no browser.
-    private func cmdFeedback(_ words: [String]) throws {
+    /// By default the text is also sent to Pacer's Sentry project (Eric's
+    /// decision, 2026-11-02), so a wrong verdict reaches the person who can fix
+    /// it; `--local`, `PACER_FEEDBACK=local` and the Settings toggle keep it
+    /// here. Sending can fail and never fails the command: the local copy and
+    /// the GitHub link are already the answer.
+    private func cmdFeedback(_ allWords: [String]) throws {
+        var words = allWords
+        var keepLocal = env["PACER_FEEDBACK"] == "local"
+        if words.first == "--local" {
+            keepLocal = true
+            words.removeFirst()
+        }
         let text = words.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else {
             try die("feedback needs the text: pacer feedback \"what you ran, what it printed\"")
@@ -1369,8 +1522,29 @@ final class PaceRun {
         let title = "pacer feedback: " + (text.count > 60 ? String(text.prefix(59)) + "…" : text)
         let url = Pace.issuesURL + "?title=" + Self.queryEncoded(title)
             + "&body=" + Self.queryEncoded(String(body.prefix(4_000)))
-        io.out("pace: feedback saved to \(inbox) — nothing was sent anywhere.\n")
-        io.out("To file it as an issue, open:\n\(url)\n")
+        let sent = !keepLocal && sendFeedback(text, verdict: state.quoted("status"))
+        if sent {
+            io.out("pace: feedback saved to \(inbox) and sent to Pacer's issue tracker. Add --local to keep it on this machine.\n")
+        } else {
+            let attempted = !keepLocal && io.telemetry.enabled() && !(io.telemetry.dsn?.isEmpty ?? true)
+            let why = attempted ? "it could not be sent, so nothing left this machine" : "nothing was sent anywhere"
+            io.out("pace: feedback saved to \(inbox) — \(why).\n")
+            io.out("To file it as an issue, open:\n\(url)\n")
+        }
+    }
+
+    /// One POST of the scrubbed text. Only enumerable context goes along (the
+    /// last verdict's kind); no paths, accounts, session ids or the state file.
+    private func sendFeedback(_ text: String, verdict: String?) -> Bool {
+        let t = io.telemetry
+        guard t.enabled(), let raw = t.dsn, !raw.isEmpty, let dsn = SentryEnvelope.DSN(raw) else { return false }
+        var tags: [String: String] = [:]
+        if let verdict, ["go", "paused", "unknown"].contains(verdict) { tags["last_verdict"] = verdict }
+        guard let envelope = SentryEnvelope.feedback(
+            message: text, release: t.release, environment: t.environment, tags: tags,
+            installId: t.installId, home: env["HOME"] ?? NSHomeDirectory(), now: io.now())
+        else { return false }
+        return t.send(SentryEnvelope.request(envelope, dsn: dsn, timeout: 3))
     }
 
     /// One `write(2)` on an `O_APPEND` descriptor, so two sessions reporting

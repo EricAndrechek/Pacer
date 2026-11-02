@@ -118,4 +118,27 @@ public struct WindowSpec: Sendable, Equatable {
         if case .scoped = origin { return true }
         return false
     }
+
+    // MARK: - Telemetry
+
+    /// A kind for this window that is safe to send: cadence plus the model
+    /// family ("weekly_opus", "session_fable"), never the identity (which can
+    /// carry whatever the server put in a surface name) and never a version.
+    /// Nil for the fixed windows, which already have their own names.
+    ///
+    /// Why a family and not the model id: the check-in wants "do per-model
+    /// weekly caps forecast worse than the account-wide one", and a bare id
+    /// would split that by every point release.
+    public var telemetryKind: String? {
+        guard case .scoped(_, let group, let modelId, let displayName, let surface) = origin else { return nil }
+        func words(_ raw: String?) -> [String] {
+            (raw ?? "").lowercased()
+                .split(whereSeparator: { !($0.isASCII && ($0.isLetter || $0.isNumber)) })
+                .map(String.init)
+                .filter { $0 != "claude" && $0 != "anthropic" && !$0.allSatisfy(\.isNumber) }
+        }
+        let family = words(displayName).first ?? words(modelId).first ?? words(surface).first ?? "other"
+        let cadence = words(group).first ?? "window"
+        return "\(cadence.prefix(12))_\(family.prefix(20))"
+    }
 }

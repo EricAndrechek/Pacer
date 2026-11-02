@@ -107,6 +107,7 @@ final class ArchiveSync {
                 pendingCollapse = false
                 if let removed = try? archive.collapseDuplicates(), removed > 0 {
                     Log.write("ArchiveSync", "collapsed \(removed) superseded copy/copies")
+                    TelemetryCounters.add("data.archive_superseded_collapsed", Int(removed))
                 }
             }
             // Advanced only after the append succeeded, so a failed write is
@@ -265,6 +266,9 @@ final class ArchiveSync {
         }
         verdict += "|checks=\(checks)|mismatches=\(mismatches)"
         if !worst.isEmpty { verdict += "|" + worst }
+        // Integrity checks run on the sync's own slow cadence, so one tally
+        // add each; the check-in sends ok vs mismatch.
+        TelemetryCounters.add(archived == stored ? "data.archive_integrity.ok" : "data.archive_integrity.mismatch")
         // Logged every time, not only on failure: a soak needs to distinguish
         // "clean for two days" from "never ran".
         Log.write("ArchiveSync",
@@ -321,6 +325,7 @@ final class ArchiveSync {
         // `make verify-data` would fail on every run from then on.
         if let removed = try? opened.collapseDuplicates(), removed > 0 {
             Log.write("ArchiveSync", "collapsed \(removed) duplicate turn(s) in the archive")
+            TelemetryCounters.add("data.archive_duplicates_collapsed", Int(removed))
         }
         archive = opened
         return opened

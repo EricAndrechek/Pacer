@@ -1,4 +1,5 @@
 import Foundation
+import PacerCore
 import Sparkle
 import SwiftUI
 
@@ -19,6 +20,10 @@ final class PacerUpdater: ObservableObject {
     // it controls the version text in Sparkle's standard update dialogs.
     private let uiDelegate = PacerUserDriverDelegate()
 
+    // Observing-only delegate for the telemetry check-in (every build). Held
+    // strongly for the same reason as the Debug delegate below.
+    private let outcomeObserver: UpdateOutcomeObserver
+
     #if DEBUG
     // Retained for the updater's lifetime — `SPUUpdater` holds its
     // delegate weakly, so without this strong reference the delegate
@@ -37,6 +42,8 @@ final class PacerUpdater: ObservableObject {
         // `self.uiDelegate` until every stored property (incl. `controller`)
         // is assigned. Capture it in a local to pass into the controller.
         let userDriverDelegate = uiDelegate
+        let outcomes = UpdateOutcomeObserver()
+        self.outcomeObserver = outcomes
         #if DEBUG
         // Local Debug builds: install a delegate that vetoes automatic
         // (launch + scheduled) update checks. See DevBuildUpdaterDelegate.
@@ -53,13 +60,50 @@ final class PacerUpdater: ObservableObject {
         #else
         self.controller = SPUStandardUpdaterController(
             startingUpdater: true,
-            updaterDelegate: nil,
+            updaterDelegate: outcomes,
             userDriverDelegate: userDriverDelegate
         )
         #endif
     }
 
     var updater: SPUUpdater { controller.updater }
+}
+
+/// Writes what Sparkle did to `UpdateOutcomeLog`, for the daily check-in. It
+/// only observes: none of these callbacks can change what Sparkle does (the
+/// only veto in this file is the Debug-only `mayPerform`, below). Every build
+/// uses it; the Debug delegate subclasses it so both keep reporting.
+///
+/// Sparkle delivers "you're up to date" through the error channel
+/// (`SUNoUpdateError`), so that code is mapped to its own outcome rather than
+/// recorded as a failure.
+private class UpdateOutcomeObserver: NSObject, SPUUpdaterDelegate {
+    func updater(_ updater: SPUUpdater, didFindValidUpdate item: SUAppcastItem) {
+        UpdateOutcomeLog.record(.found, version: item.displayVersionString)
+    }
+
+    func updaterDidNotFindUpdate(_ updater: SPUUpdater) {
+        UpdateOutcomeLog.record(.noUpdate)
+    }
+
+    func updater(_ updater: SPUUpdater, failedToDownloadUpdate item: SUAppcastItem, error: any Error) {
+        UpdateOutcomeLog.record(.downloadFailed, version: item.displayVersionString)
+    }
+
+    func updater(_ updater: SPUUpdater, willInstallUpdate item: SUAppcastItem) {
+        UpdateOutcomeLog.record(.willInstall, version: item.displayVersionString)
+    }
+
+    func updater(_ updater: SPUUpdater, didFinishUpdateCycleFor updateCheck: SPUUpdateCheck, error: (any Error)?) {
+        guard let error else { return }
+        let ns = error as NSError
+        if ns.domain == UpdateOutcomeLog.sparkleErrorDomain, ns.code == UpdateOutcomeLog.sparkleNoUpdateCode {
+            UpdateOutcomeLog.record(.noUpdate, endOfCycle: true)
+        } else {
+            UpdateOutcomeLog.record(UpdateOutcomeLog.result(forErrorDomain: ns.domain, code: ns.code),
+                                    endOfCycle: true)
+        }
+    }
 }
 
 /// Controls the version text Sparkle prints in its standard update
@@ -125,7 +169,7 @@ private final class PacerUserDriverDelegate: NSObject, SPUStandardUserDriverDele
 /// leak into a release build sharing the same bundle identifier.
 ///
 /// Compiled out of Release builds entirely.
-private final class DevBuildUpdaterDelegate: NSObject, SPUUpdaterDelegate {
+private final class DevBuildUpdaterDelegate: UpdateOutcomeObserver {
     func updater(_ updater: SPUUpdater, mayPerform updateCheck: SPUUpdateCheck) throws {
         // `.updatesInBackground` is the launch/scheduled check;
         // `.updates` is the user clicking "Check for Updates…".

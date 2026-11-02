@@ -173,12 +173,17 @@ public actor JSONLScanner {
                 if let cur = c.cursor, cur.byteOffset <= c.size {
                     return cur.byteOffset
                 }
+                // A file that shrank under its cursor (rewritten or compacted).
+                if c.cursor != nil { TelemetryCounters.add("data.cursor_reset") }
                 return 0
             }()
 
             filesScanned += 1
             do {
                 var bytesConsumed: Int64 = 0
+                // Drift check on the first usage-bearing line of this read
+                // only: one extra JSON parse per file per pass, not per line.
+                var checkedUsageFields = false
                 try readNewLines(
                     from: c.url,
                     startingAt: startOffset
@@ -191,6 +196,10 @@ public actor JSONLScanner {
                     ) {
                         entriesParsed += 1
                         kept.offer(entry, from: c.path)
+                        if !checkedUsageFields {
+                            checkedUsageFields = true
+                            FormatDrift.noteUsageFields(inLine: lineData)
+                        }
                     }
                 } byteCounter: { delta in
                     bytesConsumed += delta

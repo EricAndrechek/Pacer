@@ -68,8 +68,16 @@ public enum MemoryHygiene {
     /// `context` is appended after the numbers, so the line's head stays
     /// fixed for grepping.
     public static func report(_ context: String? = nil) {
-        let line = ProcessMemory.current().summary
+        let memory = ProcessMemory.current()
+        let line = memory.summary
         Log.write("Memory", context.map { "\(line) · \($0)" } ?? line)
+        // Launch, hourly and after a rebuild only; never a hot path. The
+        // context label is mapped to a fixed set, as the log's is free text.
+        let kind = context.map { $0.hasPrefix("launch") ? "launch" : $0.contains("rebuild") ? "after_rebuild" : "other" }
+            ?? "hourly"
+        Telemetry.gauge("memory.footprint_mb", Double(memory.footprint) / 1_000_000, unit: .none,
+                        attributes: ["context": .string(kind),
+                                     "allocator": .string(allocatorMode)])
     }
 
     /// Start the hourly `[Memory]` line, once per process; later calls are

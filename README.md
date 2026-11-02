@@ -83,7 +83,7 @@ keeps all of your data on your own Mac.
 3. Launch Pacer. It lives in your **menu bar** — look for the little gauge icon
    up top (there's no Dock icon). Click it to open the dashboard.
 4. The first time, macOS asks permission for Pacer to read Claude Code's files.
-   Click **Allow** — that's how Pacer sees your usage. Nothing leaves your Mac.
+   Click **Allow** — that's how Pacer sees your usage. It stays on your Mac.
 
 Or with Homebrew:
 
@@ -218,23 +218,12 @@ tools all move fast, so corrections are welcome via an issue or PR.</sub>
 
 ## Privacy
 
-Pacer is **local-first**. It reads only the files Claude Code already writes to
-your own Mac, and it sends nothing about your usage anywhere:
+Your usage data stays on your Mac. Pacer reads Claude Code's own files and uses
+your Claude Code login only to ask Anthropic for your rate limits.
 
-- `~/.claude/projects/*.jsonl` — your session token usage, read on your machine.
-- The Claude Code login token in your macOS Keychain — used only to ask
-  Anthropic for your rate-limit status, the same way Claude Code itself does.
-
-The **only** network connections Pacer makes are:
-
-- `api.anthropic.com` — to check your rate-limit windows (~12 small requests an
-  hour while it's running).
-- `github.com` — to check for, download, and install app updates (at launch,
-  then every 6 hours; installs happen in the background when automatic updates
-  are on).
-
-**No analytics, no telemetry, no third parties.** Your data stays on your Mac in
-`~/Library/Group Containers/…/pacer.sqlite`, and it persists across app updates.
+Pacer sends crash reports and anonymous usage stats to [Sentry](https://sentry.io)
+so I can find bugs and slowdowns. Never your prompts, projects, files, accounts or
+costs. Turn either off in **Settings → Privacy**.
 
 ---
 

@@ -1906,6 +1906,7 @@ public final class ScanCoordinator {
         let stranded = activePersister.consumeStrandedHourBuckets()
         if !stranded.isEmpty {
             let deleted = try activePersister.deleteHourAggregates(stranded)
+            TelemetryCounters.add("data.stranded_hourly_deleted", deleted)
             log("integrity: deleted \(deleted) stranded hourly aggregate(s) with no samples")
         }
 
@@ -1923,10 +1924,8 @@ public final class ScanCoordinator {
         // sample-driven aggregate dirty so the recomputers rebuild
         // them. After the cycle's terminal save we write the new
         // version to ClaudeCodeMeta so this only fires once per bump.
-        let needsCostRebuild = (
-            try fetchMeta(ClaudeCodeMetaKey.costRecomputeVersion)
-            != Self.currentCostRecomputeVersion
-        )
+        let storedCostVersion = try fetchMeta(ClaudeCodeMetaKey.costRecomputeVersion)
+        let needsCostRebuild = (storedCostVersion != Self.currentCostRecomputeVersion)
         if needsCostRebuild {
             if !rebuilding {
                 rebuilding = true
@@ -1942,6 +1941,8 @@ public final class ScanCoordinator {
         if try fetchMeta(ClaudeCodeMetaKey.duplicateRepairVersion)
             != Self.currentDuplicateRepairVersion {
             let removed = try activePersister.repairDuplicateSamples()
+            TelemetryCounters.add("data.duplicate_repair_run")
+            TelemetryCounters.add("data.duplicate_repair_removed", removed)
             if removed > 0 {
                 log("integrity: collapsed \(removed) duplicate turn(s) — rebuilding affected buckets")
             }
@@ -2450,7 +2451,7 @@ public final class ScanCoordinator {
         phase.notifMs = tickMs()
         lastCycleRebuilt = rebuilding
 
-        return ScanReport(
+        let report = ScanReport(
             wasFullScan: isFullScan,
             scanProgress: result.progress,
             persisterStats: cycleStats,
@@ -2462,6 +2463,83 @@ public final class ScanCoordinator {
             durationSeconds: Date().timeIntervalSince(started),
             phaseTimings: phase
         )
+        reportCycleTelemetry(
+            report, started: started,
+            rebuild: .init(
+                fromScanVersion: lastVersion, fromCostVersion: storedCostVersion,
+                fullScan: isFullScan, costRebuild: needsCostRebuild, pathMigration: needsPathMigration,
+                rollupBootstraps: recoveryPairs.count + recoveryProjectPairs.count
+                    + recoveryHourBuckets.count + recoverySessionIds.count,
+                gaps: [("daily", recoveryPairs.count), ("project", recoveryProjectPairs.count),
+                       ("hourly", recoveryHourBuckets.count), ("session", recoverySessionIds.count)]))
+        return report
+    }
+
+    /// What made a cycle a rebuild, for the one span a post-update rebuild
+    /// reports.
+    struct RebuildCauses {
+        var fromScanVersion: String?
+        var fromCostVersion: String?
+        var fullScan: Bool
+        var costRebuild: Bool
+        var pathMigration: Bool
+        var rollupBootstraps: Int
+        /// Missing-rollup buckets found this cycle, by rollup.
+        var gaps: [(String, Int)]
+        var repriced = false
+        var any: Bool { fullScan || costRebuild || rollupBootstraps > 0 || repriced }
+    }
+
+    /// Telemetry for the cycle, only for the rare or slow ones: a rebuild
+    /// (once per update) or a cycle over a second (capped per Mac per day, as
+    /// a bad day could otherwise send hundreds). The common cycle, which
+    /// runs up to twice a second, adds a handful of in-memory tallies and
+    /// nothing else (AGENTS.md → Performance).
+    private func reportCycleTelemetry(_ r: ScanReport, started: Date, rebuild causes: RebuildCauses) {
+        var rebuild = causes
+        rebuild.repriced = cycleRepriced
+        cycleRepriced = false
+        let p = r.phaseTimings
+        let phases: [(String, TimeInterval)] = [
+            ("auto_alias", p.autoAliasMs), ("meta_prep", p.metaPrepMs), ("migration", p.migrationMs),
+            ("consume_paths", p.consumeChangedPathsMs), ("scan", p.scanMs), ("flush", p.flushMs),
+            ("save_cursors", p.saveCursorsMs), ("daily_rollup", p.dailyRecomputeMs),
+            ("hourly_rollup", p.hourlyRecomputeMs), ("project_rollup", p.projectRecomputeMs),
+            ("session_rollup", p.sessionRecomputeMs), ("probe", p.probeMs), ("save", p.saveMs),
+            ("notify", p.notifMs),
+        ].map { ($0.0, $0.1 / 1000) }
+        if rebuild.any {
+            Telemetry.span(.sequential(
+                op: "history.rebuild", name: "rebuild", start: started, phases: phases,
+                attributes: [
+                    "from_scan_version": .string(rebuild.fromScanVersion ?? "none"),
+                    "to_scan_version": .string(Self.currentScanVersion),
+                    "from_cost_version": .string(rebuild.fromCostVersion ?? "none"),
+                    "to_cost_version": .string(Self.currentCostRecomputeVersion),
+                    "full_scan": .bool(rebuild.fullScan), "cost_rebuild": .bool(rebuild.costRebuild),
+                    "path_migration": .bool(rebuild.pathMigration),
+                    "rollup_bootstraps": .bool(rebuild.rollupBootstraps > 0),
+                    "repriced": .bool(rebuild.repriced),
+                    "entries": .int(r.scanProgress.entriesParsed),
+                    "files": .int(r.scanProgress.filesScanned),
+                    "total_ms": .int(Int(r.durationSeconds * 1000))]))
+        } else if r.durationSeconds > 1.0,
+                  DailyCap(kind: "slow_scan", limit: 20)
+                      .take(on: TokenSample.formatDate(Date()), store: PacerPreferences.store) {
+            Telemetry.span(.sequential(
+                op: "scan.cycle", name: r.wasFullScan ? "full" : "incremental", start: started, phases: phases,
+                attributes: ["entries": .int(r.scanProgress.entriesParsed),
+                             "files": .int(r.scanProgress.filesScanned),
+                             "total_ms": .int(Int(r.durationSeconds * 1000))]))
+        }
+        reportDataHealth(r, rebuild: rebuild)
+    }
+
+    /// Data-health tallies for the daily check-in. In memory only, and a
+    /// zero adds nothing, so a quiet cycle costs a few comparisons.
+    private func reportDataHealth(_ r: ScanReport, rebuild: RebuildCauses) {
+        TelemetryCounters.add("data.streamed_supersede", r.persisterStats.upgradedFromPartial)
+        for (rollup, n) in rebuild.gaps { TelemetryCounters.add("data.rollup_gap.\(rollup)", n) }
     }
 
     /// Move turns already stored against a refuted account onto the one the
@@ -2684,6 +2762,10 @@ public final class ScanCoordinator {
            let json = String(data: encoded, encoding: .utf8) {
             try writeMeta(ClaudeCodeMetaKey.unpricedModels, value: json)
             if !unpriced.subtracting(previously).isEmpty {
+                // Newly unpriced only (the persisted set makes this once per
+                // model): the silent-$0 class, and a new model id to learn of.
+                TelemetryCounters.add("data.unpriced_model", unpriced.subtracting(previously).count)
+                for model in unpriced.subtracting(previously) { FormatDrift.noteUnknownModel(model) }
                 log("pricing: no price yet for \(unpriced.sorted().joined(separator: ", ")) — cost reads low until there is")
             }
         }
@@ -2697,6 +2779,10 @@ public final class ScanCoordinator {
     /// buckets that were priced by that model over the affected window —
     /// and nothing else. Past usage is re-priced at the rate in effect when
     /// it was made, never at today's.
+    /// Set when this cycle queued buckets for repricing; read (and cleared)
+    /// by the cycle's telemetry.
+    private var cycleRepriced = false
+
     private func rebuildRepricedBuckets(_ changes: [PriceChange], persister: SamplePersister) throws {
         guard !changes.isEmpty else { return }
         let scope = try PriceLedgerStore.affectedBuckets(context: context, changes: changes)
@@ -2714,6 +2800,7 @@ public final class ScanCoordinator {
             log("pricing: \(changes.count - reaching.count) price change(s) reach no stored bucket")
         }
         guard !scope.isEmpty else { return }
+        cycleRepriced = true
         persister.addDirtyPairs(scope.daily)
         persister.addDirtyHourBuckets(scope.hourly)
         persister.addDirtyProjectDates(scope.project)

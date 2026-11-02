@@ -124,7 +124,12 @@ public enum SwitcherUsageCache {
     /// same way `readings(at:)` is: anything unexpected is `.empty`.
     public static func read(at url: URL) -> Contents {
         guard let data = try? Data(contentsOf: url) else { return .empty }
-        return parse(data)
+        let contents = parse(data)
+        // A file that is there but yields nothing is cswap changing its
+        // layout (or writing mid-read), not an absent switcher: worth one
+        // tally a launch, since this read repeats while it stays broken.
+        if contents == .empty, !data.isEmpty { CredentialTelemetry.noteOnce("switcher", "usage_unreadable") }
+        return contents
     }
 
     /// `read(at:)` without the file, so the parse can be tested on bytes.

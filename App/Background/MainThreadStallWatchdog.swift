@@ -38,6 +38,19 @@ final class MainThreadStallWatchdog {
         observer = RunLoopStallObserver(runLoop: CFRunLoopGetMain(), threshold: 0.1) { stall in
             Log.write("MainThread",
                       "stalled \(Int(stall.wall * 1000))ms (cpu \(Int(stall.cpu * 1000))ms)")
+            // The log keeps every stall over 100 ms; telemetry sends only the
+            // ones a person would feel (250 ms and up). The rest are one
+            // in-memory tally, drained into the daily check-in.
+            if stall.wall >= 0.25 {
+                // Busy (working) vs waiting (a lock or throttled), in thirds.
+                let busy = stall.wall > 0 ? stall.cpu / stall.wall : 0
+                let cpuBucket = busy >= 0.66 ? "busy" : busy >= 0.33 ? "mixed" : "waiting"
+                Telemetry.distribution("main_thread.stall_ms", stall.wall * 1000, unit: .millisecond,
+                                       attributes: ["cpu": .string(cpuBucket)])
+                Telemetry.breadcrumb("stall", "\(Int(stall.wall * 1000)) ms")
+            } else {
+                TelemetryCounters.add("main_thread.stall_100ms")
+            }
         }
     }
 }

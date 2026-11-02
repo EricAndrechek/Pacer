@@ -226,7 +226,11 @@ struct ContentView: View {
         }
         // Paired with `Click` lines: which tab a click landed on, and when a
         // tab switch (a full rebuild of the new tab) was in flight.
-        .onChange(of: selectionRaw) { _, new in Log.write("Navigation", "tab → \(new)") }
+        .onChange(of: selectionRaw) { _, new in
+            Log.write("Navigation", "tab → \(new)")
+            // Raw values are the fixed `Destination` cases, never user data.
+            TelemetryCounters.add("ui.tab.\(new)")
+        }
         .onReceive(NotificationCenter.default.publisher(for: .pacerOpenSettings)) { _ in
             PacerAppDelegate.pendingDestination = nil
             selectionRaw = Destination.settings.rawValue
