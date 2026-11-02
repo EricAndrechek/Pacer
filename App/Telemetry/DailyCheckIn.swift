@@ -373,8 +373,12 @@ final class DailyCheckIn {
             let label = scope.accountId.flatMap { accounts[$0] }
             if scope.accountId != nil, label == nil { continue }
             let scopeName = scope.isAllAccounts ? "all" : "account"
-            for window in ["five_hour", "seven_day"] {
-                let board = await engine.meterModelBoard(windowKey: window)
+            // The account-wide blocks, then each per-model (scoped) cap the
+            // engine fits, named by cadence and model family only.
+            var windows: [(key: String, name: String)] = [("five_hour", "five_hour"), ("seven_day", "seven_day")]
+            windows += await engine.scopedWindowKinds().map { ($0.key, $0.kind) }
+            for (windowKey, window) in windows {
+                let board = await engine.meterModelBoard(windowKey: windowKey)
                 var ranked: [(id: String, miss: Double, isPick: Bool)] = []
                 for row in board.rows {
                     switch row.status {
