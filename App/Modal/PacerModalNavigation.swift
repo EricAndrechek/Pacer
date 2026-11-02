@@ -59,6 +59,17 @@ public enum PacerModalDestination: Hashable, Identifiable {
     /// key. Without it, tapping personal's 5-hour column would open work's.
     case projection(window: String, accountId: String?)
 
+    /// The destination kind alone (no date, path, session or account), for
+    /// usage counts.
+    var telemetryKind: String {
+        switch self {
+        case .day:        return "day"
+        case .project:    return "project"
+        case .session:    return "session"
+        case .projection: return "projection"
+        }
+    }
+
     public var id: String {
         switch self {
         case .day(let d):                return "day:\(d)"
@@ -208,6 +219,7 @@ private struct PacerModalNavigationModifier: ViewModifier {
                 // With `Click` and `Navigation`, says whether a click that
                 // "did nothing" opened the modal and something closed it.
                 Log.write("Modal", isNil ? "closed" : "opened")
+                if let presented { TelemetryCounters.add("ui.modal.\(presented.telemetryKind)") }
             }
     }
 }

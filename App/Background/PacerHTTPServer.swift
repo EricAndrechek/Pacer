@@ -334,9 +334,21 @@ final class PacerHTTPServer: @unchecked Sendable {
         }
     }
 
+    /// The route template for usage counts: only paths this server defines,
+    /// never the query or anything a caller typed (an unknown path is `other`).
+    nonisolated private static let telemetryRoutes: Set<String> = [
+        "/v1/snapshot", "/v1/accounts", "/metrics", "/v1/stream", "/v1/session",
+        "/v1/usage/daily", "/v1/usage/models", "/v1/sessions", "/v1/limits/history",
+        "/v1/predictions/history",
+    ]
+    nonisolated private static func telemetryRoute(_ path: String) -> String {
+        telemetryRoutes.contains(path) ? path.replacingOccurrences(of: "/", with: ".") : "other"
+    }
+
     /// Every route but the two above, on `workQueue`.
     private func route(path: String, query: [String: String], headers: [String: String],
                        token: String?, client: ClientConnection) {
+        TelemetryCounters.add("api.route.\(Self.telemetryRoute(path))")
         switch path {
         case "/v1/snapshot":
             guard Self.authorized(headers, token: token) else { return unauthorized(client) }

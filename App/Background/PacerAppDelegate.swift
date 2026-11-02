@@ -467,6 +467,9 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         MainThreadStallWatchdog.shared.start()
         ClickLatencyProbe.shared.start()
         backgroundService.start()
+        // Telemetry services; each is a no-op unless TelemetryController is running.
+        DailyCheckIn.shared.start(container: container, engines: backgroundService.engines)
+        CrashReportForwardingService.shared.start()
         // Logs the login-item status every launch and restores a registration
         // macOS dropped against the user's recorded choice.
         LoginItemController.reconcileAtLaunch()
@@ -500,6 +503,7 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             await backgroundService.stop()
             await NotificationCoordinator.shared.notifyCollectionPaused()
             TelemetryController.shared.prepareForTermination()
+            DailyCheckIn.markCleanExit()
             NSApp.reply(toApplicationShouldTerminate: true)
         }
         return .terminateLater
@@ -1109,6 +1113,7 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// keeps the drop-down tall enough for however many windows are in play.
     func menuWillOpen(_ menu: NSMenu) {
         StatusMenuOpening.shared.willOpen()
+        TelemetryCounters.add("ui.menu.open")
         guard let view = statusMenuContentController?.view else { return }
         view.layoutSubtreeIfNeeded()
         let fitting = view.fittingSize
@@ -1132,6 +1137,7 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// `ContentView.onAppear` consumes it.
     @discardableResult
     private func ensureMainWindowVisible() -> Bool {
+        TelemetryCounters.add("ui.window.open")
         // `NSApp.activate(ignoringOtherApps:)` was effectively neutered
         // in macOS 14 — third-party apps can no longer pull focus
         // from the foreground app unless the activation was triggered
@@ -1181,6 +1187,7 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func menuOpenMainWindow() {
+        TelemetryCounters.add("ui.menu.item.open_pacer")
         ensureMainWindowVisible()
     }
 
@@ -1222,6 +1229,7 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func menuOpenSettings() {
+        TelemetryCounters.add("ui.menu.item.settings")
         let wasAlreadyOpen = ensureMainWindowVisible()
         if wasAlreadyOpen {
             // ContentView is already mounted and subscribed via
