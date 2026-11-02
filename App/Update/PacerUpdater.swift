@@ -1,4 +1,5 @@
 import Foundation
+import PacerCore
 import Sparkle
 import SwiftUI
 
