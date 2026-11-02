@@ -198,6 +198,12 @@ final class DailyCheckIn {
         if let last = UserDefaults.standard.object(forKey: "SULastCheckTime") as? Date {
             a["lifecycle.sparkle_last_check_hours"] = .int(Int(Date().timeIntervalSince(last) / 3600))
         }
+        // What the last update check did (found / no update / download failed /
+        // will install / error_<domain>_<code>), from the Sparkle delegate.
+        if let update = UpdateOutcomeLog.last(store: store) {
+            a["lifecycle.update_result"] = .string(update.result)
+            if let version = update.version { a["lifecycle.update_version"] = .string(version) }
+        }
         let cpu = max(cpuSeconds() - cpuBefore, 0)
         a["energy.cpu_seconds"] = .double((cpu * 10).rounded() / 10)
         return a
