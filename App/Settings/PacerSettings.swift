@@ -105,6 +105,8 @@ public enum PacerSettings {
         public static let oauthTokenOverride     = PacerPreferenceKeys.oauthTokenOverride
         public static let desktopCredentialsEnabled = PacerPreferenceKeys.desktopCredentialsEnabled
         public static let switcherCredentialsEnabled = PacerPreferenceKeys.switcherCredentialsEnabled
+        public static let telemetryCrashReports = PacerPreferenceKeys.telemetryCrashReports
+        public static let telemetryUsageData = PacerPreferenceKeys.telemetryUsageData
         public static let desktopOnboardingDismissed = PacerPreferenceKeys.desktopOnboardingDismissed
         public static let desktopExtraDataDirectories = PacerPreferenceKeys.desktopExtraDataDirectories
         public static let apiEnabled             = PacerPreferenceKeys.apiEnabled

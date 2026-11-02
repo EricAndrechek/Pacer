@@ -65,6 +65,12 @@ packages:
     # See docs/releasing.md for the keypair + secrets setup.
     url: https://github.com/sparkle-project/Sparkle
     from: 2.6.0
+  Sentry:
+    # Crash reports and usage telemetry (docs/telemetry-plan.md). App target
+    # only: the widget and the CLI never run the SDK; their crashes reach
+    # Sentry through the app (CrashReportForwarder).
+    url: https://github.com/getsentry/sentry-cocoa
+    from: 9.30.2
 
 targets:
   Pacer:
@@ -153,8 +159,14 @@ targets:
         # time. The `[Memory] … launch` log line says whether it took.
         LSEnvironment:
           MallocSpaceEfficient: "1"
+        # Where crash reports and usage data go (docs/telemetry-plan.md). The
+        # DSN is a public client key by design: it can only send, not read.
+        # Building from source under your own account? Set it empty and the
+        # app never starts telemetry.
+        PacerSentryDSN: $(PACER_SENTRY_DSN)
     settings:
       base:
+        PACER_SENTRY_DSN: https://4538a70956bdb802f903aa6ceba5ba32@o4506596663427072.ingest.us.sentry.io/4512290674049024
         PRODUCT_BUNDLE_IDENTIFIER: com.ericandrechek.pacer
         PRODUCT_NAME: Pacer
         CODE_SIGN_ENTITLEMENTS: App/Pacer.entitlements
@@ -175,6 +187,8 @@ targets:
         product: PacerUI
       - package: Sparkle
         product: Sparkle
+      - package: Sentry
+        product: Sentry
       - target: PacerWidgets
       # The `pacer` command line (#194), at
       # Contents/Helpers/PacerCLI.app/Contents/MacOS/pacer. Unsigned here like

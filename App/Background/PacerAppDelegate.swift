@@ -181,6 +181,10 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // absent from the suite, so a first-run user would otherwise
         // see different defaults from a returning user.
         PacerSettings.registerDefaults()
+        // Before the store opens, so a crash opening or migrating it is
+        // reported. The diagnostic modes returned above, and the controller
+        // checks `LaunchMode.isNormalLaunch` itself as well.
+        TelemetryController.shared.startIfAllowed()
         do {
             container = try PacerStore.makeModelContainer()
         } catch {
@@ -495,6 +499,7 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         Task { @MainActor in
             await backgroundService.stop()
             await NotificationCoordinator.shared.notifyCollectionPaused()
+            TelemetryController.shared.prepareForTermination()
             NSApp.reply(toApplicationShouldTerminate: true)
         }
         return .terminateLater
