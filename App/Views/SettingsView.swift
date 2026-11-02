@@ -2744,9 +2744,14 @@ private struct TelemetryCard: View {
             VStack(alignment: .leading, spacing: 10) {
                 Toggle("Send crash reports", isOn: $crashReports)
                 Toggle("Share usage data", isOn: $usageData)
-                Link("What is sent",
-                     destination: URL(string: "https://github.com/ericandrechek/Pacer#privacy")!)
-                    .font(.caption)
+                HStack {
+                    Button("Report a Problem…") { ReportProblemWindow.shared.show() }
+                        .pacerDenseControl()
+                    Spacer()
+                    Link("What is sent",
+                         destination: URL(string: "https://github.com/ericandrechek/Pacer#privacy")!)
+                        .font(.caption)
+                }
             }
         })
     }

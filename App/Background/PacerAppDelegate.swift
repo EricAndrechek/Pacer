@@ -1082,6 +1082,16 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         settingsItem.target = self
         menu.addItem(settingsItem)
 
+        // Where people are when something goes wrong: the menu bar, not the
+        // Help menu of a window that may not be open (PACER-A).
+        let reportItem = NSMenuItem(
+            title: "Report a Problem…",
+            action: #selector(menuReportProblem),
+            keyEquivalent: ""
+        )
+        reportItem.target = self
+        menu.addItem(reportItem)
+
         menu.addItem(NSMenuItem.separator())
 
         let quitItem = NSMenuItem(
@@ -1229,6 +1239,11 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         ensureMainWindowVisible()
+    }
+
+    @objc private func menuReportProblem() {
+        TelemetryCounters.add("ui.menu.item.report_problem")
+        ReportProblemWindow.shared.show()
     }
 
     @objc private func menuOpenSettings() {

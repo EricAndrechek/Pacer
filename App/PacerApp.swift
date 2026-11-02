@@ -203,11 +203,8 @@ struct PacerApp: App {
             // shows an error sheet — surfacing logs / the data store
             // is more useful for a tracking utility.
             CommandGroup(replacing: .help) {
-                // A user-initiated menu command, like About: activating is
-                // what brings the window forward from accessory mode.
                 Button("Report a Problem…") {
-                    openWindow(id: "report-problem")
-                    NSApp.activate()
+                    ReportProblemWindow.shared.show()
                 }
                 #if DEBUG
                 // Development builds only: the end-to-end check of crash and
@@ -249,14 +246,6 @@ struct PacerApp: App {
             AboutView(updater: updater.updater)
         }
         .windowStyle(.hiddenTitleBar)
-        .windowResizability(.contentSize)
-        .defaultPosition(.center)
-
-        // Help → Report a Problem…: a singleton like About, opened only from
-        // that menu item.
-        Window("Report a Problem", id: "report-problem") {
-            ReportProblemView()
-        }
         .windowResizability(.contentSize)
         .defaultPosition(.center)
     }
