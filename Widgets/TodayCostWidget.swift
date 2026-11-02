@@ -24,14 +24,17 @@ struct TodayCostProvider: TimelineProvider {
     }
 
     func getSnapshot(in context: Context, completion: @escaping (TodayCostEntry) -> Void) {
-        WidgetRefreshRecord.snapshot(WidgetKinds.todayCost, context)
-        completion(currentEntry())
+        let began = WidgetRefreshRecord.begin()
+        let entry = currentEntry()
+        WidgetRefreshRecord.snapshot(WidgetKinds.todayCost, context, since: began)
+        completion(entry)
     }
 
     func getTimeline(in context: Context, completion: @escaping (Timeline<TodayCostEntry>) -> Void) {
+        let began = WidgetRefreshRecord.begin()
         let entry = currentEntry()
         let nextRefresh = WidgetRefresh.after(300)
-        WidgetRefreshRecord.timeline(WidgetKinds.todayCost, context, next: nextRefresh)
+        WidgetRefreshRecord.timeline(WidgetKinds.todayCost, context, next: nextRefresh, since: began)
         completion(Timeline(entries: [entry], policy: .after(nextRefresh)))
     }
 

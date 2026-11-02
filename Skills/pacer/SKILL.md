@@ -26,7 +26,9 @@ either way.
 need, report it** with `pacer feedback "<what you ran, what it printed>"` —
 never save a workaround for a Pacer quirk in memory or a brief; it outlives
 the fix. The report goes to a local inbox (`~/.claude/pace/feedback.jsonl`)
-and `feedback` prints a pre-filled GitHub issue link; nothing is sent.
+and is also sent, scrubbed of paths and names, to Pacer's issue tracker; add
+`--local` (or set `PACER_FEEDBACK=local`) to keep it on the machine. If the send
+fails, `feedback` prints a pre-filled GitHub issue link instead.
 
 ## 1. Just report where I'm at
 

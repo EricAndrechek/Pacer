@@ -14,8 +14,11 @@ import Foundation
 ///
 /// **Format**, one line per call, space-separated so `grep` and `awk` read it:
 ///
-///     2026-10-24T14:03:12.345Z timeline PaceGaugesWidget systemMedium next=2026-10-24T14:08:12Z
-///     2026-10-24T14:03:15.002Z snapshot TodayCostWidget systemSmall
+///     2026-10-24T14:03:12.345Z timeline PaceGaugesWidget systemMedium next=2026-10-24T14:08:12Z ms=41
+///     2026-10-24T14:03:15.002Z snapshot TodayCostWidget systemSmall ms=12
+///
+/// `ms` is how long the provider took to build the entry (the daily check-in
+/// reports it); lines from before it existed have none and still parse.
 ///
 /// **Cheap and harmless.** No SwiftData. One `open(O_APPEND)` and one
 /// `write` per call, well under `PIPE_BUF`, so two writers cannot interleave
@@ -45,13 +48,16 @@ public enum WidgetRefreshLog {
         public let family: String
         /// When the timeline asked to be rebuilt; nil for a snapshot.
         public let next: Date?
+        /// How long the provider took to build it; nil on older lines.
+        public let ms: Int?
 
-        public init(at: Date, event: Event, kind: String, family: String, next: Date?) {
+        public init(at: Date, event: Event, kind: String, family: String, next: Date?, ms: Int? = nil) {
             self.at = at
             self.event = event
             self.kind = kind
             self.family = family
             self.next = next
+            self.ms = ms
         }
     }
 
@@ -78,6 +84,7 @@ public enum WidgetRefreshLog {
     public static func line(_ entry: Entry) -> String {
         var out = "\(stamp.string(from: entry.at)) \(entry.event.rawValue) \(entry.kind) \(entry.family)"
         if let next = entry.next { out += " next=\(wholeStamp.string(from: next))" }
+        if let ms = entry.ms { out += " ms=\(ms)" }
         return out
     }
 
@@ -92,16 +99,19 @@ public enum WidgetRefreshLog {
         let next = parts.dropFirst(4)
             .first { $0.hasPrefix("next=") }
             .flatMap { wholeStamp.date(from: String($0.dropFirst(5))) }
-        return Entry(at: at, event: event, kind: String(parts[2]), family: String(parts[3]), next: next)
+        let ms = parts.dropFirst(4)
+            .first { $0.hasPrefix("ms=") }
+            .flatMap { Int($0.dropFirst(3)) }
+        return Entry(at: at, event: event, kind: String(parts[2]), family: String(parts[3]), next: next, ms: ms)
     }
 
     // MARK: - Writing
 
     /// Append one line. Never throws, never blocks on anything but the file.
     public static func record(_ event: Event, kind: String, family: String, next: Date?,
-                              at: Date = Date(), to url: URL? = defaultURL()) {
+                              ms: Int? = nil, at: Date = Date(), to url: URL? = defaultURL()) {
         guard let url else { return }
-        let data = Data((line(Entry(at: at, event: event, kind: kind, family: family, next: next)) + "\n").utf8)
+        let data = Data((line(Entry(at: at, event: event, kind: kind, family: family, next: next, ms: ms)) + "\n").utf8)
         let fd = open(url.path, O_WRONLY | O_APPEND | O_CREAT, 0o644)
         guard fd >= 0 else { return }
         let written = data.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
@@ -131,6 +141,35 @@ public enum WidgetRefreshLog {
         return String(decoding: data, as: UTF8.self)
             .split(separator: "\n")
             .compactMap { parse($0) }
+    }
+
+    // MARK: - Build durations (daily check-in)
+
+    /// How long the providers took, per widget kind and family, for entries in
+    /// `[since, until)`. Entries without `ms` (older lines) are skipped.
+    /// Timelines and snapshots are pooled: both are the same build.
+    public struct Durations: Sendable, Equatable {
+        public let kind: String
+        public let family: String
+        public let ms: [Int]
+        public var count: Int { ms.count }
+    }
+
+    public static func durations(entries: [Entry], since: Date, until: Date = .distantFuture) -> [Durations] {
+        var grouped: [String: [Int]] = [:]
+        for e in entries where e.at >= since && e.at < until {
+            guard let ms = e.ms else { continue }
+            grouped["\(shortName(e.kind)) \(e.family)", default: []].append(ms)
+        }
+        return grouped.map { key, list in
+            let parts = key.split(separator: " ", maxSplits: 1)
+            return Durations(kind: String(parts[0]), family: parts.count > 1 ? String(parts[1]) : "", ms: list)
+        }.sorted { ($0.kind, $0.family) < ($1.kind, $1.family) }
+    }
+
+    public static func durations(at url: URL? = defaultURL(), since: Date,
+                                 until: Date = .distantFuture) -> [Durations] {
+        durations(entries: entries(at: url), since: since, until: until)
     }
 
     // MARK: - The hourly summary

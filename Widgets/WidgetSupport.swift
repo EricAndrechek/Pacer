@@ -43,15 +43,27 @@ enum WidgetRefresh {
 /// which of the app's reload requests WidgetKit granted, and when. This
 /// process's stderr reaches no log anyone reads. Off while the clock is
 /// pinned for the README screenshots, whose timelines are not the user's.
+///
+/// Each line carries `ms`, how long the provider took to build its entry:
+/// call `begin()` first thing in a provider and pass the result as `since`.
+/// A monotonic clock, so a wall-clock change mid-build cannot give a negative.
 enum WidgetRefreshRecord {
-    static func timeline(_ kind: String, _ context: TimelineProviderContext, next: Date) {
-        guard PacerClock.pinned == nil else { return }
-        WidgetRefreshLog.record(.timeline, kind: kind, family: "\(context.family)", next: next)
+    static func begin() -> UInt64 { DispatchTime.now().uptimeNanoseconds }
+
+    private static func elapsedMs(since: UInt64) -> Int {
+        Int((DispatchTime.now().uptimeNanoseconds &- since) / 1_000_000)
     }
 
-    static func snapshot(_ kind: String, _ context: TimelineProviderContext) {
+    static func timeline(_ kind: String, _ context: TimelineProviderContext, next: Date, since: UInt64) {
         guard PacerClock.pinned == nil else { return }
-        WidgetRefreshLog.record(.snapshot, kind: kind, family: "\(context.family)", next: nil)
+        WidgetRefreshLog.record(.timeline, kind: kind, family: "\(context.family)", next: next,
+                                ms: elapsedMs(since: since))
+    }
+
+    static func snapshot(_ kind: String, _ context: TimelineProviderContext, since: UInt64) {
+        guard PacerClock.pinned == nil else { return }
+        WidgetRefreshLog.record(.snapshot, kind: kind, family: "\(context.family)", next: nil,
+                                ms: elapsedMs(since: since))
     }
 }
 

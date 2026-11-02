@@ -16,6 +16,6 @@ case "-h", "--help", "help":
 default:
     // No arguments is `report`, as it always was.
     let environment = ProcessInfo.processInfo.environment
-    exit(Pace.run(arguments, environment: environment,
-                  io: .live(offline: .store, environment: environment)))
+    exit(Pace.runLogged(arguments, environment: environment,
+                       io: .live(offline: .store, environment: environment)))
 }
