@@ -84,6 +84,7 @@ public enum StoreIndexRepair {
             }
         }
         if !created.isEmpty {
+            Telemetry.count("store.index_repair", created.count)
             Log.write("StoreIndexRepair", "created \(created.count) missing index(es): "
                         + created.joined(separator: ", "))
         }

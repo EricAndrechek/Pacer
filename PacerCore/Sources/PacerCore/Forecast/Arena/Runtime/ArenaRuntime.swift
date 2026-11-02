@@ -623,6 +623,16 @@ public actor ArenaRecordScorer {
         runners.removeAll()
         FMScratch.release()
         MemoryHygiene.relieve()
+        // One report per pass; a pass is a launch-time or hours-long job, not a cycle.
+        if report.cycles > 0 {
+            let slowest = report.modelSeconds.max { $0.value < $1.value }?.key
+            var attrs: Telemetry.Attributes = [:]
+            if let slowest { attrs["slowest_model"] = .string(slowest) }
+            Telemetry.distribution("arena.pass_seconds", report.busySeconds, unit: .second, attributes: attrs)
+            Telemetry.distribution("arena.cpu_seconds", report.modelCPUSeconds.values.reduce(0, +),
+                                   unit: .second, attributes: attrs)
+            Telemetry.count("arena.models_graded", report.modelSeconds.count)
+        }
         return report
     }
 

@@ -1500,8 +1500,20 @@ public actor OAuthPoller: TokenPoolTesting {
     private func pollLane(_ idx: Int) async -> PollOutcome {
         guard idx < lanes.count else { return .credentialsNotFound }
         let credential = lanes[idx].credential
+        let polledAt = Date()
         let result = await client.fetchUsage(using: credential)
         let now = clock.now()
+        // Every poll is tallied (the check-in's outcome rates: 401/429...),
+        // but only slow ones are sent as timings: a poll a minute per lane on
+        // every Mac would spend the free plan's metric quota on normal polls.
+        let outcomeClass = Self.telemetryOutcome(result)
+        let pollMs = Date().timeIntervalSince(polledAt) * 1000
+        TelemetryCounters.add("oauth.poll.\(outcomeClass)")
+        TelemetryCounters.add(pollMs < 1000 ? "oauth.poll_ms.lt1s" : pollMs < 5000 ? "oauth.poll_ms.1_5s" : "oauth.poll_ms.gt5s")
+        if pollMs >= 2000 {
+            Telemetry.distribution("oauth.poll_ms", pollMs, unit: .millisecond,
+                                   attributes: ["outcome": .string(outcomeClass)])
+        }
         lastPollAt = now
         // Guard: the lane array can change across the await (rediscovery
         // never runs concurrently on the same actor, but be defensive).
@@ -1532,6 +1544,29 @@ public actor OAuthPoller: TokenPoolTesting {
         // cooldown) so it survives a restart.
         await saveAllLaneMeta()
         return outcome
+    }
+
+    /// A poll's outcome as a small enumerable label: `ok`, `401`, `403`,
+    /// `429`, `5xx`, `http_other`, `transport`, `expired`, `schema_mismatch`,
+    /// or `credentials` (nothing to poll with, or the keychain refused).
+    /// Never the body or an error description.
+    nonisolated static func telemetryOutcome(_ result: Result<RateLimitSnapshot, OAuthClientError>) -> String {
+        switch result {
+        case .success: return "ok"
+        case .failure(let error):
+            switch error {
+            case .unauthorized: return "401"
+            case .rateLimited: return "429"
+            case .http(let status, _):
+                if status == 403 { return "403" }
+                return (500..<600).contains(status) ? "5xx" : "http_other"
+            case .transport: return "transport"
+            case .tokenExpired: return "expired"
+            case .responseSchemaMismatch: return "schema_mismatch"
+            case .credentialsNotFound, .keychainAccessDenied, .keychainMalformed, .keychainStatus:
+                return "credentials"
+            }
+        }
     }
 
     /// Is a poll whose org resolved to `org` part of the active account?

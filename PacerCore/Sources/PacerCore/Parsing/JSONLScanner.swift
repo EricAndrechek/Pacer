@@ -173,6 +173,8 @@ public actor JSONLScanner {
                 if let cur = c.cursor, cur.byteOffset <= c.size {
                     return cur.byteOffset
                 }
+                // A file that shrank under its cursor (rewritten or compacted).
+                if c.cursor != nil { TelemetryCounters.add("data.cursor_reset") }
                 return 0
             }()
 

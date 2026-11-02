@@ -43,6 +43,8 @@ final class ClickLatencyProbe {
         let at = "(\(Int(p.x)),\(Int(p.y)))"
         switch event.type {
         case .leftMouseDown:
+            // One tally add per click into five buckets, no per-click metric.
+            TelemetryCounters.add("ui.click.delay." + FormatDrift.clickBucket(delaySeconds: max(0, now - event.timestamp)))
             downAt = event.timestamp
             Log.write("Click", "down \(at) delivered \(lagMs)ms after press")
         case .leftMouseUp:

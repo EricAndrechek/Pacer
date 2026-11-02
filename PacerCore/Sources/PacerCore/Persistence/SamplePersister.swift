@@ -448,6 +448,9 @@ public final class SamplePersister {
     /// copy of every patched turn's key alive for the life of the app (#337).
     private var patchedKeys: Set<DedupIndex.Key> = []
 
+    /// The last Claude Code version string reported to `FormatDrift`.
+    private var lastNotedClaudeCodeVersion: String?
+
     /// Returns true if the entry was inserted, false if it was a
     /// duplicate. Marks `(date, model)` and `(projectPath, date)` dirty
     /// on insert.
@@ -483,6 +486,12 @@ public final class SamplePersister {
                 return false
             }
             bestOutputByKey[hashed] = entry.breakdown.outputTokens
+        }
+        // A new Claude Code version string, first sighting only: comparing to
+        // the last one keeps the common row free of any lock or lookup.
+        if let version = entry.claudeCodeVersion, version != lastNotedClaudeCodeVersion {
+            lastNotedClaudeCodeVersion = version
+            FormatDrift.noteClaudeCodeVersion(version)
         }
         let sample = TokenSample(from: entry)
         // Attribute by *when the turn happened*, not by who is logged in

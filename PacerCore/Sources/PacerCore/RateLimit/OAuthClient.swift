@@ -526,13 +526,25 @@ public struct OAuthClient: Sendable {
         // dynamically — see `UsageLimit.parse` — so new models/kinds/groups
         // flow through with no code change. Tolerant: a bad item is
         // dropped, never fails the whole decode.
+        let limits = UsageLimit.parse(top["limits"])
+        // Format drift: a limits[] kind this Mac has never seen. Reported
+        // once per kind per Mac (`FormatDrift`), so a poll a minute costs a
+        // set lookup per limit.
+        for kind in Set(limits.map(\.kind)) { FormatDrift.noteUsageEndpointKind(kind) }
+        // A window that used to arrive and no longer does.
+        for key in ["five_hour", "seven_day"] where top[key] == nil {
+            if FormatDrift.firstSighting("window_missing", key) {
+                Telemetry.count("format.usage_endpoint",
+                                attributes: ["kind": .string(key), "change": .string("window_missing")])
+            }
+        }
         return RateLimitSnapshot(
             sampledAt: sampledAt,
             fiveHour: decodeWindow(top["five_hour"]),
             sevenDay: decodeWindow(top["seven_day"]),
             extraUsageCents: Self.decodeExtraUsage(top["extra_usage"]),
             organizationId: organizationId,
-            limits: UsageLimit.parse(top["limits"])
+            limits: limits
         )
     }
 

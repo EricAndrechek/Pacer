@@ -482,6 +482,15 @@ public actor UsageIntelligenceEngine {
             let cpuMs = Int((clock_gettime_nsec_np(CLOCK_PROCESS_CPUTIME_ID) - cpuStarted) / 1_000_000)
             Log.write("Engine", "recompute \(scopeLabel) \(total)ms awake:\(awakeMs)ms cpuProc:\(cpuMs)ms "
                       + "{\(detail)} \(acct)")
+            // Same gate as the log line: a refit is the app's most expensive
+            // recurring work, but only a slow one is worth a trace.
+            // The scope is "account"/"all", never the account id.
+            let started = Date().addingTimeInterval(-Double(total) / 1000)
+            Telemetry.span(.sequential(
+                op: "engine.recompute", name: scope == .allAccounts ? "all" : "account", start: started,
+                phases: phase.sorted { $0.key < $1.key }.map { ($0.key, Double($0.value) / 1000) },
+                attributes: ["scope": .string(scope == .allAccounts ? "all" : "account"),
+                             "awake_ms": .int(awakeMs), "cpu_ms": .int(cpuMs), "total_ms": .int(total)]))
         }
     }
 
@@ -661,6 +670,15 @@ public actor UsageIntelligenceEngine {
         let took = SuspendingClock.now - started
         Log.write("Engine", "record backfill \(String((limitAccountId ?? "all").suffix(4))): "
                   + "+\(added) outcome(s) over \(cycles) cycle(s) in \(batches) batch(es), \(took) awake")
+        // Once per engine per record version, so rare. Added only when the pass did work.
+        if added > 0 {
+            let secs = Double(took.components.seconds) + Double(took.components.attoseconds) / 1e18
+            let end = Date()
+            Telemetry.span(.init(
+                op: "engine.record_backfill", name: limitAccountId == nil ? "all" : "account",
+                start: end.addingTimeInterval(-secs), end: end,
+                attributes: ["outcomes": .int(added), "cycles": .int(cycles), "batches": .int(batches)]))
+        }
         return added
     }
 

@@ -353,7 +353,12 @@ final class AppBackgroundService {
                 var refreshed = false
                 if stale {
                     let count = await PricingTable.shared.modelCount()
+                    let refreshStarted = Date()
                     refreshed = await PricingTable.shared.refresh()
+                    // Daily at most (an hourly retry on failure).
+                    Telemetry.distribution(
+                        "pricing.refresh_ms", Date().timeIntervalSince(refreshStarted) * 1000,
+                        unit: .millisecond, attributes: ["outcome": .string(refreshed ? "ok" : "failed")])
                     // The curated price history rides the same cadence; it
                     // is best-effort and never blocks the catalog refresh.
                     await CuratedPriceHistory.refresh()
@@ -830,6 +835,10 @@ final class AppBackgroundService {
         engineRefitCount += 1
         engineRefitTotalMs += refitMs
         if refitMs >= 1_000 || engineRefitCount % 20 == 0 {
+            // Sampled on the same gate as the log (slow ones and every 20th),
+            // not every refit: a refit can run every 20 s.
+            Telemetry.distribution("engine.refit_ms", Double(refitMs), unit: .millisecond,
+                                   attributes: ["slow": .bool(refitMs >= 1_000)])
             let duty = Double(engineRefitTotalMs) / max(1, Double(engineRefitCount))
                 / floor / 10.0
             Log.write("Engine",

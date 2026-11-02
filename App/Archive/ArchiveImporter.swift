@@ -373,9 +373,18 @@ struct ArchiveImporter: BulkTranscriptImporter {
             marked.timeIntervalSince(started), queried.timeIntervalSince(marked),
             Date().timeIntervalSince(queried), Self.threads, Self.memoryLimit))
 
+        // Once per full rebuild (an update that re-reads history), so rare.
+        let importSeconds = Date().timeIntervalSince(started)
+        Telemetry.span(Telemetry.Span.sequential(
+            op: "history.bulk_import", name: "import", start: started,
+            phases: [("marks", marked.timeIntervalSince(started)),
+                     ("query", queried.timeIntervalSince(marked)),
+                     ("rows", Date().timeIntervalSince(queried))],
+            attributes: ["entries": .int(entries.count), "files": .int(marks.count),
+                         "threads": .int(Self.threads)]))
         return BulkImportResult(entries: entries,
                                 fileMarks: marks,
-                                seconds: Date().timeIntervalSince(started))
+                                seconds: importSeconds)
     }
 
     /// Where the live scanner should resume each transcript, so the caller

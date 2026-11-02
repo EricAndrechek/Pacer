@@ -105,6 +105,12 @@ public enum ArenaWeightStore {
         return nil
     }
 
+    /// The pinned model ids complete on this Mac (bundled or downloaded), sorted.
+    /// Stat only, no hashing, so the daily check-in can call it cheaply.
+    public static func presentModelIds() -> [String] {
+        pinned.keys.filter { localURL(for: $0) != nil }.sorted()
+    }
+
     /// A file is there and has its pinned size (a cheap check that catches a
     /// truncated copy without hashing hundreds of megabytes on every lookup).
     static func isComplete(_ url: URL, id: String) -> Bool {
@@ -243,9 +249,14 @@ public enum ArenaWeightStore {
                 if Task.isCancelled || stopped { return }
                 do {
                     try await fetch(id: id, repo: repo, revision: rev, files: files,
-                                    into: root().appendingPathComponent(rel, isDirectory: true))
+                                    into: root().appendingPathComponent(rel, isDirectory: true),
+                                    attempts: (failures[id]?.count ?? 0) + 1)
                     failures[id] = nil
                 } catch {
+                    // Rare by nature (backoff caps retries), so a count per failure is safe.
+                    let ns = error as NSError
+                    Telemetry.count("model.download.failure", attributes: [
+                        "model": .string(id), "error_domain": .string(ns.domain), "error_code": .int(ns.code)])
                     let count = (failures[id]?.count ?? 0) + 1
                     let wait = Self.backoff(failures: count)
                     failures[id] = Failure(count: count, retryAt: now().addingTimeInterval(wait))
@@ -280,19 +291,23 @@ public enum ArenaWeightStore {
         /// One id: every file downloaded and verified into a staging folder,
         /// then the folder renamed into place (so `localURL` never sees half
         /// an id).
-        private func fetch(id: String, repo: String, revision: String, files: [PinnedFile], into dest: URL) async throws {
+        private func fetch(id: String, repo: String, revision: String, files: [PinnedFile], into dest: URL,
+                           attempts: Int = 1) async throws {
             let fm = FileManager.default
             let staging = dest.deletingLastPathComponent()
                 .appendingPathComponent(".staging-\(dest.lastPathComponent)-\(UUID().uuidString)", isDirectory: true)
             defer { try? fm.removeItem(at: staging) }
             try fm.createDirectory(at: staging, withIntermediateDirectories: true)
             let started = now()
+            var bytes = 0
+            var resumed = false
             for f in files {
                 let src = URL(string: "https://huggingface.co/\(repo)/resolve/\(revision)/\(f.name)")!
                 var req = URLRequest(url: src)
                 req.networkServiceType = .background
                 let key = "\(id)|\(f.name)"
                 let resume = resumeData.removeValue(forKey: key)
+                if resume != nil { resumed = true }
                 let tmp: URL, response: URLResponse
                 do {
                     let transport = self.transport, request = req
@@ -317,12 +332,17 @@ public enum ArenaWeightStore {
                 guard digest == f.sha256 else {
                     throw ArenaError.invalid("\(f.name): sha256 \(digest) is not the pinned \(f.sha256)")
                 }
+                bytes += ((try? fm.attributesOfItem(atPath: tmp.path)[.size]) as? Int) ?? 0
                 try fm.moveItem(at: tmp, to: staging.appendingPathComponent(f.name))
             }
             try fm.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
             if fm.fileExists(atPath: dest.path) { try fm.removeItem(at: dest) }
             try fm.moveItem(at: staging, to: dest)
             Log.write("Arena", "weights \(id): downloaded and verified in \(Int(now().timeIntervalSince(started))) s")
+            // A model is downloaded once per Mac, so one span each is rare.
+            Telemetry.span(.init(op: "model.download", name: id, start: started, end: now(), attributes: [
+                "model": .string(id), "bytes": .int(bytes), "attempts": .int(attempts),
+                "resumed": .bool(resumed)]))
         }
 
         /// An error for the log without its resume blob.

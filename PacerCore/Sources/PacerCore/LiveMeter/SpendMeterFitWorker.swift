@@ -241,6 +241,10 @@ public actor SpendMeterFitWorker {
                 Log.write("SpendMeterFit", "\(who): not fitted, \(reason)")
             }
         }
+        // Daily at most (`runIfDue`), and only from a persisting run.
+        Telemetry.distribution("meter_fit.ms", report.elapsed * 1000, unit: .millisecond)
+        Telemetry.count("meter_fit.fitted", report.fitted.count)
+        Telemetry.count("meter_fit.skipped", report.entries.count - report.fitted.count)
         Log.write("SpendMeterFit", String(
             format: "%@: %d fitted, %d skipped in %.0f ms (%d readings, %d spend rows)",
             report.fittedDay, report.fitted.count, report.entries.count - report.fitted.count,
