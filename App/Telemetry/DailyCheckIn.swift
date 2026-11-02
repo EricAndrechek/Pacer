@@ -124,18 +124,23 @@ final class DailyCheckIn {
         let startOfYesterday = calendar.date(byAdding: .day, value: -1, to: startOfToday) ?? startOfToday.addingTimeInterval(-86_400)
         let yesterdayKey = TokenSample.formatDate(startOfYesterday)
 
+        let gatherStart = Date()
         let settings = Self.settingsAttributes(store: store)
             .merging(Self.clientAttributes(AccountClientsStore.current)) { _, new in new }
         let lifecycle = Self.lifecycleAttributes(store: store, launchedAt: launchedAt,
                                                  cpuBefore: cpuSecondsAtLastCheckIn)
         cpuSecondsAtLastCheckIn = Self.cpuSeconds()
+        let widgetsStart = Date()
         let widgets = await Self.installedWidgets()
+        let widgetsEnd = Date()
         let counters = TelemetryCounters.drain()
 
+        let storeStart = Date()
         let gathered = await Task.detached(priority: .utility) {
             Self.gather(container: container, startOfYesterday: startOfYesterday,
                         startOfToday: startOfToday, yesterdayKey: yesterdayKey)
         }.value
+        let storeEnd = Date()
 
         var attributes: Telemetry.Attributes = ["checkin.day": .string(today)]
         for part in [settings, lifecycle, gathered.attributes, widgets] {
@@ -147,9 +152,16 @@ final class DailyCheckIn {
         // models ever earn their download (docs/telemetry-plan.md).
         attributes["models.present"] = .string(ArenaWeightStore.presentModelIds().joined(separator: ","))
 
-        let now = Date()
-        Telemetry.span(.init(op: "app.heartbeat", name: "app.heartbeat",
-                             start: now, end: now.addingTimeInterval(0.001), attributes: attributes))
+        // A real span with real children, like the scan and engine spans that
+        // do reach Sentry: a zero-length childless transaction was dropped on
+        // its way there. The children are the two slow parts of gathering.
+        Telemetry.span(.init(
+            op: "app.heartbeat", name: "app.heartbeat", start: gatherStart, end: Date(),
+            attributes: attributes,
+            children: [
+                .init(op: "checkin.widgets", name: "checkin.widgets", start: widgetsStart, end: widgetsEnd),
+                .init(op: "checkin.gather", name: "checkin.gather", start: storeStart, end: storeEnd),
+            ]))
         for (key, n) in counters { Telemetry.count(key, n) }
         if let cpu = lifecycle["energy.cpu_seconds"], case .double(let seconds) = cpu {
             Telemetry.gauge("energy.cpu_seconds", seconds, unit: .second)
