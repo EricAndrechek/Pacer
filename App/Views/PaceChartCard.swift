@@ -653,6 +653,19 @@ struct PaceChartCard: View {
         var fiveHour: [LimitSamplePoint] = []
         var sevenDay: [LimitSamplePoint] = []
         var latest: LimitSamplePoint?
+        var latestFiveHourAt: Date?
+        var latestSevenDayAt: Date?
+
+        /// The account's latest poll had a 7-day window and no 5-hour one:
+        /// it has no 5-hour limit (verified Ultra, since 2026-10-30), so the
+        /// card shows no 5-hour column rather than one that reads as an
+        /// account that stopped being polled. Same rule as `latestBatch`,
+        /// folded into this pass so the history is walked once.
+        var hasNoFiveHourWindow: Bool {
+            guard let latest, let week = latestSevenDayAt,
+                  week >= latest.sampledAt.addingTimeInterval(-2) else { return false }
+            return (latestFiveHourAt ?? .distantPast) < latest.sampledAt.addingTimeInterval(-2)
+        }
     }
 
     /// Derived synchronously from `samples` so the first render already has the
@@ -661,8 +674,13 @@ struct PaceChartCard: View {
     private func bucketed(_ entry: AccountSeries) -> Bucketed {
         var b = Bucketed()
         for s in entry.fixed {
-            if s.window == RateLimitWindowName.fiveHour { b.fiveHour.append(s) }
-            else if s.window == RateLimitWindowName.sevenDay { b.sevenDay.append(s) }
+            if s.window == RateLimitWindowName.fiveHour {
+                b.fiveHour.append(s)
+                if s.sampledAt > (b.latestFiveHourAt ?? .distantPast) { b.latestFiveHourAt = s.sampledAt }
+            } else if s.window == RateLimitWindowName.sevenDay {
+                b.sevenDay.append(s)
+                if s.sampledAt > (b.latestSevenDayAt ?? .distantPast) { b.latestSevenDayAt = s.sampledAt }
+            }
             if s.sampledAt > (b.latest?.sampledAt ?? .distantPast) { b.latest = s }
         }
         return b
@@ -713,10 +731,14 @@ struct PaceChartCard: View {
         for entry in series {
             let b = bucketed(entry)
             let pollGap = ReadingFreshness.typicalGap(readingTimes: entry.fixed.map(\.sampledAt))
-            var tagged: [(side: Side, col: Column)] = [
+            var tagged: [(side: Side, col: Column)] = []
+            if !b.hasNoFiveHourWindow {
+                tagged.append(
                 (.fiveHour, fixedColumn(entry, title: "5-hour", key: RateLimitWindowName.fiveHour,
                                         duration: Self.fiveHourDuration, samples: b.fiveHour, now: now,
-                                        newestAnyAccountAt: newestAny, typicalPollGap: pollGap)),
+                                        newestAnyAccountAt: newestAny, typicalPollGap: pollGap)))
+            }
+            tagged += [
                 (.sevenDay, fixedColumn(entry, title: "7-day", key: RateLimitWindowName.sevenDay,
                                         duration: Self.sevenDayDuration, samples: b.sevenDay, now: now,
                                         newestAnyAccountAt: newestAny, typicalPollGap: pollGap)),

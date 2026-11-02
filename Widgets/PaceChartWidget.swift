@@ -45,6 +45,10 @@ struct PaceChartEntry: TimelineEntry {
     /// old `both` behaviour byte-for-byte.
     let primaryKey: String
     let secondaryKey: String
+    /// False when the latest poll had a 7-day window and no 5-hour one: the
+    /// account has no 5-hour limit (verified Ultra), so the large list drops
+    /// that row rather than showing one that waits forever.
+    var hasFiveHour = true
 
     /// One window's worth of pace data, paired down to what the shared
     /// `PaceChartView` consumes plus the metadata the widget needs for
@@ -159,12 +163,19 @@ struct PaceChartProvider: AppIntentTimelineProvider {
     /// other fixed window). Nil/absent selections reproduce today's 5h+7d.
     private static func resolveKeys(
         primary: PaceWindowEntity?, secondary: PaceWindowEntity?,
-        scoped: [PaceChartEntry.ScopedState]
+        scoped: [PaceChartEntry.ScopedState],
+        hasFiveHour: Bool = true
     ) -> (String, String) {
-        var available: Set<String> = ["five_hour", "seven_day"]
+        // Same fallback as the gauges widget: no 5-hour limit → 7-day first,
+        // the first per-model cap second.
+        var available: Set<String> = ["seven_day"]
+        if hasFiveHour { available.insert("five_hour") }
         for s in scoped { available.insert(s.key) }
-        let p = PaceWindowResolver.resolveKey(primary?.id, available: available, fallback: "five_hour")
-        let secFallback = (p == "five_hour") ? "seven_day" : "five_hour"
+        let p = PaceWindowResolver.resolveKey(primary?.id, available: available,
+                                              fallback: hasFiveHour ? "five_hour" : "seven_day")
+        let secFallback = hasFiveHour
+            ? ((p == "five_hour") ? "seven_day" : "five_hour")
+            : ((p == "seven_day") ? (scoped.first?.key ?? "seven_day") : "seven_day")
         let s = PaceWindowResolver.resolveKey(secondary?.id, available: available, fallback: secFallback)
         return (p, s)
     }
@@ -199,18 +210,25 @@ struct PaceChartProvider: AppIntentTimelineProvider {
             // The live meter as of this refresh (#318), the same arithmetic
             // the app's surfaces read through `LiveMeterBoard`.
             let live = account.map { LiveMeterSource(context: context).currentValues(account: $0, now: PacerClock.now) } ?? [:]
-            let five = Self.window(rows: rows, key: "five_hour", duration: K.fiveHourSeconds,
-                                   outlook: snapshot?.fiveHour, live: live["five_hour"])
+            // See `latestBatch`: a 5-hour window the latest poll no longer
+            // reported is not charted from its last row.
+            let hasFiveHour = !rows.map(\.limitPoint).hasNoFiveHourWindow
+            let five = hasFiveHour
+                ? Self.window(rows: rows, key: "five_hour", duration: K.fiveHourSeconds,
+                              outlook: snapshot?.fiveHour, live: live["five_hour"])
+                : nil
             let seven = Self.window(rows: rows, key: "seven_day", duration: K.sevenDaySeconds,
                                     outlook: snapshot?.sevenDay, live: live["seven_day"])
             let scoped = Self.scopedStates(context: context, snapshot: snapshot, account: account, live: live)
-            let (primaryKey, secondaryKey) = Self.resolveKeys(primary: primary, secondary: secondary, scoped: scoped)
+            let (primaryKey, secondaryKey) = Self.resolveKeys(primary: primary, secondary: secondary,
+                                                              scoped: scoped, hasFiveHour: hasFiveHour)
             return PaceChartEntry(
                 date: PacerClock.now, fiveHour: five, sevenDay: seven,
-                fiveHourIdle: five == nil ? Self.idleUsedPct(rows: rows, key: "five_hour") : nil,
+                fiveHourIdle: five == nil && hasFiveHour ? Self.idleUsedPct(rows: rows, key: "five_hour") : nil,
                 sevenDayIdle: seven == nil ? Self.idleUsedPct(rows: rows, key: "seven_day") : nil,
                 scoped: scoped,
-                primaryKey: primaryKey, secondaryKey: secondaryKey)
+                primaryKey: primaryKey, secondaryKey: secondaryKey,
+                hasFiveHour: hasFiveHour)
         } catch {
             let (primaryKey, secondaryKey) = Self.resolveKeys(primary: primary, secondary: secondary, scoped: [])
             return PaceChartEntry(date: PacerClock.now, fiveHour: nil, sevenDay: nil,
@@ -483,6 +501,7 @@ struct PaceChartWidgetView: View {
             .init(id: "seven_day", label: "7-day",
                   state: entry.sevenDay, idle: entry.sevenDayIdle, isActive: false),
         ]
+        if !entry.hasFiveHour { out.removeAll { $0.id == "five_hour" } }
         for s in entry.scoped.prefix(max(0, Self.largeRowCap - out.count)) {
             out.append(.init(id: s.label, label: s.label,
                              state: s.state, idle: nil, isActive: s.isActive))

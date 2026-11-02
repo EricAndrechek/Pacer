@@ -70,6 +70,57 @@ public extension Sequence where Element == LimitSamplePoint {
     func inCycle(resetting resets: Date, duration: TimeInterval) -> [LimitSamplePoint] {
         filter { RateLimitCycle.contains(sampleReset: $0.resetsAt, resets: resets, duration: duration) }
     }
+
+    /// The newest reading of each fixed window **the latest poll still
+    /// reported**, one per window, newest-first input order preserved.
+    ///
+    /// A window's newest row is not automatically its current value. Every
+    /// poll writes all the windows it received under one `sampledAt`, so a
+    /// window the server has stopped sending shows up as its newest row
+    /// falling behind the account's newest batch. That happened on
+    /// 2026-10-30, when verified Ultra (formerly Max 20×) accounts lost the
+    /// 5-hour limit: the API simply stopped returning `five_hour`, and every
+    /// "newest row per window" reader kept showing the last pre-change 5-hour
+    /// value as if it were live. Before that, `five_hour` was never absent
+    /// from a poll that had `seven_day` — an idle window came back with a
+    /// null reset, not as a missing key — so its absence means the account
+    /// has no such limit, not that the reading failed.
+    ///
+    /// Same rule, and same jitter tolerance, as `ScopedWindowRow.latestBatch`:
+    /// a limit dropped from the response stops appearing.
+    ///
+    /// Callers pass one account's rows. An empty result means no reading yet.
+    func latestBatch(tolerance: TimeInterval = 2) -> [LimitSamplePoint] {
+        let all = Array(self)
+        guard let newest = all.map(\.sampledAt).max() else { return [] }
+        let cutoff = newest.addingTimeInterval(-tolerance)
+        var order: [String] = []
+        var best: [String: LimitSamplePoint] = [:]
+        for row in all where row.sampledAt >= cutoff {
+            guard let existing = best[row.window] else {
+                best[row.window] = row
+                order.append(row.window)
+                continue
+            }
+            if row.sampledAt > existing.sampledAt { best[row.window] = row }
+        }
+        return order.compactMap { best[$0] }
+    }
+
+    /// `window`'s reading from the latest batch, or nil when the latest poll
+    /// did not report it (see `latestBatch`).
+    func current(_ window: String, tolerance: TimeInterval = 2) -> LimitSamplePoint? {
+        latestBatch(tolerance: tolerance).first { $0.window == window }
+    }
+
+    /// True when the latest poll reported a 7-day window but no 5-hour one:
+    /// the account has no 5-hour limit (a verified Ultra account), as opposed
+    /// to having no reading at all yet.
+    var hasNoFiveHourWindow: Bool {
+        let batch = latestBatch()
+        return batch.contains { $0.window == RateLimitWindowName.sevenDay }
+            && !batch.contains { $0.window == RateLimitWindowName.fiveHour }
+    }
 }
 
 public extension Sequence where Element == ScopedSamplePoint {

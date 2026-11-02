@@ -107,7 +107,8 @@ exactly as it always has.
   the wall? Color bands (behind / on track / ahead / nearly maxed) tell you at a
   glance, and *every* window gets the same forecast: projected fill,
   time-to-limit, and calibrated bands. Refreshed every few minutes from
-  Anthropic's usage data.
+  Anthropic's usage data. On an Ultra plan, which has no 5-hour limit, Pacer
+  shows the weekly and per-model windows only.
 - **Costs, your way.** See spend the way Claude Code reports it, or have Pacer
   price it from tokens itself — switchable in Settings. Daily, monthly, and
   all-time totals included.
