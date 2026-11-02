@@ -342,7 +342,11 @@ final class PacerHTTPServer: @unchecked Sendable {
         "/v1/predictions/history",
     ]
     nonisolated private static func telemetryRoute(_ path: String) -> String {
-        telemetryRoutes.contains(path) ? path.replacingOccurrences(of: "/", with: ".") : "other"
+        // "/v1/usage/daily" → "v1.usage.daily" (no leading dot: the key is
+        // appended to "api.route.").
+        guard telemetryRoutes.contains(path) else { return "other" }
+        let name = path.split(separator: "/").joined(separator: ".")
+        return name.isEmpty ? "root" : name
     }
 
     /// Every route but the two above, on `workQueue`.

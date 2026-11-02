@@ -155,9 +155,20 @@ final class DailyCheckIn {
         // A real span with real children, like the scan and engine spans that
         // do reach Sentry: a zero-length childless transaction was dropped on
         // its way there. The children are the two slow parts of gathering.
+        // The full snapshot goes as one metric: metrics take attributes and
+        // can be grouped and counted per Mac (count_unique(user.id)). The
+        // transaction carries only a small core: with ~60 attributes the
+        // installed build's heartbeat never reached Sentry (2026-11-02) while
+        // every small transaction and every metric did.
+        Telemetry.count("checkin.snapshot", 1, attributes: attributes)
+        let core = attributes.filter {
+            ["checkin.day", "env.macos", "env.model", "settings.cost_mode"].contains($0.key)
+        }
         Telemetry.span(.init(
-            op: "app.heartbeat", name: "app.heartbeat", start: gatherStart, end: Date(),
-            attributes: attributes,
+            // Not "app.*": Sentry treats app-start-style ops specially, and the
+            // "app.heartbeat" transaction never arrived while every other did.
+            op: "pacer.checkin", name: "daily check-in", start: gatherStart, end: Date(),
+            attributes: core,
             children: [
                 .init(op: "checkin.widgets", name: "checkin.widgets", start: widgetsStart, end: widgetsEnd),
                 .init(op: "checkin.gather", name: "checkin.gather", start: storeStart, end: storeEnd),
