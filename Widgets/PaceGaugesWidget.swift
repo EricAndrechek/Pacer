@@ -122,29 +122,8 @@ struct PaceGaugesProvider: AppIntentTimelineProvider {
         scoped: [PaceGaugesEntry.ScopedGauge],
         hasFiveHour: Bool = true
     ) -> (String, String) {
-        // An account with no 5-hour limit (verified Ultra) gauges its 7-day
-        // window first and its first per-model cap second, rather than an
-        // empty "awaiting" 5-hour gauge that would never fill.
-        var available: Set<String> = ["seven_day"]
-        if hasFiveHour { available.insert("five_hour") }
-        for g in scoped { available.insert(g.key) }
-        let p = PaceWindowResolver.resolveKey(primary?.id, available: available,
-                                              fallback: hasFiveHour ? "five_hour" : "seven_day")
-        let secFallback = hasFiveHour
-            ? ((p == "five_hour") ? "seven_day" : "five_hour")
-            : ((p == "seven_day") ? (scoped.first?.key ?? "seven_day") : "seven_day")
-        var s = PaceWindowResolver.resolveKey(secondary?.id, available: available, fallback: secFallback)
-        // Never the same window twice. A widget configured "5-hour + 7-day"
-        // on an account with no 5-hour limit (verified Ultra) resolved its
-        // first gauge to 7-day by fallback and its second to 7-day by choice,
-        // and showed 7-day twice (PACER-A, 2026-11-02). The second takes the
-        // next window that exists instead; with none, the medium layout draws
-        // one gauge (`secondaryKey == primaryKey`).
-        if s == p, let other = (scoped.map(\.key) + ["seven_day", "five_hour"])
-            .first(where: { $0 != p && available.contains($0) }) {
-            s = other
-        }
-        return (p, s)
+        PaceWindowResolver.resolvePair(primary: primary?.id, secondary: secondary?.id,
+                                       scopedKeys: scoped.map(\.key), hasFiveHour: hasFiveHour)
     }
 
     private func currentEntry(primary: PaceWindowEntity?, secondary: PaceWindowEntity?) -> PaceGaugesEntry {

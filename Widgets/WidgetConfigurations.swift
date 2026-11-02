@@ -171,6 +171,34 @@ enum PaceWindowResolver {
         if let id, available.contains(id) { return id }
         return fallback
     }
+
+    /// The two windows a two-window widget (pace gauges, pace chart) shows,
+    /// from the person's two selections and the windows that exist now. One
+    /// place for both widgets: they each carried a copy, and the copies shared
+    /// the bug below.
+    ///
+    /// No 5-hour limit (verified Ultra) → 7-day first, the first per-model cap
+    /// second. Never the same window twice: "5-hour + 7-day" on an Ultra
+    /// account resolved the first slot to 7-day by fallback and the second to
+    /// 7-day by choice, and showed 7-day twice (PACER-A). The second slot then
+    /// takes the next window that exists; with none, both keys are equal and
+    /// the medium layouts draw one window.
+    static func resolvePair(primary: String?, secondary: String?,
+                            scopedKeys: [String], hasFiveHour: Bool) -> (String, String) {
+        var available: Set<String> = ["seven_day"]
+        if hasFiveHour { available.insert("five_hour") }
+        available.formUnion(scopedKeys)
+        let p = resolveKey(primary, available: available, fallback: hasFiveHour ? "five_hour" : "seven_day")
+        let secFallback = hasFiveHour
+            ? ((p == "five_hour") ? "seven_day" : "five_hour")
+            : ((p == "seven_day") ? (scopedKeys.first ?? "seven_day") : "seven_day")
+        var s = resolveKey(secondary, available: available, fallback: secFallback)
+        if s == p, let other = (scopedKeys + ["seven_day", "five_hour"])
+            .first(where: { $0 != p && available.contains($0) }) {
+            s = other
+        }
+        return (p, s)
+    }
 }
 
 /// Configuration for the pace-chart widget. Two window slots so the medium

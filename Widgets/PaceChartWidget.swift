@@ -169,18 +169,8 @@ struct PaceChartProvider: AppIntentTimelineProvider {
         scoped: [PaceChartEntry.ScopedState],
         hasFiveHour: Bool = true
     ) -> (String, String) {
-        // Same fallback as the gauges widget: no 5-hour limit → 7-day first,
-        // the first per-model cap second.
-        var available: Set<String> = ["seven_day"]
-        if hasFiveHour { available.insert("five_hour") }
-        for s in scoped { available.insert(s.key) }
-        let p = PaceWindowResolver.resolveKey(primary?.id, available: available,
-                                              fallback: hasFiveHour ? "five_hour" : "seven_day")
-        let secFallback = hasFiveHour
-            ? ((p == "five_hour") ? "seven_day" : "five_hour")
-            : ((p == "seven_day") ? (scoped.first?.key ?? "seven_day") : "seven_day")
-        let s = PaceWindowResolver.resolveKey(secondary?.id, available: available, fallback: secFallback)
-        return (p, s)
+        PaceWindowResolver.resolvePair(primary: primary?.id, secondary: secondary?.id,
+                                       scopedKeys: scoped.map(\.key), hasFiveHour: hasFiveHour)
     }
 
     private func currentEntry(primary: PaceWindowEntity?, secondary: PaceWindowEntity?) -> PaceChartEntry {
@@ -585,8 +575,12 @@ struct PaceChartWidgetView: View {
                 let b = entry.resolve(entry.secondaryKey)
                 HStack(alignment: .top, spacing: 12) {
                     column(label: a.label, state: a.state, idle: a.idle, style: .compact)
-                    Divider()
-                    column(label: b.label, state: b.state, idle: b.idle, style: .compact)
+                    // One window only (an Ultra account with no per-model
+                    // caps): one card, not the same card twice (PACER-A).
+                    if entry.secondaryKey != entry.primaryKey {
+                        Divider()
+                        column(label: b.label, state: b.state, idle: b.idle, style: .compact)
+                    }
                 }
             }
         }
