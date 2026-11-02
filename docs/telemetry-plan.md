@@ -345,8 +345,6 @@ imageIndex/imageOffset/symbol, `exception` type/signal). Sent two ways:
 
 ### Release-note bullet (for the release that first ships this)
 
-**Crash reports and usage data.** Pacer now sends crash reports and a daily
-summary of how it is used to its Sentry project, to find bugs and slowdowns on
-Macs other than ours. Both are on by default and each can be turned off in
-Settings → Privacy. Your prompts, projects, paths, account details and costs
-are never sent. The README's Privacy section lists exactly what is.
+**Crash reports and usage stats.** Pacer now sends crash reports and anonymous
+usage stats to Sentry so bugs and slowdowns get found. Turn either off in
+Settings → Privacy.

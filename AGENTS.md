@@ -229,8 +229,8 @@ These are subtle, easy to miss, and break user-visible numbers:
 
 Pacer sends crash reports and usage data to its Sentry project, both on by
 default, each with a Settings → Privacy toggle (decided 2026-10-21; plan and
-every signal in `docs/telemetry-plan.md`; README "Privacy" is the public promise
-and must match what the code sends). Read this before adding any signal.
+every signal in `docs/telemetry-plan.md`; README "Privacy" is the short public
+promise). Read this before adding any signal.
 
 - **The doors.** PacerCore code reports through `Telemetry` (count,
   distribution, gauge, after-the-fact `Span`, breadcrumb) or, for anything
@@ -256,8 +256,11 @@ and must match what the code sends). Read this before adding any signal.
 - **The widget and the CLI** report through the App Group: the CLI appends to
   `CLIRunLog`, the widget adds `ms=` to `WidgetRefreshLog`, and the app forwards
   their macOS crash reports (`CrashReportForwarder`). Do not give them the SDK.
-- **Changing what is sent** means changing the README "Privacy" section in the
-  same commit.
+- **Changing what is sent** means updating the signal list in
+  `docs/telemetry-plan.md` in the same commit. The README "Privacy" section is
+  deliberately short (Eric's call, 2026-11-02); touch it only if a new kind of
+  data starts leaving (it promises: never prompts, projects, files, accounts or
+  costs).
 
 ## Look at the UI yourself — `make render-live`
 

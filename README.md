@@ -218,52 +218,12 @@ tools all move fast, so corrections are welcome via an issue or PR.</sub>
 
 ## Privacy
 
-Pacer reads only the files Claude Code already writes to your Mac:
+Your usage data stays on your Mac. Pacer reads Claude Code's own files and uses
+your Claude Code login only to ask Anthropic for your rate limits.
 
-- `~/.claude/projects/*.jsonl` — your session token usage, read on your machine.
-- The Claude Code login token in your macOS Keychain — used only to ask
-  Anthropic for your rate-limit status, the same way Claude Code itself does.
-
-Your usage history stays on your Mac in `~/Library/Group Containers/…/pacer.sqlite`
-and persists across app updates.
-
-### Crash reports and usage data
-
-To find bugs and slowdowns on other people's Macs, Pacer sends two kinds of data
-to its [Sentry](https://sentry.io) project (Sentry stores it in the US). Both are
-on by default and each has its own switch in **Settings → Privacy**.
-
-**Send crash reports** — crashes of the app, the widgets and the `pacer` command,
-freezes of 2 seconds or more with where the app was stuck, macOS's hang and
-CPU diagnostics, and problem reports you or your agent send with
-`pacer feedback` or **Help → Report a Problem**.
-
-**Share usage data** — once a day: Pacer's version, macOS version and Mac model,
-which settings are on, how many accounts and which plan types, installed widgets,
-which screens and commands are used and how often, how long things take
-(scans, updates, model downloads, forecasts) and how accurate the forecasts are,
-and your usage level in broad bands (for example "weekly limit 60–70% used",
-"under a million tokens"). Plus one session a day per Mac, which is how crash-free
-rates are counted.
-
-Both include your IP address, which Sentry turns into an approximate location
-(country and city), and a random ID for your Mac that is not derived from your
-hardware.
-
-**Never sent:** your prompts or conversations, project or file names, file
-paths, account emails or IDs, costs or exact token counts, and log files.
-
-Turn either off in **Settings → Privacy**, or set `PACER_TELEMETRY=off` in the
-app's environment. `pacer feedback --local` keeps a problem report on your Mac.
-
-### Network connections
-
-- `api.anthropic.com` — your rate-limit windows (~12 small requests an hour).
-- `github.com`, `ericandrechek.github.io` — app updates (at launch, then every
-  6 hours) and price history.
-- `models.dev`, `raw.githubusercontent.com` — model prices, once a day.
-- `huggingface.co` — forecast models, downloaded once.
-- `*.ingest.us.sentry.io` — crash reports and usage data, as above.
+Pacer sends crash reports and anonymous usage stats to [Sentry](https://sentry.io)
+so I can find bugs and slowdowns. Never your prompts, projects, files, accounts or
+costs. Turn either off in **Settings → Privacy**.
 
 ---
 
