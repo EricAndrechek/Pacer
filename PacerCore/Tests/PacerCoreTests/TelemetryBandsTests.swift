@@ -47,4 +47,14 @@ import Testing
         #expect(TelemetryBands.thinned([1, 2, 3], limit: 500) == [1, 2, 3])
         #expect(TelemetryBands.thinned([1, 2, 3], limit: 0).isEmpty)
     }
+
+    @Test("durations fall into fixed buckets")
+    func durationBuckets() {
+        #expect(TelemetryBands.durationBucket(ms: 0) == "lt100")
+        #expect(TelemetryBands.durationBucket(ms: 99) == "lt100")
+        #expect(TelemetryBands.durationBucket(ms: 100) == "100_250")
+        #expect(TelemetryBands.durationBucket(ms: 999) == "500_1000")
+        #expect(TelemetryBands.durationBucket(ms: 1_999) == "1000_2000")
+        #expect(TelemetryBands.durationBucket(ms: 2_000) == "gt2000")
+    }
 }

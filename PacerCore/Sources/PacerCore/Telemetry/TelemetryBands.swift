@@ -50,6 +50,20 @@ public enum TelemetryBands {
         return 200_000
     }
 
+    /// A duration in milliseconds as a counter-key suffix ("lt100" ...
+    /// "gt2000"), for things that happen far too often to report one by one
+    /// but whose spread matters (the local API's snapshot build).
+    public static func durationBucket(ms: Int) -> String {
+        switch ms {
+        case ..<100: return "lt100"
+        case ..<250: return "100_250"
+        case ..<500: return "250_500"
+        case ..<1_000: return "500_1000"
+        case ..<2_000: return "1000_2000"
+        default: return "gt2000"
+        }
+    }
+
     /// At most `limit` values, evenly thinned and order-preserving, so a
     /// busy day's thousand runs of one command do not become a thousand
     /// metric points.

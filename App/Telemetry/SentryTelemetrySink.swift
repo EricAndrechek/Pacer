@@ -19,12 +19,12 @@ struct SentryTelemetrySink: Telemetry.Sink {
     }
 
     func distribution(_ key: String, _ value: Double, unit: Telemetry.Unit, attributes: Telemetry.Attributes) {
-        guard TelemetryController.usageAllowed else { return }
+        guard TelemetryController.usageAllowed, value.isFinite else { return }
         SentrySDK.metrics.distribution(key, value: value, options: Self.options(unit, attributes))
     }
 
     func gauge(_ key: String, _ value: Double, unit: Telemetry.Unit, attributes: Telemetry.Attributes) {
-        guard TelemetryController.usageAllowed else { return }
+        guard TelemetryController.usageAllowed, value.isFinite else { return }
         SentrySDK.metrics.gauge(key, value: value, options: Self.options(unit, attributes))
     }
 
@@ -32,7 +32,7 @@ struct SentryTelemetrySink: Telemetry.Sink {
     /// end. sentry-cocoa keeps a timestamp set before `finish()`
     /// (`SentrySpanInternal.finishWithStatus` only fills a nil one).
     func span(_ span: Telemetry.Span) {
-        guard TelemetryController.usageAllowed else { return }
+        guard TelemetryController.usageAllowed, span.end >= span.start else { return }
         let context = TransactionContext(name: span.name, operation: span.op)
         let transaction = SentrySDK.startTransaction(
             transactionContext: context, bindToScope: false,
@@ -67,7 +67,7 @@ struct SentryTelemetrySink: Telemetry.Sink {
             switch value {
             case .string(let s): span.setData(value: TelemetryScrubber.scrub(s), key: key)
             case .int(let i): span.setData(value: i, key: key)
-            case .double(let d): span.setData(value: d, key: key)
+            case .double(let d): if d.isFinite { span.setData(value: d, key: key) }
             case .bool(let b): span.setData(value: b, key: key)
             }
         }
@@ -78,11 +78,11 @@ struct SentryTelemetrySink: Telemetry.Sink {
     }
 
     private static func attributes(_ attributes: Telemetry.Attributes) -> [String: SentryAttributeValue] {
-        attributes.mapValues { value -> SentryAttributeValue in
+        attributes.compactMapValues { value -> SentryAttributeValue? in
             switch value {
             case .string(let s): TelemetryScrubber.scrub(s)
             case .int(let i): i
-            case .double(let d): d
+            case .double(let d): d.isFinite ? d : nil
             case .bool(let b): b
             }
         }
