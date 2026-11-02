@@ -81,7 +81,8 @@ struct PaceGaugesEntry: TimelineEntry {
                                                    isEstimate: g.isEstimate, readPct: g.readPct),
                                 durationSeconds: g.durationSeconds, isActive: g.isActive)
             }
-            return Resolved(label: "5-hour", state: fiveHour, durationSeconds: 5 * 3600, isActive: false)
+            // Unknown key -> 7-day, never an empty 5-hour gauge (Ultra has none).
+            return Resolved(label: "7-day", state: sevenDay, durationSeconds: 7 * 86_400, isActive: false)
         }
     }
 }

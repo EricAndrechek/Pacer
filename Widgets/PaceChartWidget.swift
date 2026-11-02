@@ -125,8 +125,9 @@ struct PaceChartEntry: TimelineEntry {
                 return Resolved(label: s.label, state: s.state, idle: nil,
                                 duration: s.state.chart.durationSeconds, isActive: s.isActive)
             }
-            return Resolved(label: "5-hour", state: fiveHour, idle: fiveHourIdle,
-                            duration: K.fiveHourSeconds, isActive: false)
+            // Unknown key -> 7-day, never an empty 5-hour chart (Ultra has none).
+            return Resolved(label: "7-day", state: sevenDay, idle: sevenDayIdle,
+                            duration: K.sevenDaySeconds, isActive: false)
         }
     }
 }
