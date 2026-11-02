@@ -290,3 +290,41 @@ take only the usage events (items 5–7) and Sentry keeps crashes, hangs and per
 - Every install tries to download all four large forecast networks (~2.7 GB), including models it
   never picks. Worth an issue on its own, independent of telemetry.
 - `CLI` and widget crashes have never been visible to anyone but the user.
+
+### Update 2026-11-02 (2): answers, the download question, more signals
+
+Answers: usage levels yes (banded); forecast accuracy reported per account AND per Mac.
+
+**The 2.7 GB download is by design, not a bug.** `ArenaRuntime.start` collects the weights of
+every selectable model (`roster.selectable` → `requiredWeights`) and fetches what's missing before
+each scorer pass, because a Mac can only pick its best model by grading every candidate on its own
+history. The cost: ~2.7 GB of disk and bandwidth per install (Timestral-123M 490 MB, -209M 837 MB,
+Chronos 478 MB, TimesFM 925 MB), in `~/Library/Application Support/Pacer/ForecastWeights`, with
+nothing in the UI saying so. Already skips expensive/constrained networks. Telemetry item 4
+(which models win, per plan and window, across Macs) answers whether the big ones ever win;
+if they rarely do, download them only when cheaper models leave room to improve.
+
+**More signals for maintaining the app** (added to the catalog):
+
+10. **Data health** (the bug classes that have bitten before): malformed lines skipped, models
+    with no price (the silent-$0 class), streamed-message supersedes, cursor resets, archive
+    integrity results, rollup gaps rebuilt, dedup repairs. Counts per day, alert on spikes.
+11. **Format drift from Anthropic**: Claude Code versions seen in transcripts, unknown usage
+    fields, new model ids before pricing knows them, usage-endpoint shape changes (new `limits[]`
+    kinds, a window that disappears, as `five_hour` did for Ultra). Alerts on first sighting.
+12. **Credentials and polling health**: keychain read failures, 401/429 rates, Desktop and cswap
+    credential errors, poll lanes stalled.
+13. **Environment**: macOS, Mac model and architecture, RAM, free disk, store size and row
+    counts, archive size, transcript file count, both config dirs present, `CLAUDE_CONFIG_DIR`
+    set, time-zone offset (day-boundary bugs).
+14. **Lifecycle**: launched at login or by hand, uptime, restarts per day, unclean exits, Sparkle
+    check/install failures, time from a release to each Mac running it.
+15. **Energy**: process CPU seconds per hour and while idle (the 0 % idle invariant, fleet-wide).
+16. **Feature errors**: notification permission state, API server port in use, skill install
+    failures, widget timeline failures.
+17. **Problem reports carry a diagnostics snapshot**: version, settings, store stats and the last
+    lines of tag-allow-listed, scrubbed log, shown in the sheet before sending.
+18. **Remote switch**: a small JSON beside the appcast (Pacer already fetches price history from
+    there) that can lower sample rates or turn a signal off without a release.
+19. **Sentry alerts**: new issue, regression, crash-free below a floor, new format-drift sighting,
+    data-health spike, idle CPU above a floor.
