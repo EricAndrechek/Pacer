@@ -209,6 +209,18 @@ struct PacerApp: App {
                     openWindow(id: "report-problem")
                     NSApp.activate()
                 }
+                #if DEBUG
+                // Development builds only: the end-to-end check of crash and
+                // freeze reporting (docs/telemetry-plan.md, "Verification").
+                // A crash is sent on the next launch; a freeze of 2 s or more
+                // is reported while it happens.
+                Button("Crash Pacer (test)") {
+                    fatalError("Test crash from Help menu (development build)")
+                }
+                Button("Freeze for 3 Seconds (test)") {
+                    Thread.sleep(forTimeInterval: 3)
+                }
+                #endif
                 Divider()
                 Button("Show Database in Finder") {
                     if let url = try? PacerStore.storeURL() {
