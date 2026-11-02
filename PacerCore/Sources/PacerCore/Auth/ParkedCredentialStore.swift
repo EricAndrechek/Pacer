@@ -131,6 +131,11 @@ public final class ParkedCredentialStore: @unchecked Sendable {
                 cache[key] = nil
             case .failed(let reason):
                 failures[kind] = reason
+                // Once per kind per session (the branch above stops further
+                // reads), so this is "this Mac's keychain read failed",
+                // classified to a fixed word, never the reason text.
+                CredentialTelemetry.note(kind == .switcher ? "switcher" : "profile",
+                                         CredentialTelemetry.keychainKind(reason: reason))
                 Log.write("ParkedCredentials",
                           "\(kind == .switcher ? "cswap's saved logins" : "profile credentials") "
                             + "could not be read (\(reason)); not reading them again this session")

@@ -1494,6 +1494,45 @@ public actor OAuthPoller: TokenPoolTesting {
         }
     }
 
+    // MARK: - Stalled lanes (telemetry)
+
+    /// A lane that was polled before, whose credential is still good and that
+    /// is not cooling down, yet has not been polled for this long: the
+    /// scheduler is starving it (or deferring to another client for good).
+    /// Longer than `externalYieldMax` twice over, so ordinary yielding to
+    /// cswap never counts.
+    static let stalledLaneAfter: TimeInterval = 30 * 60
+
+    /// How many of these lanes are stalled. Pure, for tests.
+    static func stalledLaneCount(lastPolledAt: [Date?], expiresAt: [Date?], cooldownUntil: [Date?],
+                                 now: Date, after threshold: TimeInterval = stalledLaneAfter) -> Int {
+        var n = 0
+        for i in lastPolledAt.indices {
+            guard let last = lastPolledAt[i], now.timeIntervalSince(last) >= threshold else { continue }
+            if let exp = expiresAt[i], exp <= now { continue }
+            if let cool = cooldownUntil[i], cool > now { continue }
+            n += 1
+        }
+        return n
+    }
+
+    private var lastStalledNoteAt: Date?
+
+    /// After each poll: tally `oauth.lane_stalled` when a lane has gone quiet,
+    /// at most once an hour. A loop over a handful of lanes and a counter add;
+    /// nothing is sent from here (the check-in sends the tally).
+    private func noteStalledLanes(now: Date) {
+        if let last = lastStalledNoteAt, now.timeIntervalSince(last) < 3_600 { return }
+        let n = Self.stalledLaneCount(
+            lastPolledAt: lanes.map { $0.state.lastPolledAt },
+            expiresAt: lanes.map { $0.credential.expiresAt },
+            cooldownUntil: lanes.map { $0.state.cooldownUntil },
+            now: now)
+        guard n > 0 else { return }
+        lastStalledNoteAt = now
+        TelemetryCounters.add("oauth.lane_stalled", n)
+    }
+
     // MARK: - One poll
 
     @discardableResult
@@ -1527,6 +1566,7 @@ public actor OAuthPoller: TokenPoolTesting {
         let previousLane = lastPolledLaneId
         let outcome = await apply(result: result, laneIndex: idx, now: now)
         lastOutcome = outcome
+        noteStalledLanes(now: now)
         lastPolledLaneId = idx < lanes.count
             ? Self.laneId(lanes[idx].credential.accessToken) : nil
         // Log a change of lane as well as a change of outcome. Deduping on the

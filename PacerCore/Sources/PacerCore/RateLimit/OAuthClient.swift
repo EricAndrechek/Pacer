@@ -393,6 +393,7 @@ public struct OAuthClient: Sendable {
         // Layer 3 (or first-ever read): the only prompt-risking step.
         guard allowKeyRead else { return (working(), nil) }
         guard case .success(let key) = desktop.readKey() else {
+            CredentialTelemetry.noteOnce("desktop", "key_unreadable")
             return (working(), nil)
         }
         let creds = desktop.profileCredentials(fromBlobs: blobs, keyPassword: key)
@@ -469,8 +470,11 @@ public struct OAuthClient: Sendable {
             let fingerprint = desktop.cacheFingerprint()
             if desktopGate.shouldRead(fingerprint: fingerprint) {
                 desktopGate.record(fingerprint: fingerprint)
-                if case .success(let creds) = desktop.readAll() {
-                    candidates.append(contentsOf: creds)
+                switch desktop.readAll() {
+                case .success(let creds): candidates.append(contentsOf: creds)
+                // Gated by the fingerprint above, so this tallies a changed
+                // cache that still would not read, not every poll.
+                case .failure(let error): CredentialTelemetry.note("desktop", error.telemetryKind)
                 }
             }
         }
