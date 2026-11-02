@@ -14,19 +14,18 @@ struct SentryTelemetrySink: Telemetry.Sink {
 
     func count(_ key: String, _ value: Int, attributes: Telemetry.Attributes) {
         guard TelemetryController.usageAllowed, value > 0 else { return }
-        SentrySDK.metrics.count(key: key, value: UInt(value), attributes: Self.attributes(attributes))
+        SentrySDK.metrics.count(key, value: UInt(value),
+                                options: SentryMetricOptions(attributes: Self.attributes(attributes)))
     }
 
     func distribution(_ key: String, _ value: Double, unit: Telemetry.Unit, attributes: Telemetry.Attributes) {
         guard TelemetryController.usageAllowed else { return }
-        SentrySDK.metrics.distribution(key: key, value: value, unit: Self.unit(unit),
-                                       attributes: Self.attributes(attributes))
+        SentrySDK.metrics.distribution(key, value: value, options: Self.options(unit, attributes))
     }
 
     func gauge(_ key: String, _ value: Double, unit: Telemetry.Unit, attributes: Telemetry.Attributes) {
         guard TelemetryController.usageAllowed else { return }
-        SentrySDK.metrics.gauge(key: key, value: value, unit: Self.unit(unit),
-                                attributes: Self.attributes(attributes))
+        SentrySDK.metrics.gauge(key, value: value, options: Self.options(unit, attributes))
     }
 
     /// A span measured elsewhere, sent as a transaction with its real start and
@@ -72,6 +71,10 @@ struct SentryTelemetrySink: Telemetry.Sink {
             case .bool(let b): span.setData(value: b, key: key)
             }
         }
+    }
+
+    private static func options(_ unit: Telemetry.Unit, _ attributes: Telemetry.Attributes) -> SentryMetricOptions {
+        SentryMetricOptions(unit: Self.unit(unit), attributes: Self.attributes(attributes))
     }
 
     private static func attributes(_ attributes: Telemetry.Attributes) -> [String: SentryAttributeValue] {
