@@ -342,3 +342,11 @@ imageIndex/imageOffset/symbol, `exception` type/signal). Sent two ways:
 - **B, `event.applecrashreport` attachment with the JSON `.ips`**: accepted (PACER-2) but not
   parsed: no stack. Ruled out.
 - The `fatalError` message is not in the `.ips`; the forwarded event says the signal and where.
+
+### Release-note bullet (for the release that first ships this)
+
+**Crash reports and usage data.** Pacer now sends crash reports and a daily
+summary of how it is used to its Sentry project, to find bugs and slowdowns on
+Macs other than ours. Both are on by default and each can be turned off in
+Settings → Privacy. Your prompts, projects, paths, account details and costs
+are never sent. The README's Privacy section lists exactly what is.

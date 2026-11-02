@@ -93,7 +93,7 @@ struct AboutView: View {
                 .padding(.vertical, 2)
 
             VStack(spacing: 6) {
-                Text("Storage is local to this Mac. Network: usage polls to api.anthropic.com, forecast model downloads from huggingface.co, and update checks.")
+                Text("Storage is local to this Mac. Network: usage polls to api.anthropic.com, forecast model downloads from huggingface.co, update checks, and crash reports and usage data to Sentry (Settings → Privacy).")
                     .font(.caption)
                     .multilineTextAlignment(.center)
                     .foregroundStyle(.secondary)
