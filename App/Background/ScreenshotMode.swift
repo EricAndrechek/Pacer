@@ -2181,9 +2181,12 @@ extension ScreenshotMode {
                 lastSeenAt: a.active ? now : now.addingTimeInterval(-25 * 60),
                 subscriptionType: "max",
                 // The tier, not just the family: the fixture should show what
-                // a real install shows, and "Max 20×" is the number a pacing
-                // decision is read against.
-                rateLimitTier: "default_claude_max_20x",
+                // a real install shows. Max (formerly Max 5×), because these
+                // accounts are seeded with a 5-hour window and since
+                // 2026-10-30 a verified Ultra (formerly Max 20×) account has
+                // none — an "Ultra" badge over a 5-hour chart is a plan that
+                // does not exist.
+                rateLimitTier: "default_claude_max_5x",
                 emailAddress: a.email,
                 organizationName: a.org,
                 latestFiveHourPct: a.five,
