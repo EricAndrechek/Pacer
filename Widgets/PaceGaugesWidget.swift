@@ -144,7 +144,7 @@ struct PaceGaugesProvider: AppIntentTimelineProvider {
             let current = Set(rows.map(\.limitPoint).latestBatch().map(\.window))
             let five = current.contains("five_hour") ? rows.first { $0.window == "five_hour" } : nil
             let seven = current.contains("seven_day") ? rows.first { $0.window == "seven_day" } : nil
-            let hasFiveHour = five != nil || seven == nil
+            let hasFiveHour = !LimitSamplePoint.hasNoFiveHourWindow(hasFiveHour: five != nil, hasSevenDay: seven != nil)
             // Each gauge at the live meter's value as of this refresh (#318).
             let now = PacerClock.now
             let live = account.map { LiveMeterSource(context: context).currentValues(account: $0, now: now) } ?? [:]

@@ -662,9 +662,11 @@ struct PaceChartCard: View {
         /// account that stopped being polled. Same rule as `latestBatch`,
         /// folded into this pass so the history is walked once.
         var hasNoFiveHourWindow: Bool {
-            guard let latest, let week = latestSevenDayAt,
-                  week >= latest.sampledAt.addingTimeInterval(-2) else { return false }
-            return (latestFiveHourAt ?? .distantPast) < latest.sampledAt.addingTimeInterval(-2)
+            guard let latest else { return false }
+            let cutoff = latest.sampledAt.addingTimeInterval(-2)
+            return LimitSamplePoint.hasNoFiveHourWindow(
+                hasFiveHour: (latestFiveHourAt ?? .distantPast) >= cutoff,
+                hasSevenDay: (latestSevenDayAt ?? .distantPast) >= cutoff)
         }
     }
 

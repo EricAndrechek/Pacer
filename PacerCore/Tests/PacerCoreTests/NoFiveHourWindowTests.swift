@@ -85,3 +85,19 @@ struct NoFiveHourWindowTests {
         #expect(PlanLabel.describe(subscriptionType: "pro", rateLimitTier: "default_claude_pro") == "Pro")
     }
 }
+
+/// The one predicate every surface calls (value form).
+@Suite("No 5-hour window predicate")
+struct NoFiveHourPredicateTests {
+    @Test func truthTable() {
+        #expect(LimitSamplePoint.hasNoFiveHourWindow(hasFiveHour: false, hasSevenDay: true))
+        #expect(!LimitSamplePoint.hasNoFiveHourWindow(hasFiveHour: true, hasSevenDay: true))
+        #expect(!LimitSamplePoint.hasNoFiveHourWindow(hasFiveHour: true, hasSevenDay: false))
+        // No reading at all is not an Ultra account.
+        #expect(!LimitSamplePoint.hasNoFiveHourWindow(hasFiveHour: false, hasSevenDay: false))
+    }
+
+    @Test func emptyBatchIsNotNoFiveHour() {
+        #expect(![LimitSamplePoint]().hasNoFiveHourWindow)
+    }
+}

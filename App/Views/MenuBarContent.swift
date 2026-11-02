@@ -34,7 +34,7 @@ enum MenuBarWindowSource {
         // 5-hour limit at all (verified Ultra). Listing it anyway left an
         // empty "5H" row and, being the default icon driver, a grey icon that
         // never fell back to the 7-day window.
-        if fiveHour != nil || sevenDay == nil {
+        if !LimitSamplePoint.hasNoFiveHourWindow(hasFiveHour: fiveHour != nil, hasSevenDay: sevenDay != nil) {
             items.append(MenuBarWindowItem(
                 key: RateLimitWindowName.fiveHour, displayName: "5-hour",
                 usedPercentage: fiveHour?.usedPercentage, resetsAt: fiveHour?.resetsAt,
