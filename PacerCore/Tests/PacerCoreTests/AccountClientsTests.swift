@@ -62,6 +62,15 @@ struct AccountClientsTests {
         // Both are on the one account; the set of active accounts is that one.
         #expect(c.activeAccountIds(at: t0) == [cliOrg])
     }
+
+    @Test("counts distinct clients per kind, never their ids")
+    func clientCountsByKind() {
+        let counts = clients().clientCountsByKind()
+        #expect(counts[.cli] == 1)
+        #expect(counts[.desktop] == 2)
+        #expect(counts[.profile] == 1)
+        #expect(AccountClients.empty.clientCountsByKind().isEmpty)
+    }
 }
 
 @Suite("What the screens show for clients")
@@ -156,14 +165,5 @@ struct AccountClientsAPITests {
         #expect(try change.encodedJSON().contains("\"label\" : \"Desktop · Work\""))
         #expect(PacerMetrics.instanceTag(work.clients[0]).count == 8)
         #expect(PacerMetrics.instanceTag(cli.clients[0]) == "cli")
-    }
-
-    @Test("counts distinct clients per kind, never their ids")
-    func clientCountsByKind() {
-        let counts = clients().clientCountsByKind()
-        #expect(counts[.cli] == 1)
-        #expect(counts[.desktop] == 2)
-        #expect(counts[.profile] == 1)
-        #expect(AccountClients.empty.clientCountsByKind().isEmpty)
     }
 }
