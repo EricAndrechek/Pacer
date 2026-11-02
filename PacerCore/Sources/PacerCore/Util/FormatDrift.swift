@@ -99,10 +99,10 @@ public enum FormatDrift {
               let message = root["message"] as? [String: Any],
               let usage = message["usage"] as? [String: Any]
         else { return [] }
-        return usage.keys.filter { !knownUsageKeys.contains($0) }.sorted().compactMap { key in
+        return usage.keys.filter { !knownUsageKeys.contains($0) }.compactMap { key in
             let safe = String(key.lowercased().map { $0.isASCII && ($0.isLetter || $0.isNumber) ? $0 : "_" }.prefix(40))
             return safe.isEmpty ? nil : safe
-        }
+        }.sorted()
     }
 
     /// First sighting of each unknown `usage` key on `line` -> `format.usage_field`.
