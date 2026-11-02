@@ -106,6 +106,7 @@ final class DailyCheckIn {
         let yesterdayKey = TokenSample.formatDate(startOfYesterday)
 
         let settings = Self.settingsAttributes(store: store)
+            .merging(Self.clientAttributes(AccountClientsStore.current)) { _, new in new }
         let lifecycle = Self.lifecycleAttributes(store: store, launchedAt: launchedAt,
                                                  cpuBefore: cpuSecondsAtLastCheckIn)
         cpuSecondsAtLastCheckIn = Self.cpuSeconds()
@@ -166,6 +167,17 @@ final class DailyCheckIn {
         let skillManifest = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".claude/skills/\(ClaudeSkillInstaller.skillName)/\(ClaudeSkillInstaller.manifestName)")
         a["settings.skill_installed"] = .bool(FileManager.default.fileExists(atPath: skillManifest.path))
+        return a
+    }
+
+    /// Clients on this Mac by kind (CLI login, Desktop installs, pinned
+    /// profiles): counts only, from what the scan already published.
+    private static func clientAttributes(_ clients: AccountClients) -> Telemetry.Attributes {
+        let counts = clients.clientCountsByKind()
+        var a: Telemetry.Attributes = [:]
+        for kind in [AccountClients.Kind.cli, .desktop, .profile] {
+            a["clients.\(kind.rawValue)_count"] = .int(counts[kind] ?? 0)
+        }
         return a
     }
 

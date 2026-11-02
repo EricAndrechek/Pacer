@@ -157,4 +157,13 @@ struct AccountClientsAPITests {
         #expect(PacerMetrics.instanceTag(work.clients[0]).count == 8)
         #expect(PacerMetrics.instanceTag(cli.clients[0]) == "cli")
     }
+
+    @Test("counts distinct clients per kind, never their ids")
+    func clientCountsByKind() {
+        let counts = clients().clientCountsByKind()
+        #expect(counts[.cli] == 1)
+        #expect(counts[.desktop] == 2)
+        #expect(counts[.profile] == 1)
+        #expect(AccountClients.empty.clientCountsByKind().isEmpty)
+    }
 }
