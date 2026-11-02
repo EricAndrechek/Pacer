@@ -133,7 +133,17 @@ struct PaceGaugesProvider: AppIntentTimelineProvider {
         let secFallback = hasFiveHour
             ? ((p == "five_hour") ? "seven_day" : "five_hour")
             : ((p == "seven_day") ? (scoped.first?.key ?? "seven_day") : "seven_day")
-        let s = PaceWindowResolver.resolveKey(secondary?.id, available: available, fallback: secFallback)
+        var s = PaceWindowResolver.resolveKey(secondary?.id, available: available, fallback: secFallback)
+        // Never the same window twice. A widget configured "5-hour + 7-day"
+        // on an account with no 5-hour limit (verified Ultra) resolved its
+        // first gauge to 7-day by fallback and its second to 7-day by choice,
+        // and showed 7-day twice (PACER-A, 2026-11-02). The second takes the
+        // next window that exists instead; with none, the medium layout draws
+        // one gauge (`secondaryKey == primaryKey`).
+        if s == p, let other = (scoped.map(\.key) + ["seven_day", "five_hour"])
+            .first(where: { $0 != p && available.contains($0) }) {
+            s = other
+        }
         return (p, s)
     }
 
@@ -361,8 +371,12 @@ struct PaceGaugesWidgetView: View {
             WidgetTitleBar(title: "RATE LIMITS")
             HStack(spacing: 14) {
                 gaugeColumn(a.label, a.state, durationSeconds: a.durationSeconds)
-                Divider()
-                gaugeColumn(b.label, b.state, durationSeconds: b.durationSeconds)
+                // One window only (an Ultra account with no per-model caps):
+                // one gauge, not the same gauge twice.
+                if entry.secondaryKey != entry.primaryKey {
+                    Divider()
+                    gaugeColumn(b.label, b.state, durationSeconds: b.durationSeconds)
+                }
             }
             .frame(maxHeight: .infinity)
         }
