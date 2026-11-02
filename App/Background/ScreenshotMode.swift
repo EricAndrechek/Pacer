@@ -318,7 +318,9 @@ enum ScreenshotMode {
         // feature exists for, and the one a screenshot has to show.
         let store = PacerPreferences.store
         let previousChips = store.string(forKey: PacerSettings.Key.menuBarChips)
-        store.set("icon,five_hour_pct,account_pct:\(fixtureOtherAccountId)|five_hour",
+        // Its weekly window: the pinned account is the fixture's Ultra, which
+        // has no 5-hour one.
+        store.set("icon,five_hour_pct,account_pct:\(fixtureOtherAccountId)|seven_day",
                   forKey: PacerSettings.Key.menuBarChips)
         defer { store.set(previousChips, forKey: PacerSettings.Key.menuBarChips) }
 
@@ -2113,12 +2115,9 @@ extension ScreenshotMode {
     /// live accounts sees. Lower and flatter than the active account's, because
     /// it is the one being used less.
     private static func seedSecondAccountLimits(_ ctx: ModelContext, now: Date) {
-        let fiveHour = WindowSpec(
-            window: "five_hour",
-            resetsAt: now.addingTimeInterval(3 * 3_600),
-            duration: 5 * 3_600,
-            keyframes: [(0, 0), (0.15, 9), (0.30, 17), (0.45, 26),
-                        (0.55, 34), (0.62, 41), (0.66, 47)])
+        // Weekly only: this account is the fixture's verified Ultra, which
+        // since 2026-10-30 has no 5-hour window, so its polls carry
+        // `seven_day` alone.
         let sevenDay = WindowSpec(
             window: "seven_day",
             resetsAt: now.addingTimeInterval(4 * 86_400),
@@ -2126,10 +2125,10 @@ extension ScreenshotMode {
             keyframes: [(0, 0), (0.12, 6), (0.25, 12), (0.36, 17),
                         (0.45, 21), (0.52, 26), (0.57, 30)])
         let interval: TimeInterval = 5 * 60
-        var t = min(fiveHour.cycleStart, sevenDay.cycleStart)
+        var t = sevenDay.cycleStart
         var last: [String: Double] = [:]
         while t <= now {
-            for spec in [fiveHour, sevenDay] where t >= spec.cycleStart {
+            for spec in [sevenDay] where t >= spec.cycleStart {
                 let nowFrac = now.timeIntervalSince(spec.cycleStart) / spec.duration
                 let frac = min(nowFrac, max(0, t.timeIntervalSince(spec.cycleStart) / spec.duration))
                 var pct = interpolateKeyframes(spec.keyframes, at: frac)
@@ -2161,15 +2160,20 @@ extension ScreenshotMode {
     }
 
     private static func seedAccounts(_ ctx: ModelContext, now: Date) {
-        let accounts: [(id: String, email: String, org: String, active: Bool, five: Double, seven: Double)] = [
+        // One of each plan the README has to show since 2026-10-30: a Max
+        // account (5-hour and weekly windows) and a verified Ultra one, which
+        // has no 5-hour window at all — so the pace card, menu bar and
+        // widgets photograph both shapes side by side.
+        let accounts: [(id: String, email: String, org: String, active: Bool,
+                        tier: String, five: Double?, seven: Double)] = [
             // Distinct local parts on purpose: `Account.shortLabel` is the
             // email's local part, so "you@acme" and "you@globex" both render
             // as "you" and the two accounts become indistinguishable in every
             // header that uses it.
             (fixtureActiveAccountId, "work@acme.example",
-             "Acme's Organization", true, 32, 62),
+             "Acme's Organization", true, "default_claude_max_5x", 32, 62),
             (fixtureOtherAccountId, "personal@globex.example",
-             "Globex's Organization", false, 47, 30),
+             "Globex's Organization", false, "default_claude_max_20x", nil, 30),
         ]
         for a in accounts {
             ctx.insert(Account(
@@ -2181,16 +2185,12 @@ extension ScreenshotMode {
                 lastSeenAt: a.active ? now : now.addingTimeInterval(-25 * 60),
                 subscriptionType: "max",
                 // The tier, not just the family: the fixture should show what
-                // a real install shows. Max (formerly Max 5×), because these
-                // accounts are seeded with a 5-hour window and since
-                // 2026-10-30 a verified Ultra (formerly Max 20×) account has
-                // none — an "Ultra" badge over a 5-hour chart is a plan that
-                // does not exist.
-                rateLimitTier: "default_claude_max_5x",
+                // a real install shows, and it is what the plan badge reads.
+                rateLimitTier: a.tier,
                 emailAddress: a.email,
                 organizationName: a.org,
                 latestFiveHourPct: a.five,
-                latestFiveHourResetsAt: now.addingTimeInterval(2 * 3_600),
+                latestFiveHourResetsAt: a.five == nil ? nil : now.addingTimeInterval(2 * 3_600),
                 latestSevenDayPct: a.seven,
                 latestSevenDayResetsAt: now.addingTimeInterval(2 * 86_400),
                 latestPolledAt: a.active ? now.addingTimeInterval(-40)
