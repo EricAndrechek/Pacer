@@ -1364,5 +1364,51 @@ colour, which had quietly flattened every stacked view.</p>]]></description>
             type="application/octet-stream"
             sparkle:edSignature="jT9fZLkS2WfHqe8P7jXC1XIYOuLQlsrePnN1BnVz+Xf0YLQnpPqB9l4wt0MNACFctr9CtM+HTOM3j98ssHnDDg==" />
     </item>
+            <item>
+        <title>Version 0.8.0</title>
+        <description><![CDATA[<p>Costs use the rates in effect when you made each request, forecasts show a live estimate between readings, and Ultra and Claude Desktop accounts are tracked properly.</p>
+<h2>Costs and pricing</h2>
+<h3>Costs use the rate in effect when you made the request</h3>
+<p>Each request is priced from a dated price history, so a later price change no longer rewrites what you already spent. Long prompts are priced at their own tier, and 1-hour cache writes, fast mode and US-only routing are priced too. Fast mode and multi-call responses are counted call by call.</p>
+<h3>Cost by part, and sortable tables</h3>
+<p>Costs split into input, output, cache reads and cache writes, shown in the daily chart, the Day, Project and History breakdowns, and a Mix bar per model. Tables default to tokens, cache hit rate, output share, cost and mix. Right-click to show, hide, reorder or resize columns.</p>
+<h2>Forecasts and the live meter</h2>
+<h3>A live estimate between readings</h3>
+<p>Between Anthropic's readings, the menu bar, dashboard and widgets show the last reading plus the API spend since. An estimate has a decimal (42.6%), a reading doesn't (42%). An estimate is never saved as a reading and never goes below one.</p>
+<h3>Forecast lines and claims</h3>
+<p>Forecast lines stay up between polls, including on accounts that are read in bursts. An idle window says "holds until reset" or "≈X% at reset" instead of nothing. A red "limit in…" now needs at least half the window used and the crossing to hold across two updates; otherwise it reads "may hit limit in…".</p>
+<h3>Forecasts pick the method that fits you best</h3>
+<p>Pacer scores its forecast methods on your own history in the background, capped at about a fifth of one CPU core, and uses the one with the best record, falling back to the previous rule. Two networks ship in the app, which adds about 130 MB; others download once on first use.</p>
+<h3>Pacing uses the live estimate</h3>
+<p><code class="notranslate">pacer gate</code>, <code class="notranslate">status</code> and <code class="notranslate">wait</code> judge the live estimate rather than the last poll, padded for how old the reading is, so they pause closer to the limit. <code class="notranslate">pacer report</code> shows both: <code class="notranslate">42.6% est · read 42%</code>.</p>
+<h2>Accounts and plans</h2>
+<h3>Ultra accounts</h3>
+<p>Anthropic renamed Max 20× to Ultra and Max 5× to Max. Verified Ultra accounts have no 5-hour limit now, so Pacer hides their 5-hour window instead of showing an old reading, and the menu bar and widgets show the 7-day figure.</p>
+<h3>Claude Desktop</h3>
+<p>Cowork (agent-mode) sessions count under a "Claude Desktop (agent)" project, and each Desktop install counts with its own sessions. An account Claude Desktop is using, but Claude Code isn't, gets a "Desktop" chip for 30 minutes after its last activity. An idle account whose login has expired says "auth paused".</p>
+<h2>Alerts</h2>
+<h3>One alert per window per account</h3>
+<p>Alerts show while Pacer is the app in front. Each window of each account has one alert, which the next one replaces, and it clears when the window resets. Alerts have Mute until reset and Open Pacer buttons. Settings → Notifications can alert from live estimates too.</p>
+<h2>Privacy</h2>
+<h3>Crash reports and usage stats</h3>
+<p>Pacer now sends crash reports and anonymous usage stats to Sentry so bugs and slowdowns get found. Turn either off in Settings → Privacy.</p>
+<h2>Fixes</h2>
+<h3>Lower memory in long sessions</h3>
+<p>Memory settles at a few hundred megabytes instead of climbing past a gigabyte during long runs.</p>
+<h3>Tokens, subprojects and ranges</h3>
+<p>Tokens now means every kind of token in one total, and Top Days ranks by it. Subprojects group by folder inside a repo, "last N days" covers exactly N calendar days, and the low cache hit hint fires below 90%.</p>
+<h3>Profiles and the pace card</h3>
+<p>A Claude Code profile created while Pacer runs is counted within a minute. Pace-card hovers and open popovers survive a window or account appearing.</p>
+<p><strong>Your data is untouched.</strong> Pacer rebuilds cost history in the background on first launch. After that, an older version of Pacer can't open your data, so this one can't be downgraded.</p>]]></description>
+        <pubDate>Mon, 02 Nov 2026 20:42:33 +0000</pubDate>
+        <sparkle:version>1793651156</sparkle:version>
+        <sparkle:shortVersionString>0.8.0</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.8.0/Pacer-0.8.0.dmg"
+            length="156908538"
+            type="application/octet-stream"
+            sparkle:edSignature="AewAjRJNhOs9mkg0zZg0yUIlXZiresbe++MItMOL01c0EGh2XS12CTJS+NV3dx5LTihkpPs9gmMclNBBqFvmDg==" />
+    </item>
         </channel>
 </rss>
