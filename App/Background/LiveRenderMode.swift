@@ -40,7 +40,7 @@ import PacerCore
 enum LiveRenderMode {
 
     static var isActive: Bool {
-        !(ProcessInfo.processInfo.environment["PACER_RENDER_LIVE"] ?? "").isEmpty
+        LaunchMode.isActive(.liveRender)
     }
 
     /// What to render. Whole tabs by default; `PACER_RENDER_PAGES` takes a

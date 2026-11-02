@@ -37,7 +37,7 @@ import PacerCore
 enum ColdStartProbe {
 
     static var isActive: Bool {
-        ProcessInfo.processInfo.environment["PACER_COLD_START_PROBE"] == "1"
+        LaunchMode.isActive(.coldStartProbe)
     }
 
     private static func log(_ message: String) { print("[cold-start] \(message)") }

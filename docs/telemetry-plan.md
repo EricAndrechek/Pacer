@@ -328,3 +328,17 @@ if they rarely do, download them only when cheaper models leave room to improve.
     there) that can lower sample rates or turn a signal off without a release.
 19. **Sentry alerts**: new issue, regression, crash-free below a floor, new format-drift sighting,
     data-health spike, idle CPU above a floor.
+
+### Crash-report forwarding test (2026-11-02): route A
+
+A throwaway CLI crashed with `fatalError`; macOS wrote `pacertest-crashy-….ips` (JSON header line
++ JSON body: `usedImages` with uuid/base/size, `threads[faultingThread].frames` with
+imageIndex/imageOffset/symbol, `exception` type/signal). Sent two ways:
+- **A, hand-built native event** (frames `instruction_addr = base + imageOffset`, oldest first;
+  `debug_meta.images` macho uuid/base/size): landed as PACER-3 after ~4 min, system frames
+  symbolicated (`_assertionFailure`, `start`), app frames unknown only because no dSYM was
+  uploaded. **This is the route.** Also copy the `.ips` frame `symbol` into `function` when present,
+  so frames read even before dSYMs.
+- **B, `event.applecrashreport` attachment with the JSON `.ips`**: accepted (PACER-2) but not
+  parsed: no stack. Ruled out.
+- The `fatalError` message is not in the `.ips`; the forwarded event says the signal and where.

@@ -17,7 +17,7 @@ import PacerCore
 enum ArchiveBackfill {
 
     static var isActive: Bool {
-        ProcessInfo.processInfo.environment["PACER_ARCHIVE_BACKFILL"] == "1"
+        LaunchMode.isActive(.archiveBackfill)
     }
 
     private static func log(_ message: String) { print("[archive] \(message)") }
