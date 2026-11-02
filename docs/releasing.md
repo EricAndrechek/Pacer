@@ -208,6 +208,7 @@ your local cert/Apple-account state:
 | `NOTARY_KEY_ID` | needs you | from step 2 |
 | `NOTARY_ISSUER_ID` | needs you | from step 2 |
 | `NOTARY_KEY_P8` | needs you | the full contents of the `.p8` file from step 2 |
+| `SENTRY_AUTH_TOKEN` | optional | a Sentry organization token (Settings → Auth Tokens). Lets `release.yml` upload dSYMs and register the release so crash reports are symbolicated; without it the step is skipped and the release still ships |
 | `HOMEBREW_TAP_TRIGGER_TOKEN` | needs you | fine-grained personal access token: repository access *only* `EricAndrechek/homebrew-tap`, permission *Actions: Read and write*, nothing else. It can only start the tap's workflows; it cannot write to the tap. Used by `.github/workflows/homebrew-tap.yml`; without it the tap still follows on its six-hourly schedule. Rotate before it expires: generate a new one the same way, `gh secret set HOMEBREW_TAP_TRIGGER_TOKEN -R EricAndrechek/Pacer`, then delete the old token. |
 
 The fastest way to set the five remaining secrets is the
