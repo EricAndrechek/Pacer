@@ -35,11 +35,14 @@ import PacerUI
 
 enum PacerIntentError: Error, CustomLocalizedStringResourceConvertible {
     case noRateLimitData
+    case noFiveHourLimit
 
     var localizedStringResource: LocalizedStringResource {
         switch self {
         case .noRateLimitData:
             return "No rate-limit data yet — open Pacer once so it can poll your usage."
+        case .noFiveHourLimit:
+            return "This account has no 5-hour limit."
         }
     }
 }
@@ -60,6 +63,12 @@ struct GetUsageIntent: AppIntent {
     func perform() async throws -> some IntentResult & ProvidesDialog & ReturnsValue<Double> {
         let snap = try PacerSnapshotBuilder.build()
         guard let pct = snap.limits.fiveHour?.usedPercent else {
+            // A 7-day reading with no 5-hour one: the account has no 5-hour
+            // limit (verified Ultra). 0 is true there — all of it is room —
+            // but say why, so it does not read as a missing sample.
+            if snap.limits.sevenDay != nil {
+                return .result(value: 0, dialog: "This account has no 5-hour limit.")
+            }
             return .result(value: 0, dialog: "5-hour usage is unavailable — no rate-limit samples yet.")
         }
         return .result(value: pct, dialog: "5-hour usage is \(Int(pct.rounded()))%.")
@@ -181,8 +190,10 @@ struct GetFiveHourResetIntent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog & ReturnsValue<Date> {
-        guard let resetsAt = try PacerSnapshotBuilder.build().limits.fiveHour?.resetsAt else {
-            throw PacerIntentError.noRateLimitData
+        let limits = try PacerSnapshotBuilder.build().limits
+        guard let resetsAt = limits.fiveHour?.resetsAt else {
+            throw limits.fiveHour == nil && limits.sevenDay != nil
+                ? PacerIntentError.noFiveHourLimit : PacerIntentError.noRateLimitData
         }
         return .result(value: resetsAt,
                        dialog: "Your 5-hour limit resets \(pacerIntentRelative(resetsAt)).")
@@ -258,10 +269,12 @@ struct GetPacerSnapshotIntent: AppIntent {
     func perform() async throws -> some IntentResult & ProvidesDialog & ReturnsValue<String> {
         let snap = try PacerSnapshotBuilder.build()
         let json = try snap.encodedJSON()
-        let five = snap.limits.fiveHour.map { "5h \(Int($0.usedPercent.rounded()))%" } ?? "5h —"
+        // No 5-hour limit on the account → leave it out rather than "5h —".
+        let five: String? = snap.limits.fiveHour.map { "5h \(Int($0.usedPercent.rounded()))%" }
+            ?? (snap.limits.sevenDay == nil ? "5h —" : nil)
         let seven = snap.limits.sevenDay.map { "7d \(Int($0.usedPercent.rounded()))%" } ?? "7d —"
-        return .result(value: json,
-                       dialog: "\(five), \(seven), \(pacerCostExact(snap.cost.todayUSD)) today.")
+        let parts = [five, seven, "\(pacerCostExact(snap.cost.todayUSD)) today"].compactMap { $0 }
+        return .result(value: json, dialog: "\(parts.joined(separator: ", ")).")
     }
 }
 

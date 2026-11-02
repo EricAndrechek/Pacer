@@ -411,6 +411,8 @@ Write nothing else there: no notes, plans, scripts, logs or directories.
   `0` resumes on any room.
 - **Short windows vs long ones:** a 5-hour window is the one you actually wait
   out. A weekly cap — account-wide or per-model — is usually stop-and-notify.
+  An Ultra account (formerly Max 20×) has no 5-hour window at all: its report
+  and gate show the weekly and per-model windows only.
 - Env: `PACER_API` (default `http://127.0.0.1:7223`), `PACE_TOKEN` (if Pacer
   requires a bearer), `PACE_MODEL`, `PACE_MARGIN`, `PACE_RESUME_HEADROOM`, `PACE_ACCOUNT`, `PACE_RUN`
   (names a per-run state file), `PACE_STATE` (default this session's

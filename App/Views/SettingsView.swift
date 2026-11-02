@@ -436,14 +436,15 @@ struct MenuBarCard: View {
                             // reported: keep the row so the selection stays
                             // visible and the fallback reads clearly.
                             if !MenuBarWindows.driverIsResolvable(key: driverSelection.wrappedValue, windows: windows) {
-                                Text("Unavailable — using 5-hour").tag(driverSelection.wrappedValue)
+                                Text("Unavailable — using \(MenuBarWindows.resolveDriver(key: MenuBarWindows.autoDriverKey, windows: windows)?.displayName ?? "5-hour")")
+                                    .tag(driverSelection.wrappedValue)
                             }
                         }
                         .labelsHidden()
                         .disabled(!iconIsEnabled)
                     }
                     if showsDriverFallbackNote {
-                        Text("The menu-bar icon reflects this window's usage. If it stops being reported, the icon falls back to the 5-hour window.")
+                        Text("The menu-bar icon reflects this window's usage. If it stops being reported, the icon falls back to the 5-hour window, or the 7-day one on a plan without a 5-hour limit.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -999,7 +1000,7 @@ struct RateLimitAlertsCard: View {
             }
         }, footer: {
             VStack(alignment: .leading, spacing: 8) {
-                Text("Pacer fires a banner each time usage crosses a threshold upward (e.g. 50%, 75%, 90% in one 5-hour cycle). Each banner fires at most once per cycle. The first banner triggers the system permission prompt.")
+                Text("Pacer fires a banner each time usage crosses a threshold upward (e.g. 50%, 75%, 90% in one cycle). Each banner fires at most once per cycle. The first banner triggers the system permission prompt.")
                 Text("With live estimates, a banner can come up to one reading earlier and says it is an estimate. Reset banners always wait for a reading.")
                 Text("Per-model windows (e.g. a weekly Fable cap) appear automatically when your account reports them, and start with no alert. A window that stops being reported keeps its alerts but pauses until it returns.")
                 // Only with more than one account: on a single-account machine

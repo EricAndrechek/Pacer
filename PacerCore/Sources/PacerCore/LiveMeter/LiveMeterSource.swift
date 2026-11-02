@@ -116,15 +116,21 @@ public struct LiveMeterSource {
     }
 
     /// Every window of `account` as its latest poll left it: the fixed 5-hour
-    /// and 7-day readings and the latest batch of per-model caps, each cap
+    /// and 7-day readings that poll carried and the latest batch of per-model caps, each cap
     /// with the model it names. Empty when its newest reading is over
     /// `LiveMeter.maxReadingAge` old, which has no value to give.
     public func currentWindows(account: String, now: Date) -> [Window] {
         guard hasTables else { return [] }
-        let fixed = [RateLimitWindowName.fiveHour, RateLimitWindowName.sevenDay]
+        let readings = [RateLimitWindowName.fiveHour, RateLimitWindowName.sevenDay]
             .compactMap { latestReading(account: account, window: $0) }
-        guard let newest = fixed.map(\.reading.at).max(),
+        guard let newest = readings.map(\.reading.at).max(),
               now.timeIntervalSince(newest) <= LiveMeter.maxReadingAge else { return [] }
+        // Only the windows the latest poll reported, as `latestBatch` decides
+        // for every other reader. A verified Ultra account's last 5-hour
+        // reading (2026-10-30) sat beside a fresh 7-day one, and the meter
+        // estimated a 5-hour window from it — climbing on local spend, with
+        // nothing from Anthropic behind it — for up to five hours.
+        let fixed = readings.filter { $0.reading.at >= newest.addingTimeInterval(-2) }
         let samples = (try? context.fetch(LimitScope.modelScopedLimits(account: account, limit: 64))) ?? []
         let scoped = samples.map(\.scopedWindowRow).latestBatch().map { row -> Window in
             // Newest first, so the first naming is the newest.

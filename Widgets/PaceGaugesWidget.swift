@@ -27,6 +27,10 @@ struct PaceGaugesEntry: TimelineEntry {
     /// `five_hour` / `seven_day`, reproducing the old `both` behaviour.
     let primaryKey: String
     let secondaryKey: String
+    /// False when the latest poll had a 7-day window and no 5-hour one: the
+    /// account has no 5-hour limit (verified Ultra), so the large grid drops
+    /// that gauge rather than drawing one that never fills.
+    var hasFiveHour = true
 
     struct WindowState {
         let usedPct: Double
@@ -112,12 +116,20 @@ struct PaceGaugesProvider: AppIntentTimelineProvider {
     /// Nil/absent selections reproduce today's 5h+7d.
     private static func resolveKeys(
         primary: PaceWindowEntity?, secondary: PaceWindowEntity?,
-        scoped: [PaceGaugesEntry.ScopedGauge]
+        scoped: [PaceGaugesEntry.ScopedGauge],
+        hasFiveHour: Bool = true
     ) -> (String, String) {
-        var available: Set<String> = ["five_hour", "seven_day"]
+        // An account with no 5-hour limit (verified Ultra) gauges its 7-day
+        // window first and its first per-model cap second, rather than an
+        // empty "awaiting" 5-hour gauge that would never fill.
+        var available: Set<String> = ["seven_day"]
+        if hasFiveHour { available.insert("five_hour") }
         for g in scoped { available.insert(g.key) }
-        let p = PaceWindowResolver.resolveKey(primary?.id, available: available, fallback: "five_hour")
-        let secFallback = (p == "five_hour") ? "seven_day" : "five_hour"
+        let p = PaceWindowResolver.resolveKey(primary?.id, available: available,
+                                              fallback: hasFiveHour ? "five_hour" : "seven_day")
+        let secFallback = hasFiveHour
+            ? ((p == "five_hour") ? "seven_day" : "five_hour")
+            : ((p == "seven_day") ? (scoped.first?.key ?? "seven_day") : "seven_day")
         let s = PaceWindowResolver.resolveKey(secondary?.id, available: available, fallback: secFallback)
         return (p, s)
     }
@@ -136,8 +148,11 @@ struct PaceGaugesProvider: AppIntentTimelineProvider {
             // account wrote last.
             let account = UsageScope.limitAccountId(in: context)
             let rows = try context.fetch(LimitScope.rateLimits(account: account, limit: 50))
-            let five = rows.first { $0.window == "five_hour" }
-            let seven = rows.first { $0.window == "seven_day" }
+            // Latest poll's windows only: see `latestBatch`.
+            let current = Set(rows.map(\.limitPoint).latestBatch().map(\.window))
+            let five = current.contains("five_hour") ? rows.first { $0.window == "five_hour" } : nil
+            let seven = current.contains("seven_day") ? rows.first { $0.window == "seven_day" } : nil
+            let hasFiveHour = five != nil || seven == nil
             // Each gauge at the live meter's value as of this refresh (#318).
             let now = PacerClock.now
             let live = account.map { LiveMeterSource(context: context).currentValues(account: $0, now: now) } ?? [:]
@@ -149,13 +164,15 @@ struct PaceGaugesProvider: AppIntentTimelineProvider {
                              readPct: r.isEstimate ? r.reading.percent : nil)
             }
             let scoped = Self.scopedGauges(context: context, account: account, live: live, now: now)
-            let (primaryKey, secondaryKey) = Self.resolveKeys(primary: primary, secondary: secondary, scoped: scoped)
+            let (primaryKey, secondaryKey) = Self.resolveKeys(primary: primary, secondary: secondary, scoped: scoped,
+                                                                  hasFiveHour: hasFiveHour)
             return PaceGaugesEntry(
                 date: PacerClock.now,
                 fiveHour: five.map(shown),
                 sevenDay: seven.map(shown),
                 scoped: scoped,
-                primaryKey: primaryKey, secondaryKey: secondaryKey
+                primaryKey: primaryKey, secondaryKey: secondaryKey,
+                hasFiveHour: hasFiveHour
             )
         } catch {
             let (primaryKey, secondaryKey) = Self.resolveKeys(primary: primary, secondary: secondary, scoped: [])
@@ -235,6 +252,7 @@ struct PaceGaugesWidgetView: View {
                       resetsAt: entry.sevenDay?.resetsAt, durationSeconds: 7 * 86_400, isActive: false,
                       isEstimate: entry.sevenDay?.isEstimate ?? false, readPct: entry.sevenDay?.readPct),
         ]
+        if !entry.hasFiveHour { cells.removeAll { $0.id == "five_hour" } }
         // Up to four scoped gauges → six total, a clean 3×2 grid at most.
         for s in entry.scoped.prefix(4) {
             cells.append(GaugeCell(id: s.label, label: s.label, usedPct: s.usedPct,

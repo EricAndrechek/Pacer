@@ -324,11 +324,13 @@ struct PlanLabelTests {
                         subscriptionType: subscription, rateLimitTier: tier)
     }
 
-    /// The reason this exists: `subscriptionType` calls both Max tiers "max",
-    /// and 20% of a Max 20× budget is four times 20% of a Max 5× one.
+    /// The reason this exists: `subscriptionType` calls both tiers "max", and
+    /// an Ultra budget is not a Max one. Both read by the names Anthropic gave
+    /// them on 2026-10-30 (Max 20× → Ultra, Max 5× → Max); the tier strings
+    /// kept the old multipliers.
     @Test func theTierDistinguishesWhatTheSubscriptionTypeCannot() {
-        #expect(credential(subscription: "max", tier: "default_claude_max_20x").planLabel == "Max 20×")
-        #expect(credential(subscription: "max", tier: "default_claude_max_5x").planLabel == "Max 5×")
+        #expect(credential(subscription: "max", tier: "default_claude_max_20x").planLabel == "Ultra")
+        #expect(credential(subscription: "max", tier: "default_claude_max_5x").planLabel == "Max")
         // Both report the same coarse family.
         #expect(credential(subscription: "max", tier: nil).planLabel == "Max")
     }

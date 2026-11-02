@@ -4,7 +4,8 @@ import PacerCore
 import PacerUI
 
 /// Builds the ordered menu-bar window set from live samples: the fixed 5-hour
-/// and 7-day blocks (always present, even before the first sample lands) plus
+/// and 7-day blocks (present even before the first sample lands; the 5-hour
+/// one drops out for an account that has no 5-hour limit) plus
 /// every scoped per-model window in the latest poll (a "Fable" weekly cap and
 /// the like). Shared by the status-item label (icon-driver resolution), the
 /// dropdown (row listing), and Settings' driver picker so all three agree on
@@ -27,14 +28,22 @@ enum MenuBarWindowSource {
             return LiveMeterReadout(reading: MeterReading(at: at, percent: pct, resetsAt: resets),
                                     live: live[key], now: now)
         }
-        var items: [MenuBarWindowItem] = [
-            MenuBarWindowItem(
+        var items: [MenuBarWindowItem] = []
+        // The 5-hour block is a placeholder until the first poll, but an
+        // account whose poll carries a 7-day window and no 5-hour one has no
+        // 5-hour limit at all (verified Ultra). Listing it anyway left an
+        // empty "5H" row and, being the default icon driver, a grey icon that
+        // never fell back to the 7-day window.
+        if fiveHour != nil || sevenDay == nil {
+            items.append(MenuBarWindowItem(
                 key: RateLimitWindowName.fiveHour, displayName: "5-hour",
                 usedPercentage: fiveHour?.usedPercentage, resetsAt: fiveHour?.resetsAt,
                 duration: MenuBarWindows.fiveHourDuration, group: "",
                 isScoped: false, isActive: false,
                 readout: readout(RateLimitWindowName.fiveHour, fiveHour?.sampledAt,
-                                 fiveHour?.usedPercentage, fiveHour?.resetsAt)),
+                                 fiveHour?.usedPercentage, fiveHour?.resetsAt)))
+        }
+        items.append(contentsOf: [
             MenuBarWindowItem(
                 key: RateLimitWindowName.sevenDay, displayName: "7-day",
                 usedPercentage: sevenDay?.usedPercentage, resetsAt: sevenDay?.resetsAt,
@@ -42,7 +51,7 @@ enum MenuBarWindowSource {
                 isScoped: false, isActive: false,
                 readout: readout(RateLimitWindowName.sevenDay, sevenDay?.sampledAt,
                                  sevenDay?.usedPercentage, sevenDay?.resetsAt)),
-        ]
+        ])
         // Latest poll only. Account-wide `session`/`weekly_all` rows are
         // excluded in the fetch (`LimitScope.modelScopedLimits`) rather than
         // here — they duplicate 5h/7d and were two thirds of the rows.
@@ -88,8 +97,12 @@ enum MenuBarWindowSource {
     @MainActor
     static func load(_ context: ModelContext, account: String?)
         -> (fixed: [LimitSamplePoint], scoped: [ScopedWindowRow]) {
+        // Latest batch only: a window the last poll no longer reported (the
+        // 5-hour one on a verified Ultra account) must not keep its last
+        // value as if it were current.
         let fixed = ((try? context.fetch(LimitScope.rateLimits(account: account, limit: 8))) ?? [])
             .map(\.limitPoint)
+            .latestBatch()
         let scoped = ((try? context.fetch(recentScoped(account: account))) ?? [])
             .map(\.scopedWindowRow)
         return (fixed, scoped)
@@ -481,6 +494,13 @@ struct MenuBarLabel: View {
             return .rings(rings.map(\.usedPercentage))
         case .fixed(.fiveHourPct):
             let w = windows.first { $0.key == RateLimitWindowName.fiveHour }
+            // No 5-hour window on this account (verified Ultra): the default
+            // chip would otherwise be a permanent "—". Show the 7-day number
+            // in its place, or nothing when a 7-day chip is already there.
+            if w == nil, let week = windows.first(where: { $0.key == RateLimitWindowName.sevenDay }) {
+                guard !chipItems.contains(.fixed(.sevenDayPct)) else { return nil }
+                return .percent(prefix: "7d ", pct: week.usedPercentage, isEstimate: week.isEstimate)
+            }
             return .percent(prefix: fiveHourNeedsPrefix ? "5h " : nil,
                             pct: w?.usedPercentage, isEstimate: w?.isEstimate ?? false)
         case .fixed(.sevenDayPct):

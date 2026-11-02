@@ -6,8 +6,9 @@ import Foundation
 /// Two fields describe a plan and only one of them is useful for pacing:
 /// `subscriptionType` is the family (`free`, `pro`, `max`) and calls both Max
 /// tiers `max`, while `rateLimitTier` (`default_claude_max_20x`) says how big
-/// the budget actually is. 20% of a Max 20× budget is four times 20% of a Max
-/// 5× one, so a percentage per hour means little without it.
+/// the budget actually is. 20% of an Ultra (formerly Max 20×) budget is not
+/// 20% of a Max (formerly Max 5×) one, so a percentage per hour means little
+/// without it.
 ///
 /// Lives here rather than on either type because three surfaces need the same
 /// answer — the HTTP API, the Settings accounts list, and the dashboard's
@@ -34,6 +35,17 @@ public enum PlanLabel {
         guard let multiplier = parts.dropFirst().first(where: { $0.hasSuffix("x") }) else {
             return family.capitalized
         }
+        if let renamed = renamed["\(family)_\(multiplier)"] { return renamed }
         return "\(family.capitalized) \(multiplier.dropLast())×"
     }
+
+    /// Tiers whose plan Anthropic has since renamed, under the name it sells
+    /// them by now. On 2026-10-30 Max 5× became "Max" and Max 20× became
+    /// "Ultra", but the tier strings did not change, so parsing alone would
+    /// keep showing the retired names. The one place Pacer names a plan
+    /// rather than reading it: there is no other source for the new name.
+    private static let renamed: [String: String] = [
+        "max_5x": "Max",
+        "max_20x": "Ultra",
+    ]
 }

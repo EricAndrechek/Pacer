@@ -615,8 +615,13 @@ public enum PacerSnapshotBuilder {
             (outlook?.scoped ?? []).map { ($0.identity, $0.outlook) },
             uniquingKeysWith: { first, _ in first })
 
-        let fiveHourSample = rlRows.first { $0.window == fiveHourKey }
-        let sevenDaySample = rlRows.first { $0.window == sevenDayKey }
+        // Only the windows the latest poll still reported. A verified Ultra
+        // account stopped receiving `five_hour` on 2026-10-30; its last row
+        // stays the newest five_hour row for hours, and served here it read
+        // as a live session percentage with a growing sample age.
+        let current = Set(rlRows.map(\.limitPoint).latestBatch().map(\.window))
+        let fiveHourSample = current.contains(fiveHourKey) ? rlRows.first { $0.window == fiveHourKey } : nil
+        let sevenDaySample = current.contains(sevenDayKey) ? rlRows.first { $0.window == sevenDayKey } : nil
         let live = liveValues(context: context, account: limitAccount,
                               fiveHour: fiveHourSample, sevenDay: sevenDaySample,
                               scoped: scopedRows, scopedSamples: scopedSamples, now: now)

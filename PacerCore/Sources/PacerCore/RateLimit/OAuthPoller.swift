@@ -1985,6 +1985,14 @@ public actor OAuthPoller: TokenPoolTesting {
             if let w = captured.fiveHour {
                 account.latestFiveHourPct = w.usedPercentage
                 account.latestFiveHourResetsAt = w.resetsAt
+            } else if captured.sevenDay != nil {
+                // A poll with a 7-day window and no 5-hour one means the
+                // account has no 5-hour limit (verified Ultra, since
+                // 2026-10-30) — not a failed read, which carries neither.
+                // Keeping the last value showed a frozen "5h 87%" beside a
+                // fresh poll time on every account surface.
+                account.latestFiveHourPct = nil
+                account.latestFiveHourResetsAt = nil
             }
             if let w = captured.sevenDay {
                 account.latestSevenDayPct = w.usedPercentage

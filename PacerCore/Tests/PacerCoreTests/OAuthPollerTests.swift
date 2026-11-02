@@ -125,6 +125,51 @@ import Testing
         #expect(rows.allSatisfy { $0.source == "oauth" })
     }
 
+    // MARK: - An account with no 5-hour window (Ultra, 2026-10-30)
+
+    /// Verified Ultra accounts stopped receiving `five_hour`; the poll still
+    /// carries `seven_day`. The account's cached 5-hour reading must clear
+    /// rather than stay frozen beside a fresh poll time, and the stored rows
+    /// must read as "no 5-hour window", not as the last pre-change value.
+    @Test func aPollWithoutFiveHourClearsTheCachedReading() async throws {
+        let container = try Self.makeContainer()
+        let clock = TestClock()
+        let outcomes: [HTTPOutcome] = [
+            .success(jsonBody: """
+                {"five_hour":{"utilization":87.0,"resets_at":"2026-05-06T17:00:00Z"},
+                 "seven_day":{"utilization":40.0,"resets_at":"2026-05-13T00:00:00Z"}}
+            """),
+            .success(jsonBody: """
+                {"seven_day":{"utilization":41.0,"resets_at":"2026-05-13T00:00:00Z"}}
+            """),
+        ]
+        // Samples are stamped by the client's clock; the two polls must be a
+        // minute apart, as they are live, for the batches to be told apart.
+        let counter = AtomicCounter()
+        let client = OAuthClient(
+            keychain: KeychainOAuth(rawReader: { .success(Self.defaultKeychainBlob()) }),
+            transport: { _ in try outcomes[min(counter.next(), outcomes.count - 1)].materialize() },
+            now: { clock.now() },
+            desktopEnabled: { false })
+        let poller = OAuthPoller(client: client, container: container,
+                                 configuration: .init(), clock: clock)
+
+        _ = await poller.runOnce()
+        #expect(try await Self.fetchAccounts(in: container).first?.latestFiveHourPct == 87.0)
+
+        clock.advance(by: 60)
+        _ = await poller.runOnce()
+        #expect(try await Self.fetchAccounts(in: container).first?.latestFiveHourPct == nil)
+
+        let (batch, noFive) = try await MainActor.run {
+            let points = try ModelContext(container).fetch(FetchDescriptor<RateLimitSample>(
+                sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])).map(\.limitPoint)
+            return (points.latestBatch().map(\.window), points.hasNoFiveHourWindow)
+        }
+        #expect(batch == ["seven_day"])
+        #expect(noFive)
+    }
+
     // MARK: - The post-install `ok keychain` line (#325)
 
     @Test("reading Claude Code's keychain token marks the launch's ok-keychain line")

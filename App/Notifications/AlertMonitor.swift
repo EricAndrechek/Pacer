@@ -215,6 +215,9 @@ final class AlertMonitor {
         for id in ids {
             out.fixed[id] = ((try? context.fetch(
                 LimitScope.rateLimits(account: id, limit: 8))) ?? []).map(\.limitPoint)
+                // A window the latest poll no longer reports (5-hour on a
+                // verified Ultra account) has nothing to alert on.
+                .latestBatch()
             // Already model/surface-scoped: the account-wide `session` /
             // `weekly_all` identities have no per-model rules.
             let rows = ((try? context.fetch(
