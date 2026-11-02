@@ -80,6 +80,39 @@ public enum FormatDrift {
         }
     }
 
+    /// Keys of a transcript line's `message.usage` that Pacer reads
+    /// (`RawUsage`), plus the ones it knowingly ignores. Anything else is
+    /// Claude Code or the API adding a field: a new token class, say, that
+    /// would be billed and not counted.
+    static let knownUsageKeys: Set<String> = [
+        "input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens",
+        "cache_creation", "speed", "inference_geo", "iterations",
+        "service_tier", "server_tool_use",
+    ]
+
+    /// The usage keys on `line` that are not known, as identifier-safe names
+    /// (letters, digits, `_`, at most 40 chars). Pure; parses the line once
+    /// with `JSONSerialization`, so callers run it on one line per file per
+    /// pass, never per line.
+    static func unknownUsageKeys(inLine line: Data) -> [String] {
+        guard let root = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any],
+              let message = root["message"] as? [String: Any],
+              let usage = message["usage"] as? [String: Any]
+        else { return [] }
+        return usage.keys.filter { !knownUsageKeys.contains($0) }.sorted().compactMap { key in
+            let safe = String(key.lowercased().map { $0.isASCII && ($0.isLetter || $0.isNumber) ? $0 : "_" }.prefix(40))
+            return safe.isEmpty ? nil : safe
+        }
+    }
+
+    /// First sighting of each unknown `usage` key on `line` -> `format.usage_field`.
+    /// Call on the first usage-bearing line of a file read, not on every line.
+    public static func noteUsageFields(inLine line: Data) {
+        for key in unknownUsageKeys(inLine: line) where firstSighting("usage_field", key) {
+            Telemetry.count("format.usage_field", attributes: ["key": .string(key)])
+        }
+    }
+
     /// Latency bucket label used by main-thread stall and click metrics.
     public static func clickBucket(delaySeconds s: Double) -> String {
         switch s * 1000 {

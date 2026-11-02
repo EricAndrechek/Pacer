@@ -181,6 +181,9 @@ public actor JSONLScanner {
             filesScanned += 1
             do {
                 var bytesConsumed: Int64 = 0
+                // Drift check on the first usage-bearing line of this read
+                // only: one extra JSON parse per file per pass, not per line.
+                var checkedUsageFields = false
                 try readNewLines(
                     from: c.url,
                     startingAt: startOffset
@@ -193,6 +196,10 @@ public actor JSONLScanner {
                     ) {
                         entriesParsed += 1
                         kept.offer(entry, from: c.path)
+                        if !checkedUsageFields {
+                            checkedUsageFields = true
+                            FormatDrift.noteUsageFields(inLine: lineData)
+                        }
                     }
                 } byteCounter: { delta in
                     bytesConsumed += delta
