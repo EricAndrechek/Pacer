@@ -203,3 +203,90 @@ with the invariants (what may be sent, never forward `Log`, scrubber, `LaunchMod
 
 Apply at sentry.io/for/good; build the Sentry dashboard (active installs by version, installs by
 country, crash-free by version, stall p95 by version, slow scans by phase); then decide on PostHog.
+
+## Update 2026-11-02: answers and the full metrics plan
+
+Answers: `pacer feedback` sends to Sentry by default; the CLI counts its commands; Help → "Report a
+Problem…" yes; check-in settings list kept. Eric also wants crashes, hangs and slow runs from the
+CLI and widget, not just the app. Still a plan: nothing is built.
+
+### Covering the CLI and the widget without Sentry inside them
+
+- Neither runs the Sentry SDK. The widget has no network and a ~30 MB budget; sharing the SDK's
+  cache folder with the app is unsupported (no cross-process lock, crash reports are per bundle).
+  The CLI is run constantly by agents and must stay fast.
+- **Crashes**: macOS writes a crash report (`.ips`) for every crashing process. The app (not
+  sandboxed) scans `~/Library/Logs/DiagnosticReports` for `pacer-*` and `PacerWidgets-*` reports
+  once a day and at launch, and forwards each new one to Sentry with its binary images
+  (`debug_meta`), so it is symbolicated against the uploaded dSYMs like an app crash. Sentry
+  documents an `event.applecrashreport` attachment for exactly this; whether it accepts the JSON
+  `.ips` form or needs the text form is the first thing to test. Fallback: build the native event
+  ourselves (image UUID + base + frame offsets are all in the `.ips`).
+- **Hangs and slow runs**: both processes time their own work and append one line per run to a
+  file in the App Group container (the `WidgetRefreshLog` pattern: `O_APPEND`, small lines, safe
+  with many concurrent `pacer` processes, no defaults read-modify-write). The CLI writes subcommand,
+  exit code, duration, API-or-offline; never arguments, accounts or paths. The widget adds the
+  timeline build time to its existing refresh log line. The app rolls both up daily into the
+  check-in and sends per-subcommand duration distributions; runs over a threshold (CLI > 5 s
+  excluding `wait`; widget timeline > 1 s) also go as individual slow-run metrics.
+- **CLI freezes**: a stuck `pacer` shows as a run that started but never wrote its end line. The
+  CLI writes a start line too; the app counts starts with no end older than 10 minutes (excluding
+  `wait`, whose own max-wait is known) as hung runs.
+- **App crash that Sentry missed** (e.g. killed by the system): the same `.ips` scan catches
+  `Pacer-*` reports Sentry did not already send, deduplicated by crash time.
+
+### Metrics catalog
+
+All under "Share usage data" unless marked (crash). Attributes in brackets; none identify a
+person, account, project or path. Account ids are org ids, so never sent; plan tier is used.
+
+1. **Model downloads** (`ArenaWeightStore`, `:325` and `:252`): per download, a span with model,
+   bytes, seconds, attempts, resumed; failures counted by error code. Daily: which models are
+   present on disk. [model]
+2. **Fitting and grading** (no gradient training exists; these are curve fits, rankings and model
+   inference): engine refit duration and per-phase breakdown (`recompute` already times phases),
+   daily spend-to-meter fit duration and fitted/skipped counts, arena scorer pass time, CPU used,
+   and slowest model per pass. [phase, model, window kind]
+3. **Upgrades and backfills**: first launch after an update is detectable (last-seen build in
+   `WidgetExtensionRelauncher`). One span for the whole post-update rebuild: full re-read, cost
+   rebuild, price repricing and rollup bootstraps, with the phase steps `HistoryRebuildStatus`
+   already names, entries and files processed, and the record backfill. Plus SwiftData
+   index-repair time. [from-version, to-version, what rebuilt]
+4. **Forecast accuracy**: once a day per window kind, the model each account picked, its typical
+   error (percentage points), the gap to the best model, how many models were ranked, cycles of
+   history, and which models were well behind. Per account but labelled only by plan tier and an
+   account number local to that Mac (1, 2, 3…). [model, window kind, plan tier]
+5. **Accounts and plans**: number of accounts, count per plan tier (raw tier string, stable across
+   the Max/Ultra renaming), Claude Desktop, cswap and pinned-profile counts. [tier]
+6. **Usage levels** (a new kind of data: see question 1): per window kind, yesterday's peak
+   percentage in 10-point bands, whether any window hit 100 % or was forecast to, number of models
+   used, and token volume as an order-of-magnitude band. No costs, no exact tokens.
+7. **What people use**: dashboard tab views and time on tab, detail sheets opened (kind only),
+   menu-bar menu opens and which item, dashboard window opens, settings changed (key name, not
+   value, except for the check-in list), notification Mute/Open clicks, Shortcuts actions run,
+   local API routes hit, CLI subcommands, installed widgets (kind + size). The least-used shows
+   up as zero counts against the full list, which the check-in carries.
+8. **Slow operations**: scan cycles > 1 s with phase breakdown (already planned), OAuth poll
+   latency and outcome (ok / 401 / 429 / network), pricing refresh time, local API snapshot build
+   time, widget timeline time, CLI command time, main-thread stalls (the watchdog's threshold is
+   100 ms in code; send ≥ 250 ms), launch-to-ready time, memory footprint at launch, hourly and
+   after a rebuild.
+9. **Crash-side** (crash toggle): app crashes, hangs and MetricKit as planned, plus forwarded CLI
+   and widget crashes and hung CLI runs.
+
+Hot paths kept off: no per-click events (aggregate the click probe, send distributions), no
+per-cycle or per-forecast events, `ProcessMemory` only hourly.
+
+### PostHog
+
+Still Sentry. Every item above is a count, duration or distribution sliced by version, model,
+plan tier, window or install, which Sentry metrics and traces handle with group-by and dashboards.
+PostHog adds value for exploring by hand: drilling into one install's history, SQL, funnels and
+retention curves, and a world map. Revisit after seeing the Sentry dashboards; if added, it would
+take only the usage events (items 5–7) and Sentry keeps crashes, hangs and performance.
+
+### Found along the way
+
+- Every install tries to download all four large forecast networks (~2.7 GB), including models it
+  never picks. Worth an issue on its own, independent of telemetry.
+- `CLI` and widget crashes have never been visible to anyone but the user.
