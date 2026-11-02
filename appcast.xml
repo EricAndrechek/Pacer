@@ -1410,5 +1410,26 @@ colour, which had quietly flattened every stacked view.</p>]]></description>
             type="application/octet-stream"
             sparkle:edSignature="AewAjRJNhOs9mkg0zZg0yUIlXZiresbe++MItMOL01c0EGh2XS12CTJS+NV3dx5LTihkpPs9gmMclNBBqFvmDg==" />
     </item>
+            <item>
+        <title>Version 0.8.1</title>
+        <description><![CDATA[<p>Fixes for Ultra accounts, and an easier way to report a problem.</p>
+<h2>Report a problem from anywhere</h2>
+<p><strong>Report a Problem…</strong> is now in the menu-bar menu and in Settings → Privacy, as well as the Help menu. A report can include a picture of Pacer's window and any files you add.</p>
+<h2>Ultra accounts</h2>
+<h3>Widgets show each window once</h3>
+<p>The rate-limit gauges and pace chart widgets showed the 7-day window twice on accounts with no 5-hour limit. They now show 7-day and the next window you have, or just 7-day, and the widget's Edit sheet no longer offers a 5-hour window the account doesn't have.</p>
+<h3>No empty 5-hour readouts</h3>
+<p>Account rows in Settings no longer show an empty 5-hour bar, and Settings hides the 5-hour menu-bar chip and alert thresholds when no account has a 5-hour limit.</p>
+<p><strong>Your data is untouched.</strong></p>]]></description>
+        <pubDate>Mon, 02 Nov 2026 22:13:53 +0000</pubDate>
+        <sparkle:version>1793656792</sparkle:version>
+        <sparkle:shortVersionString>0.8.1</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.8.1/Pacer-0.8.1.dmg"
+            length="156929028"
+            type="application/octet-stream"
+            sparkle:edSignature="lCNkyswUsrsdGI1y2MRIgKC4A+tP2WJq0voaqzhRKYaUv7gzDfV8ScuBqja+TsgO4AH0UAzieDHJi4fdZXH7CQ==" />
+    </item>
         </channel>
 </rss>
