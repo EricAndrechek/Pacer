@@ -288,6 +288,18 @@ final class DailyCheckIn {
     struct AccountLabel: Sendable {
         let index: Int
         let plan: String
+        /// No 5-hour limit on this account (verified Ultra): its 5-hour
+        /// forecasts and usage bands are not reported, because there is no
+        /// window to be right or wrong about.
+        let hasNoFiveHour: Bool
+    }
+
+    /// Whether the 5-hour window exists for the scope being reported: for one
+    /// account its own flag, for all accounts only when none of them has one.
+    /// No accounts yet is "unknown", so the window is kept.
+    nonisolated static func reportsFiveHour(accountId: String?, accounts: [String: AccountLabel]) -> Bool {
+        if let accountId { return !(accounts[accountId]?.hasNoFiveHour ?? false) }
+        return accounts.isEmpty || accounts.values.contains { !$0.hasNoFiveHour }
     }
 
     nonisolated private static func gather(container: ModelContainer, startOfYesterday: Date,
@@ -303,7 +315,11 @@ final class DailyCheckIn {
         var subscriptions: [String: Int] = [:]
         for (i, account) in accounts.enumerated() {
             let tier = sanitized(account.rateLimitTier ?? "unknown")
-            labels[account.id] = AccountLabel(index: i + 1, plan: tier)
+            labels[account.id] = AccountLabel(
+                index: i + 1, plan: tier,
+                hasNoFiveHour: LimitSamplePoint.hasNoFiveHourWindow(
+                    hasFiveHour: account.latestFiveHourPct != nil,
+                    hasSevenDay: account.latestSevenDayPct != nil))
             tiers[tier, default: 0] += 1
             subscriptions[sanitized(account.subscriptionType ?? "unknown"), default: 0] += 1
         }
@@ -313,7 +329,8 @@ final class DailyCheckIn {
         // Usage levels: yesterday's peak per window, banded.
         let rate = (try? context.fetch(FetchDescriptor<RateLimitSample>(
             predicate: #Predicate { $0.sampledAt >= startOfYesterday && $0.sampledAt < startOfToday }))) ?? []
-        for window in ["five_hour", "seven_day"] {
+        let fiveHourExists = Self.reportsFiveHour(accountId: nil, accounts: labels)
+        for window in ["five_hour", "seven_day"] where fiveHourExists || window != "five_hour" {
             let peak = rate.lazy.filter { $0.window == window }.map(\.usedPercentage).max() ?? 0
             a["usage.\(window).peak_band"] = .int(TelemetryBands.percentBand(peak))
             a["usage.\(window).hit_100"] = .bool(peak >= 100)
@@ -427,7 +444,10 @@ final class DailyCheckIn {
             let scopeName = scope.isAllAccounts ? "all" : "account"
             // The account-wide blocks, then each per-model (scoped) cap the
             // engine fits, named by cadence and model family only.
-            var windows: [(key: String, name: String)] = [("five_hour", "five_hour"), ("seven_day", "seven_day")]
+            var windows: [(key: String, name: String)] = [("seven_day", "seven_day")]
+            if Self.reportsFiveHour(accountId: scope.accountId, accounts: accounts) {
+                windows.insert(("five_hour", "five_hour"), at: 0)
+            }
             windows += await engine.scopedWindowKinds().map { ($0.key, $0.kind) }
             for (windowKey, window) in windows {
                 let board = await engine.meterModelBoard(windowKey: windowKey)

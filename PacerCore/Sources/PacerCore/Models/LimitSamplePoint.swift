@@ -118,8 +118,21 @@ public extension Sequence where Element == LimitSamplePoint {
     /// to having no reading at all yet.
     var hasNoFiveHourWindow: Bool {
         let batch = latestBatch()
-        return batch.contains { $0.window == RateLimitWindowName.sevenDay }
-            && !batch.contains { $0.window == RateLimitWindowName.fiveHour }
+        return LimitSamplePoint.hasNoFiveHourWindow(
+            hasFiveHour: batch.contains { $0.window == RateLimitWindowName.fiveHour },
+            hasSevenDay: batch.contains { $0.window == RateLimitWindowName.sevenDay })
+    }
+}
+
+public extension LimitSamplePoint {
+    /// THE rule for "this account has no 5-hour limit", for callers that hold
+    /// the latest poll's two windows as values rather than rows: the poll
+    /// reported a 7-day window and no 5-hour one. A poll with neither is a
+    /// failed or absent read, not an Ultra account, so it is false. Every
+    /// surface (menu bar, widgets, pace chart, poller, settings, telemetry)
+    /// calls this so they cannot drift apart again.
+    static func hasNoFiveHourWindow(hasFiveHour: Bool, hasSevenDay: Bool) -> Bool {
+        hasSevenDay && !hasFiveHour
     }
 }
 

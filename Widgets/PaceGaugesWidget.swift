@@ -81,7 +81,8 @@ struct PaceGaugesEntry: TimelineEntry {
                                                    isEstimate: g.isEstimate, readPct: g.readPct),
                                 durationSeconds: g.durationSeconds, isActive: g.isActive)
             }
-            return Resolved(label: "5-hour", state: fiveHour, durationSeconds: 5 * 3600, isActive: false)
+            // Unknown key -> 7-day, never an empty 5-hour gauge (Ultra has none).
+            return Resolved(label: "7-day", state: sevenDay, durationSeconds: 7 * 86_400, isActive: false)
         }
     }
 }
@@ -122,19 +123,8 @@ struct PaceGaugesProvider: AppIntentTimelineProvider {
         scoped: [PaceGaugesEntry.ScopedGauge],
         hasFiveHour: Bool = true
     ) -> (String, String) {
-        // An account with no 5-hour limit (verified Ultra) gauges its 7-day
-        // window first and its first per-model cap second, rather than an
-        // empty "awaiting" 5-hour gauge that would never fill.
-        var available: Set<String> = ["seven_day"]
-        if hasFiveHour { available.insert("five_hour") }
-        for g in scoped { available.insert(g.key) }
-        let p = PaceWindowResolver.resolveKey(primary?.id, available: available,
-                                              fallback: hasFiveHour ? "five_hour" : "seven_day")
-        let secFallback = hasFiveHour
-            ? ((p == "five_hour") ? "seven_day" : "five_hour")
-            : ((p == "seven_day") ? (scoped.first?.key ?? "seven_day") : "seven_day")
-        let s = PaceWindowResolver.resolveKey(secondary?.id, available: available, fallback: secFallback)
-        return (p, s)
+        PaceWindowResolver.resolvePair(primary: primary?.id, secondary: secondary?.id,
+                                       scopedKeys: scoped.map(\.key), hasFiveHour: hasFiveHour)
     }
 
     private func currentEntry(primary: PaceWindowEntity?, secondary: PaceWindowEntity?) -> PaceGaugesEntry {
@@ -155,7 +145,7 @@ struct PaceGaugesProvider: AppIntentTimelineProvider {
             let current = Set(rows.map(\.limitPoint).latestBatch().map(\.window))
             let five = current.contains("five_hour") ? rows.first { $0.window == "five_hour" } : nil
             let seven = current.contains("seven_day") ? rows.first { $0.window == "seven_day" } : nil
-            let hasFiveHour = five != nil || seven == nil
+            let hasFiveHour = !LimitSamplePoint.hasNoFiveHourWindow(hasFiveHour: five != nil, hasSevenDay: seven != nil)
             // Each gauge at the live meter's value as of this refresh (#318).
             let now = PacerClock.now
             let live = account.map { LiveMeterSource(context: context).currentValues(account: $0, now: now) } ?? [:]
@@ -361,8 +351,12 @@ struct PaceGaugesWidgetView: View {
             WidgetTitleBar(title: "RATE LIMITS")
             HStack(spacing: 14) {
                 gaugeColumn(a.label, a.state, durationSeconds: a.durationSeconds)
-                Divider()
-                gaugeColumn(b.label, b.state, durationSeconds: b.durationSeconds)
+                // One window only (an Ultra account with no per-model caps):
+                // one gauge, not the same gauge twice.
+                if entry.secondaryKey != entry.primaryKey {
+                    Divider()
+                    gaugeColumn(b.label, b.state, durationSeconds: b.durationSeconds)
+                }
             }
             .frame(maxHeight: .infinity)
         }

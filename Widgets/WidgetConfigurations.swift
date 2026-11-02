@@ -78,7 +78,12 @@ enum PaceWindowResolver {
     static func liveWindows() -> [PaceWindowEntity] {
         var seen = Set<String>()
         var out: [PaceWindowEntity] = []
-        for spec in WindowSpec.fixedWindows where seen.insert(spec.key).inserted {
+        // An account with no 5-hour limit (verified Ultra) must not be offered
+        // one: the widgets render nothing for it and the Edit sheet would name a
+        // window the person cannot have.
+        let noFiveHour = accountHasNoFiveHourWindow()
+        for spec in WindowSpec.fixedWindows
+        where seen.insert(spec.key).inserted && !(noFiveHour && spec.key == "five_hour") {
             out.append(PaceWindowEntity(
                 id: spec.key, displayName: spec.displayName,
                 subtitle: fixedSubtitle(spec.key)))
@@ -87,6 +92,16 @@ enum PaceWindowResolver {
             out.append(e)
         }
         return out
+    }
+
+    /// The shared no-5-hour rule over the same latest batch the widgets read
+    /// (same account, same `limit: 50` fetch as the gauges provider).
+    static func accountHasNoFiveHourWindow() -> Bool {
+        guard let container = try? PacerStore.sharedModelContainer() else { return false }
+        let context = ModelContext(container)
+        let rows = (try? context.fetch(
+            LimitScope.rateLimits(account: UsageScope.limitAccountId(in: context), limit: 50))) ?? []
+        return rows.map(\.limitPoint).hasNoFiveHourWindow
     }
 
     /// The latest poll's scoped (model/surface) windows — identical filtering
@@ -116,6 +131,12 @@ enum PaceWindowResolver {
     static func absentEntity(for id: String) -> PaceWindowEntity {
         switch id {
         case "five_hour":
+            // A saved 5-hour selection on an account that has none renders as
+            // 7-day (`resolvePair`), so the Edit sheet must say 7-day too.
+            if accountHasNoFiveHourWindow() {
+                return PaceWindowEntity(id: "seven_day", displayName: "7-day",
+                                        subtitle: fixedSubtitle("seven_day"))
+            }
             return PaceWindowEntity(id: id, displayName: "5-hour", subtitle: fixedSubtitle(id))
         case "seven_day":
             return PaceWindowEntity(id: id, displayName: "7-day", subtitle: fixedSubtitle(id))
@@ -170,6 +191,34 @@ enum PaceWindowResolver {
     static func resolveKey(_ id: String?, available: Set<String>, fallback: String) -> String {
         if let id, available.contains(id) { return id }
         return fallback
+    }
+
+    /// The two windows a two-window widget (pace gauges, pace chart) shows,
+    /// from the person's two selections and the windows that exist now. One
+    /// place for both widgets: they each carried a copy, and the copies shared
+    /// the bug below.
+    ///
+    /// No 5-hour limit (verified Ultra) → 7-day first, the first per-model cap
+    /// second. Never the same window twice: "5-hour + 7-day" on an Ultra
+    /// account resolved the first slot to 7-day by fallback and the second to
+    /// 7-day by choice, and showed 7-day twice (PACER-A). The second slot then
+    /// takes the next window that exists; with none, both keys are equal and
+    /// the medium layouts draw one window.
+    static func resolvePair(primary: String?, secondary: String?,
+                            scopedKeys: [String], hasFiveHour: Bool) -> (String, String) {
+        var available: Set<String> = ["seven_day"]
+        if hasFiveHour { available.insert("five_hour") }
+        available.formUnion(scopedKeys)
+        let p = resolveKey(primary, available: available, fallback: hasFiveHour ? "five_hour" : "seven_day")
+        let secFallback = hasFiveHour
+            ? ((p == "five_hour") ? "seven_day" : "five_hour")
+            : ((p == "seven_day") ? (scopedKeys.first ?? "seven_day") : "seven_day")
+        var s = resolveKey(secondary, available: available, fallback: secFallback)
+        if s == p, let other = (scopedKeys + ["seven_day", "five_hour"])
+            .first(where: { $0 != p && available.contains($0) }) {
+            s = other
+        }
+        return (p, s)
     }
 }
 

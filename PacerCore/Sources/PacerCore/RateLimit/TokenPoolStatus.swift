@@ -82,6 +82,12 @@ public struct AccountStatusSummary: Sendable, Identifiable, Equatable {
     }
     public let fiveHourPct: Double?
     public let sevenDayPct: Double?
+    /// This account has no 5-hour limit (verified Ultra). The poller clears
+    /// `fiveHourPct` when a poll carries a 7-day window and no 5-hour one, so
+    /// the cached pair answers the shared rule.
+    public var hasNoFiveHourWindow: Bool {
+        LimitSamplePoint.hasNoFiveHourWindow(hasFiveHour: fiveHourPct != nil, hasSevenDay: sevenDayPct != nil)
+    }
     public let extraUsageCents: Int?
     public let lastPolledAt: Date?
     /// How many pollable lanes (tokens) currently resolve to this account.
