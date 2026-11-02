@@ -92,6 +92,14 @@ public final class Account {
     public var latestFiveHourResetsAt: Date?
     public var latestSevenDayPct: Double?
     public var latestSevenDayResetsAt: Date?
+
+    /// This account has no 5-hour limit (verified Ultra). The poller clears
+    /// `latestFiveHourPct` when a poll has a 7-day window and no 5-hour one,
+    /// so the cached pair answers the shared rule.
+    public var hasNoFiveHourWindow: Bool {
+        LimitSamplePoint.hasNoFiveHourWindow(hasFiveHour: latestFiveHourPct != nil,
+                                             hasSevenDay: latestSevenDayPct != nil)
+    }
     public var latestExtraUsageCents: Int?
     public var latestPolledAt: Date?
 

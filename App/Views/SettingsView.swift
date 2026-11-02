@@ -346,7 +346,11 @@ struct MenuBarCard: View {
         return menuBarAccounts
             .sorted(by: Account.listOrder)
             .flatMap { account in
-                [RateLimitWindowName.fiveHour, RateLimitWindowName.sevenDay].map {
+                // No 5-hour chip for an account without a 5-hour window: it
+                // would read blank forever.
+                (account.hasNoFiveHourWindow
+                    ? [RateLimitWindowName.sevenDay]
+                    : [RateLimitWindowName.fiveHour, RateLimitWindowName.sevenDay]).map {
                     PacerSettings.MenuBarChipItem.account(accountId: account.id, window: $0)
                 }
             }
@@ -906,6 +910,9 @@ struct RateLimitAlertsCard: View {
     /// per-account note below is worth saying at all.
     @Query private var alertAccounts: [Account]
     private var accountCount: Int { alertAccounts.count }
+    private var allAccountsLackFiveHour: Bool {
+        !alertAccounts.isEmpty && alertAccounts.allSatisfy(\.hasNoFiveHourWindow)
+    }
 
     /// Latest-poll scoped `limits[]` rows (active account) so the card can
     /// auto-list every per-model window alongside the fixed 5h/7d ones. Bounded
@@ -971,8 +978,12 @@ struct RateLimitAlertsCard: View {
                 }
                 .disabled(!enabled)
                 Divider().opacity(0.4)
-                ThresholdSubsection(title: "5-hour window", window: "five_hour", enabled: enabled)
-                Divider().opacity(0.4)
+                // Hidden only when every tracked account lacks a 5-hour window
+                // (all Ultra); with any other account its alerts still apply.
+                if !allAccountsLackFiveHour {
+                    ThresholdSubsection(title: "5-hour window", window: "five_hour", enabled: enabled)
+                    Divider().opacity(0.4)
+                }
                 ThresholdSubsection(title: "7-day window", window: "seven_day", enabled: enabled)
 
                 // Scoped per-model windows — auto-listed from the latest poll,
