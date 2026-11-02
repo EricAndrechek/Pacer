@@ -41,6 +41,11 @@ public struct PacerAccountRow<Trailing: View>: View {
         public let subtitle: String?
         public let fiveHourPercent: Double?
         public let sevenDayPercent: Double?
+        /// False for an account with no 5-hour limit (verified Ultra): the
+        /// "5h" readout is left out rather than drawn as an empty dash that
+        /// reads as an account that stopped being polled. A flag, not a mode,
+        /// so every caller states it explicitly.
+        public let hasFiveHour: Bool
         public let isActive: Bool
         /// Other clients active on this account (#245): a Desktop install, a
         /// pinned profile. Shown beside the plan. Empty, the default, renders
@@ -51,6 +56,7 @@ public struct PacerAccountRow<Trailing: View>: View {
         public init(
             name: String, plan: String? = nil, subtitle: String? = nil,
             fiveHourPercent: Double? = nil, sevenDayPercent: Double? = nil,
+            hasFiveHour: Bool = true,
             isActive: Bool = false, clients: [PacerClientChip] = []
         ) {
             self.name = name
@@ -58,6 +64,7 @@ public struct PacerAccountRow<Trailing: View>: View {
             self.subtitle = subtitle
             self.fiveHourPercent = fiveHourPercent
             self.sevenDayPercent = sevenDayPercent
+            self.hasFiveHour = hasFiveHour
             self.isActive = isActive
             self.clients = clients
         }
@@ -154,7 +161,9 @@ public struct PacerAccountRow<Trailing: View>: View {
             .frame(maxWidth: .infinity, alignment: .leading)
 
             HStack(spacing: 14) {
-                PacerWindowReadout(label: "5h", percent: model.fiveHourPercent)
+                if model.hasFiveHour {
+                    PacerWindowReadout(label: "5h", percent: model.fiveHourPercent)
+                }
                 PacerWindowReadout(label: "7d", percent: model.sevenDayPercent)
             }
 

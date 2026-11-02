@@ -2382,6 +2382,7 @@ private struct AccountSwitchRow: View {
             subtitle: subtitle,
             fiveHourPercent: account.fiveHourPct,
             sevenDayPercent: account.sevenDayPct,
+            hasFiveHour: !account.hasNoFiveHourWindow,
             isActive: account.isActive,
             // Read here, in this row's own body, so a Desktop starting or
             // timing out redraws the row.
