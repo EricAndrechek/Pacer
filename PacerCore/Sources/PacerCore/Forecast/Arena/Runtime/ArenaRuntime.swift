@@ -1011,6 +1011,30 @@ public actor ArenaLiveForecaster {
         }
     }
 
+    /// How long a projection that has seen the window's newest reading is
+    /// kept before it is made again anyway: half the time the cache serves it
+    /// (`ArenaLiveCache.maxAge`), so it is remade, at a refit, before it stops
+    /// being drawn. 7.5 min on a five-hour window, an hour on a weekly one.
+    /// The bound is what brings in what readings don't show: new spend, which
+    /// spend-reading models forecast from.
+    static func refreshAge(duration: TimeInterval) -> TimeInterval {
+        ArenaLiveCache.maxAge(duration: duration) / 2
+    }
+
+    /// Whether `e` is still the answer for `r`: made for this cycle, after the
+    /// newest reading the engine fitted on (`latestReadingAt`), and younger
+    /// than `refreshAge`. An extension moves the cut at every refit, so "made
+    /// at this cut" was never true and every refit re-ran every model of
+    /// every window (#368); a refit with no new reading now costs nothing.
+    static func isCurrent(_ e: ArenaLiveCache.Entry, request r: ArenaLiveRequest, cut: Date,
+                          duration: TimeInterval) -> Bool {
+        guard RateLimitCycle.contains(sampleReset: e.resetsAt, resets: r.resetsAt, duration: duration) else {
+            return false
+        }
+        if e.asOf >= cut { return true }      // made at this cut (or a later one): the same answer
+        return e.asOf >= r.latestReadingAt && cut.timeIntervalSince(e.asOf) < refreshAge(duration: duration)
+    }
+
     /// Returns whether anything new landed.
     private func make(_ r: ArenaLiveRequest, cut: ArenaHistory, asOf: Date, runner: ArenaRunner) -> Bool {
         let duration = TimeInterval(r.binding.target.windowMillis) / 1000
@@ -1018,9 +1042,7 @@ public actor ArenaLiveForecaster {
         for model in r.models {
             guard !cancel.isSet else { return any }
             let key = ArenaLiveCache.Key(account: r.binding.account, windowKey: r.binding.windowKey, model: model)
-            // Already made at this cut, for this cycle: the same answer.
-            if let e = cache.entry(key), e.asOf >= asOf,
-               RateLimitCycle.contains(sampleReset: e.resetsAt, resets: r.resetsAt, duration: duration) {
+            if let e = cache.entry(key), Self.isCurrent(e, request: r, cut: asOf, duration: duration) {
                 continue
             }
             budget.mark()

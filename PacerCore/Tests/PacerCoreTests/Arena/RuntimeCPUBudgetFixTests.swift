@@ -212,4 +212,84 @@ struct RuntimeCPUBudgetFixTests {
         #expect(againLog.trained == 1)
         #expect(MLAlignTests.same(state(again), refState))
     }
+
+    // MARK: The live lane skips what has seen the newest reading
+
+    /// Counts its fits; forecasts flat.
+    final class Counted: ArenaModel {
+        nonisolated(unsafe) static var runs = 0
+        static let lock = NSLock()
+        static var count: Int { lock.lock(); defer { lock.unlock() }; return runs }
+        init(context: ArenaContext) {}
+        func fit(_ history: ArenaHistory) { Self.lock.lock(); Self.runs += 1; Self.lock.unlock() }
+        func forecast(_ request: ArenaRequest) throws -> ArenaForecast {
+            ArenaForecast(byKey: Dictionary(uniqueKeysWithValues: request.targets.map {
+                ($0.key, ArenaTargetForecast.point(Array(repeating: 10, count: $0.grid.count)))
+            }))
+        }
+    }
+
+    /// The same request after the history moved on (a refit extends it) runs
+    /// nothing while no new reading has arrived; a newer reading, or an entry
+    /// past `refreshAge`, runs the model again.
+    @Test func theLiveLaneSkipsAModelUntilANewReadingArrives() async throws {
+        Counted.runs = 0
+        typealias E = RuntimeEngineTests
+        let container = try E.seeded()
+        let spec = ArenaModelSpec(name: "test-counted", targets: E.meters) { Counted(context: $0) }
+        let rt = E.runtime(container, roster: [spec])
+        let binding = ArenaWindowBinding(account: E.account, windowKey: "five_hour", target: .meterFiveHour, cap: nil)
+        let resets = E.now.addingTimeInterval(3 * 3600)
+        func submit(latest: Date) async {
+            await rt.live.submit([ArenaLiveRequest(binding: binding, resetsAt: resets, latestReadingAt: latest,
+                                                   models: ["test-counted"])])
+            await rt.live.settle()
+        }
+        // Readings up to ten minutes ago: before any cut the lane makes now.
+        let reading = Date().addingTimeInterval(-600)
+        await submit(latest: reading)
+        #expect(Counted.count == 1)
+        let key = ArenaLiveCache.Key(account: E.account, windowKey: "five_hour", model: "test-counted")
+        let first = try #require(rt.cache.entry(key)).asOf
+
+        // A refit five minutes on: the history extends, the cut moves, no new reading.
+        let later = first.addingTimeInterval(5 * 60 + 1)
+        _ = await rt.history.built(account: E.account, now: later)
+        await submit(latest: reading)
+        #expect(Counted.count == 1, "re-ran a model that had seen the newest reading")
+
+        // A reading after the entry's cut: made again.
+        await submit(latest: first.addingTimeInterval(60))
+        #expect(Counted.count == 2)
+        let second = try #require(rt.cache.entry(key)).asOf
+        #expect(second > first)
+
+        // No new reading, but the entry is older than the bound: made again.
+        let age = ArenaLiveForecaster.refreshAge(duration: E.fiveHours)
+        _ = await rt.history.built(account: E.account, now: second.addingTimeInterval(age + 5 * 60))
+        await submit(latest: reading)
+        #expect(Counted.count == 3)
+    }
+
+    @Test func aProjectionIsCurrentOnlyForItsCycleItsReadingsAndItsAge() {
+        let duration: TimeInterval = 5 * 3600
+        let reset = Date(timeIntervalSince1970: 1_800_000_000)
+        let made = reset.addingTimeInterval(-3600)
+        let binding = ArenaWindowBinding(account: "a", windowKey: "five_hour", target: .meterFiveHour, cap: nil)
+        let entry = ArenaLiveCache.Entry(resetsAt: reset, asOf: made,
+                                         projection: ArenaProjection(grid: [1], median: [0])!)
+        func req(latest: Date, resets: Date = reset) -> ArenaLiveRequest {
+            ArenaLiveRequest(binding: binding, resetsAt: resets, latestReadingAt: latest, models: ["m"])
+        }
+        let isCurrent = ArenaLiveForecaster.isCurrent
+        let bound = ArenaLiveForecaster.refreshAge(duration: duration)
+        #expect(bound < ArenaLiveCache.maxAge(duration: duration), "remade before the cache stops serving it")
+        #expect(isCurrent(entry, req(latest: made), made, duration), "the same cut")
+        #expect(isCurrent(entry, req(latest: made.addingTimeInterval(-60)), made.addingTimeInterval(300), duration))
+        #expect(!isCurrent(entry, req(latest: made.addingTimeInterval(60)), made.addingTimeInterval(300), duration),
+                "a newer reading")
+        #expect(!isCurrent(entry, req(latest: made), made.addingTimeInterval(bound), duration), "too old")
+        #expect(!isCurrent(entry, req(latest: made, resets: reset.addingTimeInterval(duration)), made, duration),
+                "another cycle")
+    }
 }
