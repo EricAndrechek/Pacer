@@ -1,0 +1,48 @@
+name: Sentry issues
+
+# Files new production Sentry issues as GitHub issues every 6 hours, because
+# Sentry's free plan cannot create GitHub tickets from alerts. Stdlib-only
+# Python, no checkout of anything but the script's repo, no cache, no
+# artifacts. Body contents are an allow-list; see docs/telemetry-plan.md.
+# Needs the SENTRY_ISSUES_TOKEN secret (read-only: event:read, project:read);
+# without it the job prints a notice and stays green.
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Print what would be filed without creating issues
+        type: boolean
+        default: false
+
+permissions:
+  issues: write
+  contents: read
+
+concurrency:
+  group: sentry-issues
+  cancel-in-progress: false
+
+jobs:
+  file:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: bin/sentry-issues-to-github.py
+          sparse-checkout-cone-mode: false
+
+      - name: File new Sentry issues
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SENTRY_ISSUES_TOKEN: ${{ secrets.SENTRY_ISSUES_TOKEN }}
+          DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
+        run: |
+          if [ -z "$SENTRY_ISSUES_TOKEN" ]; then
+            echo "::notice::SENTRY_ISSUES_TOKEN is not set; skipping. Add a read-only Sentry token (event:read, project:read) as a repository secret."
+            exit 0
+          fi
+          python3 bin/sentry-issues-to-github.py ${DRY_RUN:+--dry-run}

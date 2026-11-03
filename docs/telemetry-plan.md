@@ -348,3 +348,29 @@ imageIndex/imageOffset/symbol, `exception` type/signal). Sent two ways:
 **Crash reports and usage stats.** Pacer now sends crash reports and anonymous
 usage stats to Sentry so bugs and slowdowns get found. Turn either off in
 Settings → Privacy.
+
+## Where Sentry issues go
+
+Sentry's free plan cannot open GitHub tickets from an alert, so there are two
+routes. Alerts email the maintainer from inside Sentry (set up there, not in
+this repo). `.github/workflows/sentry-issues.yml` runs
+`bin/sentry-issues-to-github.py` every 6 hours (and on demand, with a
+`dry_run` input) and files each unresolved `production` issue seen in the last
+14 days as a GitHub issue labelled `sentry` (plus `crash`, `freeze` or
+`resource`). It skips any issue whose short id is already in the title of a
+`sentry`-labelled issue, open or closed, and files at most 10 per run.
+
+The repo is public, so the body is an allow-list, every string passed through a
+scrubber (paths, emails, UUIDs, 32+ character hex runs, IPs, `@mentions`):
+level, issue type, first and last seen dates, event count, number of Macs
+affected (a count, never ids), release and macOS version, the exception type
+and scrubbed value, up to 25 in-app frames (function plus module or package
+basename), a Sentry link, and a line saying it was filed automatically. Never
+copied: user ids, IPs, geo, device names, usernames, paths, breadcrumbs,
+request data, other tags. `bin/test_sentry_issues_to_github.py` checks this
+against a fixture full of such values
+(`uv run --no-project python -I bin/test_sentry_issues_to_github.py`).
+
+It needs a repository secret `SENTRY_ISSUES_TOKEN`: a read-only Sentry token
+with `event:read` and `project:read`, not the upload-only `SENTRY_AUTH_TOKEN`.
+Without it the job prints a notice and stays green.
