@@ -221,9 +221,10 @@ tools all move fast, so corrections are welcome via an issue or PR.</sub>
 Your usage data stays on your Mac. Pacer reads Claude Code's own files and uses
 your Claude Code login only to ask Anthropic for your rate limits.
 
-Pacer sends crash reports and anonymous usage stats to [Sentry](https://sentry.io)
-so I can find bugs and slowdowns. Never your prompts, projects, files, accounts or
-costs. Turn either off in **Settings → Privacy**.
+Pacer sends crash reports to [Sentry](https://sentry.io) and anonymous usage
+stats to [PostHog](https://posthog.com) so I can find bugs and see what gets used.
+Never your prompts, projects, files, accounts or costs. Turn either off in
+**Settings → Privacy**.
 
 ---
 
