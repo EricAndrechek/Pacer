@@ -161,9 +161,7 @@ final class DailyCheckIn {
         // installed build's heartbeat never reached Sentry (2026-11-02) while
         // every small transaction and every metric did.
         Telemetry.count("checkin.snapshot", 1, attributes: attributes)
-        let core = attributes.filter {
-            ["checkin.day", "env.macos", "env.model", "settings.cost_mode"].contains($0.key)
-        }
+        let core = attributes.filter { Self.coreKeys.contains($0.key) }
         Telemetry.span(.init(
             // Not "app.*": Sentry treats app-start-style ops specially, and the
             // "app.heartbeat" transaction never arrived while every other did.
@@ -188,6 +186,16 @@ final class DailyCheckIn {
         }
         await sendForecastAccuracy(engines: engines, accounts: gathered.accounts)
     }
+
+    /// The attributes the transaction carries (the snapshot metric carries
+    /// all). Span-only because `count_unique(user.id)` works on spans, not
+    /// metrics, so whatever the dashboard groups Macs by is here. Keep it
+    /// under ~16: ~60 attributes never reached Sentry.
+    private static let coreKeys: Set<String> = [
+        "checkin.day", "env.macos", "env.model", "env.model_name", "settings.cost_mode",
+        "accounts.count", "accounts.plans", "usage.seven_day.peak_band", "usage.five_hour.peak_band",
+        "install.first_seen", "install.age_days", "build.config",
+    ]
 
     // MARK: - Settings snapshot
 
@@ -298,8 +306,10 @@ final class DailyCheckIn {
     /// account its own flag, for all accounts only when none of them has one.
     /// No accounts yet is "unknown", so the window is kept.
     nonisolated static func reportsFiveHour(accountId: String?, accounts: [String: AccountLabel]) -> Bool {
-        if let accountId { return !(accounts[accountId]?.hasNoFiveHour ?? false) }
-        return accounts.isEmpty || accounts.values.contains { !$0.hasNoFiveHour }
+        CheckInFields.reportsFiveHour(
+            scopedHasNoFiveHour: accountId.flatMap { accounts[$0]?.hasNoFiveHour },
+            allHaveNoFiveHour: accounts.values.map(\.hasNoFiveHour),
+            scopedToAccount: accountId != nil)
     }
 
     nonisolated private static func gather(container: ModelContainer, startOfYesterday: Date,
@@ -323,6 +333,7 @@ final class DailyCheckIn {
             tiers[tier, default: 0] += 1
             subscriptions[sanitized(account.subscriptionType ?? "unknown"), default: 0] += 1
         }
+        a["accounts.plans"] = .string(CheckInFields.plans(tiers: Array(tiers.keys)))
         for (tier, n) in tiers { a["accounts.tier.\(tier)"] = .int(n) }
         for (sub, n) in subscriptions { a["accounts.subscription.\(sub)"] = .int(n) }
 
@@ -362,6 +373,8 @@ final class DailyCheckIn {
         a["usage.tokens_magnitude"] = .string(TelemetryBands.magnitude(tokens))
 
         for (k, v) in environment() { a[k] = v }
+        a["build.config"] = .string(TelemetryController.buildConfig)
+        for (k, v) in installAttributes(earliestAccount: accounts.first?.firstSeenAt) { a[k] = v }
 
         let cli = CLIRunLog.summary(CLIRunLog.lines(), since: startOfYesterday, until: startOfToday)
         return Gathered(attributes: a, cli: cli, accounts: labels)
@@ -371,7 +384,9 @@ final class DailyCheckIn {
         var a: Telemetry.Attributes = [:]
         let os = ProcessInfo.processInfo.operatingSystemVersion
         a["env.macos"] = .string("\(os.majorVersion).\(os.minorVersion)")
-        a["env.model"] = .string(sysctlString("hw.model"))
+        let model = sysctlString("hw.model")
+        a["env.model"] = .string(model)
+        a["env.model_name"] = .string(MacModelName.name(for: model))
         a["env.ram_gb"] = .int(Int(ProcessInfo.processInfo.physicalMemory / 1_073_741_824))
         a["env.timezone_utc_offset_hours"] = .double(Double(TimeZone.current.secondsFromGMT()) / 3600)
 
@@ -398,6 +413,21 @@ final class DailyCheckIn {
             a["env.archive_mb_bucket"] = .int(TelemetryBands.megabytesBucket(bytes: archive))
         }
         return a
+    }
+
+    /// When this install first ran, from the App Group defaults. An install
+    /// that predates the key is backfilled once from the oldest account row
+    /// (an ascending `firstSeenAt` sort, so one row; already fetched above, no
+    /// extra read). Coarse and ours, not an identifier.
+    nonisolated private static func installAttributes(earliestAccount: Date?) -> Telemetry.Attributes {
+        let store = PacerPreferences.store
+        let now = Date()
+        let r = CheckInFields.installFirstSeen(
+            stored: store.string(forKey: PacerPreferenceKeys.installFirstSeen),
+            earliestEvidence: earliestAccount, now: now)
+        if r.save { store.set(r.day, forKey: PacerPreferenceKeys.installFirstSeen) }
+        return ["install.first_seen": .string(r.day),
+                "install.age_days": .int(CheckInFields.installAgeDays(firstSeen: r.day, now: now))]
     }
 
     nonisolated private static func sysctlString(_ name: String) -> String {

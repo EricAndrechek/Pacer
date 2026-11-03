@@ -271,6 +271,18 @@ person, account, project or path. Account ids are org ids, so never sent; plan t
    time, widget timeline time, CLI command time, main-thread stalls (the watchdog's threshold is
    100 ms in code; send ≥ 250 ms), launch-to-ready time, memory footprint at launch, hourly and
    after a rebuild.
+8a. **Check-in core and build/arena tags** (2026-11): the check-in snapshot (a metric, all
+   attributes) is also sent as the `pacer.checkin` transaction with a small core, because
+   `count_unique(user.id)` works on spans and not metrics. Core: `checkin.day`, `env.macos`,
+   `env.model`, `env.model_name` (readable Mac model from `hw.model`, raw identifier when unknown),
+   `settings.cost_mode`, `accounts.count`, `accounts.plans` (distinct plan tiers, sorted, joined
+   with `+`, `default_claude_` dropped; `none` without accounts), `usage.seven_day.peak_band` and
+   `usage.five_hour.peak_band` (the latter only where a 5-hour window exists), `install.first_seen`
+   (day only; first launch, or backfilled once from the oldest account row), `install.age_days`
+   and `build.config` (`debug`/`release`). Scope tags on every crash, hang and MetricKit report:
+   `build.config` and `arena.cpu_mode` (`full` while plugged in and idle, `fifth` otherwise).
+   `arena.pass_seconds` / `arena.cpu_seconds` are sent only for passes that graded something
+   (they were always 0 because no-op incremental passes were reported too).
 9. **Crash-side** (crash toggle): app crashes, hangs and MetricKit as planned, plus forwarded CLI
    and widget crashes and hung CLI runs.
 

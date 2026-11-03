@@ -49,6 +49,7 @@ final class TelemetryController {
         }
         isRunning = true
         Telemetry.install(SentryTelemetrySink())
+        tagScope()
         if Self.usageAllowed { startSession() }
         observe()
         Log.write("Telemetry", "started · \(Self.environment) · crash=\(Self.crashAllowed) usage=\(Self.usageAllowed)")
@@ -61,6 +62,19 @@ final class TelemetryController {
         if sessionDay != nil { SentrySDK.endSession() }
         sessionDay = nil
         SentrySDK.flush(timeout: 2)
+    }
+
+    /// Scope tags every crash, hang and MetricKit report carries.
+    /// `arena.cpu_mode` follows the arena's governor (full core when plugged
+    /// in and idle, a fifth otherwise), so a CPU report says which was on.
+    /// PacerCore only calls the closure on a change; here it is a tag write.
+    private func tagScope() {
+        SentrySDK.configureScope { $0.setTag(value: Self.buildConfig, key: "build.config") }
+        let tag: @Sendable (String) -> Void = { mode in
+            SentrySDK.configureScope { $0.setTag(value: mode, key: "arena.cpu_mode") }
+        }
+        ArenaBudgetGovernor.onModeChange = tag
+        if let mode = ArenaBudgetGovernor.lastModeName { tag(mode) }
     }
 
     // MARK: - Options
@@ -221,6 +235,15 @@ final class TelemetryController {
         "development"
         #else
         "production"
+        #endif
+    }
+
+    /// `debug` for `make install` builds, `release` for shipped ones.
+    nonisolated static var buildConfig: String {
+        #if DEBUG
+        "debug"
+        #else
+        "release"
         #endif
     }
 
