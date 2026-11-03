@@ -2743,8 +2743,11 @@ private struct LabeledControlRow<Control: View>: View {
 /// drafts and committed via "Save & restart" (so a half-typed port doesn't
 /// thrash the listener); the enable toggle applies immediately.
 /// The two telemetry toggles (docs/telemetry-plan.md). Both default to on;
-/// `TelemetryController` reads them on every send, so a change applies at once.
-/// Terse by design: the README's privacy section lists exactly what is sent.
+/// they are read on every send, so a change applies at once. "Crash reports
+/// and performance" is Sentry, "Usage data" is PostHog (`TelemetryConsent`).
+/// A change by the user ends the one-time migration hold, so the toggles go
+/// through bindings that say so. Terse by design: the README's privacy
+/// section lists exactly what is sent.
 private struct TelemetryCard: View {
     @AppStorage(PacerSettings.Key.telemetryCrashReports, store: PacerSettings.store)
     private var crashReports: Bool = true
@@ -2754,10 +2757,10 @@ private struct TelemetryCard: View {
     var body: some View {
         PacerCard("Sharing with Pacer", content: {
             VStack(alignment: .leading, spacing: 10) {
-                Toggle("Send crash reports", isOn: $crashReports)
-                Toggle("Share usage data", isOn: $usageData)
+                Toggle("Crash reports and performance", isOn: userChange($crashReports))
+                Toggle("Usage data", isOn: userChange($usageData))
                 HStack {
-                    Button("Report a Problem…") { ReportProblemWindow.shared.show() }
+                    Button("Report a Problem…") { ReportProblemWindow.shared.show(from: .settings) }
                         .pacerDenseControl()
                     Spacer()
                     Link("What is sent",
@@ -2765,6 +2768,13 @@ private struct TelemetryCard: View {
                         .font(.caption)
                 }
             }
+        })
+    }
+
+    private func userChange(_ binding: Binding<Bool>) -> Binding<Bool> {
+        Binding(get: { binding.wrappedValue }, set: { on in
+            binding.wrappedValue = on
+            TelemetryConsent.userChangedToggle(store: PacerSettings.store)
         })
     }
 }

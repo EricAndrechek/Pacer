@@ -3,9 +3,10 @@ import PacerCore
 @preconcurrency import Sentry
 
 /// Where PacerCore's `Telemetry` calls go in the app: Sentry metrics,
-/// after-the-fact transactions, breadcrumbs. Usage data only, so every call
-/// checks the usage toggle first (breadcrumbs ride on crash reports, so they
-/// check the crash toggle).
+/// after-the-fact transactions, breadcrumbs. Performance data, so every call
+/// checks `performanceAllowed` first (the crash toggle, minus the migration
+/// hold; breadcrumbs ride on crash reports, so they check the crash toggle).
+/// Product usage events go to PostHog through `Analytics`, not here.
 struct SentryTelemetrySink: Telemetry.Sink {
 
     /// Read by the `tracesSampler` in `TelemetryController`: a transaction we
@@ -13,18 +14,18 @@ struct SentryTelemetrySink: Telemetry.Sink {
     static let sampleKey = "pacer.sample"
 
     func count(_ key: String, _ value: Int, attributes: Telemetry.Attributes) {
-        guard TelemetryController.usageAllowed, value > 0 else { return }
+        guard TelemetryController.performanceAllowed, value > 0 else { return }
         SentrySDK.metrics.count(key, value: UInt(value),
                                 options: SentryMetricOptions(attributes: Self.attributes(attributes)))
     }
 
     func distribution(_ key: String, _ value: Double, unit: Telemetry.Unit, attributes: Telemetry.Attributes) {
-        guard TelemetryController.usageAllowed, value.isFinite else { return }
+        guard TelemetryController.performanceAllowed, value.isFinite else { return }
         SentrySDK.metrics.distribution(key, value: value, options: Self.options(unit, attributes))
     }
 
     func gauge(_ key: String, _ value: Double, unit: Telemetry.Unit, attributes: Telemetry.Attributes) {
-        guard TelemetryController.usageAllowed, value.isFinite else { return }
+        guard TelemetryController.performanceAllowed, value.isFinite else { return }
         SentrySDK.metrics.gauge(key, value: value, options: Self.options(unit, attributes))
     }
 
@@ -32,7 +33,7 @@ struct SentryTelemetrySink: Telemetry.Sink {
     /// end. sentry-cocoa keeps a timestamp set before `finish()`
     /// (`SentrySpanInternal.finishWithStatus` only fills a nil one).
     func span(_ span: Telemetry.Span) {
-        guard TelemetryController.usageAllowed, span.end >= span.start else { return }
+        guard TelemetryController.performanceAllowed, span.end >= span.start else { return }
         let context = TransactionContext(name: span.name, operation: span.op)
         let transaction = SentrySDK.startTransaction(
             transactionContext: context, bindToScope: false,

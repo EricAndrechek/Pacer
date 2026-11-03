@@ -3,14 +3,17 @@ import Observation
 import PacerCore
 @preconcurrency import Sentry
 
-/// Crash reports and usage data, sent to Pacer's Sentry project. The plan,
+/// Crash reports and performance data, sent to Pacer's Sentry project.
+/// Product usage events go to PostHog instead (`AnalyticsController`). The plan,
 /// the decisions behind it and every signal are in docs/telemetry-plan.md;
 /// the rules for adding a signal are in AGENTS.md → Telemetry.
 ///
 /// **When it runs**: the user's own app only (`LaunchMode.isNormalLaunch`),
 /// with a DSN in Info.plist (`PacerSentryDSN`; empty for builds from source),
 /// unless `PACER_TELEMETRY=off`, and only when at least one of the two
-/// Settings → Privacy toggles is on. Both default to on.
+/// Settings → Privacy toggles is on. Both default to on. What each toggle
+/// allows, and the migration from the first release's meaning, is
+/// `TelemetryConsent`.
 ///
 /// **The toggles are read on every send**, not at start: turning one off stops
 /// that kind of data immediately without restarting the SDK (sentry-cocoa does
@@ -37,6 +40,7 @@ final class TelemetryController {
         guard ProcessInfo.processInfo.environment["PACER_TELEMETRY"] != "off" else { return }
         guard let dsn = Self.dsn else { return }
         let store = PacerPreferences.store
+        TelemetryConsent.migrate(store: store)
         guard PacerPreferences.telemetryCrashReportsEnabled(from: store)
                 || PacerPreferences.telemetryUsageDataEnabled(from: store) else { return }
 
@@ -50,9 +54,9 @@ final class TelemetryController {
         isRunning = true
         Telemetry.install(SentryTelemetrySink())
         tagScope()
-        if Self.usageAllowed { startSession() }
+        if Self.performanceAllowed { startSession() }
         observe()
-        Log.write("Telemetry", "started · \(Self.environment) · crash=\(Self.crashAllowed) usage=\(Self.usageAllowed)")
+        Log.write("Telemetry", "started · \(Self.environment) · crash=\(Self.crashAllowed) performance=\(Self.performanceAllowed) usage=\(Self.analyticsAllowed)")
     }
 
     /// Ends the day's session and sends what is queued before the app quits.
@@ -147,7 +151,7 @@ final class TelemetryController {
             return span
         }
         o.beforeSendMetric = { metric in
-            guard TelemetryController.usageAllowed,
+            guard TelemetryController.performanceAllowed,
                   TelemetryBudget.shared.takeMetric(metric.name) else { return nil }
             return metric
         }
@@ -183,8 +187,15 @@ final class TelemetryController {
     nonisolated static var crashAllowed: Bool {
         PacerPreferences.telemetryCrashReportsEnabled(from: PacerPreferences.store)
     }
-    nonisolated static var usageAllowed: Bool {
-        PacerPreferences.telemetryUsageDataEnabled(from: PacerPreferences.store)
+    /// Performance metrics and spans, sessions, forecast accuracy and the
+    /// minimal check-in: the crash toggle, unless the migration holds them
+    /// off for someone who had refused "usage data" before it meant PostHog.
+    nonisolated static var performanceAllowed: Bool {
+        TelemetryConsent.state(store: PacerPreferences.store).performance
+    }
+    /// PostHog usage events ("Usage data").
+    nonisolated static var analyticsAllowed: Bool {
+        TelemetryConsent.state(store: PacerPreferences.store).usage
     }
 
     // MARK: - Sessions: one per Mac per local day
@@ -200,8 +211,8 @@ final class TelemetryController {
         // Day rollover: PacerToday already turns NSCalendarDayChanged and wake
         // into a published day key, so no timer of our own.
         trackDay()
-        // The usage toggle: end the session when it goes off, start one when
-        // it comes back on.
+        // The crash/performance toggle (and the migration hold): end the
+        // session when it goes off, start one when it comes back on.
         let store = PacerPreferences.store
         observers.append(NotificationCenter.default.addObserver(
             forName: UserDefaults.didChangeNotification, object: store, queue: .main
@@ -216,7 +227,7 @@ final class TelemetryController {
         } onChange: { [weak self] in
             Task { @MainActor in
                 guard let self else { return }
-                if self.sessionDay != nil, self.sessionDay != PacerToday.shared.key, Self.usageAllowed {
+                if self.sessionDay != nil, self.sessionDay != PacerToday.shared.key, Self.performanceAllowed {
                     self.startSession()
                 }
                 self.trackDay()
@@ -225,7 +236,7 @@ final class TelemetryController {
     }
 
     private func syncSessionWithToggle() {
-        let on = Self.usageAllowed
+        let on = Self.performanceAllowed
         if on, sessionDay == nil {
             startSession()
         } else if !on, sessionDay != nil {

@@ -164,9 +164,21 @@ targets:
         # Building from source under your own account? Set it empty and the
         # app never starts telemetry.
         PacerSentryDSN: $(PACER_SENTRY_DSN)
+        # `pacer://widget?kind=…&family=…`: what a tapped widget opens, so the
+        # app can count widget taps (WidgetTapURL; kind and family only).
+        CFBundleURLTypes:
+          - CFBundleURLName: com.ericandrechek.pacer.widget
+            CFBundleURLSchemes: [pacer]
+        # Where usage data goes (PostHog; docs/telemetry-plan.md, "PostHog").
+        # The project token is public by design, like the DSN: it can only
+        # send events. Empty either one and the app never sends usage data.
+        PacerPostHogToken: $(PACER_POSTHOG_TOKEN)
+        PacerPostHogHost: $(PACER_POSTHOG_HOST)
     settings:
       base:
         PACER_SENTRY_DSN: https://4538a70956bdb802f903aa6ceba5ba32@o4506596663427072.ingest.us.sentry.io/4512290674049024
+        PACER_POSTHOG_TOKEN: phc_rCT9m6F6y7DwcDSJ5BgHpZECFyvpmsPoyUiLx5pa693A
+        PACER_POSTHOG_HOST: https://us.i.posthog.com
         PRODUCT_BUNDLE_IDENTIFIER: com.ericandrechek.pacer
         PRODUCT_NAME: Pacer
         CODE_SIGN_ENTITLEMENTS: App/Pacer.entitlements
