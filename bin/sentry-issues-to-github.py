@@ -24,6 +24,8 @@ import urllib.request
 
 SENTRY = "https://us.sentry.io/api/0"
 ORG = "ericandrechek"
+# Named on every gh call so the script works from any directory, not only a checkout.
+REPO = os.environ.get("GITHUB_REPOSITORY", "EricAndrechek/Pacer")
 PROJECT = "pacer"
 MAX_CREATIONS = 10
 MAX_FRAMES = 25
@@ -141,7 +143,8 @@ def make_title(issue):
 
 def frame_lines(exc):
     frames = ((exc.get("stacktrace") or {}).get("frames")) or []
-    app = [f for f in frames if f.get("in_app")]
+    # The events API spells it inApp; raw event payloads spell it in_app.
+    app = [f for f in frames if f.get("inApp", f.get("in_app"))]
     app.reverse()  # Sentry stores oldest first; show the top of the stack first
     lines = []
     for f in app[:MAX_FRAMES]:
@@ -216,7 +219,7 @@ def fetch_latest_event(token, issue_id):
 
 def already_filed(short_id):
     out = subprocess.run(
-        ["gh", "issue", "list", "--label", "sentry", "--state", "all",
+        ["gh", "issue", "list", "--repo", REPO, "--label", "sentry", "--state", "all",
          "--search", f"{short_id} in:title", "--json", "number,title", "--limit", "50"],
         capture_output=True, text=True, check=True).stdout
     # Exact match on the bracketed id so PACER-1 does not shadow PACER-10.
@@ -225,12 +228,12 @@ def already_filed(short_id):
 
 def ensure_labels():
     for name, (color, desc) in LABELS.items():
-        subprocess.run(["gh", "label", "create", name, "--color", color,
+        subprocess.run(["gh", "label", "create", "--repo", REPO, name, "--color", color,
                         "--description", desc], capture_output=True)
 
 
 def create_issue(title, body, labels):
-    cmd = ["gh", "issue", "create", "--title", title, "--body-file", "-"]
+    cmd = ["gh", "issue", "create", "--repo", REPO, "--title", title, "--body-file", "-"]
     for l in labels:
         cmd += ["--label", l]
     return subprocess.run(cmd, input=body, capture_output=True, text=True,

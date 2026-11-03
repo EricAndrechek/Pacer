@@ -25,7 +25,7 @@ ISSUE = {
 
 def frame(fn, module="PacerCore.Scanner", in_app=True, path="/Users/someone/Code/Foo.swift"):
     return {"function": fn, "module": module, "package": "/Applications/Pacer.app/Contents/MacOS/Pacer",
-            "in_app": in_app, "filename": path}
+            "inApp": in_app, "filename": path}
 
 EVENT = {
     "release": "pacer@0.8.1+81",
