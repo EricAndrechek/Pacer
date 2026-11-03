@@ -142,6 +142,7 @@ struct LiveSessionWidgetView: View {
         .padding(WidgetStyle.smallPad)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .containerBackground(widgetCardBackground, for: .widget)
+        .pacerWidgetTapURL(WidgetKinds.liveSession)
     }
 
     @ViewBuilder
@@ -173,6 +174,7 @@ struct LiveSessionWidgetView: View {
         .padding(WidgetStyle.mediumPad)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .containerBackground(widgetCardBackground, for: .widget)
+        .pacerWidgetTapURL(WidgetKinds.liveSession)
     }
 
     private func statColumn(value: String, label: String) -> some View {

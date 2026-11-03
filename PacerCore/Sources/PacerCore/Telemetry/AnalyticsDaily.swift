@@ -144,3 +144,29 @@ public enum CounterRouting {
             || key.hasPrefix("api.request.")
     }
 }
+
+/// The URL a widget opens when tapped: `pacer://widget?kind=<kind>&family=<family>`.
+/// The app opens the dashboard and records `widget_tapped` (kind and family
+/// only). Without a URL a tap only activated the app, and the app could not
+/// tell a widget tap from any other launch.
+public enum WidgetTapURL {
+    public static let scheme = "pacer"
+    public static let host = "widget"
+
+    public static func make(kind: String, family: String) -> URL? {
+        var c = URLComponents()
+        c.scheme = scheme
+        c.host = host
+        c.queryItems = [URLQueryItem(name: "kind", value: kind), URLQueryItem(name: "family", value: family)]
+        return c.url
+    }
+
+    /// Kind and family of a widget tap URL; nil for any other URL.
+    public static func parse(_ url: URL) -> (kind: String, family: String)? {
+        guard url.scheme == scheme, url.host == host,
+              let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems else { return nil }
+        let kind = items.first { $0.name == "kind" }?.value ?? "other"
+        let family = items.first { $0.name == "family" }?.value ?? "other"
+        return (kind, family)
+    }
+}

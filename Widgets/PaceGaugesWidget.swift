@@ -285,6 +285,7 @@ struct PaceGaugesWidgetView: View {
         .padding(WidgetStyle.largePad)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .containerBackground(widgetCardBackground, for: .widget)
+        .pacerWidgetTapURL(WidgetKinds.paceGauges)
     }
 
     @ViewBuilder
@@ -338,6 +339,7 @@ struct PaceGaugesWidgetView: View {
         .padding(WidgetStyle.smallPad)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .containerBackground(widgetCardBackground, for: .widget)
+        .pacerWidgetTapURL(WidgetKinds.paceGauges)
     }
 
     @ViewBuilder
@@ -363,6 +365,7 @@ struct PaceGaugesWidgetView: View {
         .padding(WidgetStyle.mediumPad)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .containerBackground(widgetCardBackground, for: .widget)
+        .pacerWidgetTapURL(WidgetKinds.paceGauges)
     }
 
     @ViewBuilder

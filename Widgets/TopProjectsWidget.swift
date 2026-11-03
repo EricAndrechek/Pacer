@@ -211,6 +211,7 @@ struct TopProjectsWidgetView: View {
         .padding(family == .systemLarge ? WidgetStyle.largePad : WidgetStyle.mediumPad)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .containerBackground(widgetCardBackground, for: .widget)
+        .pacerWidgetTapURL(WidgetKinds.topProjects)
     }
 
     // MARK: Top-N (no project pinned)

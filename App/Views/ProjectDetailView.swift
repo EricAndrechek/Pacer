@@ -593,6 +593,7 @@ struct ProjectDetailView: View {
                 initialCanonical: draft.canonical.isEmpty ? nil : draft.canonical,
                 initialSources: draft.sources
             )
+            .onAppear { Analytics.capture(.detailOpened(.bulkMerge)) }
         }
         // Quick-merge confirmation — single source, single canonical,
         // no editor sheet. Same shape as the Projects-view context-
@@ -889,7 +890,14 @@ private struct BudgetEditor: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Toggle("Enable budget for this project", isOn: $enabled)
+            // The binding's setter is the user's click (the `onChange` below
+            // also fires when `enabled` syncs from the store on appear).
+            Toggle("Enable budget for this project", isOn: Binding(
+                get: { enabled },
+                set: { on in
+                    enabled = on
+                    Analytics.capture(.controlChanged(card: "project_budget", control: "enabled", value: on ? "true" : "false"))
+                }))
                 .onChange(of: enabled) { _, _ in commit() }
 
             HStack(spacing: 16) {

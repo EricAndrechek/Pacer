@@ -146,6 +146,7 @@ struct DailyChartWidgetView: View {
         }
         .padding(family == .systemLarge ? WidgetStyle.largePad : WidgetStyle.mediumPad)
         .containerBackground(widgetCardBackground, for: .widget)
+        .pacerWidgetTapURL(WidgetKinds.dailyChart)
     }
 
     @ViewBuilder

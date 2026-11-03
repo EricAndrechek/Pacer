@@ -94,6 +94,7 @@ struct CollectionsManager: View {
         .frame(width: 640, height: 600)
         .sheet(item: $editor) { draft in
             editorSheet(for: draft) { save($0) }
+                .onAppear { Analytics.capture(.detailOpened(.collectionEditor)) }
         }
     }
 

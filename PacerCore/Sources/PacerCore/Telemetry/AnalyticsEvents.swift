@@ -24,7 +24,7 @@ extension AnalyticsEvent {
     }
 
     public enum DashboardTrigger: String, Sendable, CaseIterable {
-        case menu, hotkey, notification, settings, launch, dock, other
+        case menu, hotkey, notification, settings, widget, launch, dock, other
     }
 
     public static func dashboardOpened(trigger: DashboardTrigger) -> AnalyticsEvent {

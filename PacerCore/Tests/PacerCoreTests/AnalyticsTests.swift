@@ -238,6 +238,17 @@ struct AnalyticsMappingTests {
         #expect(WidgetInventory.rangeField("days365") == "other")
     }
 
+    @Test("widget tap URL round-trips; other URLs are not taps")
+    func widgetTapURL() throws {
+        let url = try #require(WidgetTapURL.make(kind: WidgetKinds.paceGauges, family: "systemSmall"))
+        #expect(url.absoluteString == "pacer://widget?kind=PaceGaugesWidget&family=systemSmall")
+        let tap = try #require(WidgetTapURL.parse(url))
+        #expect(tap.kind == WidgetKinds.paceGauges && tap.family == "systemSmall")
+        #expect(WidgetTapURL.parse(URL(string: "https://example.com/widget?kind=x")!) == nil)
+        let e = AnalyticsEvent.widgetTapped(kind: "Evil", family: "systemSmall")
+        #expect(e.properties["kind"] == .string("other"))
+    }
+
     @Test("refresh counts are timeline grants only, in the day")
     func refreshCounts() {
         let at = Date(timeIntervalSince1970: 1_790_000_000)

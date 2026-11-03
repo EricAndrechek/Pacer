@@ -61,12 +61,15 @@ public enum PacerModalDestination: Hashable, Identifiable {
 
     /// The destination kind alone (no date, path, session or account), for
     /// usage counts.
-    var telemetryKind: String {
+    var telemetryKind: String { analyticsDetail.rawValue }
+
+    /// The same kind as a `detail_opened` value.
+    var analyticsDetail: AnalyticsEvent.Detail {
         switch self {
-        case .day:        return "day"
-        case .project:    return "project"
-        case .session:    return "session"
-        case .projection: return "projection"
+        case .day:        return .day
+        case .project:    return .project
+        case .session:    return .session
+        case .projection: return .projection
         }
     }
 
@@ -219,7 +222,10 @@ private struct PacerModalNavigationModifier: ViewModifier {
                 // With `Click` and `Navigation`, says whether a click that
                 // "did nothing" opened the modal and something closed it.
                 Log.write("Modal", isNil ? "closed" : "opened")
-                if let presented { TelemetryCounters.add("ui.modal.\(presented.telemetryKind)") }
+                if let presented {
+                    TelemetryCounters.add("ui.modal.\(presented.telemetryKind)")
+                    Analytics.capture(.detailOpened(presented.analyticsDetail))
+                }
             }
     }
 }
@@ -253,6 +259,7 @@ private struct PacerModalStackHost: View {
                 \.pacerModalPush,
                 PacerModalPushAction { dest in
                     Log.write("Navigation", "modal push")
+                    Analytics.capture(.detailOpened(dest.analyticsDetail, pushed: true))
                     stack.append(dest)
                 }
             )

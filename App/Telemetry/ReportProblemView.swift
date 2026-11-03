@@ -14,8 +14,9 @@ final class ReportProblemWindow {
     static let shared = ReportProblemWindow()
     private var window: NSWindow?
 
-    func show() {
+    func show(from source: AnalyticsEvent.ReportProblemSource) {
         TelemetryCounters.add("ui.report_problem.open")
+        Analytics.capture(.reportProblemOpened(from: source))
         if let window, window.isVisible {
             NSApp.activate()
             window.makeKeyAndOrderFront(nil)

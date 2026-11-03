@@ -1658,6 +1658,7 @@ private struct PaceColumn: View {
                     fileName: payload.fileName,
                     makeCard: { scheme in AnyView(PaceShareCard(payload: payload, scheme: scheme)) }
                 )
+                .onAppear { Analytics.capture(.detailOpened(.chartShare)) }
             }
         }
     }

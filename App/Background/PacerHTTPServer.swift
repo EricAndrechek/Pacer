@@ -341,6 +341,9 @@ final class PacerHTTPServer: @unchecked Sendable {
         "/v1/usage/daily", "/v1/usage/models", "/v1/sessions", "/v1/limits/history",
         "/v1/predictions/history",
     ]
+    /// `api.request.<route>|<client family>` counters (`DailyCheckIn`).
+    nonisolated static let analyticsPrefix = "api.request."
+
     nonisolated private static func telemetryRoute(_ path: String) -> String {
         // "/v1/usage/daily" → "v1.usage.daily" (no leading dot: the key is
         // appended to "api.route.").
@@ -353,6 +356,11 @@ final class PacerHTTPServer: @unchecked Sendable {
     private func route(path: String, query: [String: String], headers: [String: String],
                        token: String?, client: ClientConnection) {
         TelemetryCounters.add("api.route.\(Self.telemetryRoute(path))")
+        // Per route and client family (from the User-Agent; only the family
+        // word is kept), tallied and sent once a day as `api_request`
+        // events: a dashboard can poll every second.
+        let family = AnalyticsVocabulary.clientFamily(userAgent: headers["user-agent"])
+        TelemetryCounters.add("\(Self.analyticsPrefix)\(Self.telemetryRoute(path))|\(family)")
         switch path {
         case "/v1/snapshot":
             guard Self.authorized(headers, token: token) else { return unauthorized(client) }

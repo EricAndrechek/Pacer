@@ -204,7 +204,7 @@ struct PacerApp: App {
             // is more useful for a tracking utility.
             CommandGroup(replacing: .help) {
                 Button("Report a Problem…") {
-                    ReportProblemWindow.shared.show()
+                    ReportProblemWindow.shared.show(from: .helpMenu)
                 }
                 #if DEBUG
                 // Development builds only: the end-to-end check of crash and

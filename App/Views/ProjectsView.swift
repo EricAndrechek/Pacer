@@ -160,6 +160,7 @@ struct ProjectsView: View {
         )
         .sheet(isPresented: $showingAliasManager) {
             ProjectAliasManager()
+                .onAppear { Analytics.capture(.detailOpened(.aliasManager)) }
         }
         .sheet(item: $collectionsSheet) { request in
             switch request.mode {
@@ -167,6 +168,9 @@ struct ProjectsView: View {
             case .new:           CollectionsManager(startNew: true)
             case .edit(let id):  CollectionsManager(editCollectionID: id)
             }
+        }
+        .onChange(of: collectionsSheet != nil) { _, open in
+            if open { Analytics.capture(.detailOpened(.collectionsManager)) }
         }
         .pacerModalNavigation(modalRoot, root: $modalRoot)
         .onAppear {
@@ -668,6 +672,7 @@ private struct ProjectsContent: View {
                 initialCanonical: draft.canonical,
                 initialSources: draft.sources
             )
+            .onAppear { Analytics.capture(.detailOpened(.bulkMerge)) }
         }
         // Quick-merge confirmation. The user already picked both
         // sides from the context-menu submenu — a full editor sheet
