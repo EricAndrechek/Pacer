@@ -358,10 +358,10 @@ public enum ArenaHistoryBuilder {
     }
 
     static func makeStore(account: String, meters: [ArenaMeterID: [ArenaReading]], spend: [ArenaSpendRow],
-                          now: Date, since: Date) -> ArenaHistoryStore {
+                          now: Date, since: Date, generationMemo: ArenaMemo = ArenaMemo()) -> ArenaHistoryStore {
         ArenaHistoryStore(meters: meters, spend: spend.isEmpty ? [:] : [account: spend],
                           tzOffsetMin: TimeZone.current.secondsFromGMT(for: now) / 60,
-                          dataStart: ArenaTime.millis(since))
+                          dataStart: ArenaTime.millis(since), generationMemo: generationMemo)
     }
 
     /// `built` moved on to `now`: new live rows appended (thinned on from the
@@ -405,7 +405,9 @@ public enum ArenaHistoryBuilder {
                                pricing: pricing ?? Self.pricing(container: container),
                                mode: mode ?? PacerPreferences.costMode(), pace: pace)
         let spend = kept + reread
-        return Built(store: makeStore(account: account, meters: meters, spend: spend, now: now, since: since),
+        // The generation's memo goes on with it (`ArenaHistoryStore.generationMemo`).
+        return Built(store: makeStore(account: account, meters: meters, spend: spend, now: now, since: since,
+                                      generationMemo: built.store.generationMemo),
                      builtThrough: now, generation: built.generation)
     }
 
