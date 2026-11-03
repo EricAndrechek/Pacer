@@ -2,6 +2,7 @@ import CoreGraphics
 import Foundation
 import IOKit
 import IOKit.ps
+import Synchronization
 
 // How much CPU the arena may use right now: one full core while the Mac is
 // plugged in, cool, not in Low Power Mode and nobody has touched it for two
@@ -105,6 +106,12 @@ public enum ArenaBudgetPolicy {
         mode == .fullCore ? QOS_CLASS_UTILITY : QOS_CLASS_BACKGROUND
     }
 
+    /// The coarse mode for telemetry: `full` (a whole core) or `fifth` (the
+    /// everyday share).
+    public static func telemetryName(_ mode: Mode) -> String {
+        mode == .fullCore ? "full" : "fifth"
+    }
+
     /// What the log says: `full core (plugged in, idle)`, `20% of a core (on battery)`.
     public static func describe(_ mode: Mode, shareRate: Double) -> String {
         switch mode {
@@ -120,6 +127,20 @@ public enum ArenaBudgetPolicy {
 public final class ArenaBudgetGovernor: @unchecked Sendable {
     public static let interval: TimeInterval = 30
     public static let fullCoreInterval: TimeInterval = 2
+
+    /// Told the mode name (`ArenaBudgetPolicy.telemetryName`) at the first
+    /// evaluation and whenever it changes between full and the share. The
+    /// app's telemetry layer sets this to tag crash and CPU reports; PacerCore
+    /// does not link Sentry. Called off the main thread; keep it cheap.
+    public static var onModeChange: (@Sendable (String) -> Void) {
+        get { modeObserver.withLock { $0 } }
+        set { modeObserver.withLock { $0 = newValue } }
+    }
+    /// The last mode reported, for an observer installed after the first
+    /// evaluation (nil before it).
+    public static var lastModeName: String? { lastMode.withLock { $0 } }
+    private static let lastMode = Mutex<String?>(nil)
+    private static let modeObserver = Mutex<@Sendable (String) -> Void>({ _ in })
 
     private let budget: ArenaCPUBudget
     private let shareRate: Double
@@ -165,6 +186,9 @@ public final class ArenaBudgetGovernor: @unchecked Sendable {
             budget.rate = rate
             budget.scorerQoS = ArenaBudgetPolicy.scorerQoS(next)
             log("budget: " + ArenaBudgetPolicy.describe(next, shareRate: shareRate))
+            let name = ArenaBudgetPolicy.telemetryName(next)
+            Self.lastMode.withLock { $0 = name }
+            Self.onModeChange(name)
             reschedule(full: next == .fullCore)
         }
         return next

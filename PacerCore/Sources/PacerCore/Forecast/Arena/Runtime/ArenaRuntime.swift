@@ -623,17 +623,38 @@ public actor ArenaRecordScorer {
         runners.removeAll()
         FMScratch.release()
         MemoryHygiene.relieve()
-        // One report per pass; a pass is a launch-time or hours-long job, not a cycle.
-        if report.cycles > 0 {
-            let slowest = report.modelSeconds.max { $0.value < $1.value }?.key
-            var attrs: Telemetry.Attributes = [:]
-            if let slowest { attrs["slowest_model"] = .string(slowest) }
-            Telemetry.distribution("arena.pass_seconds", report.busySeconds, unit: .second, attributes: attrs)
-            Telemetry.distribution("arena.cpu_seconds", report.modelCPUSeconds.values.reduce(0, +),
-                                   unit: .second, attributes: attrs)
-            Telemetry.count("arena.models_graded", report.modelSeconds.count)
-        }
+        Self.sendPassTelemetry(report)
         return report
+    }
+
+    /// What one pass reports. A pass that graded nothing sends nothing: every
+    /// 15 minutes an incremental pass visits the recent cycles, finds each
+    /// model already graded and returns at once. `cycles` counts those visits,
+    /// so gating on it sent `arena.pass_seconds` and `arena.cpu_seconds` as 0
+    /// on every such pass, and Sentry's distributions were all zeros. Gate on
+    /// forecasts actually run.
+    struct PassMetrics: Equatable {
+        var passSeconds: Double
+        var cpuSeconds: Double
+        var modelsGraded: Int
+        var slowestModel: String?
+    }
+
+    static func passMetrics(_ report: Report) -> PassMetrics? {
+        guard report.forecasts > 0 else { return nil }
+        return PassMetrics(passSeconds: report.busySeconds,
+                           cpuSeconds: report.modelCPUSeconds.values.reduce(0, +),
+                           modelsGraded: report.modelSeconds.count,
+                           slowestModel: report.modelSeconds.max { $0.value < $1.value }?.key)
+    }
+
+    private static func sendPassTelemetry(_ report: Report) {
+        guard let m = passMetrics(report) else { return }
+        var attrs: Telemetry.Attributes = [:]
+        if let slowest = m.slowestModel { attrs["slowest_model"] = .string(slowest) }
+        Telemetry.distribution("arena.pass_seconds", m.passSeconds, unit: .second, attributes: attrs)
+        Telemetry.distribution("arena.cpu_seconds", m.cpuSeconds, unit: .second, attributes: attrs)
+        Telemetry.count("arena.models_graded", m.modelsGraded)
     }
 
     /// Save what is unsaved, then hand each account's share to its engine.
