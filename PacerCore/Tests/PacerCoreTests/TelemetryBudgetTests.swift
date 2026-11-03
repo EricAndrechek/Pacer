@@ -130,4 +130,54 @@ struct TelemetryBudgetTests {
         #expect(counts["telemetry.capped.metric"] == 1)
         #expect(counts["telemetry.capped.metric.x.y"] == 1)
     }
+
+    // MARK: - PostHog
+
+    @Test("PostHog: per-name cap, higher for hot names, and an all-names cap")
+    func analyticsCaps() throws {
+        var limits = TelemetryBudget.Limits.release
+        limits.analyticsEvent = 3
+        limits.analyticsHotEvent = 5
+        limits.analytics = 10
+        let (budget, _, _) = try make(limits)
+        #expect((0..<3).allSatisfy { _ in budget.takeAnalytics(event: "detail_opened") })
+        #expect(!budget.takeAnalytics(event: "detail_opened"))
+        #expect((0..<5).allSatisfy { _ in budget.takeAnalytics(event: "tab_viewed") })
+        #expect(!budget.takeAnalytics(event: "tab_viewed"))
+        // 8 spent of 10: two more of another name, then the total stops it.
+        #expect(budget.takeAnalytics(event: "export_used"))
+        #expect(budget.takeAnalytics(event: "export_used"))
+        #expect(!budget.takeAnalytics(event: "setting_changed"))
+        #expect(budget.used(.analytics) == 10)
+        // A refusal spends nothing.
+        #expect(budget.used(.analyticsEvent, name: "detail_opened") == 3)
+    }
+
+    @Test("PostHog: daily_checkin and widget_inventory are exempt and spend nothing")
+    func analyticsExempt() throws {
+        var limits = TelemetryBudget.Limits.release
+        limits.analytics = 0
+        let (budget, _, _) = try make(limits)
+        #expect(!budget.takeAnalytics(event: "app_launched"))
+        #expect((0..<3).allSatisfy { _ in budget.takeAnalytics(event: "daily_checkin") })
+        #expect(budget.takeAnalytics(event: "widget_inventory"))
+        #expect(budget.used(.analytics) == 0)
+    }
+
+    @Test("PostHog: release 500 a day, debug 100; drops counted")
+    func analyticsDefaultsAndCounted() throws {
+        #expect(TelemetryBudget.Limits.release.analytics == 500)
+        #expect(TelemetryBudget.Limits.debug.analytics == 100)
+        _ = TelemetryCounters.drain()
+        var limits = TelemetryBudget.Limits.release
+        limits.analyticsEvent = 1
+        let (budget, _, clock) = try make(limits)
+        #expect(budget.takeAnalytics(event: "menubar_item_clicked"))
+        #expect(!budget.takeAnalytics(event: "menubar_item_clicked"))
+        let counts = TelemetryCounters.drain()
+        #expect(counts["telemetry.capped.analytics"] == 1)
+        #expect(counts["telemetry.capped.analytics.menubar_item_clicked"] == 1)
+        clock.advance(86_400)
+        #expect(budget.takeAnalytics(event: "menubar_item_clicked"))
+    }
 }
