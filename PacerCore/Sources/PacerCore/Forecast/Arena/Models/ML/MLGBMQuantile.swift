@@ -76,6 +76,17 @@ public final class MLGBMQuantileModel: KitMLLearnedMeterModel {
     /// `[set][level]`. A set is a list of stacked-row indices into `x`/`y`.
     func fit(sets: [[Int]], x: [Double], y: [Double], width: Int, levels: [Double],
              params p: KitMLGBM.Params) -> [[KitMLGBM.Booster]] {
+        // A pace that never throws: this cannot fail.
+        try! fit(sets: sets, x: x, y: y, width: width, levels: levels, params: p, pace: {})
+    }
+
+    /// The same, calling `pace` before every tree of every booster (so also
+    /// between boosters; `KitMLGBM.trainQuantile`): the model's cancellation
+    /// check, where the arena pays for its CPU. A throw ends the fit and is
+    /// passed on: in parallel, the first job's to throw, after the others
+    /// have stopped at their next tree.
+    func fit(sets: [[Int]], x: [Double], y: [Double], width: Int, levels: [Double],
+             params p: KitMLGBM.Params, pace: @escaping () throws -> Void) throws -> [[KitMLGBM.Booster]] {
         let datasets = sets.map { rows -> (KitMLGBM.Dataset, [Double]) in
             var xs: [Double] = []
             xs.reserveCapacity(rows.count * width)
@@ -89,16 +100,36 @@ public final class MLGBMQuantileModel: KitMLLearnedMeterModel {
         out.initialize(repeating: nil)
         defer { out.deinitialize(); out.deallocate() }
         let slots = KitBox(out), data = KitBox(datasets)
+        let failure = FitFailure()
+        // Once one job has thrown, every other stops at its next tree.
+        let paced = {
+            if failure.error != nil { throw ArenaError.cancelled }
+            try pace()
+        }
         let work = { (i: Int) in
             let (s, j) = jobs[i]
-            slots.value[i] = KitMLGBM.trainQuantile(data.value[s].0, y: data.value[s].1, alpha: levels[j], params: p)
+            do {
+                slots.value[i] = try KitMLGBM.trainQuantile(data.value[s].0, y: data.value[s].1, alpha: levels[j],
+                                                            params: p, pace: paced)
+            } catch {
+                failure.record(error)
+            }
         }
         if parallel && jobs.count > 1 {
             DispatchQueue.concurrentPerform(iterations: jobs.count, execute: work)
         } else {
-            for i in jobs.indices { work(i) }
+            for i in jobs.indices where failure.error == nil { work(i) }
         }
+        if let error = failure.error { throw error }
         return sets.indices.map { s in levels.indices.map { j in out[s * levels.count + j]! } }
+    }
+
+    /// The first error a fit's jobs threw.
+    final class FitFailure: @unchecked Sendable {
+        private let lock = NSLock()
+        private var first: Error?
+        var error: Error? { lock.lock(); defer { lock.unlock() }; return first }
+        func record(_ e: Error) { lock.lock(); if first == nil { first = e }; lock.unlock() }
     }
 
     public override func train(_ ts: KitMLWalkforward.TrainSet, kind: String) throws -> Any {
@@ -130,9 +161,11 @@ public final class MLGBMQuantileModel: KitMLLearnedMeterModel {
             }
         }
         // The final boosters and every fold's, fitted together.
-        try ctx.checkCancelled()
-        let fitted = fit(sets: [Array(y.indices)] + foldSets.map(\.train), x: X, y: y, width: width, levels: levels,
-                         params: kw)
+        // Paced per booster and per tree: the training is the longest stretch
+        // a model runs (#368).
+        let ctx = self.ctx
+        let fitted = try fit(sets: [Array(y.indices)] + foldSets.map(\.train), x: X, y: y, width: width,
+                             levels: levels, params: kw, pace: { try ctx.checkCancelled() })
         if !foldSets.isEmpty {
             var oof = [[Double]](repeating: [Double](repeating: .nan, count: y.count), count: levels.count)
             X.withUnsafeBufferPointer { xp in

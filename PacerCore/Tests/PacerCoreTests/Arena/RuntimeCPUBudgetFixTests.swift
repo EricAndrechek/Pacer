@@ -4,8 +4,9 @@ import SwiftData
 @testable import PacerCore
 
 /// The arena's CPU fixes (#368): a trained bucket state outlives the live
-/// lane's history extensions, so a refit does not retrain it.
-@Suite("Arena CPU: trained states across extensions", .serialized)
+/// lane's history extensions, so a refit does not retrain it; a training
+/// pays for its CPU at every tree and stops there when cancelled.
+@Suite("Arena CPU: training cost and pacing", .serialized)
 struct RuntimeCPUBudgetFixTests {
     typealias Log = MLModelTests.Log
     static let account = "S1"
@@ -109,5 +110,106 @@ struct RuntimeCPUBudgetFixTests {
                      + "  states lost at each extension: %d trainings, %.2f CPU s\n"
                      + "  states kept (#368):            %d trainings, %.2f CPU s",
                      before.trainings, before.cpu, after.trainings, after.cpu))
+    }
+
+    // MARK: Pacing inside training
+
+    /// Counts the calls and throws `cancelled` from call `cancelAt` on.
+    final class Pace: @unchecked Sendable {
+        let lock = NSLock()
+        var calls = 0
+        var cancelAt: Int
+        init(cancelAt: Int = .max) { self.cancelAt = cancelAt }
+        func call() -> Bool { lock.lock(); defer { lock.unlock() }; calls += 1; return calls >= cancelAt }
+        var count: Int { lock.lock(); defer { lock.unlock() }; return calls }
+    }
+
+    static func dataset(n: Int = 400, features: Int = 5) -> (KitMLGBM.Dataset, [Double], KitMLGBM.Params) {
+        var rng = ArenaRNG(seed: 3)
+        var x: [Double] = [], y: [Double] = []
+        for _ in 0..<n {
+            let row = (0..<features).map { _ in rng.uniform() }
+            x += row
+            y.append(3 * row[0] + row[1] * row[2] + 0.3 * rng.uniform())
+        }
+        var p = KitMLGBM.Params()
+        p.nEstimators = 30; p.numLeaves = 7; p.minDataInLeaf = 10; p.maxBin = 63
+        p.baggingFraction = 0.8; p.baggingFreq = 1; p.featureFraction = 0.8; p.seed = 5
+        return (KitMLGBM.Dataset(x: x, n: n, nFeatures: features, params: p), y, p)
+    }
+
+    /// One call before every tree, and the trees are the unpaced ones.
+    @Test func aBoosterPacesOncePerTreeAndPacingChangesNoTree() throws {
+        let (ds, y, p) = Self.dataset()
+        let plain = KitMLGBM.trainQuantile(ds, y: y, alpha: 0.75, params: p)
+        let pace = Pace()
+        let paced = try KitMLGBM.trainQuantile(ds, y: y, alpha: 0.75, params: p, pace: { _ = pace.call() })
+        #expect(plain.trees.count == p.nEstimators)
+        #expect(pace.count == p.nEstimators)
+        #expect(paced.trees.count == plain.trees.count)
+        #expect(zip(paced.trees, plain.trees).allSatisfy {
+            $0.leafValue == $1.leafValue && $0.threshold == $1.threshold && $0.feature == $1.feature
+        })
+    }
+
+    @Test func aCancelledBoosterStopsAtTheNextTree() {
+        let (ds, y, p) = Self.dataset()
+        let pace = Pace(cancelAt: 10)
+        #expect(throws: ArenaError.cancelled) {
+            _ = try KitMLGBM.trainQuantile(ds, y: y, alpha: 0.5, params: p, pace: {
+                if pace.call() { throw ArenaError.cancelled }
+            })
+        }
+        #expect(pace.count == 10, "no tree after the one that was cancelled")
+    }
+
+    /// The model's cancellation check (the arena's CPU checkpoint) is reached
+    /// at every tree of a real training, serial as registered, and in
+    /// parallel. A training cancelled part-way stores nothing, so the next
+    /// forecast trains the same state an uninterrupted one does.
+    @Test(arguments: [false, true])
+    func aTrainingIsPacedPerTreeAndCanBeCancelledInside(parallel: Bool) throws {
+        var spec = Self.spec()
+        spec.config.values["n_estimators"] = 20
+        spec.config.values["parallel"] = .bool(parallel)
+        let (whole, end) = Self.built()
+        let store = Self.through(whole.store, end)
+        let t = end - 2 * ArenaTime.hour
+
+        func run(_ store: ArenaHistoryStore, _ pace: Pace, log: Log) throws -> MLGBMQuantileModel {
+            let h = ArenaHistory(store: store, now: t, accounts: [Self.account])
+            let services = ArenaServices(log: { _, m in log.add(m) }, isCancelled: { pace.call() })
+            let runner = ArenaRunner(registry: [spec], services: services)
+            let ctx = ArenaContext(spec: spec, seed: 1, services: services, runner: runner, history: { h })
+            let m = try MLGBMQuantileModel(context: ctx)
+            try m.fit(h)
+            let req = try #require(MLModelTests.request(h, account: Self.account, kind: "seven_day"))
+            _ = try m.forecast(req)
+            withExtendedLifetime(runner) {}
+            return m
+        }
+        let bucket = KitMLData.floorDiv(t, 72 * ArenaTime.hour) * 72 * ArenaTime.hour
+        func state(_ m: MLGBMQuantileModel) -> MLGBMQuantileModel.State? {
+            m.states[.init(kind: "seven_day", cap: nil, bucket: bucket)]?.1 as? MLGBMQuantileModel.State
+        }
+
+        // Uninterrupted, on its own store: how many checks, and the state.
+        let refLog = Log(), refPace = Pace()
+        let ref = try run(Self.through(whole.store, end), refPace, log: refLog)
+        let refState = try #require(state(ref), "\(refLog.lines)")
+        let trees = refState.boosters.reduce(0) { $0 + $1.trees.count }
+        #expect(refPace.count >= trees, "a check per tree of the final boosters at least")
+
+        // Cancelled near the end: inside the boosting, after the walk-forward.
+        let cancelLog = Log()
+        #expect(throws: ArenaError.cancelled) {
+            _ = try run(store, Pace(cancelAt: refPace.count - 3), log: cancelLog)
+        }
+        #expect(cancelLog.trained == 0, "cancelled before the training finished: \(cancelLog.lines)")
+        // Nothing was cached: the next forecast trains, and gets the same state.
+        let againLog = Log()
+        let again = try run(store, Pace(), log: againLog)
+        #expect(againLog.trained == 1)
+        #expect(MLAlignTests.same(state(again), refState))
     }
 }
