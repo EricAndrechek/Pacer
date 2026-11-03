@@ -292,4 +292,51 @@ struct RuntimeCPUBudgetFixTests {
         #expect(!isCurrent(entry, req(latest: made, resets: reset.addingTimeInterval(duration)), made, duration),
                 "another cycle")
     }
+
+    // MARK: Only the pick is urgent
+
+    /// Records whether an urgent lane was working when it ran.
+    final class UrgencyProbe: ArenaModel {
+        nonisolated(unsafe) static var seen: [String: Int] = [:]
+        nonisolated(unsafe) static var budget: ArenaCPUBudget?
+        static let lock = NSLock()
+        let name: String
+        init(context: ArenaContext) { name = context.spec.name }
+        func fit(_ history: ArenaHistory) {
+            Self.lock.lock(); Self.seen[name] = Self.budget?.urgentLanes ?? -1; Self.lock.unlock()
+        }
+        func forecast(_ request: ArenaRequest) throws -> ArenaForecast {
+            ArenaForecast(byKey: Dictionary(uniqueKeysWithValues: request.targets.map {
+                ($0.key, ArenaTargetForecast.point(Array(repeating: 10, count: $0.grid.count)))
+            }))
+        }
+    }
+
+    /// A refit's request: the pick runs while the lane is urgent (the scorer
+    /// waits), the comparison models after, at the everyday share.
+    @Test func onlyTheWindowsPickRunsUrgent() async throws {
+        typealias E = RuntimeEngineTests
+        let container = try E.seeded()
+        let specs = ["test-pick", "test-compare-1", "test-compare-2"].map { n in
+            ArenaModelSpec(name: n, targets: E.meters) { UrgencyProbe(context: $0) }
+        }
+        let rt = E.runtime(container, roster: specs)
+        UrgencyProbe.seen = [:]
+        UrgencyProbe.budget = rt.budget
+        defer { UrgencyProbe.budget = nil }
+        let binding = ArenaWindowBinding(account: E.account, windowKey: "five_hour", target: .meterFiveHour, cap: nil)
+        await rt.live.submit([ArenaLiveRequest(binding: binding, resetsAt: E.now.addingTimeInterval(3 * 3600),
+                                               latestReadingAt: E.now, models: specs.map(\.name))])
+        await rt.live.settle()
+        #expect(UrgencyProbe.seen == ["test-pick": 1, "test-compare-1": 0, "test-compare-2": 0])
+        #expect(rt.budget.urgentLanes == 0)
+    }
+
+    @Test func aRoundOfSkipsSaysNothing() {
+        var r = ArenaLiveForecaster.Round()
+        r.skipped = 40
+        #expect(r.line(wall: 0.1) == nil)
+        r.made = 3; r.picks = 1; r.cpu = 2.25
+        #expect(r.line(wall: 4) == "live round: 3 made (1 picks), 40 skipped, 0 failed, 2.2 CPU s in 4.0 s")
+    }
 }

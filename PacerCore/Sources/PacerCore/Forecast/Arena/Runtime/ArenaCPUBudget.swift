@@ -145,6 +145,8 @@ public final class ArenaCPUBudget: @unchecked Sendable {
     /// while any is.
     public func beginUrgent() { lock.lock(); urgent += 1; lock.unlock() }
     public func endUrgent() { lock.lock(); urgent = max(0, urgent - 1); lock.unlock() }
+    /// How many urgent lanes are working (tests).
+    var urgentLanes: Int { lock.lock(); defer { lock.unlock() }; return urgent }
 
     /// Charge the CPU this thread used since its last mark or checkpoint, then
     /// sleep for as long as the budget is overdrawn (and, unless `urgent`,
