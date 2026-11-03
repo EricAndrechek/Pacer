@@ -30,10 +30,6 @@ final class TelemetryController {
     private var sessionDay: String?
     private var observers: [NSObjectProtocol] = []
 
-    /// Freeze and MetricKit reports count against the free plan's error quota;
-    /// a Mac stuck in a bad state could send hundreds a day.
-    private static let hangCap = DailyCap(kind: "hang", limit: 2)
-
     // MARK: - Start
 
     func startIfAllowed() {
@@ -44,6 +40,10 @@ final class TelemetryController {
         guard PacerPreferences.telemetryCrashReportsEnabled(from: store)
                 || PacerPreferences.telemetryUsageDataEnabled(from: store) else { return }
 
+        // Debug builds get the tighter send caps (TelemetryBudget.Limits).
+        #if DEBUG
+        TelemetryBudget.shared.useLimits(.debug)
+        #endif
         SentrySDK.start { options in
             Self.configure(options, dsn: dsn)
         }
@@ -61,6 +61,7 @@ final class TelemetryController {
         guard isRunning else { return }
         if sessionDay != nil { SentrySDK.endSession() }
         sessionDay = nil
+        TelemetryBudget.shared.flush()
         SentrySDK.flush(timeout: 2)
     }
 
@@ -117,14 +118,19 @@ final class TelemetryController {
 
         // Only transactions we start ourselves exist, and each says whether it
         // is sampled (`SentryTelemetrySink`); everything else is dropped.
+        // This is also where transactions are capped: a root transaction over
+        // today's budget is sampled at 0 and never built (TelemetryBudget).
         o.tracesSampler = { context in
-            (context.customSamplingContext?[SentryTelemetrySink.sampleKey] as? NSNumber) ?? 0
+            guard let sample = context.customSamplingContext?[SentryTelemetrySink.sampleKey] as? NSNumber,
+                  sample.doubleValue > 0 else { return 0 }
+            let op = context.transactionContext.operation
+            return TelemetryBudget.shared.takeTransaction(op: op) ? sample : 0
         }
 
         o.beforeSend = { event in
             guard TelemetryController.crashAllowed else { return nil }
-            if TelemetryController.isHangLike(event),
-               !TelemetryController.hangCap.take(on: TokenSample.formatDate(Date()), store: PacerPreferences.store) {
+            // User feedback is budgeted where it is sent (ReportProblemView).
+            if let kind = TelemetryController.budgetKind(event), !TelemetryBudget.shared.take(kind) {
                 return nil
             }
             TelemetryController.scrub(event)
@@ -141,13 +147,21 @@ final class TelemetryController {
             return span
         }
         o.beforeSendMetric = { metric in
-            TelemetryController.usageAllowed ? metric : nil
+            guard TelemetryController.usageAllowed,
+                  TelemetryBudget.shared.takeMetric(metric.name) else { return nil }
+            return metric
         }
     }
 
-    nonisolated private static func isHangLike(_ event: Event) -> Bool {
-        guard let mechanism = event.exceptions?.first?.mechanism?.type else { return false }
-        return mechanism == "AppHang" || mechanism.hasPrefix("mx_")
+    /// Which daily budget an event spends; nil for feedback, which the
+    /// Report a Problem sheet budgets itself.
+    nonisolated static func budgetKind(_ event: Event) -> TelemetryBudget.Kind? {
+        if event.type == "feedback" { return nil }
+        let mechanism = event.exceptions?.first?.mechanism
+        if mechanism?.type == "AppHang" { return .hang }
+        if mechanism?.type.hasPrefix("mx_") == true { return .diagnostic }
+        if event.level == .fatal || mechanism?.handled == false { return .crash }
+        return .error
     }
 
     nonisolated private static func scrub(_ event: Event) {

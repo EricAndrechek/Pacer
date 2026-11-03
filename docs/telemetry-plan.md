@@ -17,7 +17,7 @@ project.
 
 | Quota (Developer, monthly) | Expected use at ~100 installs | Guard |
 | --- | --- | --- |
-| 5,000 errors | crashes (rare) + hang/diagnostic reports | cap hang + MetricKit reports at 2 per Mac per day (`beforeSend`) → ≤ 6,000 worst case, typically far less; over-quota is dropped, never billed |
+| 5,000 errors | crashes (rare) + hang/diagnostic reports | per-Mac daily send caps ("Send caps" below) in `beforeSend`; over-quota is dropped, never billed |
 | 5M spans | 1 heartbeat/day + slow scan cycles (> 1 s, cap 20/day) ≈ 1M worst case | caps |
 | 5 GB metrics | stall, click-lag, scan summary values | only stalls ≥ 250 ms; tiny |
 | feedback | own category, not the error quota | — |
@@ -37,6 +37,52 @@ commits), no profiling, no Seer. The open-source plan lifts all of these.
   work without our own ID.
 - NOT yet verified: hand-built test transactions (two attempts) never appeared, not even as drops.
   The real SDK is the first thing to prove (Phase 1 verification).
+
+## Send caps
+
+The Sentry DSN is public (it ships in the binary), and the free plan has no
+server-side per-key rate limit (that is Business-only). Any one install, or
+anyone who copies the DSN out of the app, could burn the month's quota; the
+scarce one is errors (~5k a month). A Debug build on the maintainer's Mac sent
+~14,000 `main_thread.stall_ms` metrics in a week. So the app limits itself.
+This bounds what an honest Mac can send; it cannot stop someone replaying the
+DSN by hand (that needs Sentry's inbound filters or a relay).
+
+Per Mac, per UTC day (`TelemetryBudget`, PacerCore; constants in
+`TelemetryBudget.Limits`):
+
+| Kind | Release | Debug |
+| --- | --- | --- |
+| error events (excluding crashes) | 25 | 10 |
+| app hangs | 10 | 3 |
+| crashes (fatal, incl. forwarded widget/CLI crash reports) | 10 | 5 |
+| MetricKit diagnostics | 10 | 10 |
+| user feedback | 5 | 5 |
+| transactions/spans (by root transaction) | 150 | 40 |
+| metrics, per metric name | 300 | 60 |
+| `main_thread.stall_ms` specifically | 100 | 20 |
+
+Slow-scan traces keep their own, tighter 20 a day inside the transaction cap.
+Debug is `#if DEBUG` (`build.config` debug).
+
+- **Where applied**: `beforeSend` (errors, hangs, crashes, MetricKit; returns
+  nil over budget), `tracesSampler` (root transactions; over budget samples at
+  0), `beforeSendMetric` (per name; stall has its own), the Report a Problem
+  sheet (offers the GitHub issue instead), the CLI's `pacer feedback` POST, and
+  `CrashReportForwardingService` (widget/CLI crash envelopes; these bypass the
+  SDK's hooks, so they spend the crash budget directly).
+- **State**: App Group defaults, one dictionary (UTC day + counts), so a
+  relaunch loop cannot reset it. Checks are in memory; rare kinds persist at
+  once, metrics and transactions at most every 10 s and on quit.
+- **Counted**: each drop adds `telemetry.capped.<kind>` (and
+  `telemetry.capped.metric.<name>`) to `TelemetryCounters`, so the next daily
+  check-in shows capping.
+- **Never capped**: the daily check-in (`pacer.checkin` transaction,
+  `checkin.*` metrics). Its counter metrics are one per name per day, far under
+  any cap.
+- **Known gap**: the CLI and the app write the same defaults key without a
+  lock, so a feedback sent by the CLI at the instant the app persists can lose
+  one count. Harmless at five a day.
 
 ## Toggle mapping
 
@@ -75,8 +121,8 @@ commits), no profiling, no Seer. The open-source plan lifts all of these.
   cache cleaners and the CLI can read it.
 - Crash handler on; `enableUncaughtNSExceptionReporting = true`.
 - App hangs: `enableAppHangTracking = true`, 2 s threshold (captures the main-thread stack during
-  the hang, which our run-loop watchdog cannot). `enableMetricKit = true`. Both capped at 2 reports
-  per Mac per day in `beforeSend`. Idle-CPU cost of Sentry's watchdog thread measured before
+  the hang, which our run-loop watchdog cannot). `enableMetricKit = true`. Both capped per Mac per
+  day in `beforeSend` (see "Send caps"). Idle-CPU cost of Sentry's watchdog thread measured before
   shipping (perf invariant).
 - Off: `enableSwizzling` (kills network/file auto-instrumentation in one go),
   `enableNetworkTracking`, `enableNetworkBreadcrumbs`, `enableCaptureFailedRequests`,

@@ -54,9 +54,10 @@ struct ReportProblemView: View {
     @State private var includeWindow = false
     @State private var files: [URL] = []
     @State private var sent = false
+    @State private var capped = false
 
     private var canSend: Bool {
-        TelemetryController.shared.isRunning && TelemetryController.crashAllowed
+        TelemetryController.shared.isRunning && TelemetryController.crashAllowed && !capped
     }
 
     var body: some View {
@@ -86,7 +87,8 @@ struct ReportProblemView: View {
                         }
                     }
                 } else {
-                    Text("Crash reports are off in Settings → Privacy.")
+                    Text(capped ? "Today's report limit is reached."
+                                : "Crash reports are off in Settings → Privacy.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -133,6 +135,9 @@ struct ReportProblemView: View {
         let feedback = SentryFeedback(message: TelemetryScrubber.scrub(message), name: nil,
                                       email: address.isEmpty ? nil : address, source: .custom,
                                       attachments: attachments.isEmpty ? nil : attachments)
+        // Public DSN, no server-side limit: five reports a day per Mac.
+        // Over that, the sheet offers the GitHub issue instead.
+        guard TelemetryBudget.shared.take(.feedback) else { capped = true; return }
         SentrySDK.capture(feedback: feedback)
         Telemetry.breadcrumb("feedback", "problem report sent")
         sent = true

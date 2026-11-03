@@ -15,16 +15,6 @@ struct TelemetryCoreTests {
         #expect(span.end == t0.addingTimeInterval(0.6))
     }
 
-    @Test("the daily cap allows N per local day, then resets the next day")
-    func dailyCap() throws {
-        let store = try #require(UserDefaults(suiteName: "cap-\(UUID().uuidString)"))
-        let cap = DailyCap(kind: "hang", limit: 2)
-        #expect(cap.take(on: "2026-11-02", store: store))
-        #expect(cap.take(on: "2026-11-02", store: store))
-        #expect(!cap.take(on: "2026-11-02", store: store))
-        #expect(cap.take(on: "2026-11-03", store: store))
-    }
-
     @Test("a DSN parses into the envelope URL and auth header")
     func dsn() throws {
         let dsn = try #require(SentryEnvelope.DSN("https://abc123@o1.ingest.us.sentry.io/42"))

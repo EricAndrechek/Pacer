@@ -251,7 +251,9 @@ promise). Read this before adding any signal.
   never start Sentry. A new diagnostic mode goes in `LaunchMode`, nowhere else.
 - **Hot paths stay hot.** Nothing new per scan cycle, per click or per forecast
   but a `TelemetryCounters.add`. Report the slow ones (`logIfInteresting`),
-  rebuilds, refits, passes, downloads. Quota-eating reports have a `DailyCap`.
+  rebuilds, refits, passes, downloads. Every send is under a per-Mac daily cap
+  (`TelemetryBudget`, applied in the Sentry hooks; "Send caps" in the plan): a new
+  send path that bypasses the hooks must call `TelemetryBudget.shared.take`.
 - **Toggles are read on every send**, not at start. Respect that in new sinks.
 - **The widget and the CLI** report through the App Group: the CLI appends to
   `CLIRunLog`, the widget adds `ms=` to `WidgetRefreshLog`, and the app forwards
