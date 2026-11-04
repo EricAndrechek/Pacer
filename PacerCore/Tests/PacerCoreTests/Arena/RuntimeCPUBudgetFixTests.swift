@@ -215,6 +215,16 @@ struct RuntimeCPUBudgetFixTests {
 
     // MARK: The live lane skips what has seen the newest reading
 
+    final class ClockBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var now: Date
+        init(_ now: Date) { self.now = now }
+        var value: Date {
+            get { lock.lock(); defer { lock.unlock() }; return now }
+            set { lock.lock(); now = newValue; lock.unlock() }
+        }
+    }
+
     /// Counts its fits; forecasts flat.
     final class Counted: ArenaModel {
         nonisolated(unsafe) static var runs = 0
@@ -237,7 +247,15 @@ struct RuntimeCPUBudgetFixTests {
         typealias E = RuntimeEngineTests
         let container = try E.seeded()
         let spec = ArenaModelSpec(name: "test-counted", targets: E.meters) { Counted(context: $0) }
-        let rt = E.runtime(container, roster: [spec])
+        // The lane's clock is pinned: the real one made the outcome depend on
+        // where the wall clock sat in a 5-minute cut bucket (a rebuild less
+        // than `reuseInterval` after the last one is not extended, so the
+        // test's `later` sometimes moved nothing).
+        // Started a minute into a cut bucket, so `later` (five minutes and a
+        // second past the first cut) is well over `reuseInterval` from it.
+        let t0 = ArenaTime.date(ArenaCut.millis(E.now) + 60_000)
+        let clock = ClockBox(t0)
+        let rt = E.runtime(container, roster: [spec], clock: { clock.value })
         let binding = ArenaWindowBinding(account: E.account, windowKey: "five_hour", target: .meterFiveHour, cap: nil)
         let resets = E.now.addingTimeInterval(3 * 3600)
         func submit(latest: Date) async {
@@ -246,7 +264,7 @@ struct RuntimeCPUBudgetFixTests {
             await rt.live.settle()
         }
         // Readings up to ten minutes ago: before any cut the lane makes now.
-        let reading = Date().addingTimeInterval(-600)
+        let reading = t0.addingTimeInterval(-600)
         await submit(latest: reading)
         #expect(Counted.count == 1)
         let key = ArenaLiveCache.Key(account: E.account, windowKey: "five_hour", model: "test-counted")
@@ -254,7 +272,7 @@ struct RuntimeCPUBudgetFixTests {
 
         // A refit five minutes on: the history extends, the cut moves, no new reading.
         let later = first.addingTimeInterval(5 * 60 + 1)
-        _ = await rt.history.built(account: E.account, now: later)
+        clock.value = later
         await submit(latest: reading)
         #expect(Counted.count == 1, "re-ran a model that had seen the newest reading")
 
@@ -266,7 +284,7 @@ struct RuntimeCPUBudgetFixTests {
 
         // No new reading, but the entry is older than the bound: made again.
         let age = ArenaLiveForecaster.refreshAge(duration: E.fiveHours)
-        _ = await rt.history.built(account: E.account, now: second.addingTimeInterval(age + 5 * 60))
+        clock.value = second.addingTimeInterval(age + 5 * 60)
         await submit(latest: reading)
         #expect(Counted.count == 3)
     }

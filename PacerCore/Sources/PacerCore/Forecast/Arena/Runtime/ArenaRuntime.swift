@@ -928,6 +928,10 @@ public actor ArenaLiveForecaster {
     private let cancel: ArenaCancelFlag
     private let urgency: ArenaLaneUrgency
     private let landed: @Sendable (Set<String>) async -> Void
+    /// The time the history is asked to be known at. Injected so a test can
+    /// hold the lane at a chosen instant: the cut is the history's
+    /// `builtThrough`, which the lane sets from this.
+    private let clock: @Sendable () -> Date
     /// See the file header.
     private let queue = DispatchSerialQueue(label: "com.ericandrechek.pacer.arena.live", qos: .utility)
     public nonisolated var unownedExecutor: UnownedSerialExecutor { queue.asUnownedSerialExecutor() }
@@ -949,9 +953,11 @@ public actor ArenaLiveForecaster {
     ///   running is urgent.
     init(roster: ArenaRoster, history: ArenaHistoryCache, cache: ArenaLiveCache, services: ArenaServices,
          budget: ArenaCPUBudget, cancel: ArenaCancelFlag, urgency: ArenaLaneUrgency = ArenaLaneUrgency(),
+         clock: @escaping @Sendable () -> Date = { Date() },
          landed: @escaping @Sendable (Set<String>) async -> Void) {
         self.roster = roster; self.history = history; self.cache = cache; self.services = services
         self.budget = budget; self.cancel = cancel; self.urgency = urgency; self.landed = landed
+        self.clock = clock
     }
 
     /// What one round of the lane did, for its log line.
@@ -1002,7 +1008,7 @@ public actor ArenaLiveForecaster {
             var cuts: [(account: String, cut: ArenaHistory, asOf: Date, runner: ArenaRunner,
                         requests: [ArenaLiveRequest])] = []
             for (account, requests) in Dictionary(grouping: batch, by: { $0.binding.account }) {
-                let built = await history.built(account: account)
+                let built = await history.built(account: account, now: clock())
                 let cutMs = ArenaCut.millis(built.builtThrough)
                 cuts.append((account, ArenaHistory(store: built.store, now: cutMs, accounts: [account]),
                              ArenaTime.date(cutMs), runner(account: account, built: built), requests))
@@ -1044,7 +1050,7 @@ public actor ArenaLiveForecaster {
     public func makeNow(_ request: ArenaLiveRequest) async {
         guard !request.models.isEmpty, !cancel.isSet else { return }
         let account = request.binding.account
-        let built = await history.built(account: account)
+        let built = await history.built(account: account, now: clock())
         let cutMs = min(ArenaCut.millis(built.builtThrough), request.cutAt.map(ArenaCut.millis) ?? .max)
         let cut = ArenaHistory(store: built.store, now: cutMs, accounts: [account])
         // Urgent only while the models run (see `drain`).
@@ -1201,12 +1207,15 @@ public final class ArenaRuntime: Sendable {
     ///     (`UsageIntelligenceEngine.refreshArenaResolution`).
     ///   - progress: where the scorer publishes its progress; the app's
     ///     sheet reads `ArenaScoringProgressBoard.shared`.
+    ///   - clock: the time the live lane asks its history to be known at
+    ///     (tests pin it).
     public init(container: ModelContainer, roster: ArenaRoster = .standard,
                 weights: @escaping @Sendable (String) -> URL? = ArenaRuntime.defaultWeights,
                 ensureWeights: @escaping @Sendable ([String]) async -> Void = ArenaRuntime.defaultEnsureWeights,
                 config: ArenaRecordScorer.Config = .init(), compareLimit: Int = 4,
                 costs: ArenaModelCosts = ArenaModelCosts(defaults: nil),
                 progress: ArenaScoringProgressBoard = .shared,
+                clock: @escaping @Sendable () -> Date = { Date() },
                 onRecordLanded: @escaping @Sendable (String, [EngineSelfEval.NewOutcome]) async -> Void,
                 onLiveLanded: @escaping @Sendable (Set<String>) async -> Void) {
         self.roster = roster
@@ -1249,7 +1258,8 @@ public final class ArenaRuntime: Sendable {
                                         services: scorerServices, budget: budget, costs: costs, cancel: cancel,
                                         config: config, progress: progress, landed: onRecordLanded)
         self.live = ArenaLiveForecaster(roster: roster, history: history, cache: cache, services: liveServices,
-                                        budget: budget, cancel: cancel, urgency: urgency, landed: onLiveLanded)
+                                        budget: budget, cancel: cancel, urgency: urgency, clock: clock,
+                                        landed: onLiveLanded)
         self.relief = ArenaMemoryRelief(live: live, scorerFlag: scorer.relief)
         let sweep = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
         sweep.schedule(deadline: .now() + 60, repeating: 60, leeway: .seconds(5))
