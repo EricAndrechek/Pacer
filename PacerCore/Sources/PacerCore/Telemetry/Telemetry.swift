@@ -100,25 +100,3 @@ public enum Telemetry {
         sink.breadcrumb(category, message)
     }
 }
-
-/// "At most N of these per Mac per day", for reports that could otherwise eat
-/// the free plan's quota on a bad day: hang reports, MetricKit diagnostics,
-/// slow-scan traces. Counts live in the given defaults under one key per kind,
-/// reset when the local day changes. App process only (single writer).
-public struct DailyCap: Sendable {
-    public let kind: String
-    public let limit: Int
-
-    public init(kind: String, limit: Int) { self.kind = kind; self.limit = limit }
-
-    /// True and counted when under the cap today; false otherwise.
-    public func take(on day: String, store: UserDefaults) -> Bool {
-        let key = "pacer.telemetry.cap.\(kind)"
-        let saved = store.dictionary(forKey: key)
-        var count = (saved?["day"] as? String) == day ? (saved?["count"] as? Int ?? 0) : 0
-        guard count < limit else { return false }
-        count += 1
-        store.set(["day": day, "count": count], forKey: key)
-        return true
-    }
-}

@@ -114,6 +114,13 @@ final class CrashReportForwardingService {
                 watermark = advance(watermark, to: candidate.modified, store: store)
                 continue
             }
+            // This path bypasses the SDK's hooks, so it spends the crash budget
+            // itself. Over it, the report is dropped (counted), not retried:
+            // a crash loop would otherwise queue the same day's reports.
+            guard TelemetryBudget.shared.take(.crash) else {
+                watermark = advance(watermark, to: candidate.modified, store: store)
+                continue
+            }
             let request = SentryEnvelope.request(envelope, dsn: dsn, timeout: 10)
             let response = try? await URLSession.shared.data(for: request)
             let status = (response?.1 as? HTTPURLResponse)?.statusCode

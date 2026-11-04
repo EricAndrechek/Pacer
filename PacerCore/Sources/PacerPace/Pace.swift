@@ -1538,6 +1538,13 @@ final class PaceRun {
     private func sendFeedback(_ text: String, verdict: String?) -> Bool {
         let t = io.telemetry
         guard t.enabled(), let raw = t.dsn, !raw.isEmpty, let dsn = SentryEnvelope.DSN(raw) else { return false }
+        // Same daily feedback budget as the app's sheet (this path bypasses the
+        // SDK's hooks). Over it, the caller prints the GitHub issue link.
+        #if DEBUG
+        TelemetryBudget.shared.useLimits(.debug)
+        #endif
+        guard TelemetryBudget.shared.take(.feedback) else { return false }
+        defer { TelemetryBudget.shared.flush() }
         var tags: [String: String] = [:]
         if let verdict, ["go", "paused", "unknown"].contains(verdict) { tags["last_verdict"] = verdict }
         guard let envelope = SentryEnvelope.feedback(

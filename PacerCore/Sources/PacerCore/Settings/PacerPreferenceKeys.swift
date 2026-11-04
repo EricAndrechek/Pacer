@@ -126,6 +126,10 @@ public enum PacerPreferenceKeys {
     /// a missing value means on. Read live by every send hook, so turning it
     /// off stops sending immediately. See docs/telemetry-plan.md.
     public static let telemetryCrashReports = "pacer.telemetry.crashReports"
+    /// "YYYY-MM-DD" the day this install first ran (or, for installs that
+    /// predate the key, the earliest evidence in the store). Reported by the
+    /// daily check-in as `install.first_seen` and `install.age_days`.
+    public static let installFirstSeen = "pacer.install.firstSeen"
     /// Opt-out: send usage data (daily check-in, sessions, performance and
     /// feature-use metrics). On by default; a missing value means on.
     public static let telemetryUsageData = "pacer.telemetry.usageData"

@@ -2523,9 +2523,7 @@ public final class ScanCoordinator {
                     "entries": .int(r.scanProgress.entriesParsed),
                     "files": .int(r.scanProgress.filesScanned),
                     "total_ms": .int(Int(r.durationSeconds * 1000))]))
-        } else if r.durationSeconds > 1.0,
-                  DailyCap(kind: "slow_scan", limit: 20)
-                      .take(on: TokenSample.formatDate(Date()), store: PacerPreferences.store) {
+        } else if r.durationSeconds > 1.0, TelemetryBudget.shared.take(.slowScan) {
             Telemetry.span(.sequential(
                 op: "scan.cycle", name: r.wasFullScan ? "full" : "incremental", start: started, phases: phases,
                 attributes: ["entries": .int(r.scanProgress.entriesParsed),
