@@ -3,7 +3,6 @@ import Darwin
 import Foundation
 import Observation
 import PacerCore
-import ServiceManagement
 import SwiftData
 import WidgetKit
 
@@ -45,8 +44,8 @@ final class DailyCheckIn {
 
     private static let lastDayKey = "pacer.telemetry.checkin.lastDay"
     private static let runningKey = "pacer.telemetry.lifecycle.running"
-    private static let launchesKey = "pacer.telemetry.lifecycle.launches"
-    private static let uncleanKey = "pacer.telemetry.lifecycle.unclean"
+    nonisolated private static let launchesKey = "pacer.telemetry.lifecycle.launches"
+    nonisolated private static let uncleanKey = "pacer.telemetry.lifecycle.unclean"
     private static let settleDelay: Duration = .seconds(30)
 
     // MARK: - Start
@@ -88,16 +87,22 @@ final class DailyCheckIn {
     /// through `applicationShouldTerminate`, so it counts as clean.
     private static func recordLaunch() {
         let store = PacerPreferences.store
-        launchOrigin.record(store: store)
+        Task { @MainActor in await launchOrigin.record(store: store) }
         if store.bool(forKey: runningKey) { store.set(store.integer(forKey: uncleanKey) + 1, forKey: uncleanKey) }
         store.set(store.integer(forKey: launchesKey) + 1, forKey: launchesKey)
         store.set(true, forKey: runningKey)
     }
 
-    /// How this process was launched. Captured in `applicationWillFinishLaunching`
-    /// because `currentAppleEvent` is only the launch event that early; read
-    /// by `recordLaunch` once telemetry has started. Main-thread only.
-    private(set) static var launchOrigin = LaunchOrigin.manual
+    /// How this process was launched. The Apple event is captured in
+    /// `applicationWillFinishLaunching`, because `currentAppleEvent` is only
+    /// the launch event that early; the answer may also need the login-item
+    /// status, which is resolved off the main thread (`LaunchOrigin.resolve`).
+    /// Read by `recordLaunch` and the `app_launched` event. Main-thread only.
+    private static var launchOriginTask: Task<LaunchOrigin, Never>?
+
+    static var launchOrigin: LaunchOrigin {
+        get async { await launchOriginTask?.value ?? .manual }
+    }
 
     static func captureLaunchOrigin() {
         let event = NSAppleEventManager.shared().currentAppleEvent
@@ -106,10 +111,15 @@ final class DailyCheckIn {
         let saysLogin = event?.eventID == AEEventID(kAEOpenApplication)
             && event?.paramDescriptor(forKeyword: AEKeyword(keyAEPropData))?.enumCodeValue
                 == OSType(keyAELaunchedAsLogInItem)
-        launchOrigin = LaunchOrigin.classify(
-            appleEventSaysLogin: saysLogin,
-            loginItemEnabled: SMAppService.mainApp.status == .enabled,
-            secondsSinceBoot: ProcessInfo.processInfo.systemUptime)
+        let uptime = ProcessInfo.processInfo.systemUptime
+        // Not `SMAppService.mainApp.status` here: it is an XPC call to smd
+        // and this is the main thread at launch, where smd is at its slowest
+        // (Sentry PACER-N, 2+ s from the same read in the check-in).
+        launchOriginTask = Task { @MainActor in
+            await LaunchOrigin.resolve(appleEventSaysLogin: saysLogin, secondsSinceBoot: uptime) {
+                await LoginItemController.statusOffMain() == .enabled
+            }
+        }
     }
 
     /// Called from the terminate path once everything has flushed.
@@ -138,11 +148,25 @@ final class DailyCheckIn {
         let yesterdayKey = TokenSample.formatDate(startOfYesterday)
 
         let gatherStart = Date()
-        let settings = Self.settingsAttributes(store: store)
+        // Nothing below blocks the main actor on the system: the login-item
+        // status (an XPC call to smd, 2+ s in Sentry PACER-N), the file checks
+        // and the logs are all read on a background executor.
+        let loginItemEnabled = await LoginItemController.statusOffMain() == .enabled
+        let launchedAt = self.launchedAt
+        let cpuBefore = cpuSecondsAtLastCheckIn
+        let local = await Task.detached(priority: .utility) {
+            let store = PacerPreferences.store
+            return (settings: Self.settingsAttributes(store: store),
+                    lifecycle: Self.lifecycleAttributes(store: store, launchedAt: launchedAt,
+                                                        cpuBefore: cpuBefore,
+                                                        loginItemEnabled: loginItemEnabled),
+                    modelsPresent: ArenaWeightStore.presentModelIds().joined(separator: ","),
+                    cpuSeconds: Self.cpuSeconds())
+        }.value
+        let settings = local.settings
             .merging(Self.clientAttributes(AccountClientsStore.current)) { _, new in new }
-        let lifecycle = Self.lifecycleAttributes(store: store, launchedAt: launchedAt,
-                                                 cpuBefore: cpuSecondsAtLastCheckIn)
-        cpuSecondsAtLastCheckIn = Self.cpuSeconds()
+        let lifecycle = local.lifecycle
+        cpuSecondsAtLastCheckIn = local.cpuSeconds
         let widgetsStart = Date()
         let installed = await Self.installedWidgets()
         let widgets = Self.widgetAttributes(installed)
@@ -164,7 +188,7 @@ final class DailyCheckIn {
         // Which forecast networks this Mac has on disk (stat only): with the
         // accuracy metrics, this is what says whether the ~2.7 GB of large
         // models ever earn their download (docs/telemetry-plan.md).
-        attributes["models.present"] = .string(ArenaWeightStore.presentModelIds().joined(separator: ","))
+        attributes["models.present"] = .string(local.modelsPresent)
 
         // PostHog: the whole approved snapshot, with person properties. Sent
         // before the Sentry part, which awaits the forecast engines.
@@ -198,7 +222,7 @@ final class DailyCheckIn {
 
         Self.sendCLISummary(gathered.cli, since: startOfYesterday, until: startOfToday)
         // Widget build times, from the extension's own log (it has no network).
-        for d in WidgetRefreshLog.durations(since: startOfYesterday, until: startOfToday) {
+        for d in gathered.widgetDurations {
             for ms in TelemetryBands.thinned(d.ms, limit: 200) {
                 Telemetry.distribution("widget.timeline_ms", Double(ms), unit: .millisecond,
                                        attributes: ["kind": .string(d.kind), "family": .string(d.family)])
@@ -247,7 +271,7 @@ final class DailyCheckIn {
 
     // MARK: - Settings snapshot
 
-    private static func settingsAttributes(store: UserDefaults) -> Telemetry.Attributes {
+    nonisolated private static func settingsAttributes(store: UserDefaults) -> Telemetry.Attributes {
         var a: Telemetry.Attributes = [:]
         // Chips are built-in tokens (`five_hour_pct`); a per-model chip's token
         // embeds a model name, so only its count is kept.
@@ -281,8 +305,11 @@ final class DailyCheckIn {
 
     // MARK: - Lifecycle, energy, Sparkle
 
-    private static func lifecycleAttributes(store: UserDefaults, launchedAt: Date,
-                                            cpuBefore: Double) -> Telemetry.Attributes {
+    /// Off the main actor (`runIfDue` runs it detached). `loginItemEnabled`
+    /// is passed in, read by the caller through `statusOffMain`.
+    nonisolated private static func lifecycleAttributes(store: UserDefaults, launchedAt: Date,
+                                                        cpuBefore: Double,
+                                                        loginItemEnabled: Bool) -> Telemetry.Attributes {
         var a: Telemetry.Attributes = [:]
         a["lifecycle.restarts"] = .int(store.integer(forKey: launchesKey))
         a["lifecycle.unclean_exits"] = .int(store.integer(forKey: uncleanKey))
@@ -293,7 +320,7 @@ final class DailyCheckIn {
         a["lifecycle.launches_login"] = .int(origins.login)
         a["lifecycle.launches_manual"] = .int(origins.manual)
         a["lifecycle.uptime_hours"] = .double((Date().timeIntervalSince(launchedAt) / 360).rounded() / 10)
-        a["lifecycle.login_item"] = .bool(SMAppService.mainApp.status == .enabled)
+        a["lifecycle.login_item"] = .bool(loginItemEnabled)
         // Sparkle records its last check in the app's own defaults; reading it
         // needs no change to the updater. Whether the check found an update
         // is not stored there, so only its age is reported.
@@ -312,7 +339,7 @@ final class DailyCheckIn {
     }
 
     /// User + system CPU time of this process since launch.
-    private static func cpuSeconds() -> Double {
+    nonisolated private static func cpuSeconds() -> Double {
         var usage = rusage()
         guard getrusage(RUSAGE_SELF, &usage) == 0 else { return 0 }
         func seconds(_ t: timeval) -> Double { Double(t.tv_sec) + Double(t.tv_usec) / 1_000_000 }
@@ -367,6 +394,8 @@ final class DailyCheckIn {
         var cliRuns: [CLIRunLog.Run]
         /// Yesterday's granted timeline refreshes per widget kind.
         var widgetRefreshes: [String: Int]
+        /// Yesterday's widget build times, from the extension's log file.
+        var widgetDurations: [WidgetRefreshLog.Durations]
         /// Account id -> (1-based index, plan tier). Lives for this send only.
         var accounts: [String: AccountLabel]
     }
@@ -463,9 +492,13 @@ final class DailyCheckIn {
         let runs = CLIRunLog.runs(lines, since: max(cursor ?? startOfYesterday, startOfYesterday.addingTimeInterval(-6 * 86_400)),
                                   until: startOfToday)
         store.set(startOfToday.timeIntervalSince1970, forKey: cliCursorKey)
-        let refreshes = WidgetInventory.refreshCounts(WidgetRefreshLog.entries(), since: startOfYesterday,
+        let widgetLog = WidgetRefreshLog.entries()
+        let refreshes = WidgetInventory.refreshCounts(widgetLog, since: startOfYesterday,
                                                       until: startOfToday)
-        return Gathered(attributes: a, cli: cli, cliRuns: runs, widgetRefreshes: refreshes, accounts: labels)
+        let durations = WidgetRefreshLog.durations(entries: widgetLog, since: startOfYesterday,
+                                                   until: startOfToday)
+        return Gathered(attributes: a, cli: cli, cliRuns: runs, widgetRefreshes: refreshes,
+                        widgetDurations: durations, accounts: labels)
     }
 
     nonisolated private static func environment() -> Telemetry.Attributes {

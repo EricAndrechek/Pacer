@@ -21,17 +21,34 @@ import Foundation
 ///
 /// It deliberately leaves UUIDs alone: crash reports need image UUIDs to be
 /// symbolicated, and a random UUID identifies nothing.
+///
+/// One exemption, by exact shape: the PostHog person link
+/// (`PostHogPersonLink`, `https://us.posthog.com/project/<n>/person/<uuid>`).
+/// Its path plus the UUID is a 40+ run of `[A-Za-z0-9/-]`, which the long-token
+/// rule would redact; the link is ours and holds only the random install id.
 public enum TelemetryScrubber {
 
     public static func scrub(_ text: String, home: String = NSHomeDirectory()) -> String {
         guard !text.isEmpty else { return text }
+        // Set the person links aside under placeholders no rule matches, and
+        // put them back after.
+        var kept: [String] = []
         var out = text
+        let links = PostHogPersonLink.pattern.matches(in: out, range: NSRange(out.startIndex..., in: out))
+        for match in links.reversed() {
+            guard let range = Range(match.range, in: out) else { continue }
+            kept.insert(String(out[range]), at: 0)
+            out.replaceSubrange(range, with: "\u{1}\(links.count - kept.count)\u{1}")
+        }
         if !home.isEmpty, home != "/" {
             out = out.replacingOccurrences(of: home, with: "~")
         }
         for (regex, replacement) in rules {
             out = regex.stringByReplacingMatches(
                 in: out, range: NSRange(out.startIndex..., in: out), withTemplate: replacement)
+        }
+        for (i, link) in kept.enumerated() {
+            out = out.replacingOccurrences(of: "\u{1}\(i)\u{1}", with: link)
         }
         return out
     }

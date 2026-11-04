@@ -203,8 +203,13 @@ private struct StartupCard: View {
             for: NSApplication.didBecomeActiveNotification)) { _ in refresh() }
     }
 
+    /// Off the main thread: the status is an XPC call to smd that can take
+    /// seconds (Sentry PACER-N), and this also runs every time Pacer comes
+    /// to the front with Settings open, not only on a click.
     private func refresh() {
-        loginItemStatus = LoginItemController.currentStatus()
+        Task { @MainActor in
+            loginItemStatus = await LoginItemController.statusOffMain()
+        }
     }
 }
 

@@ -317,6 +317,15 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // The launch Apple event is only current this early; the check-in
         // tallies login vs by-hand launches from it (once telemetry starts).
         DailyCheckIn.captureLaunchOrigin()
+        // Widget taps arrive as a `pacer://` get-URL Apple event. Taking that
+        // event ourselves, here, keeps it away from SwiftUI's scene routing:
+        // see `handleGetURLEvent`. Installed this early so it is in place for
+        // the event that launched us, if a tap is what did.
+        NSAppleEventManager.shared().setEventHandler(
+            self,
+            andSelector: #selector(handleGetURLEvent(_:withReplyEvent:)),
+            forEventClass: AEEventClass(kInternetEventClass),
+            andEventID: AEEventID(kAEGetURL))
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -478,10 +487,16 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Telemetry services; each is a no-op unless TelemetryController is running.
         DailyCheckIn.shared.start(container: container, engines: backgroundService.engines)
         CrashReportForwardingService.shared.start()
-        AnalyticsUsage.shared.appLaunched(loginOrigin: DailyCheckIn.launchOrigin)
+        // The launch origin can depend on the login-item status, which is
+        // resolved off the main thread; the event waits for it.
+        Task { @MainActor in
+            AnalyticsUsage.shared.appLaunched(loginOrigin: await DailyCheckIn.launchOrigin)
+        }
         // Logs the login-item status every launch and restores a registration
-        // macOS dropped against the user's recorded choice.
-        LoginItemController.reconcileAtLaunch()
+        // macOS dropped against the user's recorded choice. Detached: the
+        // status read is an XPC call to smd that can block for seconds, and
+        // this is the main thread at launch (Sentry PACER-N).
+        Task.detached(priority: .utility) { LoginItemController.reconcileAtLaunch() }
         installWindowObservers()
         installMenuBar()
         installGlobalHotkey()
@@ -520,9 +535,43 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return .terminateLater
     }
 
+    /// The `pacer://` get-URL Apple event, installed in
+    /// `applicationWillFinishLaunching` in place of AppKit's own handler.
+    ///
+    /// Why not `application(_:open:)`: AppKit's handler hands the URL to
+    /// SwiftUI's app delegate first, and SwiftUI routes it to a scene as an
+    /// external event, which for a scene means "open an instance for this
+    /// event". The dashboard is a singleton `Window`, so the only instance it
+    /// can open is a new one in place of the one on screen: a widget tap made
+    /// the dashboard visibly close and reopen before the delegate's handler
+    /// brought it forward. Taking the event here means SwiftUI never sees it,
+    /// and a tap does exactly what the menu's "Open Pacer" does
+    /// (`ensureMainWindowVisible`: order the existing window front, or open
+    /// it once if it is closed). Preferred over
+    /// `.handlesExternalEvents(matching: [])` on the scenes, because what
+    /// SwiftUI does with an event no scene claims is not documented, and a
+    /// fallback to the first scene would be this same bug.
+    @objc private func handleGetURLEvent(
+        _ event: NSAppleEventDescriptor, withReplyEvent reply: NSAppleEventDescriptor
+    ) {
+        guard let string = event.paramDescriptor(forKeyword: AEKeyword(keyDirectObject))?.stringValue,
+              let url = URL(string: string) else { return }
+        Log.write("Widget", "tap URL via Apple event")
+        handleOpenedURLs([url])
+    }
+
+    /// Fallback only: with `handleGetURLEvent` installed, AppKit no longer
+    /// calls this for `pacer://` URLs. Kept so a URL that reaches the
+    /// delegate by another route still does the right thing; the log line
+    /// says which route a tap took.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        Log.write("Widget", "tap URL via application(_:open:)")
+        handleOpenedURLs(urls)
+    }
+
     /// A tapped widget (`WidgetTapURL`): count it, then do what a tap did
     /// before widgets carried a URL, open the dashboard.
-    func application(_ application: NSApplication, open urls: [URL]) {
+    private func handleOpenedURLs(_ urls: [URL]) {
         for url in urls {
             guard let tap = WidgetTapURL.parse(url) else { continue }
             Analytics.capture(.widgetTapped(kind: tap.kind, family: tap.family))

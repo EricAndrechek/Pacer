@@ -30,6 +30,19 @@ public enum LaunchOrigin: String, Sendable {
         return .manual
     }
 
+    /// `classify`, reading the login-item status only when the answer depends
+    /// on it: no marker in the launch event and a boot recent enough for the
+    /// grace rule. That status is an XPC call to `smd` that can take seconds
+    /// (and is slowest right after a boot), so `loginItemEnabled` must read it
+    /// off the main thread; most launches never call it at all.
+    public static func resolve(appleEventSaysLogin: Bool, secondsSinceBoot: TimeInterval,
+                               loginItemEnabled: @Sendable () async -> Bool) async -> LaunchOrigin {
+        if appleEventSaysLogin { return .login }
+        guard secondsSinceBoot >= 0, secondsSinceBoot < loginGrace else { return .manual }
+        return classify(appleEventSaysLogin: false, loginItemEnabled: await loginItemEnabled(),
+                        secondsSinceBoot: secondsSinceBoot)
+    }
+
     /// The tally for one launch.
     public func record(store: UserDefaults = PacerPreferences.store) {
         let key = self == .login ? Self.loginKey : Self.manualKey

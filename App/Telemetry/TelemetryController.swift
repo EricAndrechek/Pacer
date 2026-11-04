@@ -31,6 +31,8 @@ final class TelemetryController {
 
     private(set) var isRunning = false
     private var sessionDay: String?
+    /// Whether the scope carries the PostHog person link; nil until first set.
+    private var postHogLinked: Bool?
     private var observers: [NSObjectProtocol] = []
 
     // MARK: - Start
@@ -54,6 +56,7 @@ final class TelemetryController {
         isRunning = true
         Telemetry.install(SentryTelemetrySink())
         tagScope()
+        syncPostHogLink()
         if Self.performanceAllowed { startSession() }
         observe()
         Log.write("Telemetry", "started · \(Self.environment) · crash=\(Self.crashAllowed) performance=\(Self.performanceAllowed) usage=\(Self.analyticsAllowed)")
@@ -80,6 +83,27 @@ final class TelemetryController {
         }
         ArenaBudgetGovernor.onModeChange = tag
         if let mode = ArenaBudgetGovernor.lastModeName { tag(mode) }
+    }
+
+    /// Every Sentry event links to the same Mac's PostHog person page
+    /// (`PostHogPersonLink`): one install id names the Mac in both tools.
+    /// Only while Usage data is on; with it off there is no PostHog person.
+    ///
+    /// A context, not a tag: Sentry shows a context's URL value as a link
+    /// that opens the page, while a tag value is a search filter, and tags
+    /// are run through the scrubber, whose long-token rule needed an
+    /// exemption for this URL (which it now has, tested, in case the link is
+    /// ever quoted anywhere that is scrubbed).
+    private func syncPostHogLink() {
+        let on = Self.analyticsAllowed
+        guard on != postHogLinked else { return }
+        postHogLinked = on
+        if on, let id = AnalyticsIdentity.installId(in: URL(fileURLWithPath: Self.cacheDirectory)) {
+            let url = PostHogPersonLink.url(installId: id)
+            SentrySDK.configureScope { $0.setContext(value: ["url": url], key: "posthog") }
+        } else {
+            SentrySDK.configureScope { $0.removeContext(key: "posthog") }
+        }
     }
 
     // MARK: - Options
@@ -217,7 +241,10 @@ final class TelemetryController {
         observers.append(NotificationCenter.default.addObserver(
             forName: UserDefaults.didChangeNotification, object: store, queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.syncSessionWithToggle() }
+            MainActor.assumeIsolated {
+                self?.syncSessionWithToggle()
+                self?.syncPostHogLink()
+            }
         })
     }
 
