@@ -184,9 +184,12 @@ struct RuntimeUnifiedRankingTests {
             EngineSelfEval.rankRL(rows, complexity: complexity, weekly: false, at: 0.5,
                                   depth: EngineSelfEval.rlDepth(weekly: false), tieRelative: 0.05, disagreement: d)
         }
+        // Without the filter both read ±0, at the live point and over every
+        // cut: no evidence, so nothing is picked from the record (#374; it
+        // was "simple", by the tie band, whatever the busy cycles said).
         let all = rank(nil)
         #expect(all.standing("good")?.typicalAbsError == 0 && all.standing("simple")?.typicalAbsError == 0)
-        #expect(all.pick == "simple")
+        #expect(all.noEvidence && all.pick == nil)
 
         let busyOnly = rank(2)
         #expect(busyOnly.standing("good")?.typicalAbsError == 1)
@@ -200,7 +203,7 @@ struct RuntimeUnifiedRankingTests {
         // A spread under the threshold is agreement: here every moment, so
         // the window ranks as it would without the filter.
         let agreed = rank(6)
-        #expect(agreed.pick == "simple")
+        #expect(agreed.noEvidence && agreed.pick == nil)
         #expect(agreed.standing("good")?.typicalAbsError == 0)
     }
 

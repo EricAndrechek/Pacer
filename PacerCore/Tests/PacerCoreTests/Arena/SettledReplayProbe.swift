@@ -75,7 +75,7 @@ struct SettledReplayProbe {
             for (label, r) in [("without readings", Self.rank(Self.blind(rows), surface: surface, at: x)),
                                ("with readings", Self.rank(rows, surface: surface, at: x))] {
                 text.append("\(parts[0]) at \(x), \(label): pick \(r.pick ?? "none")"
-                            + ", ranked at \(r.at.map { "\($0)" } ?? "every cut")"
+                            + (r.noEvidence ? " (no evidence)" : "") + ", ranked at \(r.at.map { "\($0)" } ?? "every cut")"
                             + ", span \(r.span?.cycles ?? 0) cycles")
                 for s in r.ranked.prefix(10) {
                     text.append(String(format: "    %-36@ %6.2f", s.method, s.typicalAbsError ?? .nan))

@@ -68,6 +68,9 @@ public struct MeterModelBoard: Sendable, Equatable {
         /// Graded, but clearly behind the best; still graded on every new
         /// cycle and drawable.
         case wellBehind(typicalMiss: Double, cycles: Int)
+        /// Graded over the span, but the record has no evidence at this
+        /// point of the window (`RLRanking.noEvidence`): no number to show.
+        case noEvidence(cycles: Int)
         /// Still being graded over history.
         case scoring(done: Int, total: Int, eta: TimeInterval?)
         /// Its network is downloading (nil: progress unknown).

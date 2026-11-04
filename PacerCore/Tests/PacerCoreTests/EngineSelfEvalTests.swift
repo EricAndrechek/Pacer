@@ -363,6 +363,7 @@ struct EngineSelfEvalTests {
         let after = rankSettling(rows, weekly: weekly)
         let pick = try #require(after.pick)
         #expect(pick != "hold")
+        #expect(!after.noEvidence)
         // Holding is ranked on the open moments now, and there it is far off.
         let hold = try #require(after.standing("hold")?.typicalAbsError)
         let best = try #require(after.standing(pick)?.typicalAbsError)
@@ -393,5 +394,69 @@ struct EngineSelfEvalTests {
                 : $0
         }
         #expect(rankSettling(mixed, weekly: true) == rankSettling(rows, weekly: true))
+    }
+
+    // MARK: - No evidence (#374)
+
+    /// A zero-width band: with a best of 0, a model 0.05 off is still tied,
+    /// and the simplest of the tied is picked, not the simplest at exactly 0.
+    @Test func theTieBandHasAnAbsoluteFloor() {
+        let scored = [(id: "a", err: 0.0), (id: "b", err: 0.0), (id: "c", err: 0.05), (id: "d", err: 0.3)]
+        let complexity = ["a": 3, "b": 2, "c": 1, "d": 0]
+        #expect(EngineSelfEval.pickWithinTie(scored, complexity: complexity, tieRelative: 0.05) == "c")
+        // Above the floor the relative band is as it was.
+        let wide = [(id: "a", err: 10.0), (id: "b", err: 10.4), (id: "c", err: 10.6)]
+        #expect(EngineSelfEval.pickWithinTie(wide, complexity: complexity, tieRelative: 0.05) == "b")
+    }
+
+    /// Every moment settled, so the record holds nothing but ties at 0:
+    /// matched or over every cut, it is no evidence. Nothing is picked (the
+    /// cold backtest picks), and no number is shown.
+    @Test func anAllZeroBoardIsNoEvidence() throws {
+        var rows: [EngineSelfEval.Record] = []
+        for p in 0..<3 {
+            let period = EngineSelfEval.periodKeyRL(Self.now.addingTimeInterval(Double(p) * 7 * 86_400))
+            for cut in EngineSelfEval.rlGrading.cuts {
+                for (m, miss) in [("a", 0.0), ("b", 0.0), ("c", 0.0), ("d", 2.0)] {
+                    rows.append(.init(method: m, bucket: EngineSelfEval.rlGrading.bucket(cut), periodKey: period,
+                                      predicted: 98 + miss, truth: 98, reading: 98))
+                }
+            }
+        }
+        let r = EngineSelfEval.rankRL(rows, complexity: ["a": 1, "b": 2, "c": 3, "d": 4], weekly: true, at: 0.85,
+                                      depth: 17, tieRelative: 0.05, disagreement: 2)
+        #expect(r.noEvidence)
+        #expect(r.pick == nil)
+        #expect(r.ranked.count == 4)
+        #expect(r.accuracy(surface: "rl-seven_day").methods.allSatisfy { !$0.typicalAbsError.isFinite })
+
+        let board = UsageIntelligenceEngine.board(
+            windowKey: "seven_day", weekly: true, ranking: r, current: r, engineIds: ["a", "b", "c", "d"],
+            specs: [], complexity: [:], selected: nil, shown: "a", cutFraction: 0.85, canRunArena: true,
+            weightsPresent: { _ in true }, liveFailure: { _ in nil }, progress: nil, gradedThrough: true,
+            drawLimit: 4)
+        #expect(board.rows.allSatisfy { $0.status == .noEvidence(cycles: 3) })
+    }
+
+    /// A tie at 0 only near the live point, while the open record over every
+    /// cut separates the models: ranked over every cut.
+    @Test func aZeroTieNearTheLivePointRanksOverEveryCut() throws {
+        var rows: [EngineSelfEval.Record] = []
+        for p in 0..<3 {
+            let period = EngineSelfEval.periodKeyRL(Self.now.addingTimeInterval(Double(p) * 7 * 86_400))
+            for cut in EngineSelfEval.rlGrading.cuts {
+                // Early cuts: "a" and "b" 4 and 1 off; late ones, both exact.
+                let late = cut >= 0.7
+                for (m, miss) in [("a", late ? 0.0 : 4.0), ("b", late ? 0.0 : 1.0)] {
+                    rows.append(.init(method: m, bucket: EngineSelfEval.rlGrading.bucket(cut), periodKey: period,
+                                      predicted: 60 + miss, truth: 60))
+                }
+            }
+        }
+        let r = EngineSelfEval.rankRL(rows, complexity: ["a": 1, "b": 2], weekly: true, at: 0.85,
+                                      depth: 17, tieRelative: 0.05)
+        #expect(!r.noEvidence)
+        #expect(r.at == nil)
+        #expect(r.pick == "b")
     }
 }

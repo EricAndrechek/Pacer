@@ -547,6 +547,15 @@ public enum EngineSelfEval {
         reading >= truth - rlSettledPoints
     }
 
+    /// Below this typical miss (points) a best tied by others is no evidence
+    /// (`RLRanking.noEvidence`).
+    static let rlNoEvidenceMiss = 0.05
+    /// The narrowest the relative tie band gets (points): a difference the
+    /// sheet, at one decimal, cannot show is a tie. Under the 5% band of any
+    /// record with real misses (5% of a 3-point miss is 0.15), so it binds
+    /// only near zero.
+    static let rlTieFloor = 0.1
+
     /// Pick the best method from an accumulated record: lowest typical
     /// absolute error (`typicalError`: the median, the mean when `weekly`) in
     /// the surface's native units (percentage points for rate-limit windows),
@@ -583,10 +592,14 @@ public enum EngineSelfEval {
     /// The simplest of the methods within the near-tie band of the best
     /// (`bestMethod`), then the lower error, then the id, so the pick holds
     /// still between refits.
+    ///
+    /// The relative band never narrows below `rlTieFloor`: with a best of 0
+    /// it was 0 wide, and the order among models a hair apart (0.00 vs
+    /// 0.01) decided the pick (#374).
     static func pickWithinTie(_ scored: [(id: String, err: Double)], complexity: [String: Int],
                               tieRelative: Double?) -> String? {
         guard let best = scored.map(\.err).min() else { return nil }
-        let band = tieRelative.map { best * $0 } ?? 1.5
+        let band = tieRelative.map { max(best * $0, rlTieFloor) } ?? 1.5
         return scored.filter { $0.err <= best + band }
             .min { (complexity[$0.id] ?? 3, $0.err, $0.id) < (complexity[$1.id] ?? 3, $1.err, $1.id) }?.id
     }
@@ -715,7 +728,12 @@ extension EngineSelfEval {
         public var depthStart: String? = nil
         /// A weekly-scale window's ranking (`rlDepth`, `rlMinPeriods`).
         public var weekly = false
-
+        /// The record holds no evidence at this point of the window: the best
+        /// is (nearly) never off and others tie with it, at the matched point
+        /// and over every cut (`rlNoEvidenceMiss`), on moments that may be
+        /// settled ones (no reading known, or no open moment at all). Nothing
+        /// is picked, and the sheet shows no number.
+        public var noEvidence = false
 
         public func standing(_ method: String) -> Standing? { standings.first { $0.method == method } }
         public var ranked: [Standing] { standings.filter(\.isRanked) }
@@ -729,7 +747,7 @@ extension EngineSelfEval {
         public func accuracy(surface: String) -> Accuracy {
             Accuracy(surface: surface, methods: standings.map { s in
                 .init(method: s.method, medianAbsPctError: s.medianAbsPctError,
-                      typicalAbsError: s.typicalAbsError ?? .infinity, periods: s.cycles, byStage: s.byStage,
+                      typicalAbsError: noEvidence ? .infinity : s.typicalAbsError ?? .infinity, periods: s.cycles, byStage: s.byStage,
                       spanPeriods: s.spanCycles, firstPeriod: s.firstPeriod)
             }, span: span)
         }
@@ -759,6 +777,9 @@ extension EngineSelfEval {
     ///   record said. A method with no such moment near `at` is ranked on
     ///   all of its open moments, so a window where everyone always agreed
     ///   ranks as it would without the filter.
+    /// - A best (nearly) never off with others tied at it, on moments that
+    ///   may be settled, is no evidence (`RLRanking.noEvidence`): ranked
+    ///   again over every cut, and if that is no better, nothing is picked.
     ///
     /// `candidates` limits the methods ranked (the ones that can run on this
     /// window); nil ranks every method in the record. `pickable` limits the
@@ -888,13 +909,47 @@ extension EngineSelfEval {
             return (out, firstLevel)
         }
 
-        let (rows, level) = score(at: x)
-        let matchedX = x
+        // A board whose best is (nearly) never off, with others tied there,
+        // says nothing about which model is better at this point when those
+        // moments may be settled ones: every model that holds the reading
+        // scores 0 there. That is so wherever a moment's reading is unknown
+        // (a row graded before it was recorded) or the record has no open
+        // moment at all. Ranked again over every cut; if that is no better,
+        // the record has no evidence here, and nothing is picked from it (the
+        // cold backtest picks). On open moments whose readings are known, a
+        // tie at 0 is models that were exactly right (a cycle that ended at
+        // the cap, and the models that clamp to it), and stands.
+        func uninformative(_ rs: [Row], level: Int, at x: Double?) -> Bool {
+            let errs = rs.compactMap(\.typical)
+            guard let best = errs.min(), best < rlNoEvidenceMiss,
+                  errs.filter({ $0 <= best + rlTieFloor }).count > 1 else { return false }
+            guard levels[level].openOnly else { return true }
+            return span.contains { p in
+                eligible.contains { m in
+                    byMethod[m]?[p]?.contains {
+                        weight($0, p, levels[level], at: x) > 0
+                            && ($0.reading ?? readingAt[Moment(period: p, cut: $0.cut)]) == nil
+                    } ?? false
+                }
+            }
+        }
+        var (rows, level) = score(at: x)
+        var matchedX = x
+        var noEvidence = false
+        if uninformative(rows, level: level, at: x) {
+            let unmatched = levels[level].matched && x != nil ? score(at: nil) : nil
+            if let unmatched, !uninformative(unmatched.rows, level: unmatched.level, at: nil) {
+                (rows, level) = unmatched
+                matchedX = nil
+            } else {
+                noEvidence = true
+            }
+        }
         let scoreLevel = levels[level]
 
         let ranked = rows.compactMap { r in r.typical.map { (id: r.method, err: $0) } }
-        let pick = pickWithinTie(ranked.filter { pickable?.contains($0.id) ?? true }, complexity: complexity,
-                                 tieRelative: tieRelative)
+        let pick = noEvidence ? nil : pickWithinTie(ranked.filter { pickable?.contains($0.id) ?? true },
+                                                    complexity: complexity, tieRelative: tieRelative)
         let best = ranked.min { ($0.err, $0.id) < ($1.err, $1.id) }
 
         // A cycle's score is over the moments the numbers were taken over; a
@@ -950,7 +1005,7 @@ extension EngineSelfEval {
                          span: .init(start: start, cycles: span.count,
                                      isWholeRecord: start == depthStart && periods.count == allPeriods.count),
                          standings: standings, pick: pick, depthCycles: periods.count, depthStart: depthStart,
-                         weekly: weekly)
+                         weekly: weekly, noEvidence: noEvidence)
     }
 
     /// P(X ≥ k) for X ~ Binomial(n, ½): the sign test's one-sided p-value.
