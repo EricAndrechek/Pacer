@@ -223,7 +223,10 @@ public enum Pace {
         }
         let name = CLIRunLog.safeName(sub, known: Set(subcommands).union(["feedback", "help"]))
         let id = CLIRunLog.newRunId()
-        CLIRunLog.recordStart(runId: id, subcommand: name, to: logURL)
+        // Flag names only, and none for `feedback`, whose arguments are the
+        // report's text.
+        let flags = sub == "feedback" ? [] : CLIRunLog.flagNames(Array(arguments.dropFirst()), known: flagNames)
+        CLIRunLog.recordStart(runId: id, subcommand: name, flags: flags, to: logURL)
         let began = DispatchTime.now().uptimeNanoseconds
         let code = run(arguments, environment: environment, io: io)
         let ms = Int((DispatchTime.now().uptimeNanoseconds &- began) / 1_000_000)
@@ -231,6 +234,13 @@ public enum Pace {
                             source: io.source(), to: logURL)
         return code
     }
+
+    /// Every flag `PaceRun.main` accepts, without dashes: the only names the
+    /// run log records (`CLIRunLog.flagNames`). Keep in step with its switch.
+    static let flagNames: Set<String> = [
+        "cap", "margin", "interval", "window", "model", "eta", "account", "max-wait", "max-age",
+        "retries", "state", "no-refresh", "resume-headroom", "help",
+    ]
 
     /// For the "unknown subcommand" message.
     static let subcommands = ["report", "json", "accounts", "sessions", "gate", "status", "wait", "safecap", "feedback"]

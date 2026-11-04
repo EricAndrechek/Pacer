@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import PacerCore
 
 /// The "share this chart" popover: a live preview of the exact image
 /// that will be produced, with Copy / Save / Share actions beneath it.
@@ -64,6 +65,7 @@ struct ChartShareSheet: View {
     private func copyImage() {
         guard let image = ChartImageRenderer.nsImage(for: card) else { return }
         ChartImageExporter.copyToPasteboard(image)
+        Analytics.capture(.exportUsed(.chartImageCopy))
         copied = true
         Task {
             try? await Task.sleep(nanoseconds: 1_400_000_000)
@@ -73,11 +75,14 @@ struct ChartShareSheet: View {
 
     private func saveImage() {
         guard let data = ChartImageRenderer.pngData(for: card) else { return }
-        ChartImageExporter.savePNG(data, suggestedName: fileName)
+        if ChartImageExporter.savePNG(data, suggestedName: fileName) {
+            Analytics.capture(.exportUsed(.chartImageSave))
+        }
     }
 
     private func shareImage() {
         guard let image = ChartImageRenderer.nsImage(for: card) else { return }
+        Analytics.capture(.exportUsed(.chartImageShare))
         shareAnchor.present([image])
     }
 }

@@ -230,6 +230,7 @@ struct ContentView: View {
             Log.write("Navigation", "tab → \(new)")
             // Raw values are the fixed `Destination` cases, never user data.
             TelemetryCounters.add("ui.tab.\(new)")
+            AnalyticsUsage.shared.tabShown(new)
         }
         .onReceive(NotificationCenter.default.publisher(for: .pacerOpenSettings)) { _ in
             PacerAppDelegate.pendingDestination = nil
@@ -246,6 +247,8 @@ struct ContentView: View {
                 PacerAppDelegate.pendingDestination = nil
                 selectionRaw = pending.rawValue
             }
+            // The tab the window opened on (onChange misses the restored one).
+            AnalyticsUsage.shared.tabShown(selectionRaw)
         }
     }
 

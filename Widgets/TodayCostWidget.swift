@@ -98,6 +98,7 @@ struct TodayCostWidgetView: View {
         .padding(WidgetStyle.smallPad)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .containerBackground(widgetCardBackground, for: .widget)
+        .pacerWidgetTapURL(WidgetKinds.todayCost)
     }
 
     @ViewBuilder

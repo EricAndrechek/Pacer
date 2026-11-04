@@ -84,6 +84,7 @@ public final class NotificationCoordinator {
         )
         do {
             try await center.add(request)
+            Analytics.capture(.notificationShown(.test, window: nil))
             return .delivered
         } catch {
             return .failed(error.localizedDescription)
@@ -221,7 +222,7 @@ public final class NotificationCoordinator {
             label: label, percent: currentPct, threshold: highest.threshold, estimated: estimated)
         content.sound = .default
         content.interruptionLevel = .active
-        await postWindowAlert(content, windowKey: windowKey, resetsAt: resetsAt,
+        await postWindowAlert(kind: .threshold, content, windowKey: windowKey, resetsAt: resetsAt,
                               dedupKey: highest.key)
     }
 
@@ -325,7 +326,7 @@ public final class NotificationCoordinator {
         content.categoryIdentifier = Self.generalCategory
 
         let request = UNNotificationRequest(identifier: key, content: content, trigger: nil)
-        await post(request)
+        await post(request, kind: .dailySummary)
         markNotified(key: key, in: context)
     }
 
@@ -386,7 +387,7 @@ public final class NotificationCoordinator {
         content.interruptionLevel = .passive
 
         // Into the window's slot: the reset notice is the window's latest news.
-        await postWindowAlert(content, windowKey: windowKey, resetsAt: resetsAt,
+        await postWindowAlert(kind: .reset, content, windowKey: windowKey, resetsAt: resetsAt,
                               dedupKey: cycleKey)
         markNotified(key: cycleKey, in: context)
     }
@@ -500,7 +501,7 @@ public final class NotificationCoordinator {
         // The window's slot, like its threshold alerts: an escalation from
         // heads-up to imminent replaces the heads-up and alerts again, rather
         // than stacking a second banner beside it (owner, 2026-10-29).
-        await postWindowAlert(
+        await postWindowAlert(kind: .burnRate, 
             content, windowKey: windowKey, resetsAt: resetsAt,
             dedupKey: "\(cycleKey).t\(tier.rawValue).\(Int(projectedFullAt.timeIntervalSince1970))")
         markBurnNotified(key: cycleKey,
@@ -570,7 +571,7 @@ public final class NotificationCoordinator {
         content.sound = .default
         content.interruptionLevel = .active
 
-        await postWindowAlert(content, windowKey: windowKey, resetsAt: detection.resetsAt,
+        await postWindowAlert(kind: .globalReset, content, windowKey: windowKey, resetsAt: detection.resetsAt,
                               dedupKey: cycleKey)
         markNotified(key: cycleKey, in: context)
     }
@@ -602,7 +603,7 @@ public final class NotificationCoordinator {
         content.categoryIdentifier = Self.generalCategory
 
         let request = UNNotificationRequest(identifier: key, content: content, trigger: nil)
-        await post(request)
+        await post(request, kind: .dailyCost)
         markNotified(key: key, in: context)
     }
 
@@ -649,7 +650,7 @@ public final class NotificationCoordinator {
         content.categoryIdentifier = Self.generalCategory
 
         let request = UNNotificationRequest(identifier: key, content: content, trigger: nil)
-        await post(request)
+        await post(request, kind: .projectBudget)
         markNotified(key: key, in: context)
     }
 
@@ -688,7 +689,7 @@ public final class NotificationCoordinator {
         content.categoryIdentifier = Self.generalCategory
 
         let request = UNNotificationRequest(identifier: key, content: content, trigger: nil)
-        await post(request)
+        await post(request, kind: .customRule)
         markNotified(key: key, in: context)
     }
 
@@ -719,11 +720,13 @@ public final class NotificationCoordinator {
     /// reading the dedup rows. `logAs` is the dedup key when it differs from
     /// the identifier (a window's slot), so the line still says which window,
     /// threshold and cycle fired.
-    func post(_ request: UNNotificationRequest, logAs dedupKey: String? = nil) async {
+    func post(_ request: UNNotificationRequest, logAs dedupKey: String? = nil,
+              kind: AnalyticsEvent.NotificationKind, window: String? = nil) async {
         let what = dedupKey.map { "\(request.identifier) (\($0))" } ?? request.identifier
         do {
             try await center.add(request)
             Log.write("Notify", "posted \(what)")
+            Analytics.capture(.notificationShown(kind, window: window))
         } catch {
             Log.write("Notify", "could not post \(what): \(error)")
         }

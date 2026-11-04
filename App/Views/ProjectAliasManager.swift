@@ -93,6 +93,7 @@ struct ProjectAliasManager: View {
                 knownPaths: knownProjectPaths,
                 onSave: { source, canonical in save(source: source, canonical: canonical, replacing: draft.replacing) }
             )
+            .onAppear { Analytics.capture(.detailOpened(.aliasEditor)) }
         }
         .sheet(item: $bulkMergeDraft) { draft in
             BulkMergeSheet(
@@ -100,6 +101,7 @@ struct ProjectAliasManager: View {
                 initialCanonical: draft.canonical.isEmpty ? nil : draft.canonical,
                 initialSources: draft.sources
             )
+            .onAppear { Analytics.capture(.detailOpened(.bulkMerge)) }
         }
         .task(id: knownProjectPaths) {
             await reloadSuggestions()

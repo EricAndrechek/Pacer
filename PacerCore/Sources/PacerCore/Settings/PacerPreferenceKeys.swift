@@ -121,8 +121,8 @@ public enum PacerPreferenceKeys {
     /// read-only. Off stops it for anyone who would rather Pacer not read
     /// another tool's credentials. See `ParkedCredentialStore`.
     public static let switcherCredentialsEnabled = "pacer.switcher.credentialsEnabled"
-    /// Opt-out: send crash reports, app hangs, macOS diagnostics and problem
-    /// reports to Pacer's Sentry project. On by default (decided 2026-10-21);
+    /// Opt-out: send crash reports, app hangs, macOS diagnostics, problem
+    /// reports and performance data to Pacer's Sentry project. On by default (decided 2026-10-21);
     /// a missing value means on. Read live by every send hook, so turning it
     /// off stops sending immediately. See docs/telemetry-plan.md.
     public static let telemetryCrashReports = "pacer.telemetry.crashReports"
@@ -130,9 +130,17 @@ public enum PacerPreferenceKeys {
     /// predate the key, the earliest evidence in the store). Reported by the
     /// daily check-in as `install.first_seen` and `install.age_days`.
     public static let installFirstSeen = "pacer.install.firstSeen"
-    /// Opt-out: send usage data (daily check-in, sessions, performance and
-    /// feature-use metrics). On by default; a missing value means on.
+    /// Opt-out: send product usage events to Pacer's PostHog project (which
+    /// features are used; docs/telemetry-plan.md, "PostHog"). On by default; a
+    /// missing value means on. Until 2026-11 this key also covered Sentry's
+    /// performance data; see `TelemetryConsent` for the migration.
     public static let telemetryUsageData = "pacer.telemetry.usageData"
+    /// Set once the two-toggle migration has run (`TelemetryConsent.migrate`).
+    public static let telemetryMigrated = "pacer.telemetry.migratedTwoToggles"
+    /// Set by the migration when the old usage toggle was off: Sentry then
+    /// sends crashes, hangs and MetricKit only, until the user changes a
+    /// Privacy toggle (`TelemetryConsent`).
+    public static let telemetryPerformanceHeld = "pacer.telemetry.performanceHeld"
     /// Set when the user dismisses the first-run "Also track Claude Desktop"
     /// nudge with "Not now" — so it never reappears. The feature itself stays
     /// reachable in Settings → Authentication; this only silences the banner.

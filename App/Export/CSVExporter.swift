@@ -60,7 +60,8 @@ enum CSVExporter {
             }
             runSavePanelAndWrite(
                 suggestedName: "pacer-daily-by-model.csv",
-                contents: csv
+                contents: csv,
+                flavor: .dailyByModelCSV
             )
         } catch {
             presentError("Couldn't read daily aggregates: \(error.localizedDescription)")
@@ -96,7 +97,8 @@ enum CSVExporter {
             }
             runSavePanelAndWrite(
                 suggestedName: "pacer-daily-totals.csv",
-                contents: csv
+                contents: csv,
+                flavor: .dailyTotalsCSV
             )
         } catch {
             presentError("Couldn't read daily aggregates: \(error.localizedDescription)")
@@ -150,7 +152,8 @@ enum CSVExporter {
             }
             runSavePanelAndWrite(
                 suggestedName: "pacer-project-totals.csv",
-                contents: csv
+                contents: csv,
+                flavor: .projectTotalsCSV
             )
         } catch {
             presentError("Couldn't read project aggregates: \(error.localizedDescription)")
@@ -170,7 +173,8 @@ enum CSVExporter {
     }
 
     @MainActor
-    private static func runSavePanelAndWrite(suggestedName: String, contents: String) {
+    private static func runSavePanelAndWrite(suggestedName: String, contents: String,
+                                             flavor: AnalyticsEvent.ExportFlavor) {
         let panel = NSSavePanel()
         panel.nameFieldStringValue = suggestedName
         panel.allowedContentTypes = [.commaSeparatedText]
@@ -181,6 +185,7 @@ enum CSVExporter {
         guard response == .OK, let url = panel.url else { return }
         do {
             try contents.write(to: url, atomically: true, encoding: .utf8)
+            Analytics.capture(.exportUsed(flavor))
             // Reveal in Finder so the user can confirm the export
             // landed and grab it without re-navigating to wherever they
             // saved it. Matches the post-save behavior of most native

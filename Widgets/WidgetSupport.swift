@@ -149,3 +149,21 @@ struct WidgetEmptyState: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 }
+
+/// Tapping a widget opens Pacer through `pacer://widget?kind=…&family=…`, so
+/// the app can count which widgets are tapped (`widget_tapped`, kind and
+/// family only). The extension itself sends nothing.
+private struct WidgetTapURLModifier: ViewModifier {
+    let kind: String
+    @Environment(\.widgetFamily) private var family
+
+    func body(content: Content) -> some View {
+        content.widgetURL(WidgetTapURL.make(kind: kind, family: "\(family)"))
+    }
+}
+
+extension View {
+    func pacerWidgetTapURL(_ kind: String) -> some View {
+        modifier(WidgetTapURLModifier(kind: kind))
+    }
+}

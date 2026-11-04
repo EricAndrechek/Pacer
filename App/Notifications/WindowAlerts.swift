@@ -33,10 +33,12 @@ extension NotificationCoordinator {
             identifier: Self.muteAction, title: "Mute until reset", options: [],
             icon: UNNotificationActionIcon(systemImageName: "bell.slash"))
         center.setNotificationCategories([
+            // `.customDismissAction` so a dismissed alert reaches `didReceive`
+            // (`notification_action` dismiss); it changes nothing on screen.
             UNNotificationCategory(identifier: Self.windowCategory, actions: [mute, open],
-                                   intentIdentifiers: [], options: []),
+                                   intentIdentifiers: [], options: [.customDismissAction]),
             UNNotificationCategory(identifier: Self.generalCategory, actions: [open],
-                                   intentIdentifiers: [], options: []),
+                                   intentIdentifiers: [], options: [.customDismissAction]),
         ])
     }
 
@@ -46,14 +48,14 @@ extension NotificationCoordinator {
     /// account's window showed before. `dedupKey` is only for the log line,
     /// which used to be the identifier and so said which threshold and cycle
     /// fired; it still should.
-    func postWindowAlert(_ content: UNMutableNotificationContent, windowKey: String,
-                         resetsAt: Date?, dedupKey: String) async {
+    func postWindowAlert(kind: AnalyticsEvent.NotificationKind, _ content: UNMutableNotificationContent,
+                         windowKey: String, resetsAt: Date?, dedupKey: String) async {
         content.categoryIdentifier = Self.windowCategory
         content.userInfo = AlertSlot.userInfo(windowKey: windowKey, window: Self.window(of: windowKey),
                                               resetsAt: resetsAt)
         let request = UNNotificationRequest(
             identifier: AlertSlot.identifier(windowKey: windowKey), content: content, trigger: nil)
-        await post(request, logAs: dedupKey)
+        await post(request, logAs: dedupKey, kind: kind, window: Self.window(of: windowKey))
     }
 
     /// Take a window's alert down and end its mute: the window reset, so
@@ -146,11 +148,16 @@ final class AlertResponder: NSObject, UNUserNotificationCenterDelegate, Sendable
             switch action {
             case NotificationCoordinator.muteAction:
                 TelemetryCounters.add("ui.alert.mute")
+                Analytics.capture(.notificationAction(.mute, window: windowKey))
                 // The test alert carries no window: nothing to mute.
                 if let windowKey { NotificationCoordinator.shared.mute(windowKey: windowKey, resetsAt: resetsAt) }
             case NotificationCoordinator.openAction, UNNotificationDefaultActionIdentifier:
                 TelemetryCounters.add(action == UNNotificationDefaultActionIdentifier ? "ui.alert.click" : "ui.alert.open")
+                Analytics.capture(.notificationAction(
+                    action == UNNotificationDefaultActionIdentifier ? .click : .open, window: windowKey))
                 NotificationCenter.default.post(name: .pacerOpenMainWindow, object: nil)
+            case UNNotificationDismissActionIdentifier:
+                Analytics.capture(.notificationAction(.dismiss, window: windowKey))
             default:
                 break
             }

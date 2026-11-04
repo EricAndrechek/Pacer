@@ -1,4 +1,140 @@
-# Telemetry plan: Sentry crash reports + usage data
+# Telemetry plan: Sentry crash reports + PostHog usage data
+
+**Since 2026-11-03 (two tools, two toggles):** Sentry carries crashes, hangs,
+MetricKit and performance; PostHog carries usage data. The current toggle
+model, migration and full PostHog event list are in "Two toggles" and
+"PostHog" below; older sections are kept as the record of how it got here, and
+where they say "Share usage data" about Sentry, read "Crash reports and
+performance".
+
+## Two toggles
+
+Settings → Privacy, card "Sharing with Pacer", both on by default, both read on
+every send (`TelemetryConsent.state`):
+
+| Toggle | Key | Tool | Covers |
+| --- | --- | --- | --- |
+| Crash reports and performance | `pacer.telemetry.crashReports` | Sentry | crashes, hangs, MetricKit, problem reports, performance metrics and spans, forecast accuracy, release-health sessions, the minimal check-in |
+| Usage data | `pacer.telemetry.usageData` | PostHog | every event in "PostHog" |
+
+"Performance" inside the first toggle is `TelemetryConsent.State.performance`:
+the crash toggle, unless the migration hold is set.
+
+**Migration (one time, `pacer.telemetry.migratedTwoToggles`).** In the first
+release the usage key also covered Sentry's performance data. If it was
+explicitly off at upgrade, `pacer.telemetry.performanceHeld` is set: PostHog
+stays off (same key) and Sentry sends only crashes, hangs, MetricKit and
+problem reports (no metrics, spans, sessions or check-in). The hold ends the
+first time the user changes either Privacy toggle. Matrix (old crash × old
+usage → crashes / performance / usage): absent or on × absent or on → on/on/on;
+on or absent × off → on/off/off; off × anything → off/off/(usage as stored).
+Tests: `TelemetryConsentTests`.
+
+**What moved from Sentry to PostHog (2026-11-03):**
+- the check-in snapshot's usage fields: `settings.*`, `clients.*`,
+  `accounts.*`, `usage.*` (peak bands, hit/forecast flags, models used, token
+  magnitude), `widgets.*`, `lifecycle.*`, `env.*` beyond macOS and model,
+  `install.*`, `models.present`, `counter.*`;
+- the usage counters as Sentry metrics: `ui.*` (tabs, menu, window, modal,
+  report problem, alert clicks; not `ui.click.delay.*`), `intent.*`,
+  `api.route.*` (`CounterRouting.isUsage`).
+
+**What Sentry keeps:** crashes, hangs, MetricKit, problem reports, sessions,
+the `pacer.checkin` span and `checkin.snapshot` metric with only
+`checkin.day`, `env.macos`, `env.model`, `env.model_name`, `build.config` (the
+release is the version), all performance metrics and spans (stalls, click
+delay, slow scans, rebuilds, downloads, arena passes, CLI durations, widget
+timeline times, `energy.cpu_seconds`), forecast accuracy, and the health
+counters (`data.*`, `oauth.*`, `cred.*`, `telemetry.*`, `main_thread.*`,
+`api.snapshot_ms.*`, `ui.click.delay.*`).
+
+## PostHog
+
+**Client.** Our own, `App/Telemetry/PostHogClient.swift`: an on-disk queue
+(App Group `PostHog/queue.json`, at most 1,000 events) posted to
+`<host>/batch/` in batches of 100, 30 s after the first queued event or at
+once past 20; no timer while the queue is empty; 2xx or a non-429 4xx removes a
+batch, anything else backs off (5 min doubling to 1 h); one bounded (2 s)
+send on quit; the toggle going off discards the queue. Not posthog-ios: its
+SPM package supports macOS but links a vendored PLCrashReporter (a second
+crash reporter beside Sentry's), libwebp for session replay, and has
+swizzling and remote-config / feature-flag fetches on by default; we would
+still have to wrap every call for the caps, the scrubber, the live toggle and
+per-event timestamps. So: no session recording, no autocapture, no surveys or
+feature flags, no SDK lifecycle events; every event below is ours.
+
+**Config.** `PacerPostHogToken` / `PacerPostHogHost` in Info.plist from
+`PACER_POSTHOG_TOKEN` / `PACER_POSTHOG_HOST` in `project.yml` (the token is
+public by design, like the DSN; either empty → no PostHog). GeoIP from the
+request IP is wanted and the project keeps anonymize_ips off.
+
+**Identity.** `distinct_id` = Sentry's install id (`INSTALLATION` in
+Sentry's App Group cache folder; created in Sentry's format if Sentry has
+not run, `AnalyticsIdentity`), so one Mac is the same in both tools.
+
+**Every event** carries `distinct_id`, `$lib` (`pacer-macos`),
+`$lib_version`, `$os`, `$os_version`, `$app_version`, `$app_build`,
+`build.config` (`debug` / `release`; the maintainer's Mac is filterable),
+`$process_person_profile`.
+
+**Gates and caps.** `LaunchMode.isNormalLaunch` and not `PACER_TELEMETRY=off`
+(no PostHog in tests, renders, probes, self-tests); the Usage data toggle on
+every capture and every send; `TelemetryBudget.takeAnalytics`: 500 events a
+day per Mac (debug 100), 100 per event name (debug 30), `tab_viewed` and
+`menubar_opened` 200 (debug 50); `daily_checkin` and `widget_inventory`
+exempt. Drops counted as `telemetry.capped.analytics` and
+`telemetry.capped.analytics.<name>`, which the next check-in carries.
+
+**Cleaning** (`AnalyticsPayload`, the last step before the queue): keys naming
+forbidden data are dropped (`email`, `path`, `prompt`, `account_id`,
+`org_id`, `project`, `cost_usd`, `message`, …); strings go through
+`TelemetryScrubber`, then UUIDs → `<id>`, file paths → `<path>`, 200 chars
+max. Constructors (`AnalyticsEvents.swift`) take enums; names outside a known
+list become `other`, free strings are tokenized (`[a-z0-9_.:+-]`).
+
+**Person properties** (`$set`) on `app_launched` and `daily_checkin`:
+`version`, `build.config`, `macos`, `menu_bar.shown`, `menu_bar.chips`
+(built-in chips `+`-joined, `scoped` for any per-model chip, `hidden`),
+`menu_bar.icon_style`, `menu_bar.icon_driver` (window kind),
+`toggles.crash_reports`, `toggles.performance`, `toggles.usage_data`; on
+`daily_checkin` also `accounts.count`, `accounts.plans`, `install.age_days`,
+`env.model`, `env.model_name`; on `widget_inventory` `widgets.count`,
+`widgets.kinds`, `widgets.families`. `$set_once`: `install.first_seen`.
+
+**Events** (all fire on a user action or once a day; nothing per scan cycle,
+frame or forecast):
+
+| Event | Where | Properties |
+| --- | --- | --- |
+| `app_launched` | `applicationDidFinishLaunching` | `origin`: `login_item`, `manual`, `after_update`, `other` |
+| `app_quit` | terminate path | `uptime_minutes` |
+| `update_installed` | first launch on a new version | `from_version`, `to_version` (digits and dots only) |
+| `dashboard_opened` | dashboard window becomes visible | `trigger`: `menu`, `hotkey`, `notification`, `settings`, `widget`, `launch`, `dock`, `other` |
+| `dashboard_closed` | window closed or hidden by the hotkey | `open_seconds` (coarse) |
+| `tab_viewed` | on leaving a tab, or closing on it | `tab` (`dashboard`, `history`, `projects`, `models`, `settings`), `dwell_seconds` |
+| `detail_opened` | modal root set or pushed; each sheet/popover appears | `which`: `day`, `project`, `session`, `projection` (prediction details / compare models), `alias_manager`, `alias_editor`, `collections_manager`, `collection_editor`, `bulk_merge`, `chart_share`; `pushed` |
+| `control_changed` | card controls (`AnalyticsSettings` watch list, plus the project budget toggle) | `card`, `control`, `value`: History/Models/Projects `range` (`7d`…`all`), Models `grouping`, heatmap `metric`, table `sort` columns, toolbar `account_scope` (`all` / `one`, never the id), `project_budget` `enabled` |
+| `export_used` | after a successful export | `flavor`: `daily_totals_csv`, `daily_by_model_csv`, `project_totals_csv`, `chart_image_copy`, `chart_image_save`, `chart_image_share` |
+| `report_problem_opened` | Report a Problem window | `from`: `help_menu`, `status_menu`, `settings` |
+| `setting_changed` | `AnalyticsSettings` watch list | `setting`; `value` only for bools and fixed sets (icon style, alert source, cost mode, time range, chips summary, icon driver as window kind); thresholds, ports, hours send the key alone; tokens, hosts and paths are not watched |
+| `menubar_opened` | `menuWillOpen` | — |
+| `menubar_item_clicked` | status menu items | `item`: `open_pacer`, `settings`, `report_problem`, `quit` |
+| `menubar_context_action` | defined, not fired: the status item has no right-click menu today | `item` |
+| `widget_inventory` | daily check-in, `WidgetCenter.getCurrentConfigurations` | `widgets`: list of {`kind`, `family`, `primary_window` / `secondary_window` (window kind or `default`), `range`, `pinned_project` (bool)}; `count`; `refreshes.<Kind>` (yesterday's granted timelines, `WidgetRefreshLog`) |
+| `widget_tapped` | app opened by `pacer://widget?kind=&family=` (widgets carry `widgetURL`) | `kind`, `family` |
+| `cli_command` | daily check-in, from `CLIRunLog`, timestamp = when it ran | `subcommand`, `flags` (names only), `outcome` (`ok`, `failure`, `misconfigured`, `hung`, `other`), `exit_code` (other only), `duration_bucket`, `source` (`api`/`offline`/`none`), `sample_weight`; at most 100 a day, evenly thinned |
+| `shortcut_run` | each App Intent's `perform` | `intent` (struct name, allow-listed) |
+| `api_request` | daily, tallied per route and client | `endpoint` (allow-listed route), `client` (family from User-Agent: `curl`, `python`, `prometheus`, …; the header is never sent), `count` |
+| `notification_shown` | after a banner is posted | `kind` (`threshold`, `reset`, `burn_rate`, `global_reset`, `daily_cost`, `project_budget`, `custom_rule`, `daily_summary`, `test`), `window` (kind) |
+| `notification_action` | notification response | `action`: `mute`, `open`, `click`, `dismiss`; `window` |
+| `daily_checkin` | daily check-in | every field the Sentry `checkin.snapshot` carried until 2026-11 (settings, clients, accounts and plans, usage bands, lifecycle, environment, install, widgets, models present, `counter.*`) |
+
+**Doors.** PacerCore code calls `Analytics.capture` (no-op until the app
+installs `PostHogAnalyticsSink`). The widget and the CLI never link PostHog:
+the widget's taps arrive as URLs and its refreshes through `WidgetRefreshLog`;
+the CLI's runs through `CLIRunLog` (start lines carry flag names,
+`CLIRunLog.flagNames`, known names only).
+
 
 Status: PLAN, not built. Branch `exp/sentry-telemetry`, rebased on main aa7fbf7a (2026-11-02). Written 2026-10-21 from a code survey of
 this tree, sentry-cocoa 9.30 source, Sentry docs, and live tests against the `ericandrechek/pacer`
@@ -84,7 +220,7 @@ Debug is `#if DEBUG` (`build.config` debug).
   lock, so a feedback sent by the CLI at the instant the app persists can lose
   one count. Harmless at five a day.
 
-## Toggle mapping
+## Toggle mapping (first release; superseded by "Two toggles")
 
 - **Send crash reports**: crashes (signals, Mach exceptions, uncaught NSExceptions), app hangs,
   MetricKit hang/CPU/disk-write diagnostics, problem reports (in-app and `pacer feedback`).

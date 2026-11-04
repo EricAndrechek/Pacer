@@ -560,6 +560,7 @@ struct PaceChartWidgetView: View {
         .padding(WidgetStyle.smallPad)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .containerBackground(widgetCardBackground, for: .widget)
+        .pacerWidgetTapURL(WidgetKinds.paceChart)
     }
 
     @ViewBuilder
@@ -588,6 +589,7 @@ struct PaceChartWidgetView: View {
         .padding(WidgetStyle.mediumPad)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .containerBackground(widgetCardBackground, for: .widget)
+        .pacerWidgetTapURL(WidgetKinds.paceChart)
     }
 
     @ViewBuilder
@@ -621,6 +623,7 @@ struct PaceChartWidgetView: View {
         .padding(WidgetStyle.largePad)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .containerBackground(widgetCardBackground, for: .widget)
+        .pacerWidgetTapURL(WidgetKinds.paceChart)
     }
 
     @ViewBuilder

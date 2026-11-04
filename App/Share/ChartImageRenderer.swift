@@ -62,17 +62,20 @@ enum ChartImageExporter {
     /// Prompt for a location and write the PNG, then reveal it in Finder
     /// — matching the post-save behavior of Preview / Numbers and of
     /// Pacer's own CSV export.
-    static func savePNG(_ data: Data, suggestedName: String) {
+    /// True when the file was written.
+    @discardableResult
+    static func savePNG(_ data: Data, suggestedName: String) -> Bool {
         let panel = NSSavePanel()
         panel.nameFieldStringValue = suggestedName
         panel.allowedContentTypes = [.png]
         panel.canCreateDirectories = true
         panel.title = "Export chart image"
         panel.message = "Choose where to save the PNG."
-        guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard panel.runModal() == .OK, let url = panel.url else { return false }
         do {
             try data.write(to: url)
             NSWorkspace.shared.activateFileViewerSelecting([url])
+            return true
         } catch {
             let alert = NSAlert()
             alert.alertStyle = .warning
@@ -80,6 +83,7 @@ enum ChartImageExporter {
             alert.informativeText = "Couldn't write image: \(error.localizedDescription)"
             alert.addButton(withTitle: "OK")
             alert.runModal()
+            return false
         }
     }
 }

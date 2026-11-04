@@ -185,6 +185,8 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // reported. The diagnostic modes returned above, and the controller
         // checks `LaunchMode.isNormalLaunch` itself as well.
         TelemetryController.shared.startIfAllowed()
+        // PostHog usage events (the "Usage data" toggle), beside Sentry.
+        AnalyticsController.shared.startIfAllowed()
         do {
             container = try PacerStore.makeModelContainer()
         } catch {
@@ -460,7 +462,10 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NotificationCenter.default.addObserver(
             forName: .pacerOpenMainWindow, object: nil, queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { _ = self?.ensureMainWindowVisible() }
+            MainActor.assumeIsolated {
+                AnalyticsUsage.shared.nextDashboardTrigger = .notification
+                _ = self?.ensureMainWindowVisible()
+            }
         }
         // If the bundle was just replaced under us (Sparkle auto-update
         // or `make install`), the old widget extension is still running
@@ -473,6 +478,7 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Telemetry services; each is a no-op unless TelemetryController is running.
         DailyCheckIn.shared.start(container: container, engines: backgroundService.engines)
         CrashReportForwardingService.shared.start()
+        AnalyticsUsage.shared.appLaunched(loginOrigin: DailyCheckIn.launchOrigin)
         // Logs the login-item status every launch and restores a registration
         // macOS dropped against the user's recorded choice.
         LoginItemController.reconcileAtLaunch()
@@ -505,11 +511,24 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         Task { @MainActor in
             await backgroundService.stop()
             await NotificationCoordinator.shared.notifyCollectionPaused()
+            AnalyticsUsage.shared.appQuit()
             TelemetryController.shared.prepareForTermination()
+            AnalyticsController.shared.prepareForTermination()
             DailyCheckIn.markCleanExit()
             NSApp.reply(toApplicationShouldTerminate: true)
         }
         return .terminateLater
+    }
+
+    /// A tapped widget (`WidgetTapURL`): count it, then do what a tap did
+    /// before widgets carried a URL, open the dashboard.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls {
+            guard let tap = WidgetTapURL.parse(url) else { continue }
+            Analytics.capture(.widgetTapped(kind: tap.kind, family: tap.family))
+            AnalyticsUsage.shared.nextDashboardTrigger = .widget
+            ensureMainWindowVisible()
+        }
     }
 
     /// macOS sends this when the user clicks the Dock icon (only
@@ -521,7 +540,10 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         _ sender: NSApplication,
         hasVisibleWindows: Bool
     ) -> Bool {
-        true
+        if !hasVisibleWindows, [.other, .launch].contains(AnalyticsUsage.shared.nextDashboardTrigger) {
+            AnalyticsUsage.shared.nextDashboardTrigger = .dock
+        }
+        return true
     }
 
     /// Don't terminate when the last window closes — the whole point
@@ -652,6 +674,7 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 Self.placeDashboardWindow(window)
                 if MainWindowPlacement.isDashboard(window), window.isVisible {
                     MainWindowPlacement.wasOpen = true
+                    AnalyticsUsage.shared.dashboardShown()
                 }
             }
         }
@@ -699,6 +722,7 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 // relaunch — only one they left open comes back.
                 if let window, MainWindowPlacement.isDashboard(window) {
                     MainWindowPlacement.wasOpen = false
+                    AnalyticsUsage.shared.endDashboard()
                 }
             }
         }
@@ -1096,9 +1120,10 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let quitItem = NSMenuItem(
             title: "Quit Pacer",
-            action: #selector(NSApplication.terminate(_:)),
+            action: #selector(menuQuit),
             keyEquivalent: "q"
         )
+        quitItem.target = self
         menu.addItem(quitItem)
 
         // No icons on these three, in principle: a deliberate, consistent
@@ -1127,6 +1152,7 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func menuWillOpen(_ menu: NSMenu) {
         StatusMenuOpening.shared.willOpen()
         TelemetryCounters.add("ui.menu.open")
+        Analytics.capture(.menubarOpened())
         guard let view = statusMenuContentController?.view else { return }
         view.layoutSubtreeIfNeeded()
         let fitting = view.fittingSize
@@ -1201,7 +1227,14 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func menuOpenMainWindow() {
         TelemetryCounters.add("ui.menu.item.open_pacer")
+        Analytics.capture(.menubarItemClicked(.openPacer))
+        AnalyticsUsage.shared.nextDashboardTrigger = .menu
         ensureMainWindowVisible()
+    }
+
+    @objc private func menuQuit() {
+        Analytics.capture(.menubarItemClicked(.quit))
+        NSApp.terminate(nil)
     }
 
     /// Register the global hotkey (⌥⌘P by default) and observe its
@@ -1233,21 +1266,26 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
            window.isVisible,
            NSApp.isActive {
             window.orderOut(nil)
+            AnalyticsUsage.shared.endDashboard()
             // Closing the last window flips us back to .accessory
             // via the willCloseNotification observer; nothing else
             // to do here.
             return
         }
+        AnalyticsUsage.shared.nextDashboardTrigger = .hotkey
         ensureMainWindowVisible()
     }
 
     @objc private func menuReportProblem() {
         TelemetryCounters.add("ui.menu.item.report_problem")
-        ReportProblemWindow.shared.show()
+        Analytics.capture(.menubarItemClicked(.reportProblem))
+        ReportProblemWindow.shared.show(from: .statusMenu)
     }
 
     @objc private func menuOpenSettings() {
         TelemetryCounters.add("ui.menu.item.settings")
+        Analytics.capture(.menubarItemClicked(.settings))
+        AnalyticsUsage.shared.nextDashboardTrigger = .settings
         let wasAlreadyOpen = ensureMainWindowVisible()
         if wasAlreadyOpen {
             // ContentView is already mounted and subscribed via

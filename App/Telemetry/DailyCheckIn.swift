@@ -7,10 +7,17 @@ import ServiceManagement
 import SwiftData
 import WidgetKit
 
-/// The daily check-in: one `app.heartbeat` span per Mac per local day, plus
-/// the metrics that only make sense once a day (CLI runs, forecast accuracy,
-/// counters). Plan and the approved field list: docs/telemetry-plan.md
-/// ("Signals", "Metrics catalog").
+/// The daily check-in, once per Mac per local day, to both tools:
+/// - **Sentry** ("Crash reports and performance"): a minimal `pacer.checkin`
+///   span and `checkin.snapshot` metric (day, macOS, Mac model, build config;
+///   the release is the version) so crash rates per version have a
+///   denominator, plus the performance metrics that only make sense once a
+///   day (CLI durations, widget build times, energy, forecast accuracy) and
+///   the health counters.
+/// - **PostHog** ("Usage data"): `daily_checkin` with the full approved field
+///   list and person properties, `widget_inventory`, the day's `cli_command`
+///   runs and `api_request` tallies.
+/// Plan and field lists: docs/telemetry-plan.md ("Signals", "PostHog").
 ///
 /// **When**: at launch if nothing was sent today (after a short settle delay so
 /// it never competes with startup), and on the `PacerToday` day rollover. No
@@ -45,7 +52,7 @@ final class DailyCheckIn {
     // MARK: - Start
 
     func start(container: ModelContainer, engines: EngineHost) {
-        guard !started, TelemetryController.shared.isRunning else { return }
+        guard !started, Self.anyRunning else { return }
         started = true
         self.container = container
         self.engines = engines
@@ -55,6 +62,11 @@ final class DailyCheckIn {
             try? await Task.sleep(for: Self.settleDelay)
             await self?.runIfDue()
         }
+    }
+
+    /// Sentry or PostHog started (each checks its own toggle on every send).
+    private static var anyRunning: Bool {
+        TelemetryController.shared.isRunning || AnalyticsController.shared.isRunning
     }
 
     private func trackDay() {
@@ -85,7 +97,7 @@ final class DailyCheckIn {
     /// How this process was launched. Captured in `applicationWillFinishLaunching`
     /// because `currentAppleEvent` is only the launch event that early; read
     /// by `recordLaunch` once telemetry has started. Main-thread only.
-    private static var launchOrigin = LaunchOrigin.manual
+    private(set) static var launchOrigin = LaunchOrigin.manual
 
     static func captureLaunchOrigin() {
         let event = NSAppleEventManager.shared().currentAppleEvent
@@ -108,8 +120,9 @@ final class DailyCheckIn {
     // MARK: - Send
 
     private func runIfDue() async {
-        guard !sending, TelemetryController.shared.isRunning, TelemetryController.usageAllowed,
-              let container, let engines else { return }
+        let sentry = TelemetryController.shared.isRunning && TelemetryController.performanceAllowed
+        let posthog = AnalyticsController.shared.isRunning && TelemetryController.analyticsAllowed
+        guard !sending, sentry || posthog, let container, let engines else { return }
         let store = PacerPreferences.store
         let today = PacerToday.shared.key
         guard store.string(forKey: Self.lastDayKey) != today else { return }
@@ -131,7 +144,8 @@ final class DailyCheckIn {
                                                  cpuBefore: cpuSecondsAtLastCheckIn)
         cpuSecondsAtLastCheckIn = Self.cpuSeconds()
         let widgetsStart = Date()
-        let widgets = await Self.installedWidgets()
+        let installed = await Self.installedWidgets()
+        let widgets = Self.widgetAttributes(installed)
         let widgetsEnd = Date()
         let counters = TelemetryCounters.drain()
 
@@ -152,16 +166,20 @@ final class DailyCheckIn {
         // models ever earn their download (docs/telemetry-plan.md).
         attributes["models.present"] = .string(ArenaWeightStore.presentModelIds().joined(separator: ","))
 
-        // A real span with real children, like the scan and engine spans that
-        // do reach Sentry: a zero-length childless transaction was dropped on
-        // its way there. The children are the two slow parts of gathering.
-        // The full snapshot goes as one metric: metrics take attributes and
-        // can be grouped and counted per Mac (count_unique(user.id)). The
-        // transaction carries only a small core: with ~60 attributes the
-        // installed build's heartbeat never reached Sentry (2026-11-02) while
-        // every small transaction and every metric did.
-        Telemetry.count("checkin.snapshot", 1, attributes: attributes)
+        // PostHog: the whole approved snapshot, with person properties. Sent
+        // before the Sentry part, which awaits the forecast engines.
+        Self.sendAnalytics(attributes: attributes, installed: installed,
+                           refreshes: gathered.widgetRefreshes, cliRuns: gathered.cliRuns,
+                           counters: counters)
+
+        // Sentry, minimal since 2026-11 (usage moved to PostHog): the
+        // snapshot metric and the span carry only `coreKeys`. A real span with
+        // real children, like the scan and engine spans that do reach Sentry:
+        // a zero-length childless transaction was dropped on its way there.
+        // The metric is what `count_unique(user.id)` cannot do on spans' side
+        // and vice versa, so both stay.
         let core = attributes.filter { Self.coreKeys.contains($0.key) }
+        Telemetry.count("checkin.snapshot", 1, attributes: core)
         Telemetry.span(.init(
             // Not "app.*": Sentry treats app-start-style ops specially, and the
             // "app.heartbeat" transaction never arrived while every other did.
@@ -171,7 +189,9 @@ final class DailyCheckIn {
                 .init(op: "checkin.widgets", name: "checkin.widgets", start: widgetsStart, end: widgetsEnd),
                 .init(op: "checkin.gather", name: "checkin.gather", start: storeStart, end: storeEnd),
             ]))
-        for (key, n) in counters { Telemetry.count(key, n) }
+        // Health counters only; usage counters (tabs, menus, Shortcuts, API
+        // routes) go to PostHog in `daily_checkin`.
+        for (key, n) in counters where !CounterRouting.isUsage(key) { Telemetry.count(key, n) }
         if let cpu = lifecycle["energy.cpu_seconds"], case .double(let seconds) = cpu {
             Telemetry.gauge("energy.cpu_seconds", seconds, unit: .second)
         }
@@ -187,15 +207,43 @@ final class DailyCheckIn {
         await sendForecastAccuracy(engines: engines, accounts: gathered.accounts)
     }
 
-    /// The attributes the transaction carries (the snapshot metric carries
-    /// all). Span-only because `count_unique(user.id)` works on spans, not
-    /// metrics, so whatever the dashboard groups Macs by is here. Keep it
-    /// under ~16: ~60 attributes never reached Sentry.
+    /// What Sentry's check-in carries (span and metric): the minimal set
+    /// that gives crash rates per version a denominator. Everything else in
+    /// the snapshot is usage data and goes to PostHog only.
     private static let coreKeys: Set<String> = [
-        "checkin.day", "env.macos", "env.model", "env.model_name", "settings.cost_mode",
-        "accounts.count", "accounts.plans", "usage.seven_day.peak_band", "usage.five_hour.peak_band",
-        "install.first_seen", "install.age_days", "build.config",
+        "checkin.day", "env.macos", "env.model", "env.model_name", "build.config",
     ]
+
+    // MARK: - PostHog
+
+    nonisolated private static let cliCursorKey = "pacer.analytics.cli.forwardedUntil"
+
+    /// `daily_checkin`, `widget_inventory`, `cli_command` and `api_request`.
+    /// Each goes through `Analytics`, whose sink checks the usage toggle and
+    /// the caps; the CLI cursor advances either way, so runs made while usage
+    /// data was off are never sent later.
+    private static func sendAnalytics(attributes: Telemetry.Attributes, installed: [WidgetInventory.Item],
+                                      refreshes: [String: Int], cliRuns: [CLIRunLog.Run],
+                                      counters: [String: Int]) {
+        var person = AnalyticsUsage.personProperties()
+        for key in ["accounts.count", "accounts.plans", "install.age_days", "env.model", "env.model_name"] {
+            if let v = attributes[key] { person[key] = v.analyticsValue }
+        }
+        var setOnce: Analytics.Properties = [:]
+        if let first = attributes["install.first_seen"] { setOnce["install.first_seen"] = first.analyticsValue }
+        Analytics.capture(.dailyCheckin(attributes: attributes, person: person, setOnce: setOnce))
+        Analytics.capture(WidgetInventory.event(installed, refreshes: refreshes))
+        for event in AnalyticsEvent.cliCommands(cliRuns) { Analytics.capture(event) }
+        let now = Date()
+        for (key, n) in counters.sorted(by: { $0.key < $1.key })
+        where key.hasPrefix(PacerHTTPServer.analyticsPrefix) && n > 0 {
+            let parts = key.dropFirst(PacerHTTPServer.analyticsPrefix.count).split(separator: "|", maxSplits: 1)
+            guard parts.count == 2 else { continue }
+            let route = String(parts[0])
+            let endpoint = route == "other" ? "other" : "/" + route.replacingOccurrences(of: ".", with: "/")
+            Analytics.capture(.apiRequest(endpoint: endpoint, client: String(parts[1]), count: n, day: now))
+        }
+    }
 
     // MARK: - Settings snapshot
 
@@ -273,13 +321,39 @@ final class DailyCheckIn {
 
     // MARK: - Widgets
 
-    private static func installedWidgets() async -> Telemetry.Attributes {
-        let names: [String] = await withCheckedContinuation { continuation in
+    /// Every placed widget with its configuration as our own words: window
+    /// kinds, lookback range, whether a project is pinned (never which).
+    private static func installedWidgets() async -> [WidgetInventory.Item] {
+        await withCheckedContinuation { continuation in
             WidgetCenter.shared.getCurrentConfigurations { result in
                 let list = (try? result.get()) ?? []
-                continuation.resume(returning: list.map { "\($0.kind):\($0.family)" }.sorted())
+                continuation.resume(returning: list.map { info in
+                    WidgetInventory.Item(kind: info.kind, family: "\(info.family)", fields: configFields(info))
+                })
             }
         }
+    }
+
+    nonisolated private static func configFields(_ info: WidgetInfo) -> [String: String] {
+        var f: [String: String] = [:]
+        if let i = info.widgetConfigurationIntent(of: PaceChartConfigurationIntent.self) {
+            f["primary_window"] = WidgetInventory.windowField(i.primaryWindow?.id)
+            f["secondary_window"] = WidgetInventory.windowField(i.secondaryWindow?.id)
+        } else if let i = info.widgetConfigurationIntent(of: PaceGaugesConfigurationIntent.self) {
+            f["primary_window"] = WidgetInventory.windowField(i.primaryWindow?.id)
+            f["secondary_window"] = WidgetInventory.windowField(i.secondaryWindow?.id)
+        } else if let i = info.widgetConfigurationIntent(of: DailyChartConfigurationIntent.self) {
+            f["range"] = WidgetInventory.rangeField(i.range.rawValue)
+        } else if let i = info.widgetConfigurationIntent(of: TopProjectsConfigurationIntent.self) {
+            f["range"] = WidgetInventory.rangeField(i.range.rawValue)
+            f["pinned_project"] = i.pinnedProject == nil ? "false" : "true"
+        }
+        return f
+    }
+
+    /// The check-in's `widgets.*` fields (kind:family pairs, count).
+    private static func widgetAttributes(_ items: [WidgetInventory.Item]) -> Telemetry.Attributes {
+        let names = items.map { "\($0.kind):\($0.family)" }.sorted()
         return ["widgets.installed": .string(names.joined(separator: ",")),
                 "widgets.count": .int(names.count)]
     }
@@ -289,6 +363,10 @@ final class DailyCheckIn {
     private struct Gathered: Sendable {
         var attributes: Telemetry.Attributes
         var cli: [String: CLIRunLog.CommandStats]
+        /// Runs since the last forward, for PostHog's `cli_command`.
+        var cliRuns: [CLIRunLog.Run]
+        /// Yesterday's granted timeline refreshes per widget kind.
+        var widgetRefreshes: [String: Int]
         /// Account id -> (1-based index, plan tier). Lives for this send only.
         var accounts: [String: AccountLabel]
     }
@@ -376,8 +454,18 @@ final class DailyCheckIn {
         a["build.config"] = .string(TelemetryController.buildConfig)
         for (k, v) in installAttributes(earliestAccount: accounts.first?.firstSeenAt) { a[k] = v }
 
-        let cli = CLIRunLog.summary(CLIRunLog.lines(), since: startOfYesterday, until: startOfToday)
-        return Gathered(attributes: a, cli: cli, accounts: labels)
+        let lines = CLIRunLog.lines()
+        let cli = CLIRunLog.summary(lines, since: startOfYesterday, until: startOfToday)
+        // Every run since the last forward (yesterday on a first run), up to
+        // the start of today, so a run is forwarded once.
+        let store = PacerPreferences.store
+        let cursor = (store.object(forKey: cliCursorKey) as? Double).map(Date.init(timeIntervalSince1970:))
+        let runs = CLIRunLog.runs(lines, since: max(cursor ?? startOfYesterday, startOfYesterday.addingTimeInterval(-6 * 86_400)),
+                                  until: startOfToday)
+        store.set(startOfToday.timeIntervalSince1970, forKey: cliCursorKey)
+        let refreshes = WidgetInventory.refreshCounts(WidgetRefreshLog.entries(), since: startOfYesterday,
+                                                      until: startOfToday)
+        return Gathered(attributes: a, cli: cli, cliRuns: runs, widgetRefreshes: refreshes, accounts: labels)
     }
 
     nonisolated private static func environment() -> Telemetry.Attributes {

@@ -13,10 +13,12 @@ import Foundation
 ///
 /// **What a line holds**: time, `start`/`end`, a random run id that pairs
 /// them, the subcommand name, and on `end` the exit code, milliseconds, and
-/// whether it answered from the app's local API or the store directly.
+/// whether it answered from the app's local API or the store directly. A
+/// `start` line may also carry the NAMES of the flags given (`flags=cap,model`,
+/// only names the CLI defines; `flagNames`), never their values.
 /// Never arguments, account names, paths or output.
 ///
-///     2026-11-02T16:03:12.345Z start 9f2c1a04 gate
+///     2026-11-02T16:03:12.345Z start 9f2c1a04 gate flags=cap,model
 ///     2026-11-02T16:03:12.401Z end 9f2c1a04 gate exit=0 ms=56 src=api
 public enum CLIRunLog {
 
@@ -40,6 +42,8 @@ public enum CLIRunLog {
         public let exitCode: Int32?
         public let milliseconds: Int?
         public let source: String?
+        /// Flag names on a `start` line; empty when none were given.
+        public var flags: [String] = []
     }
 
     public static func defaultURL() -> URL? {
@@ -58,15 +62,32 @@ public enum CLIRunLog {
         known.contains(subcommand) ? subcommand : "other"
     }
 
+    /// The names of the flags in `arguments` (`--cap 50 --model opus` gives
+    /// `cap,model`), deduplicated and sorted. A value is never a name: an
+    /// argument that does not start with `-` is skipped, `--x=value` keeps
+    /// `x`, and a name the CLI does not define (or a negative number given
+    /// as a value) becomes `other`. `-h` is `help`.
+    public static func flagNames(_ arguments: [String], known: Set<String>) -> [String] {
+        var names = Set<String>()
+        for arg in arguments where arg.hasPrefix("-") && arg.count > 1 {
+            var name = String(arg.drop { $0 == "-" })
+            if let eq = name.firstIndex(of: "=") { name = String(name[..<eq]) }
+            if name == "h" { name = "help" }
+            names.insert(known.contains(name) ? name : "other")
+        }
+        return names.sorted()
+    }
+
     public static func newRunId() -> String {
         String(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(8)).lowercased()
     }
 
     // MARK: - Writing (CLI process)
 
-    public static func recordStart(runId: String, subcommand: String, at: Date = Date(),
-                                   to url: URL? = defaultURL()) {
-        append("\(stamp.string(from: at)) start \(runId) \(subcommand)", to: url)
+    public static func recordStart(runId: String, subcommand: String, flags: [String] = [],
+                                   at: Date = Date(), to url: URL? = defaultURL()) {
+        let suffix = flags.isEmpty ? "" : " flags=\(flags.joined(separator: ","))"
+        append("\(stamp.string(from: at)) start \(runId) \(subcommand)\(suffix)", to: url)
     }
 
     public static func recordEnd(runId: String, subcommand: String, exitCode: Int32,
@@ -102,7 +123,8 @@ public enum CLIRunLog {
         if kind == .end, fields["exit"] == nil || fields["ms"] == nil { return nil }
         return Line(at: at, kind: kind, runId: String(parts[2]), subcommand: String(parts[3]),
                     exitCode: fields["exit"].flatMap { Int32($0) },
-                    milliseconds: fields["ms"].flatMap { Int($0) }, source: fields["src"])
+                    milliseconds: fields["ms"].flatMap { Int($0) }, source: fields["src"],
+                    flags: fields["flags"].map { $0.split(separator: ",").map(String.init) } ?? [])
     }
 
     public static func lines(at url: URL? = defaultURL()) -> [Line] {
@@ -144,5 +166,47 @@ public enum CLIRunLog {
             out[s.subcommand] = stats
         }
         return out
+    }
+
+    // MARK: - Per-run (PostHog `cli_command`)
+
+    public enum Outcome: String, Sendable { case ok, failure, misconfigured, hung, other }
+
+    public struct Run: Sendable, Equatable {
+        public let at: Date
+        public let subcommand: String
+        public let flags: [String]
+        public let outcome: Outcome
+        /// The exit code when it is not 0, 1 or 4 (gate and wait use 2 and 3
+        /// as answers), else nil.
+        public let exitCode: Int32?
+        public let milliseconds: Int?
+        public let source: String?
+    }
+
+    /// Finished (or hung) runs that started in `[since, until)`, oldest
+    /// first, with the same pairing and hung rule as `summary`.
+    public static func runs(_ lines: [Line], since: Date, until: Date) -> [Run] {
+        var ends: [String: Line] = [:]
+        for l in lines where l.kind == .end { ends[l.runId] = l }
+        var out: [Run] = []
+        for s in lines where s.kind == .start && s.at >= since && s.at < until {
+            if let e = ends[s.runId] {
+                let code = e.exitCode ?? -1
+                let outcome: Outcome = switch code {
+                case 0: .ok
+                case 1: .failure
+                case 4: .misconfigured
+                default: .other
+                }
+                out.append(Run(at: s.at, subcommand: s.subcommand, flags: s.flags, outcome: outcome,
+                               exitCode: outcome == .other ? e.exitCode : nil,
+                               milliseconds: e.milliseconds, source: e.source))
+            } else if until.timeIntervalSince(s.at) >= hungAfter, !longRunning.contains(s.subcommand) {
+                out.append(Run(at: s.at, subcommand: s.subcommand, flags: s.flags, outcome: .hung,
+                               exitCode: nil, milliseconds: nil, source: nil))
+            }
+        }
+        return out.sorted { $0.at < $1.at }
     }
 }

@@ -41,6 +41,10 @@ public final class TelemetryBudget: @unchecked Sendable {  // UserDefaults is th
         case stall = "stall_ms"
         /// Slow-scan traces (a transaction with an extra, tighter cap).
         case slowScan = "slow_scan"
+        /// PostHog events, all names together.
+        case analytics
+        /// PostHog events of one name (`take(.analyticsEvent, name:)`).
+        case analyticsEvent = "analytics_event"
     }
 
     /// Per Mac, per UTC day. Each number is a worst case that is still a small
@@ -65,15 +69,36 @@ public final class TelemetryBudget: @unchecked Sendable {  // UserDefaults is th
         /// The noisiest name by far: ~14,000 in a week from one Debug Mac.
         public var stall: Int
         public var slowScan: Int
+        /// PostHog events per day, all names. PostHog's free tier is 1M
+        /// events a month; 500 a day is ~15k a month per Mac at the very
+        /// worst, and a typical day is a few dozen.
+        public var analytics: Int
+        /// PostHog events of any one name, so one busy surface cannot use
+        /// the whole day.
+        public var analyticsEvent: Int
+        /// The names people repeat most (`hotAnalyticsEvents`).
+        public var analyticsHotEvent: Int
+
+        public init(error: Int, hang: Int, crash: Int, diagnostic: Int, feedback: Int,
+                    transaction: Int, metric: Int, stall: Int, slowScan: Int,
+                    analytics: Int, analyticsEvent: Int, analyticsHotEvent: Int) {
+            self.error = error; self.hang = hang; self.crash = crash
+            self.diagnostic = diagnostic; self.feedback = feedback
+            self.transaction = transaction; self.metric = metric; self.stall = stall
+            self.slowScan = slowScan; self.analytics = analytics
+            self.analyticsEvent = analyticsEvent; self.analyticsHotEvent = analyticsHotEvent
+        }
 
         public static let release = Limits(
             error: 25, hang: 10, crash: 10, diagnostic: 10, feedback: 5,
-            transaction: 150, metric: 300, stall: 100, slowScan: 20)
+            transaction: 150, metric: 300, stall: 100, slowScan: 20,
+            analytics: 500, analyticsEvent: 100, analyticsHotEvent: 200)
         /// Debug builds are a developer's own Mac running every experiment:
         /// tighter, so they stay out of the quota.
         public static let debug = Limits(
             error: 10, hang: 3, crash: 5, diagnostic: 10, feedback: 5,
-            transaction: 40, metric: 60, stall: 20, slowScan: 20)
+            transaction: 40, metric: 60, stall: 20, slowScan: 20,
+            analytics: 100, analyticsEvent: 30, analyticsHotEvent: 50)
 
         func limit(for kind: Kind) -> Int {
             switch kind {
@@ -86,6 +111,8 @@ public final class TelemetryBudget: @unchecked Sendable {  // UserDefaults is th
             case .metric: metric
             case .stall: stall
             case .slowScan: slowScan
+            case .analytics: analytics
+            case .analyticsEvent: analyticsEvent
             }
         }
     }
@@ -97,6 +124,11 @@ public final class TelemetryBudget: @unchecked Sendable {  // UserDefaults is th
     public static let stallMetric = "main_thread.stall_ms"
 
     public static func isExemptTransaction(op: String) -> Bool { op == checkInTransactionOp }
+
+    /// PostHog events that are never capped: one a day each by construction.
+    public static let exemptAnalyticsEvents: Set<String> = ["daily_checkin", "widget_inventory"]
+    /// PostHog events with the higher per-name cap.
+    public static let hotAnalyticsEvents: Set<String> = ["tab_viewed", "menubar_opened"]
     public static func isExemptMetric(_ name: String) -> Bool { name.hasPrefix(checkInMetricPrefix) }
 
     static let defaultsKey = "pacer.telemetry.budget"
@@ -147,6 +179,33 @@ public final class TelemetryBudget: @unchecked Sendable {  // UserDefaults is th
         if !allowed {
             TelemetryCounters.add("telemetry.capped.\(kind.rawValue)")
             if let name { TelemetryCounters.add("telemetry.capped.\(kind.rawValue).\(name)") }
+        }
+        return allowed
+    }
+
+    /// A PostHog event: under its per-name cap AND the all-names cap, both
+    /// counted together or not at all. Exempt names always pass and spend
+    /// nothing. A refusal records `telemetry.capped.analytics` and
+    /// `telemetry.capped.analytics.<name>`.
+    public func takeAnalytics(event name: String) -> Bool {
+        if Self.exemptAnalyticsEvents.contains(name) { return true }
+        let nameKey = "\(Kind.analyticsEvent.rawValue):\(name)"
+        let totalKey = Kind.analytics.rawValue
+        let (allowed, persist) = state.withLock { s -> (Bool, Bool) in
+            roll(&s)
+            let perName = Self.hotAnalyticsEvents.contains(name)
+                ? s.limits.analyticsHotEvent : s.limits.analyticsEvent
+            guard s.counts[nameKey, default: 0] < perName,
+                  s.counts[totalKey, default: 0] < s.limits.analytics else { return (false, false) }
+            s.counts[nameKey, default: 0] += 1
+            s.counts[totalKey, default: 0] += 1
+            s.dirty = true
+            return (true, now().timeIntervalSince(s.lastPersist) >= persistInterval)
+        }
+        if persist { flush() }
+        if !allowed {
+            TelemetryCounters.add("telemetry.capped.analytics")
+            TelemetryCounters.add("telemetry.capped.analytics.\(name)")
         }
         return allowed
     }

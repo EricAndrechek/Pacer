@@ -18,6 +18,17 @@
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
 	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.ericandrechek.pacer.widget</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>pacer</string>
+			</array>
+		</dict>
+	</array>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>LSApplicationCategoryType</key>
@@ -31,6 +42,10 @@
 	<true/>
 	<key>NSHumanReadableCopyright</key>
 	<string>Copyright © 2026 Eric Andrechek</string>
+	<key>PacerPostHogHost</key>
+	<string>$(PACER_POSTHOG_HOST)</string>
+	<key>PacerPostHogToken</key>
+	<string>$(PACER_POSTHOG_TOKEN)</string>
 	<key>PacerSentryDSN</key>
 	<string>$(PACER_SENTRY_DSN)</string>
 	<key>SUAutomaticallyUpdate</key>

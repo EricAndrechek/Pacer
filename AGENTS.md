@@ -227,8 +227,8 @@ These are subtle, easy to miss, and break user-visible numbers:
 
 ## Telemetry — what Pacer may send, and how
 
-Pacer sends crash reports and usage data to its Sentry project, both on by
-default, each with a Settings → Privacy toggle (decided 2026-10-21; plan and
+Pacer sends crash reports and performance data to Sentry and usage data to
+PostHog, both on by default, each with a Settings → Privacy toggle (decided 2026-10-21; plan and
 every signal in `docs/telemetry-plan.md`; README "Privacy" is the short public
 promise). Read this before adding any signal.
 
@@ -244,8 +244,8 @@ promise). Read this before adding any signal.
   enumerable values (model id, window kind, plan tier, phase, version, outcome
   class). Usage levels go in bands (`TelemetryBands`).
 - **Everything leaving goes through `TelemetryScrubber`.** The send hooks in
-  `TelemetryController` and the CLI's feedback path apply it; do not add a send
-  path that skips it.
+  `TelemetryController`, `AnalyticsPayload` and the CLI's feedback path apply
+  it; do not add a send path that skips it.
 - **Only the user's own app sends.** `LaunchMode.isNormalLaunch` gates it:
   screenshot, render, probe and self-test runs, tests, and `PACER_TELEMETRY=off`
   never start Sentry. A new diagnostic mode goes in `LaunchMode`, nowhere else.
@@ -258,6 +258,17 @@ promise). Read this before adding any signal.
 - **The widget and the CLI** report through the App Group: the CLI appends to
   `CLIRunLog`, the widget adds `ms=` to `WidgetRefreshLog`, and the app forwards
   their macOS crash reports (`CrashReportForwarder`). Do not give them the SDK.
+- **PostHog carries usage data** (since 2026-11-03; "Usage data" toggle;
+  Sentry keeps crashes and performance under "Crash reports and
+  performance"; `TelemetryConsent` says what each allows). The door is
+  `Analytics.capture(AnalyticsEvent.…)`: build events with the named
+  constructors (enums, allow-listed words, coarse numbers), fire them on a
+  user action or once a day, never per cycle or frame. The client
+  (`PostHogClient`, our own, no SDK) and anything that knows PostHog exists
+  live only under `App/Telemetry/`; `AnalyticsPayload` cleans every string
+  and `TelemetryBudget.takeAnalytics` caps every event. New settings or card
+  controls are picked up by adding their key to `AnalyticsSettings.watched`,
+  with a value policy; never add a secret, host or path key there.
 - **Changing what is sent** means updating the signal list in
   `docs/telemetry-plan.md` in the same commit. The README "Privacy" section is
   deliberately short (Eric's call, 2026-11-02); touch it only if a new kind of
