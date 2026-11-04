@@ -210,6 +210,21 @@ struct ModelBoardListTests {
         #expect(!ModelBoardList.isRecord(.scoring(done: 1, total: 2, eta: nil)))
     }
 
+    /// A board whose record has no evidence at this point of the window
+    /// (#374): no row claims "within ±0.0%", each shows no number, and they
+    /// stay in the record column, in order by simplicity then name.
+    @Test func aBoardWithNoEvidenceShowsNoNumber() {
+        let rows = [Self.row("a", .noEvidence(cycles: 3)), Self.row("b", .noEvidence(cycles: 3)),
+                    Self.row("c", .noEvidence(cycles: 2))]
+        let board = MeterModelBoard(windowKey: "seven_day", rows: rows, cutFraction: 0.85, spanCycles: 3,
+                                    progress: nil)
+        let texts = board.rows.map { ModelBoardList.statusText(for: $0, spanCycles: board.spanCycles) }
+        #expect(texts == ["—", "—", "—"])
+        #expect(!texts.contains { $0.contains("±") })
+        #expect(board.rows.allSatisfy { ModelBoardList.isRecord($0.status) })
+        #expect(ModelBoardList.sections(board).main.map(\.id) == ["a", "b", "c"])
+    }
+
     /// A model ranked on the previous grading while it is graded anew keeps
     /// its number, and says how far the new grading has come.
     @Test func aModelBeingGradedAnewKeepsItsNumber() {

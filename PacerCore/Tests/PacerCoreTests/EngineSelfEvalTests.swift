@@ -289,4 +289,195 @@ struct EngineSelfEvalTests {
         let acc = await engine.selfEvalAccuracy(surface: EngineSelfEval.rlSurface("seven_day"))
         #expect(acc != nil)
     }
+
+    // MARK: - Settled moments (#374)
+
+    /// `n` completed cycles of `duration` whose meter climbs evenly to
+    /// `final` by `settlesAt` of the window and then sits there: every cut
+    /// after it is a settled moment.
+    private func settlingCycles(_ n: Int, duration: TimeInterval, final: Double, settlesAt: Double,
+                                step: TimeInterval) -> [BurnTrajectory.Cycle] {
+        (0..<n).map { c in
+            let start = Self.now.addingTimeInterval(-Double(n - c) * duration)
+            let reset = start.addingTimeInterval(duration)
+            var samples: [BurnTrajectory.Sample] = []
+            var t = start
+            while t <= reset {
+                let f = t.timeIntervalSince(start) / duration
+                samples.append(.init(at: t, usedPercentage: (final * min(1, f / settlesAt)).rounded()))
+                t = t.addingTimeInterval(step)
+            }
+            return BurnTrajectory.Cycle(samples: samples, cycleStart: start, resetsAt: reset)
+        }
+    }
+
+    /// The engine's methods graded on `cycles`, plus a model that holds the
+    /// reading ("Stays where it is"), simplest of all, graded the same way:
+    /// its shown value is the reading at the cut.
+    private func settlingRecord(_ cycles: [BurnTrajectory.Cycle], window: String) -> [EngineSelfEval.Record] {
+        let graded = EngineSelfEval.newOutcomesRL(window: window, cycles: cycles, activityGrid: [],
+                                                  calendar: Self.utc, existingKeys: [], includeDiurnal: false)
+        var rows = graded.map {
+            EngineSelfEval.Record(method: $0.method, bucket: $0.bucket, periodKey: $0.periodKey,
+                                  predicted: $0.predicted, truth: $0.truth, inputs: $0.inputs, reading: $0.reading)
+        }
+        var moments = Set<String>()
+        for r in rows where moments.insert(r.periodKey + r.bucket).inserted {
+            rows.append(.init(method: "hold", bucket: r.bucket, periodKey: r.periodKey,
+                              predicted: r.reading!, truth: r.truth, reading: r.reading))
+        }
+        return rows
+    }
+
+    private var settlingComplexity: [String: Int] {
+        RateLimitRoster.engineComplexities.merging(["hold": 0]) { a, _ in a }
+    }
+
+    private func rankSettling(_ rows: [EngineSelfEval.Record], weekly: Bool) -> EngineSelfEval.RLRanking {
+        EngineSelfEval.rankRL(rows, complexity: settlingComplexity, weekly: weekly, at: 0.85,
+                              depth: EngineSelfEval.rlDepth(weekly: weekly), tieRelative: 0.05, disagreement: 2)
+    }
+
+    /// Past cycles that reached their final early and sat there; the live
+    /// one is 0.85 of the way through and still climbing. Every graded moment
+    /// near 0.85 is settled, where holding the reading is exactly right
+    /// without forecasting anything. Ranking leaves those out and falls back
+    /// to the open moments at every cut, where the record separates the
+    /// models: the pick extrapolates. A final of 98 is the case where holding
+    /// and clamping to 100 spread exactly 2 points. Five-hour blocks maxed
+    /// early are the same shape, ranked the same way.
+    @Test(arguments: [(window: "seven_day", final: 98.0), (window: "seven_day", final: 100.0),
+                      (window: "five_hour", final: 100.0), (window: "five_hour", final: 98.0)])
+    func settledMomentsDoNotRank(window: String, final: Double) throws {
+        let weekly = window == "seven_day"
+        let duration: TimeInterval = weekly ? 7 * 86_400 : 5 * 3600
+        let cycles = settlingCycles(weekly ? 3 : 8, duration: duration, final: final,
+                                    settlesAt: weekly ? 0.6 : 0.3, step: duration / 56)
+        let rows = settlingRecord(cycles, window: window)
+
+        // The trap: every moment graded near 0.85 is settled, and there
+        // holding the reading is exactly right.
+        let near = rows.filter { $0.method == "hold" && EngineSelfEval.rlCutFraction($0.bucket)! >= 0.7 }
+        #expect(!near.isEmpty && near.allSatisfy { $0.predicted == $0.truth && $0.reading == $0.truth })
+
+        let after = rankSettling(rows, weekly: weekly)
+        let pick = try #require(after.pick)
+        #expect(pick != "hold")
+        #expect(!after.noEvidence)
+        // Holding is ranked on the open moments now, and there it is far off.
+        let hold = try #require(after.standing("hold")?.typicalAbsError)
+        let best = try #require(after.standing(pick)?.typicalAbsError)
+        #expect(hold > 10 && best < hold)
+        // Still the live point's ranking; the open moments it fell back to
+        // are every cut's, alike.
+        #expect(after.at == 0.85)
+    }
+
+    @Test func aMomentIsSettledAtItsFinal() {
+        #expect(EngineSelfEval.isSettled(reading: 98, truth: 98))
+        #expect(EngineSelfEval.isSettled(reading: 99.6, truth: 100))
+        #expect(!EngineSelfEval.isSettled(reading: 97, truth: 98))
+    }
+
+    /// The reading travels with a grade, the arena's and the engine's alike,
+    /// and a row graded before it was recorded takes its moment's from any
+    /// row that has it.
+    @Test func aMomentsReadingComesFromAnyOfItsRows() throws {
+        let cycles = settlingCycles(3, duration: 7 * 86_400, final: 98, settlesAt: 0.6, step: 3 * 3600)
+        let rows = settlingRecord(cycles, window: "seven_day")
+        #expect(rows.allSatisfy { $0.reading != nil })
+        // "hold" graded before readings: it takes the engine rows'.
+        let mixed = rows.map {
+            $0.method == "hold"
+                ? EngineSelfEval.Record(method: $0.method, bucket: $0.bucket, periodKey: $0.periodKey,
+                                        predicted: $0.predicted, truth: $0.truth)
+                : $0
+        }
+        #expect(rankSettling(mixed, weekly: true) == rankSettling(rows, weekly: true))
+    }
+
+    // MARK: - No evidence (#374)
+
+    /// A zero-width band: with a best of 0, a model 0.05 off is still tied,
+    /// and the simplest of the tied is picked, not the simplest at exactly 0.
+    @Test func theTieBandHasAnAbsoluteFloor() {
+        let scored = [(id: "a", err: 0.0), (id: "b", err: 0.0), (id: "c", err: 0.05), (id: "d", err: 0.3)]
+        let complexity = ["a": 3, "b": 2, "c": 1, "d": 0]
+        #expect(EngineSelfEval.pickWithinTie(scored, complexity: complexity, tieRelative: 0.05) == "c")
+        // Above the floor the relative band is as it was.
+        let wide = [(id: "a", err: 10.0), (id: "b", err: 10.4), (id: "c", err: 10.6)]
+        #expect(EngineSelfEval.pickWithinTie(wide, complexity: complexity, tieRelative: 0.05) == "b")
+    }
+
+    /// Every moment settled, so the record holds nothing but ties at 0:
+    /// matched or over every cut, it is no evidence. Nothing is picked (the
+    /// cold backtest picks), and no number is shown.
+    @Test func anAllZeroBoardIsNoEvidence() throws {
+        var rows: [EngineSelfEval.Record] = []
+        for p in 0..<3 {
+            let period = EngineSelfEval.periodKeyRL(Self.now.addingTimeInterval(Double(p) * 7 * 86_400))
+            for cut in EngineSelfEval.rlGrading.cuts {
+                for (m, miss) in [("a", 0.0), ("b", 0.0), ("c", 0.0), ("d", 2.0)] {
+                    rows.append(.init(method: m, bucket: EngineSelfEval.rlGrading.bucket(cut), periodKey: period,
+                                      predicted: 98 + miss, truth: 98, reading: 98))
+                }
+            }
+        }
+        let r = EngineSelfEval.rankRL(rows, complexity: ["a": 1, "b": 2, "c": 3, "d": 4], weekly: true, at: 0.85,
+                                      depth: 17, tieRelative: 0.05, disagreement: 2)
+        #expect(r.noEvidence)
+        #expect(r.pick == nil)
+        #expect(r.ranked.count == 4)
+        #expect(r.accuracy(surface: "rl-seven_day").methods.allSatisfy { !$0.typicalAbsError.isFinite })
+
+        let board = UsageIntelligenceEngine.board(
+            windowKey: "seven_day", weekly: true, ranking: r, current: r, engineIds: ["a", "b", "c", "d"],
+            specs: [], complexity: [:], selected: nil, shown: "a", cutFraction: 0.85, canRunArena: true,
+            weightsPresent: { _ in true }, liveFailure: { _ in nil }, progress: nil, gradedThrough: true,
+            drawLimit: 4)
+        #expect(board.rows.allSatisfy { $0.status == .noEvidence(cycles: 3) })
+    }
+
+    /// A tie at 0 only near the live point, while the open record over every
+    /// cut separates the models: ranked over every cut.
+    @Test func aZeroTieNearTheLivePointRanksOverEveryCut() throws {
+        var rows: [EngineSelfEval.Record] = []
+        for p in 0..<3 {
+            let period = EngineSelfEval.periodKeyRL(Self.now.addingTimeInterval(Double(p) * 7 * 86_400))
+            for cut in EngineSelfEval.rlGrading.cuts {
+                // Early cuts: "a" and "b" 4 and 1 off; late ones, both exact.
+                let late = cut >= 0.7
+                for (m, miss) in [("a", late ? 0.0 : 4.0), ("b", late ? 0.0 : 1.0)] {
+                    rows.append(.init(method: m, bucket: EngineSelfEval.rlGrading.bucket(cut), periodKey: period,
+                                      predicted: 60 + miss, truth: 60))
+                }
+            }
+        }
+        let r = EngineSelfEval.rankRL(rows, complexity: ["a": 1, "b": 2], weekly: true, at: 0.85,
+                                      depth: 17, tieRelative: 0.05)
+        #expect(!r.noEvidence)
+        #expect(r.at == nil)
+        #expect(r.pick == "b")
+    }
+
+    // MARK: - Disagreement at the cap (#374)
+
+    /// Holding 98 against clamping to 100 is exactly 2 points apart, and is
+    /// not disagreement: only a spread of more than the threshold is.
+    @Test func aSpreadOfExactlyTheThresholdIsNotDisagreement() {
+        // Two cycles where the models spread exactly 2 points, one where they
+        // spread 5: only the last one's moments count.
+        let rows = (0..<3).flatMap { p -> [EngineSelfEval.Record] in
+            let period = EngineSelfEval.periodKeyRL(Self.now.addingTimeInterval(Double(p) * 7 * 86_400))
+            let spread = p < 2 ? 2.0 : 5.0
+            return EngineSelfEval.rlGrading.cuts.flatMap { cut -> [EngineSelfEval.Record] in
+                let b = EngineSelfEval.rlGrading.bucket(cut)
+                return [.init(method: "low", bucket: b, periodKey: period, predicted: 80, truth: 90),
+                        .init(method: "high", bucket: b, periodKey: period, predicted: 80 + spread, truth: 90)]
+            }
+        }
+        let r = EngineSelfEval.rankRL(rows, weekly: true, at: 0.85, depth: 17, tieRelative: 0.05, disagreement: 2)
+        #expect(r.standing("high")?.typicalAbsError == 5)
+        #expect(r.standing("low")?.typicalAbsError == 10)
+    }
 }

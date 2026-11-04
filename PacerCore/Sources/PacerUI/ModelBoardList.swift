@@ -224,6 +224,8 @@ public enum ModelBoardList {
         switch status {
         case let .ranked(miss, cycles), let .wellBehind(miss, cycles):
             return PacerAccuracyFormat.record(miss, partialCycles: cycles < spanCycles ? cycles : nil)
+        case .noEvidence:
+            return PacerAccuracyFormat.within(nil)
         case let .scoring(done, total, eta):
             return "scoring \(percent(done: done, total: total))%" + (eta.map { " · \(remaining($0))" } ?? "")
         case let .downloading(fraction):
@@ -246,7 +248,7 @@ public enum ModelBoardList {
     /// a state; the sheet sets the two apart.
     public static func isRecord(_ status: MeterModelBoard.Status) -> Bool {
         switch status {
-        case .ranked, .wellBehind: return true
+        case .ranked, .wellBehind, .noEvidence: return true
         case .scoring, .downloading, .unavailable: return false
         }
     }

@@ -27,6 +27,8 @@ enum RawEvalReader {
         let truth: Double
         /// `EngineEvalOutcome.inputs`; nil when the row has none.
         var inputs: String? = nil
+        /// `EngineEvalOutcome.reading`; nil when the row has none.
+        var reading: Double? = nil
     }
 
     /// Every row of one scope: surfaces ending in `suffix` (`#<account>`), or
@@ -65,9 +67,11 @@ enum RawEvalReader {
             return nil
         }
         defer { sqlite3_close(db) }
-        // A store opened before `inputs` existed has no ZINPUTS column until
-        // SwiftData migrates it: the prepare fails, and the caller falls back.
-        let sql = "SELECT ZSURFACE, ZMETHOD, ZBUCKET, ZPERIODKEY, ZPREDICTED, ZTRUTH, ZINPUTS FROM ZENGINEEVALOUTCOME "
+        // A store opened before `inputs` or `reading` existed lacks the column
+        // until SwiftData migrates it: the prepare fails, and the caller
+        // falls back.
+        let sql = "SELECT ZSURFACE, ZMETHOD, ZBUCKET, ZPERIODKEY, ZPREDICTED, ZTRUTH, ZINPUTS, ZREADING "
+            + "FROM ZENGINEEVALOUTCOME "
             + whereClause
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let stmt else { return nil }
@@ -87,7 +91,8 @@ enum RawEvalReader {
                   let bucket = text(stmt, 2), let period = text(stmt, 3) else { return nil }
             out.append(Row(surface: surface, method: method, bucket: bucket, periodKey: period,
                            predicted: sqlite3_column_double(stmt, 4), truth: sqlite3_column_double(stmt, 5),
-                           inputs: text(stmt, 6)))
+                           inputs: text(stmt, 6),
+                           reading: sqlite3_column_type(stmt, 7) == SQLITE_NULL ? nil : sqlite3_column_double(stmt, 7)))
         }
         return out
     }

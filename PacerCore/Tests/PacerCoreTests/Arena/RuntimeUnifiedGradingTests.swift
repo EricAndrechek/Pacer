@@ -184,9 +184,12 @@ struct RuntimeUnifiedRankingTests {
             EngineSelfEval.rankRL(rows, complexity: complexity, weekly: false, at: 0.5,
                                   depth: EngineSelfEval.rlDepth(weekly: false), tieRelative: 0.05, disagreement: d)
         }
+        // Without the filter both read ±0, at the live point and over every
+        // cut: no evidence, so nothing is picked from the record (#374; it
+        // was "simple", by the tie band, whatever the busy cycles said).
         let all = rank(nil)
         #expect(all.standing("good")?.typicalAbsError == 0 && all.standing("simple")?.typicalAbsError == 0)
-        #expect(all.pick == "simple")
+        #expect(all.noEvidence && all.pick == nil)
 
         let busyOnly = rank(2)
         #expect(busyOnly.standing("good")?.typicalAbsError == 1)
@@ -200,7 +203,7 @@ struct RuntimeUnifiedRankingTests {
         // A spread under the threshold is agreement: here every moment, so
         // the window ranks as it would without the filter.
         let agreed = rank(6)
-        #expect(agreed.pick == "simple")
+        #expect(agreed.noEvidence && agreed.pick == nil)
         #expect(agreed.standing("good")?.typicalAbsError == 0)
     }
 
@@ -389,7 +392,8 @@ struct RuntimeUnifiedGraderTests {
     }
 
     /// Each engine method's record on cycles `range`, graded as the refit
-    /// would have graded it (current inputs, so it does not grade again):
+    /// would have graded it (current inputs and a reading at the cut, so it
+    /// does not grade again):
     /// `linearRecentMiss` points off for `linear-recent`, `otherMiss` for the
     /// rest.
     static func engineRecord(_ container: ModelContainer, _ range: ClosedRange<Int>, linearRecentMiss: Double,
@@ -403,7 +407,7 @@ struct RuntimeUnifiedGraderTests {
                 for cf in EngineSelfEval.rlCutFractions {
                     ctx.insert(EngineEvalOutcome(surface: surface, method: method, bucket: EngineSelfEval.rlBucket(cf),
                                                  periodKey: period, predicted: 50 + miss, truth: 50,
-                                                 inputs: RateLimitRoster.engineInputs(method)))
+                                                 inputs: RateLimitRoster.engineInputs(method), reading: 25))
                 }
             }
         }
@@ -444,7 +448,10 @@ struct RuntimeUnifiedGraderTests {
         Turncoat.turnsAt = ArenaTime.millis(Self.reset(20))
         let container = try Fixtures.seeded(cycles: Self.cycles)
         try Self.engineRecord(container, 0...31, linearRecentMiss: 0, otherMiss: 5)
-        try Self.engineRecord(container, 32...Self.cycles - 1, linearRecentMiss: 5, otherMiss: 5)
+        // 10, not 5: at 5 the engine's 55 and the turncoat's 57 on some
+        // cycles spread exactly the 2-point disagreement threshold, which
+        // counts only when exceeded (#374), and those cycles dropped out.
+        try Self.engineRecord(container, 32...Self.cycles - 1, linearRecentMiss: 10, otherMiss: 10)
         let engine = await Fixtures.engine(container)
         let rt = Fixtures.runtime(container, roster: [Self.turncoat], engine: engine)
         await engine.adopt(arena: rt.link)

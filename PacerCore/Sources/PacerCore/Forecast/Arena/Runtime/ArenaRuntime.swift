@@ -690,7 +690,7 @@ public actor ArenaRecordScorer {
             for n in news {
                 context.insert(EngineEvalOutcome(surface: surface, method: n.method, bucket: n.bucket,
                                                  periodKey: n.periodKey, predicted: n.predicted, truth: n.truth,
-                                                 recordedAt: now, inputs: n.inputs))
+                                                 recordedAt: now, inputs: n.inputs, reading: n.reading))
             }
             byAccount[account, default: []] += news
         }
@@ -860,7 +860,8 @@ public actor ArenaRecordScorer {
                     guard shown.isFinite else { declined.insert(k); report.declined += 1; continue }
                     out.append(EngineSelfEval.NewOutcome(
                         surface: baseSurface, method: spec.name, bucket: grading.bucket(cf),
-                        periodKey: period, predicted: shown, truth: truth, inputs: s.inputs[spec.name]))
+                        periodKey: period, predicted: shown, truth: truth, inputs: s.inputs[spec.name],
+                        reading: partial.usedNow))
                     if let done = doneKey(s, spec.name, cut: ci, period: period) {
                         s.existing.insert(done)
                         if s.stale.remove(done) != nil { report.regraded += 1 }
@@ -895,14 +896,14 @@ public actor ArenaRecordScorer {
                                                 bucketSuffix: "|\(grading.version)") {
             return rows.filter { grading.contains(bucket: $0.bucket) }.map {
                 .init(method: $0.method, bucket: $0.bucket, periodKey: $0.periodKey, predicted: $0.predicted,
-                      truth: $0.truth, inputs: $0.inputs)
+                      truth: $0.truth, inputs: $0.inputs, reading: $0.reading)
             }
         }
         let d = FetchDescriptor<EngineEvalOutcome>(
             predicate: #Predicate { $0.surface == surface && periods.contains($0.periodKey) })
         return ((try? ModelContext(container).fetch(d)) ?? []).filter { grading.contains(bucket: $0.bucket) }.map {
             .init(method: $0.method, bucket: $0.bucket, periodKey: $0.periodKey, predicted: $0.predicted,
-                  truth: $0.truth, inputs: $0.inputs)
+                  truth: $0.truth, inputs: $0.inputs, reading: $0.reading)
         }
     }
 

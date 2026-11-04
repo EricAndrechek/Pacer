@@ -70,7 +70,8 @@ extension UsageIntelligenceEngine {
     /// A row's status, first that holds:
     /// - an arena model this engine cannot run (no account): unavailable;
     /// - its weights (or a child's) not on this Mac: downloading;
-    /// - ranked in the grading in use: ranked, or well behind;
+    /// - ranked in the grading in use: ranked, or well behind; with no
+    ///   evidence at this point of the window, no number;
     /// - the window has fewer completed cycles than ranking needs:
     ///   unavailable ("not enough history yet");
     /// - nothing graded, while the grader is done with it (or the runtime
@@ -115,9 +116,13 @@ extension UsageIntelligenceEngine {
             } else if let spec, !weightsPresent(spec) {
                 status = .downloading(fraction: nil)
             } else if let st = ranking?.standing(id), let miss = st.typicalAbsError {
-                status = st.wellBehind ? .wellBehind(typicalMiss: miss, cycles: st.spanCycles)
-                                       : .ranked(typicalMiss: miss, cycles: st.spanCycles)
-                behind = st.wellBehind ? st.behind : nil
+                if ranking?.noEvidence == true {
+                    status = .noEvidence(cycles: st.spanCycles)
+                } else {
+                    status = st.wellBehind ? .wellBehind(typicalMiss: miss, cycles: st.spanCycles)
+                                           : .ranked(typicalMiss: miss, cycles: st.spanCycles)
+                    behind = st.wellBehind ? st.behind : nil
+                }
                 let done = current?.standing(id)?.cycles ?? 0
                 if bridging, done < depth {
                     regrading = .init(done: done, total: depth, eta: scoring.contains(id) ? progress?.eta : nil)
@@ -145,6 +150,7 @@ extension UsageIntelligenceEngine {
         func key(_ r: MeterModelBoard.Row) -> (group: Int, value: Double) {
             switch r.status {
             case .ranked(let miss, _): return (0, miss)
+            case .noEvidence: return (0, 0)
             case .scoring(let done, _, _): return (1, -Double(done))
             case .downloading: return (2, 0)
             case .unavailable: return (3, 0)

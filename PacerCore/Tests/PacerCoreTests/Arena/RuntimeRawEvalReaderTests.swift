@@ -65,8 +65,8 @@ struct RuntimeRawEvalReaderTests {
                 == Set(all.map { "\($0.method)|\($0.bucket)|\($0.periodKey)|\($0.predicted)" }))
     }
 
-    /// A grade's inputs come back as stored (nil on rows written before
-    /// them), and the scorer can ask for one grading's rows only.
+    /// A grade's inputs and reading come back as stored (nil on rows written
+    /// before them), and the scorer can ask for one grading's rows only.
     @Test func inputsAndOneGradingsRows() throws {
         let (container, url) = try Self.store()
         let ctx = ModelContext(container)
@@ -74,7 +74,7 @@ struct RuntimeRawEvalReaderTests {
         for p in 0..<3 {
             ctx.insert(EngineEvalOutcome(surface: "rl-five_hour#acct-a", method: "test-arena",
                                          bucket: EngineSelfEval.rlBucket(0.175), periodKey: "2026-10-0\(p + 1)T00:00:00Z",
-                                         predicted: 1, truth: 2, inputs: "m1.p3.h4"))
+                                         predicted: 1, truth: 2, inputs: "m1.p3.h4", reading: Double(p) + 0.5))
         }
         try ctx.save()
         let periods = (1...5).map { "2026-10-0\($0)T00:00:00Z" }
@@ -82,8 +82,11 @@ struct RuntimeRawEvalReaderTests {
                                                              periods: periods, bucketSuffix: "|v3"))
         #expect(current.count == 3)
         #expect(Set(current.map(\.inputs)) == ["m1.p3.h4"])
+        // The reading at the cut, as stored; nil on rows without one.
+        #expect(Set(current.compactMap(\.reading)) == [0.5, 1.5, 2.5])
         let all = try #require(RawEvalReader.surfaceRows(storeURL: url, surface: "rl-five_hour#acct-a", periods: periods))
         #expect(all.filter { $0.inputs == nil }.count == all.count - 3)
+        #expect(all.filter { $0.reading == nil }.count == all.count - 3)
         let viaData = try ModelContext(container).fetch(FetchDescriptor<EngineEvalOutcome>())
             .filter { $0.surface == "rl-five_hour#acct-a" }
         #expect(Set(all.map { "\($0.bucket)|\($0.periodKey)|\($0.method)|\($0.inputs ?? "-")" })

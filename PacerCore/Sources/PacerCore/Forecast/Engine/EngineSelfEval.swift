@@ -55,10 +55,13 @@ public enum EngineSelfEval {
         /// What produced the grade (`NewOutcome.inputs`); nil on end-of-day
         /// rows and on rate-limit rows from before it was recorded.
         public var inputs: String?
+        /// The meter's reading at the cut (`NewOutcome.reading`); nil on
+        /// end-of-day rows and on rate-limit rows from before it was recorded.
+        public var reading: Double?
         public init(method: String, bucket: String, periodKey: String, predicted: Double, truth: Double,
-                    inputs: String? = nil) {
+                    inputs: String? = nil, reading: Double? = nil) {
             self.method = method; self.bucket = bucket; self.periodKey = periodKey
-            self.predicted = predicted; self.truth = truth; self.inputs = inputs
+            self.predicted = predicted; self.truth = truth; self.inputs = inputs; self.reading = reading
         }
         var absPctError: Double { truth > 0 ? abs(predicted - truth) / truth * 100 : .infinity }
     }
@@ -76,6 +79,12 @@ public enum EngineSelfEval {
         /// (`ArenaGradeInputs`). A stored grade whose inputs differ from the
         /// model's now is graded again, in place (the key is the same).
         public var inputs: String? = nil
+        /// The meter's reading at a rate-limit grade's cut
+        /// (`PartialCycle.usedNow`, the floor of every displayed value), so
+        /// ranking can tell a moment the meter had already reached its final
+        /// (`isSettled`). Model-independent: every row of a moment carries the
+        /// same one.
+        public var reading: Double? = nil
     }
 
     // MARK: - Scoring completed periods
@@ -488,7 +497,8 @@ public enum EngineSelfEval {
                     guard let proj = m.fit(partial) else { continue }
                     out.append(NewOutcome(surface: surface, method: m.id, bucket: bucket, periodKey: periodKey,
                                           predicted: BurnTrajectory.displayedAtReset(proj, partial: partial),
-                                          truth: trueFinal, inputs: RateLimitRoster.engineInputs(m.id)))
+                                          truth: trueFinal, inputs: RateLimitRoster.engineInputs(m.id),
+                                          reading: partial.usedNow))
                 }
             }
         }
@@ -519,6 +529,32 @@ public enum EngineSelfEval {
         let w = 1 - abs(cut - x) / h
         return w > 1e-9 ? w : 0
     }
+
+    /// Points within which a reading counts as the cycle's final: half the
+    /// meter's whole-point step.
+    static let rlSettledPoints = 0.5
+
+    /// A moment whose reading had already reached the cycle's final: the
+    /// meter did not move again. Every displayed value is floored at the
+    /// reading (`BurnTrajectory.displayedAtReset`), so there any model that
+    /// holds the reading scores 0 without forecasting anything, and one that
+    /// extrapolates is charged for it. On an account whose past cycles
+    /// settled early those moments were the only ones near a late live
+    /// point, and ranked the flat model first with a perfect record while
+    /// the meter was climbing (#374). Ranking leaves them out (`rankRL`);
+    /// the record keeps them, for the bands and the cycle facts.
+    static func isSettled(reading: Double, truth: Double) -> Bool {
+        reading >= truth - rlSettledPoints
+    }
+
+    /// Below this typical miss (points) a best tied by others is no evidence
+    /// (`RLRanking.noEvidence`).
+    static let rlNoEvidenceMiss = 0.05
+    /// The narrowest the relative tie band gets (points): a difference the
+    /// sheet, at one decimal, cannot show is a tie. Under the 5% band of any
+    /// record with real misses (5% of a 3-point miss is 0.15), so it binds
+    /// only near zero.
+    static let rlTieFloor = 0.1
 
     /// Pick the best method from an accumulated record: lowest typical
     /// absolute error (`typicalError`: the median, the mean when `weekly`) in
@@ -556,10 +592,14 @@ public enum EngineSelfEval {
     /// The simplest of the methods within the near-tie band of the best
     /// (`bestMethod`), then the lower error, then the id, so the pick holds
     /// still between refits.
+    ///
+    /// The relative band never narrows below `rlTieFloor`: with a best of 0
+    /// it was 0 wide, and the order among models a hair apart (0.00 vs
+    /// 0.01) decided the pick (#374).
     static func pickWithinTie(_ scored: [(id: String, err: Double)], complexity: [String: Int],
                               tieRelative: Double?) -> String? {
         guard let best = scored.map(\.err).min() else { return nil }
-        let band = tieRelative.map { best * $0 } ?? 1.5
+        let band = tieRelative.map { max(best * $0, rlTieFloor) } ?? 1.5
         return scored.filter { $0.err <= best + band }
             .min { (complexity[$0.id] ?? 3, $0.err, $0.id) < (complexity[$1.id] ?? 3, $1.err, $1.id) }?.id
     }
@@ -688,6 +728,12 @@ extension EngineSelfEval {
         public var depthStart: String? = nil
         /// A weekly-scale window's ranking (`rlDepth`, `rlMinPeriods`).
         public var weekly = false
+        /// The record holds no evidence at this point of the window: the best
+        /// is (nearly) never off and others tie with it, at the matched point
+        /// and over every cut (`rlNoEvidenceMiss`), on moments that may be
+        /// settled ones (no reading known, or no open moment at all). Nothing
+        /// is picked, and the sheet shows no number.
+        public var noEvidence = false
 
         public func standing(_ method: String) -> Standing? { standings.first { $0.method == method } }
         public var ranked: [Standing] { standings.filter(\.isRanked) }
@@ -701,7 +747,7 @@ extension EngineSelfEval {
         public func accuracy(surface: String) -> Accuracy {
             Accuracy(surface: surface, methods: standings.map { s in
                 .init(method: s.method, medianAbsPctError: s.medianAbsPctError,
-                      typicalAbsError: s.typicalAbsError ?? .infinity, periods: s.cycles, byStage: s.byStage,
+                      typicalAbsError: noEvidence ? .infinity : s.typicalAbsError ?? .infinity, periods: s.cycles, byStage: s.byStage,
                       spanPeriods: s.spanCycles, firstPeriod: s.firstPeriod)
             }, span: span)
         }
@@ -719,14 +765,21 @@ extension EngineSelfEval {
     /// - Each eligible method's typical miss over the span, each cut's
     ///   errors weighted by its closeness to `at` (`cutWeight`); the pick is
     ///   the simplest within the near-tie band of the best (`bestMethod`).
+    /// - Settled moments, where the reading had already reached the cycle's
+    ///   final (`isSettled`), do not count: every model that holds the
+    ///   reading is exactly right there. When every moment near `at` is
+    ///   settled, the open ones at every cut count alike.
     /// - With `disagreement` (points), only the moments where the models'
-    ///   forecasts spread at least that far count. Where every model said
+    ///   forecasts spread more than that count. Where every model said
     ///   the same, the meter's outcome tells nothing about which is better,
     ///   and on an account with quiet cycles those moments outnumber the
     ///   rest: every miss read ±0 and the simplest model won whatever the
     ///   record said. A method with no such moment near `at` is ranked on
-    ///   all of its moments, so a window where everyone always agreed ranks
-    ///   as it would without the filter.
+    ///   all of its open moments, so a window where everyone always agreed
+    ///   ranks as it would without the filter.
+    /// - A best (nearly) never off with others tied at it, on moments that
+    ///   may be settled, is no evidence (`RLRanking.noEvidence`): ranked
+    ///   again over every cut, and if that is no better, nothing is picked.
     ///
     /// `candidates` limits the methods ranked (the ones that can run on this
     /// window); nil ranks every method in the record. `pickable` limits the
@@ -736,7 +789,7 @@ extension EngineSelfEval {
                               at x: Double?, depth: Int? = nil, tieRelative: Double? = nil,
                               disagreement: Double? = nil) -> RLRanking {
         let x = grading.clamp(x)
-        struct Graded { let cut: Double; let error: Double; let pct: Double }
+        struct Graded { let cut: Double; let error: Double; let pct: Double; let truth: Double; let reading: Double? }
         struct Moment: Hashable { let period: String; let cut: Double }
         var cutOf: [String: Double] = [:]
         var byMethod: [String: [String: [Graded]]] = [:]
@@ -744,6 +797,11 @@ extension EngineSelfEval {
         // The lowest and highest forecast at each moment, over the methods
         // ranked: how far the models disagreed there.
         var spread: [Moment: (lo: Double, hi: Double)] = [:]
+        // The meter's reading at each moment, for the rows graded before it
+        // was recorded (`NewOutcome.reading`): it does not depend on the
+        // model, so they take it from any row of the moment that has it (the
+        // engine's, which are graded again to fill it in).
+        var readingAt: [Moment: Double] = [:]
         for r in records where r.truth > 0 && grading.contains(bucket: r.bucket) {
             if let candidates, !candidates.contains(r.method) { continue }
             let cut: Double
@@ -754,16 +812,27 @@ extension EngineSelfEval {
             }
             allPeriods.insert(r.periodKey)
             byMethod[r.method, default: [:]][r.periodKey, default: []]
-                .append(Graded(cut: cut, error: abs(r.predicted - r.truth), pct: r.absPctError))
+                .append(Graded(cut: cut, error: abs(r.predicted - r.truth), pct: r.absPctError, truth: r.truth,
+                                reading: r.reading))
+            let m = Moment(period: r.periodKey, cut: cut)
+            if let reading = r.reading { readingAt[m] = max(readingAt[m] ?? reading, reading) }
             if disagreement != nil {
-                let m = Moment(period: r.periodKey, cut: cut)
-                spread[m] = spread[m].map { (min($0.lo, r.predicted), max($0.hi, r.predicted)) }
-                    ?? (r.predicted, r.predicted)
+                // On the meter's scale: no displayed value passes 100.
+                let p = min(100, r.predicted)
+                spread[m] = spread[m].map { (min($0.lo, p), max($0.hi, p)) } ?? (p, p)
             }
         }
+        // Strictly more than the threshold: on a cycle that stayed at 98%,
+        // the models that hold the reading and the ones that clamp to 100
+        // spread exactly 2 points, and those moments passed `>=` as
+        // disagreement (#374).
         func disagreed(_ period: String, _ cut: Double) -> Bool {
             guard let disagreement, let s = spread[Moment(period: period, cut: cut)] else { return true }
-            return s.hi - s.lo >= disagreement
+            return s.hi - s.lo > disagreement
+        }
+        func open(_ period: String, _ g: Graded) -> Bool {
+            guard let reading = g.reading ?? readingAt[Moment(period: period, cut: g.cut)] else { return true }
+            return !isSettled(reading: reading, truth: g.truth)
         }
         // periodKeys are ISO 8601 instants, so their order is time order.
         var periods = allPeriods.sorted()
@@ -782,64 +851,124 @@ extension EngineSelfEval {
         let start = eligible.compactMap { first[$0] }.max() ?? depthStart
         let span = periods.filter { $0 >= start }
 
-        struct Row { let method: String; let spanCycles: Int; let typical: Double?; let pct: Double
-                     let byStage: [Accuracy.StageStat] }
-        var rows: [Row] = []
-        for (m, byPeriod) in byMethod where cycles[m] != nil {
-            // Every moment, and the ones where the models disagreed (the
-            // same lists without `disagreement`); the numbers come from the
-            // second wherever it has any.
-            var pairs: [(error: Double, weight: Double)] = [], keptPairs: [(error: Double, weight: Double)] = []
-            var pcts: [Double] = [], keptPcts: [Double] = []
-            var stages: [Accuracy.Stage: [Double]] = [:], keptStages: [Accuracy.Stage: [Double]] = [:]
-            var inSpan = 0
-            for p in span {
-                guard let gs = byPeriod[p] else { continue }
-                inSpan += 1
-                for g in gs {
-                    let pair = (error: g.error, weight: cutWeight(g.cut, at: x))
-                    let stage = Accuracy.Stage(cut: g.cut)
-                    pairs.append(pair)
-                    pcts.append(g.pct)
-                    stages[stage, default: []].append(g.error)
-                    guard disagreed(p, g.cut) else { continue }
-                    keptPairs.append(pair)
-                    keptPcts.append(g.pct)
-                    keptStages[stage, default: []].append(g.error)
-                }
-            }
-            var typical: Double?
-            if eligible.contains(m), inSpan > 0 {
-                // Infinite when no kept moment weighs anything near `at`.
-                let kept = typicalError(keptPairs, weekly: weekly)
-                let t = kept.isFinite ? kept : typicalError(pairs, weekly: weekly)
-                typical = t.isFinite ? t : nil
-            }
-            let byStage = Accuracy.Stage.allCases.compactMap { stage -> Accuracy.StageStat? in
-                guard let errs = keptStages[stage].flatMap({ $0.isEmpty ? nil : $0 }) ?? stages[stage],
-                      !errs.isEmpty else { return nil }
-                return .init(stage: stage, typicalAbsError: typicalError(errs, weekly: weekly), scores: errs.count)
-            }
-            rows.append(Row(method: m, spanCycles: inSpan, typical: typical,
-                            pct: median(keptPcts.isEmpty ? pcts : keptPcts), byStage: byStage))
+        // Which moments a number is taken over, first that has any weight:
+        // the open ones where the models disagreed, matched to `at`; the open
+        // ones; the same two over every cut alike, when every moment near
+        // `at` was settled; and, for a record with no open moment at all,
+        // every moment, as before the settled ones were known.
+        struct Level { let openOnly: Bool; let disagreedOnly: Bool; let matched: Bool }
+        let levels = [Level(openOnly: true, disagreedOnly: true, matched: true),
+                      Level(openOnly: true, disagreedOnly: false, matched: true),
+                      Level(openOnly: true, disagreedOnly: true, matched: false),
+                      Level(openOnly: true, disagreedOnly: false, matched: false),
+                      Level(openOnly: false, disagreedOnly: true, matched: true),
+                      Level(openOnly: false, disagreedOnly: false, matched: true)]
+        func counts(_ g: Graded, _ p: String, _ level: Level) -> Bool {
+            (!level.openOnly || open(p, g)) && (!level.disagreedOnly || disagreed(p, g.cut))
+        }
+        func weight(_ g: Graded, _ p: String, _ level: Level, at x: Double?) -> Double {
+            guard counts(g, p, level) else { return 0 }
+            return level.matched ? cutWeight(g.cut, at: x) : 1
         }
 
+        struct Row { let method: String; let spanCycles: Int; let typical: Double?; let pct: Double
+                     let byStage: [Accuracy.StageStat] }
+        // Every method on the first level any eligible method has weight at,
+        // so the methods are compared over the same moments; a method with
+        // nothing there (graded on fewer cycles) goes on to the next.
+        func score(at x: Double?) -> (rows: [Row], level: Int) {
+            let firstLevel = levels.indices.first { li in
+                eligible.contains { m in
+                    span.contains { p in
+                        byMethod[m]?[p]?.contains { weight($0, p, levels[li], at: x) > 0 } ?? false
+                    }
+                }
+            } ?? levels.count - 1
+            var out: [Row] = []
+            for (m, byPeriod) in byMethod where cycles[m] != nil {
+                let inSpan = span.filter { byPeriod[$0] != nil }
+                var typical: Double?
+                if eligible.contains(m), !inSpan.isEmpty {
+                    for level in levels[firstLevel...] {
+                        var pairs: [(error: Double, weight: Double)] = []
+                        for p in inSpan { for g in byPeriod[p]! { pairs.append((g.error, weight(g, p, level, at: x))) } }
+                        let t = typicalError(pairs, weekly: weekly)
+                        if t.isFinite { typical = t; break }
+                    }
+                }
+                // The stages and the percentage: every cut alike, over the
+                // moments of the first level, unmatched, that has any.
+                var graded: [(period: String, g: Graded)] = []
+                for p in inSpan { for g in byPeriod[p]! { graded.append((p, g)) } }
+                let shown = levels.lazy.filter { !$0.matched }.map { level in graded.filter { counts($0.g, $0.period, level) } }
+                    .first { !$0.isEmpty } ?? graded
+                var stages: [Accuracy.Stage: [Double]] = [:]
+                for (_, g) in shown { stages[Accuracy.Stage(cut: g.cut), default: []].append(g.error) }
+                let byStage = Accuracy.Stage.allCases.compactMap { stage -> Accuracy.StageStat? in
+                    guard let errs = stages[stage], !errs.isEmpty else { return nil }
+                    return .init(stage: stage, typicalAbsError: typicalError(errs, weekly: weekly), scores: errs.count)
+                }
+                out.append(Row(method: m, spanCycles: inSpan.count, typical: typical,
+                               pct: median(shown.map(\.g.pct)), byStage: byStage))
+            }
+            return (out, firstLevel)
+        }
+
+        // A board whose best is (nearly) never off, with others tied there,
+        // says nothing about which model is better at this point when those
+        // moments may be settled ones: every model that holds the reading
+        // scores 0 there. That is so wherever a moment's reading is unknown
+        // (a row graded before it was recorded) or the record has no open
+        // moment at all. Ranked again over every cut; if that is no better,
+        // the record has no evidence here, and nothing is picked from it (the
+        // cold backtest picks). On open moments whose readings are known, a
+        // tie at 0 is models that were exactly right (a cycle that ended at
+        // the cap, and the models that clamp to it), and stands.
+        func uninformative(_ rs: [Row], level: Int, at x: Double?) -> Bool {
+            let errs = rs.compactMap(\.typical)
+            guard let best = errs.min(), best < rlNoEvidenceMiss,
+                  errs.filter({ $0 <= best + rlTieFloor }).count > 1 else { return false }
+            guard levels[level].openOnly else { return true }
+            return span.contains { p in
+                eligible.contains { m in
+                    byMethod[m]?[p]?.contains {
+                        weight($0, p, levels[level], at: x) > 0
+                            && ($0.reading ?? readingAt[Moment(period: p, cut: $0.cut)]) == nil
+                    } ?? false
+                }
+            }
+        }
+        var (rows, level) = score(at: x)
+        var matchedX = x
+        var noEvidence = false
+        if uninformative(rows, level: level, at: x) {
+            let unmatched = levels[level].matched && x != nil ? score(at: nil) : nil
+            if let unmatched, !uninformative(unmatched.rows, level: unmatched.level, at: nil) {
+                (rows, level) = unmatched
+                matchedX = nil
+            } else {
+                noEvidence = true
+            }
+        }
+        let scoreLevel = levels[level]
+
         let ranked = rows.compactMap { r in r.typical.map { (id: r.method, err: $0) } }
-        let pick = pickWithinTie(ranked.filter { pickable?.contains($0.id) ?? true }, complexity: complexity,
-                                 tieRelative: tieRelative)
+        let pick = noEvidence ? nil : pickWithinTie(ranked.filter { pickable?.contains($0.id) ?? true },
+                                                    complexity: complexity, tieRelative: tieRelative)
         let best = ranked.min { ($0.err, $0.id) < ($1.err, $1.id) }
 
-        // A cycle's score is over its moments where the models disagreed; a
-        // cycle with none is left out (everyone said the same there).
+        // A cycle's score is over the moments the numbers were taken over; a
+        // cycle with none is left out (everyone said the same there, or the
+        // meter had already settled).
         func cycleScores(_ m: String) -> [String: Double] {
             var out: [String: Double] = [:]
             guard let byPeriod = byMethod[m] else { return out }
             for p in span {
                 guard let all = byPeriod[p] else { continue }
-                let gs = all.filter { disagreed(p, $0.cut) }
+                let gs = all.filter { counts($0, p, scoreLevel) }
                 guard !gs.isEmpty else { continue }
                 var w = 0.0, s = 0.0
-                for g in gs { let k = cutWeight(g.cut, at: x); w += k; s += k * g.error }
+                for g in gs { let k = scoreLevel.matched ? cutWeight(g.cut, at: matchedX) : 1; w += k; s += k * g.error }
                 out[p] = w > 0 ? s / w : gs.reduce(0) { $0 + $1.error } / Double(gs.count)
             }
             return out
@@ -877,11 +1006,11 @@ extension EngineSelfEval {
             if a.complexity != b.complexity { return a.complexity < b.complexity }
             return a.method < b.method
         }
-        return RLRanking(grading: grading, at: x,
+        return RLRanking(grading: grading, at: matchedX,
                          span: .init(start: start, cycles: span.count,
                                      isWholeRecord: start == depthStart && periods.count == allPeriods.count),
                          standings: standings, pick: pick, depthCycles: periods.count, depthStart: depthStart,
-                         weekly: weekly)
+                         weekly: weekly, noEvidence: noEvidence)
     }
 
     /// P(X ≥ k) for X ~ Binomial(n, ½): the sign test's one-sided p-value.
