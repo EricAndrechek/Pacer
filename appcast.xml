@@ -1431,5 +1431,32 @@ colour, which had quietly flattened every stacked view.</p>]]></description>
             type="application/octet-stream"
             sparkle:edSignature="lCNkyswUsrsdGI1y2MRIgKC4A+tP2WJq0voaqzhRKYaUv7gzDfV8ScuBqja+TsgO4AH0UAzieDHJi4fdZXH7CQ==" />
     </item>
+            <item>
+        <title>Version 0.8.2</title>
+        <description><![CDATA[<p>Better weekly forecasts, a lighter forecaster, and widgets that open Pacer.</p>
+<h2>Forecasts</h2>
+<h3>The 7-day forecast no longer stalls while you're climbing</h3>
+<p>When your past weeks had all maxed out early, Pacer could pick a forecast that simply held your current reading. The dashboard then said "≈79% at reset" while you were heading for the limit. Pacer now ignores the stretches of past weeks where the meter had already stopped moving when it decides which forecast to trust. The same fix applies to 5-hour windows.</p>
+<h3>Lighter on CPU</h3>
+<p>The on-device forecast models no longer retrain after every refit, stay within their CPU budget while training, and skip work when no new reading has arrived.</p>
+<h2>Widgets</h2>
+<p>Clicking a Pacer widget opens the dashboard, or brings it forward if it's already open.</p>
+<h2>Smoother</h2>
+<ul>
+<li>The once-a-day check no longer freezes Pacer for a moment while macOS answers whether Pacer opens at login.</li>
+</ul>
+<h2>Privacy</h2>
+<p>Settings → Privacy now has two switches: <strong>Crash reports and performance</strong> (sent to Sentry) and <strong>Usage data</strong>, which tells me which features, widgets and commands get used (sent to PostHog). Both are on by default, and either can be turned off. If you had turned usage data off before, it stays off. Pacer never sends prompts, projects, files, accounts or costs.</p>
+<p><strong>Your data is untouched.</strong></p>]]></description>
+        <pubDate>Wed, 04 Nov 2026 21:48:51 +0000</pubDate>
+        <sparkle:version>1793828065</sparkle:version>
+        <sparkle:shortVersionString>0.8.2</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.8.2/Pacer-0.8.2.dmg"
+            length="157363891"
+            type="application/octet-stream"
+            sparkle:edSignature="LmHpeCVcwX1CAjt/UJr2arIPzxsIlCzN8sOPyMfuvZAfkdspDfWSZad7mFHhaCNC/fPeyN1WrcHJl8VxXzZlAA==" />
+    </item>
         </channel>
 </rss>
