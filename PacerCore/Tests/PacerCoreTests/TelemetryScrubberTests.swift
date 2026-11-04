@@ -65,4 +65,20 @@ struct TelemetryScrubberTests {
         #expect((out["list"] as? [Any])?.first as? String == "~/y")
         #expect(out["n"] as? Int == 3)
     }
+
+    @Test("the PostHog person link survives whole; the same shape elsewhere does not")
+    func postHogPersonLink() {
+        let id = "0A1B2C3D-4E5F-4061-8293-A4B5C6D7E8F9"
+        let link = PostHogPersonLink.url(installId: id)
+        #expect(link == "https://us.posthog.com/project/678727/person/\(id)")
+        #expect(scrub(link) == link)
+        #expect(scrub("see \(link) and \(link) for /Users/alice/x")
+                == "see \(link) and \(link) for ~/x")
+        #expect(TelemetryScrubber.scrub(["posthog": ["url": link]], home: "/Users/alice")
+                .description.contains(link))
+        // Without the exemption the long-token rule eats the path and id: the
+        // same path under another host is still redacted.
+        #expect(scrub("https://evil.example.com/project/678727/person/\(id)").contains("<redacted>"))
+    }
 }
+

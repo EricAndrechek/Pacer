@@ -72,6 +72,16 @@ request IP is wanted and the project keeps anonymize_ips off.
 Sentry's App Group cache folder; created in Sentry's format if Sentry has
 not run, `AnalyticsIdentity`), so one Mac is the same in both tools.
 
+**Sentry → PostHog link.** While Usage data is on, every Sentry event carries
+a `posthog` context whose `url` is that Mac's person page,
+`https://us.posthog.com/project/678727/person/<install id>`
+(`PostHogPersonLink`, set and cleared with the toggle in
+`TelemetryController.syncPostHogLink`). A context rather than a tag because
+Sentry renders a context URL as a link and a tag as a search filter. The id
+is the random install id Sentry already holds, so the link adds nothing
+identifying. `TelemetryScrubber` exempts exactly this URL shape (its
+long-token rule would otherwise redact it); `TelemetryScrubberTests`.
+
 **Every event** carries `distinct_id`, `$lib` (`pacer-macos`),
 `$lib_version`, `$os`, `$os_version`, `$app_version`, `$app_build`,
 `build.config` (`debug` / `release`; the maintainer's Mac is filterable),
