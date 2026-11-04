@@ -39,8 +39,21 @@ public enum LoginItemController {
         case unknown
     }
 
+    /// Synchronous, and slow: `SMAppService.status` is an XPC round trip to
+    /// `smd`, which has taken 2+ s on a production Mac (Sentry PACER-N, from
+    /// the daily check-in on the main thread). Call it directly only off the
+    /// main thread; everywhere else use `statusOffMain`.
     public static func currentStatus() -> Status {
         Self.map(SMAppService.mainApp.status)
+    }
+
+    /// `currentStatus`, read on a background executor so the caller's actor
+    /// (the main actor, for every caller in the app) is never blocked on
+    /// `smd`. `read` is injectable for tests.
+    public static func statusOffMain(
+        _ read: @escaping @Sendable () -> Status = { currentStatus() }
+    ) async -> Status {
+        await Task.detached(priority: .utility) { read() }.value
     }
 
     public static func register() throws {
@@ -111,7 +124,8 @@ public enum LoginItemController {
         }
     }
 
-    /// Run once per launch: log the status, and act on `decision`.
+    /// Run once per launch: log the status, and act on `decision`. Reads
+    /// `currentStatus` (and may register), so call it off the main thread.
     ///
     /// The line is written every launch on purpose. The investigation above
     /// stalled because nothing recorded when the registration disappeared;

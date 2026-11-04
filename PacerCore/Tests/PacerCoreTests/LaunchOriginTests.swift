@@ -26,4 +26,31 @@ struct LaunchOriginTests {
         let second = LaunchOrigin.drain(store: s)
         #expect(second.login == 0 && second.manual == 0)
     }
+
+    @Test("resolve reads the login-item status only when the grace rule needs it")
+    func resolveReadsStatusOnlyWhenNeeded() async {
+        actor Reads { var count = 0; func add() { count += 1 } }
+        let reads = Reads()
+        let enabled: @Sendable () async -> Bool = { await reads.add(); return true }
+        #expect(await LaunchOrigin.resolve(appleEventSaysLogin: true, secondsSinceBoot: 60,
+                                           loginItemEnabled: enabled) == .login)
+        #expect(await LaunchOrigin.resolve(appleEventSaysLogin: false, secondsSinceBoot: 4_000,
+                                           loginItemEnabled: enabled) == .manual)
+        #expect(await reads.count == 0)
+        #expect(await LaunchOrigin.resolve(appleEventSaysLogin: false, secondsSinceBoot: 60,
+                                           loginItemEnabled: enabled) == .login)
+        #expect(await reads.count == 1)
+    }
+
+    /// Sentry PACER-N: the status read blocked the main thread for 2+ s.
+    @Test("the login-item status is read off the main thread, even from the main actor")
+    @MainActor
+    func statusReadOffMain() async {
+        #expect(pthread_main_np() != 0)
+        let status = await LoginItemController.statusOffMain {
+            #expect(pthread_main_np() == 0)
+            return .enabled
+        }
+        #expect(status == .enabled)
+    }
 }

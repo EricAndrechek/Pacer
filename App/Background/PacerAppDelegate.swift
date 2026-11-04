@@ -487,10 +487,16 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Telemetry services; each is a no-op unless TelemetryController is running.
         DailyCheckIn.shared.start(container: container, engines: backgroundService.engines)
         CrashReportForwardingService.shared.start()
-        AnalyticsUsage.shared.appLaunched(loginOrigin: DailyCheckIn.launchOrigin)
+        // The launch origin can depend on the login-item status, which is
+        // resolved off the main thread; the event waits for it.
+        Task { @MainActor in
+            AnalyticsUsage.shared.appLaunched(loginOrigin: await DailyCheckIn.launchOrigin)
+        }
         // Logs the login-item status every launch and restores a registration
-        // macOS dropped against the user's recorded choice.
-        LoginItemController.reconcileAtLaunch()
+        // macOS dropped against the user's recorded choice. Detached: the
+        // status read is an XPC call to smd that can block for seconds, and
+        // this is the main thread at launch (Sentry PACER-N).
+        Task.detached(priority: .utility) { LoginItemController.reconcileAtLaunch() }
         installWindowObservers()
         installMenuBar()
         installGlobalHotkey()
