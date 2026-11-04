@@ -389,7 +389,8 @@ struct RuntimeUnifiedGraderTests {
     }
 
     /// Each engine method's record on cycles `range`, graded as the refit
-    /// would have graded it (current inputs, so it does not grade again):
+    /// would have graded it (current inputs and a reading at the cut, so it
+    /// does not grade again):
     /// `linearRecentMiss` points off for `linear-recent`, `otherMiss` for the
     /// rest.
     static func engineRecord(_ container: ModelContainer, _ range: ClosedRange<Int>, linearRecentMiss: Double,
@@ -403,7 +404,7 @@ struct RuntimeUnifiedGraderTests {
                 for cf in EngineSelfEval.rlCutFractions {
                     ctx.insert(EngineEvalOutcome(surface: surface, method: method, bucket: EngineSelfEval.rlBucket(cf),
                                                  periodKey: period, predicted: 50 + miss, truth: 50,
-                                                 inputs: RateLimitRoster.engineInputs(method)))
+                                                 inputs: RateLimitRoster.engineInputs(method), reading: 25))
                 }
             }
         }

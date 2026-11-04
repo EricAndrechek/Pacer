@@ -589,7 +589,9 @@ public actor UsageIntelligenceEngine {
     /// model is ported, to add nothing.
     static var recordBackfillFingerprint: String {
         let models = RateLimitRoster.engineIds.sorted().map { "\($0)=\(RateLimitRoster.engineInputs($0))" }
-        return "v2|\(EngineSelfEval.rlBucketVersion)|" + models.joined(separator: ",")
+        // v3: rows carry the reading at the cut (#374); every stored cycle's
+        // engine rows are graded again to fill it in.
+        return "v3|\(EngineSelfEval.rlBucketVersion)|" + models.joined(separator: ",")
     }
 
     /// Score every completed rate-limit cycle the store holds (the live
@@ -686,18 +688,26 @@ public actor UsageIntelligenceEngine {
         (key: EngineEvalOutcome.makeKey(surface: n.surface, method: n.method, bucket: n.bucket, periodKey: n.periodKey),
          surface: n.surface,
          record: EngineSelfEval.Record(method: n.method, bucket: n.bucket, periodKey: n.periodKey,
-                                       predicted: n.predicted, truth: n.truth, inputs: n.inputs))
+                                       predicted: n.predicted, truth: n.truth, inputs: n.inputs,
+                                       reading: n.reading))
     }
 
     /// The keys of `methods`' rows already graded as they would be now, and
     /// the current-grading keys graded with older inputs
-    /// (`RateLimitRoster.engineInputs`): those are graded again. End-of-day
-    /// rows and rows of other gradings are never stale here.
+    /// (`RateLimitRoster.engineInputs`) or without the reading at the cut:
+    /// those are graded again. End-of-day rows and rows of other gradings are
+    /// never stale here.
+    ///
+    /// The reading is model-independent, and ranking takes a moment's from
+    /// any row of it (`EngineSelfEval.rankRL`). So only the engine's own
+    /// methods, a few milliseconds a cycle, are graded again for it; the
+    /// arena's rows from before it was recorded are not, which would be a
+    /// full re-grade of every model for a number the engine's rows carry.
     static func gradedKeys(_ rows: [EvalRow], methods: Set<String>) -> (keys: Set<String>, stale: Set<String>) {
         var keys = Set<String>(), stale = Set<String>()
         for row in rows where methods.contains(row.record.method) {
             if EngineSelfEval.isCurrentRLBucket(row.record.bucket),
-               row.record.inputs != RateLimitRoster.engineInputs(row.record.method) {
+               row.record.inputs != RateLimitRoster.engineInputs(row.record.method) || row.record.reading == nil {
                 stale.insert(row.key)
             } else {
                 keys.insert(row.key)
@@ -2163,7 +2173,7 @@ public actor UsageIntelligenceEngine {
                         EngineSelfEval.Record(method: intern(row.method), bucket: intern(row.bucket),
                                               periodKey: intern(row.periodKey),
                                               predicted: row.predicted, truth: row.truth,
-                                              inputs: row.inputs.map(intern)))
+                                              inputs: row.inputs.map(intern), reading: row.reading))
             }
         }
         // Only this scope's rows reach memory. A scoped surface id ends in
@@ -2190,7 +2200,7 @@ public actor UsageIntelligenceEngine {
                     EngineSelfEval.Record(method: intern(row.method), bucket: intern(row.bucket),
                                           periodKey: intern(row.periodKey),
                                           predicted: row.predicted, truth: row.truth,
-                                          inputs: row.inputs.map(intern)))
+                                          inputs: row.inputs.map(intern), reading: row.reading))
         }
     }
 
@@ -2253,7 +2263,8 @@ public actor UsageIntelligenceEngine {
             modelContext.insert(EngineEvalOutcome(
                 surface: scope.qualify(n.surface), method: n.method, bucket: n.bucket,
                 periodKey: n.periodKey,
-                predicted: n.predicted, truth: n.truth, recordedAt: now, inputs: n.inputs))
+                predicted: n.predicted, truth: n.truth, recordedAt: now, inputs: n.inputs,
+                reading: n.reading))
         }
         try? modelContext.save()
     }

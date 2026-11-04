@@ -44,7 +44,7 @@ struct AccuracyFormatTests {
         #expect(PacerAccuracyFormat.columnTitle(spanCycles: 24) == "TYPICAL MISS, LAST 24 CYCLES")
 
         let what = "How far each model's call of the final has typically been off at this point in the window, "
-            + "in percentage points; lower is better."
+            + "in percentage points; lower is better. Moments already at the cycle's final are left out."
         let counted = " Counted where the models' calls differed by 2 points or more."
         #expect(PacerAccuracyFormat.columnHelp(spanCycles: 0, disagreement: 2) == what + counted)
         #expect(PacerAccuracyFormat.columnHelp(spanCycles: 1, disagreement: 2)

@@ -48,6 +48,12 @@ public final class EngineEvalOutcome {
     /// history generations. A grade whose inputs no longer match is graded
     /// again. Nil on rows from before it was recorded, and on end-of-day rows.
     public var inputs: String?
+    /// The meter's reading at the cut a rate-limit grade was made at
+    /// (`BurnTrajectory.PartialCycle.usedNow`). Ranking leaves out the
+    /// moments where it already equals the cycle's final
+    /// (`EngineSelfEval.isSettled`). Nil on end-of-day rows and on rows
+    /// from before it was recorded.
+    public var reading: Double?
 
     public init(
         surface: String,
@@ -57,7 +63,8 @@ public final class EngineEvalOutcome {
         predicted: Double,
         truth: Double,
         recordedAt: Date = Date(),
-        inputs: String? = nil
+        inputs: String? = nil,
+        reading: Double? = nil
     ) {
         self.key = Self.makeKey(surface: surface, method: method, bucket: bucket, periodKey: periodKey)
         self.surface = surface
@@ -69,6 +76,7 @@ public final class EngineEvalOutcome {
         self.absPctError = Self.absPctError(predicted: predicted, truth: truth)
         self.recordedAt = recordedAt
         self.inputs = inputs
+        self.reading = reading
     }
 
     /// Replace the scored values after the history they were computed from
