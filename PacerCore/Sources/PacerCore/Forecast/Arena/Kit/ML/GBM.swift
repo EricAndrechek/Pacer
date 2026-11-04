@@ -526,6 +526,22 @@ public enum KitMLGBM {
 
     /// One quantile booster on `ds` (labels `y`, one per row).
     public static func trainQuantile(_ ds: Dataset, y: [Double], alpha: Double, params p: Params) -> Booster {
+        // A pace that never throws: this cannot fail.
+        try! trainQuantile(ds, y: y, alpha: alpha, params: p, pace: {})
+    }
+
+    /// The same, paced.
+    ///
+    /// - Parameter pace: called before every tree. The arena passes its
+    ///   cancellation check, which is also where it pays for its CPU
+    ///   (`ArenaCPUBudget.checkpoint`): a training is thousands of trees, tens
+    ///   of CPU seconds with no other checkpoint, so without it one ran to the
+    ///   end at a full core and the budget slept the debt off afterwards
+    ///   (#368, a MetricKit CPU report). A tree is a few milliseconds, so the
+    ///   longest unpaid stretch is one tree, and a throw (`cancelled`) ends
+    ///   the training there. It touches no state the trees read.
+    public static func trainQuantile(_ ds: Dataset, y: [Double], alpha: Double, params p: Params,
+                                     pace: () throws -> Void) rethrows -> Booster {
         let n = ds.n
         precondition(y.count == n)
         let alphaF = Float(alpha)
@@ -584,6 +600,7 @@ public enum KitMLGBM {
         var resid: [Double] = []
 
         for iter in 0..<p.nEstimators {
+            try pace()
             if useBagging && bagCount < n && iter % p.baggingFreq == 0 {
                 bag.removeAll(keepingCapacity: true)
                 for i in 0..<n {

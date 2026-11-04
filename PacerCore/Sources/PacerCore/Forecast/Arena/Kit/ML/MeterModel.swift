@@ -18,12 +18,14 @@ import Foundation
 //   the parity tests run.
 // - h > 0 (the registered model, h = `retrain_h`): at the start of the
 //   cut's h-hour bucket, `b = ⌊t / h⌋·h`, on `history.asOf(b)`, memoized on
-//   the store (`history.store.memo`) for every cut in that bucket. That is
+//   the store's generation (`history.store.generationMemo`) for every cut in that bucket. That is
 //   the Python's `update` rule (a model fitted at a cutoff keeps
 //   forecasting from fresh features until `retrain_h` of new data have
 //   arrived) made a function of the cut alone, so the app's backfill (eight
 //   cuts of every past cycle) trains once per bucket instead of once per
-//   cut, and it cannot leak: `b <= t`, and the training sees only what was
+//   cut, and the live lane once per bucket instead of once per refit (the
+//   cache is in `history.store.generationMemo`, which an extension of the
+//   history keeps), and it cannot leak: `b <= t`, and the training sees only what was
 //   known at `b`. The seed is the bucket's (`bucketSeed`), so the model does
 //   not depend on which cut asked first. The store keeps the most recent
 //   `train_cache_buckets` buckets per meter (`KitMLStateCache`).
@@ -229,7 +231,10 @@ open class KitMLLearnedMeterModel: ArenaModel {
 
 /// The store's trained states, by meter and bucket, the most recent
 /// `capacity` buckets per meter (least recently used out). Lives in
-/// `ArenaHistoryStore.memo` under one key, which has no eviction of its own.
+/// `ArenaHistoryStore.generationMemo` under one key, which has no eviction of
+/// its own: a bucket's state is trained on `history.asOf(b)`, and an
+/// extension of the history only appends rows after its build, so the state
+/// holds for the whole generation.
 final class KitMLStateCache: @unchecked Sendable {
     let capacity: Int
     private let lock = NSLock()
@@ -239,7 +244,7 @@ final class KitMLStateCache: @unchecked Sendable {
     init(capacity: Int) { self.capacity = capacity }
 
     static func of(_ store: ArenaHistoryStore, capacity: Int) -> KitMLStateCache {
-        store.memo.value("kitml.statecache|\(capacity)") { KitMLStateCache(capacity: capacity) }
+        store.generationMemo.value("kitml.statecache|\(capacity)") { KitMLStateCache(capacity: capacity) }
     }
 
     /// The meter's state for `bucket`, trained by `make` (outside the lock:

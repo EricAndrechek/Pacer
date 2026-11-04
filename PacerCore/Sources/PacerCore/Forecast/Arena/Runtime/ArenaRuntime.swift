@@ -96,6 +96,16 @@ final class ArenaCancelFlag: @unchecked Sendable {
     func take() -> Bool { lock.lock(); defer { value = false; lock.unlock() }; return value }
 }
 
+/// Whether the live lane's current model is urgent: its checkpoints
+/// (`ArenaServices.isCancelled`) read it. The window's pick is; the models
+/// drawn beside it for comparison are not (`ArenaLiveForecaster.drain`).
+final class ArenaLaneUrgency: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = true
+    var isUrgent: Bool { lock.lock(); defer { lock.unlock() }; return value }
+    func set(_ v: Bool) { lock.lock(); value = v; lock.unlock() }
+}
+
 /// Drops what the arena keeps that can be made again when macOS reports
 /// memory pressure: the runners' forecast memos (up to 24 MB an account in a
 /// pass, 16 MB an account live), the calibration layer's network cache and
@@ -916,7 +926,12 @@ public actor ArenaLiveForecaster {
     private let services: ArenaServices
     private let budget: ArenaCPUBudget
     private let cancel: ArenaCancelFlag
+    private let urgency: ArenaLaneUrgency
     private let landed: @Sendable (Set<String>) async -> Void
+    /// The time the history is asked to be known at. Injected so a test can
+    /// hold the lane at a chosen instant: the cut is the history's
+    /// `builtThrough`, which the lane sets from this.
+    private let clock: @Sendable () -> Date
     /// See the file header.
     private let queue = DispatchSerialQueue(label: "com.ericandrechek.pacer.arena.live", qos: .utility)
     public nonisolated var unownedExecutor: UnownedSerialExecutor { queue.asUnownedSerialExecutor() }
@@ -934,10 +949,28 @@ public actor ArenaLiveForecaster {
 
     /// - Parameter services: the live forecaster's own: its `isCancelled` is
     ///   the CPU budget's urgent checkpoint (`ArenaRuntime`).
+    ///   `urgency`: what those checkpoints read to know whether the model
+    ///   running is urgent.
     init(roster: ArenaRoster, history: ArenaHistoryCache, cache: ArenaLiveCache, services: ArenaServices,
-         budget: ArenaCPUBudget, cancel: ArenaCancelFlag, landed: @escaping @Sendable (Set<String>) async -> Void) {
+         budget: ArenaCPUBudget, cancel: ArenaCancelFlag, urgency: ArenaLaneUrgency = ArenaLaneUrgency(),
+         clock: @escaping @Sendable () -> Date = { Date() },
+         landed: @escaping @Sendable (Set<String>) async -> Void) {
         self.roster = roster; self.history = history; self.cache = cache; self.services = services
-        self.budget = budget; self.cancel = cancel; self.landed = landed
+        self.budget = budget; self.cancel = cancel; self.urgency = urgency; self.landed = landed
+        self.clock = clock
+    }
+
+    /// What one round of the lane did, for its log line.
+    struct Round {
+        var made = 0, picks = 0, skipped = 0, failed = 0
+        var cpu = 0.0
+        /// One line, only for a round that ran something: a round of skips
+        /// (a refit with no new reading) says nothing.
+        func line(wall: TimeInterval) -> String? {
+            guard made + failed > 0 else { return nil }
+            return String(format: "live round: %d made (%d picks), %d skipped, %d failed, %.1f CPU s in %.1f s",
+                          made, picks, skipped, failed, cpu, wall)
+        }
     }
 
     /// Queue requests; the newest per window wins.
@@ -959,25 +992,41 @@ public actor ArenaLiveForecaster {
         while draining || !pending.isEmpty { try? await Task.sleep(for: .milliseconds(5)) }
     }
 
+    /// Each round makes every window's pick first, urgent: the scorer waits at
+    /// its checkpoints and the dashboard's line lands first. The models drawn
+    /// beside it for comparison then run at the everyday share, taking turns
+    /// with the scorer rather than holding it off (#368). Urgency is held only
+    /// while the actor runs models, never across an await: a non-urgent
+    /// checkpoint of this lane must not wait for an urgent `makeNow` that
+    /// cannot run until this lane's model returns.
     private func drain() async {
-        // While this works the scorer waits at its checkpoints: the budget
-        // goes to what the dashboard is waiting for.
-        budget.beginUrgent()
-        defer { budget.endUrgent() }
         while !pending.isEmpty, !cancel.isSet {
             let batch = Array(pending.values)
             pending.removeAll()
-            var changed = Set<String>()
+            let started = Date()
+            var round = Round()
+            var cuts: [(account: String, cut: ArenaHistory, asOf: Date, runner: ArenaRunner,
+                        requests: [ArenaLiveRequest])] = []
             for (account, requests) in Dictionary(grouping: batch, by: { $0.binding.account }) {
-                let built = await history.built(account: account)
+                let built = await history.built(account: account, now: clock())
                 let cutMs = ArenaCut.millis(built.builtThrough)
-                let cut = ArenaHistory(store: built.store, now: cutMs, accounts: [account])
-                let runner = runner(account: account, built: built)
-                for r in requests where make(r, cut: cut, asOf: ArenaTime.date(cutMs), runner: runner) {
-                    changed.insert(account)
-                }
+                cuts.append((account, ArenaHistory(store: built.store, now: cutMs, accounts: [account]),
+                             ArenaTime.date(cutMs), runner(account: account, built: built), requests))
             }
-            if !changed.isEmpty { await landed(changed) }
+            for urgent in [true, false] {
+                if urgent { budget.beginUrgent() }
+                var changed = Set<String>()
+                for c in cuts {
+                    for r in c.requests where make(r, models: urgent ? Array(r.models.prefix(1)) : Array(r.models.dropFirst()),
+                                                   cut: c.cut, asOf: c.asOf, runner: c.runner, urgent: urgent,
+                                                   round: &round) {
+                        changed.insert(c.account)
+                    }
+                }
+                if urgent { budget.endUrgent() }
+                if !changed.isEmpty { await landed(changed) }
+            }
+            if let line = round.line(wall: Date().timeIntervalSince(started)) { Log.write("Arena", line) }
         }
         draining = false
     }
@@ -1000,41 +1049,79 @@ public actor ArenaLiveForecaster {
     /// same window must not replace it.
     public func makeNow(_ request: ArenaLiveRequest) async {
         guard !request.models.isEmpty, !cancel.isSet else { return }
-        budget.beginUrgent()
-        defer { budget.endUrgent() }
         let account = request.binding.account
-        let built = await history.built(account: account)
+        let built = await history.built(account: account, now: clock())
         let cutMs = min(ArenaCut.millis(built.builtThrough), request.cutAt.map(ArenaCut.millis) ?? .max)
         let cut = ArenaHistory(store: built.store, now: cutMs, accounts: [account])
-        if make(request, cut: cut, asOf: ArenaTime.date(cutMs), runner: runner(account: account, built: built)) {
-            await landed([account])
-        }
+        // Urgent only while the models run (see `drain`).
+        budget.beginUrgent()
+        var round = Round()
+        let any = make(request, models: request.models, cut: cut, asOf: ArenaTime.date(cutMs),
+                       runner: runner(account: account, built: built), urgent: true, round: &round)
+        budget.endUrgent()
+        if any { await landed([account]) }
     }
 
-    /// Returns whether anything new landed.
-    private func make(_ r: ArenaLiveRequest, cut: ArenaHistory, asOf: Date, runner: ArenaRunner) -> Bool {
+    /// How long a projection that has seen the window's newest reading is
+    /// kept before it is made again anyway: half the time the cache serves it
+    /// (`ArenaLiveCache.maxAge`), so it is remade, at a refit, before it stops
+    /// being drawn. 7.5 min on a five-hour window, an hour on a weekly one.
+    /// The bound is what brings in what readings don't show: new spend, which
+    /// spend-reading models forecast from.
+    static func refreshAge(duration: TimeInterval) -> TimeInterval {
+        ArenaLiveCache.maxAge(duration: duration) / 2
+    }
+
+    /// Whether `e` is still the answer for `r`: made for this cycle, after the
+    /// newest reading the engine fitted on (`latestReadingAt`), and younger
+    /// than `refreshAge`. An extension moves the cut at every refit, so "made
+    /// at this cut" was never true and every refit re-ran every model of
+    /// every window (#368); a refit with no new reading now costs nothing.
+    static func isCurrent(_ e: ArenaLiveCache.Entry, request r: ArenaLiveRequest, cut: Date,
+                          duration: TimeInterval) -> Bool {
+        guard RateLimitCycle.contains(sampleReset: e.resetsAt, resets: r.resetsAt, duration: duration) else {
+            return false
+        }
+        if e.asOf >= cut { return true }      // made at this cut (or a later one): the same answer
+        return e.asOf >= r.latestReadingAt && cut.timeIntervalSince(e.asOf) < refreshAge(duration: duration)
+    }
+
+    /// Make `models` of `r`, at the lane's urgency. Returns whether anything
+    /// new landed.
+    private func make(_ r: ArenaLiveRequest, models: [String], cut: ArenaHistory, asOf: Date, runner: ArenaRunner,
+                      urgent: Bool, round: inout Round) -> Bool {
         let duration = TimeInterval(r.binding.target.windowMillis) / 1000
         var any = false
-        for model in r.models {
+        urgency.set(urgent)
+        defer { urgency.set(true) }
+        for model in models {
             guard !cancel.isSet else { return any }
             let key = ArenaLiveCache.Key(account: r.binding.account, windowKey: r.binding.windowKey, model: model)
-            // Already made at this cut, for this cycle: the same answer.
-            if let e = cache.entry(key), e.asOf >= asOf,
-               RateLimitCycle.contains(sampleReset: e.resetsAt, resets: r.resetsAt, duration: duration) {
+            if let e = cache.entry(key), Self.isCurrent(e, request: r, cut: asOf, duration: duration) {
+                round.skipped += 1
                 continue
             }
             budget.mark()
-            defer { budget.checkpoint(urgent: true, cancelled: { cancel.isSet }) }
+            // The thread's own CPU: the checkpoints' sleeps inside cost none.
+            let cpu0 = budget.threadCPUSeconds()
+            defer {
+                round.cpu += budget.threadCPUSeconds() - cpu0
+                budget.checkpoint(urgent: urgent, cancelled: { cancel.isSet })
+            }
             do {
                 let p = try runner.projection(model: model, binding: r.binding, history: cut,
                                               resetAt: ArenaTime.millis(r.resetsAt))
                 cache.store(.init(resetsAt: r.resetsAt, asOf: asOf, projection: p), for: key)
                 any = true
+                round.made += 1
+                if urgent && model == r.models.first { round.picks += 1 }
             } catch ArenaError.weightsUnavailable {
+                round.failed += 1
                 cache.fail(key, reason: "downloading")
             } catch ArenaError.cancelled {
                 return any
             } catch {
+                round.failed += 1
                 cache.fail(key, reason: "no forecast this cycle")
                 if logged.insert("\(model)|\(r.binding.windowKey)").inserted {
                     Log.write("Arena", "live \(model) on \(r.binding.windowKey) …\(r.binding.account.suffix(4)): \(error)")
@@ -1120,12 +1207,15 @@ public final class ArenaRuntime: Sendable {
     ///     (`UsageIntelligenceEngine.refreshArenaResolution`).
     ///   - progress: where the scorer publishes its progress; the app's
     ///     sheet reads `ArenaScoringProgressBoard.shared`.
+    ///   - clock: the time the live lane asks its history to be known at
+    ///     (tests pin it).
     public init(container: ModelContainer, roster: ArenaRoster = .standard,
                 weights: @escaping @Sendable (String) -> URL? = ArenaRuntime.defaultWeights,
                 ensureWeights: @escaping @Sendable ([String]) async -> Void = ArenaRuntime.defaultEnsureWeights,
                 config: ArenaRecordScorer.Config = .init(), compareLimit: Int = 4,
                 costs: ArenaModelCosts = ArenaModelCosts(defaults: nil),
                 progress: ArenaScoringProgressBoard = .shared,
+                clock: @escaping @Sendable () -> Date = { Date() },
                 onRecordLanded: @escaping @Sendable (String, [EngineSelfEval.NewOutcome]) async -> Void,
                 onLiveLanded: @escaping @Sendable (Set<String>) async -> Void) {
         self.roster = roster
@@ -1159,15 +1249,17 @@ public final class ArenaRuntime: Sendable {
             budget.checkpoint(cancelled: { cancel.isSet })
             return cancel.isSet
         })
+        let urgency = ArenaLaneUrgency()
         let liveServices = ArenaServices(weights: weights, log: { gate.write($0, $1) }, isCancelled: {
-            budget.checkpoint(urgent: true, cancelled: { cancel.isSet })
+            budget.checkpoint(urgent: urgency.isUrgent, cancelled: { cancel.isSet })
             return cancel.isSet
         })
         self.scorer = ArenaRecordScorer(container: container, roster: roster, history: history,
                                         services: scorerServices, budget: budget, costs: costs, cancel: cancel,
                                         config: config, progress: progress, landed: onRecordLanded)
         self.live = ArenaLiveForecaster(roster: roster, history: history, cache: cache, services: liveServices,
-                                        budget: budget, cancel: cancel, landed: onLiveLanded)
+                                        budget: budget, cancel: cancel, urgency: urgency, clock: clock,
+                                        landed: onLiveLanded)
         self.relief = ArenaMemoryRelief(live: live, scorerFlag: scorer.relief)
         let sweep = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
         sweep.schedule(deadline: .now() + 60, repeating: 60, leeway: .seconds(5))

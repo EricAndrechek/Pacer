@@ -120,11 +120,12 @@ struct RuntimeEngineTests {
 
     static func runtime(_ container: ModelContainer, roster: [ArenaModelSpec],
                         config: ArenaRecordScorer.Config = noSleep(), landed: Landed = Landed(),
-                        engine: UsageIntelligenceEngine? = nil) -> ArenaRuntime {
+                        engine: UsageIntelligenceEngine? = nil,
+                        clock: @escaping @Sendable () -> Date = { Date() }) -> ArenaRuntime {
         // A board of its own: the app's (`.shared`) would carry one test's
         // passes into the next.
         ArenaRuntime(container: container, roster: ArenaRoster(registry: roster), config: config,
-                     progress: ArenaScoringProgressBoard(),
+                     progress: ArenaScoringProgressBoard(), clock: clock,
                      onRecordLanded: { _, news in
                          landed.add(news)
                          _ = await engine?.ingestArenaOutcomes(news)

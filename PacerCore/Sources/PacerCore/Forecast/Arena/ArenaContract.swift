@@ -142,13 +142,25 @@ public final class ArenaHistoryStore: Sendable {
     /// loaded network's buffers keyed by the store). Per-cut values belong in
     /// `ArenaHistory.memo` instead, which cannot leak a later cut's rows.
     public let memo = ArenaMemo()
+    /// A memo for the full build's lifetime, handed on by every extension of
+    /// it (`ArenaHistoryBuilder.extend`), where `memo` starts empty each time.
+    /// Only for values that depend on nothing but the rows known at a cut no
+    /// later than the build it was made on: an extension only appends rows
+    /// after that and keeps `dataStart`, so such a value is the one a new
+    /// store would make. The learned meter models' trained bucket states live
+    /// here (`KitMLStateCache`); the live lane extends every refit, and with
+    /// them in `memo` it retrained the same bucket every five minutes (#368).
+    /// Not for anything built from every row (the analog table): that goes
+    /// stale when rows are added.
+    public let generationMemo: ArenaMemo
     /// True when every row's `tKnown` is non-decreasing in event order (the
     /// app: a row is known when it is written), so "known at t" is a prefix.
     let metersKnownInOrder: [ArenaMeterID: Bool]
     let spendKnownInOrder: [String: Bool]
 
     public init(meters: [ArenaMeterID: [ArenaReading]], spend: [String: [ArenaSpendRow]],
-                tzOffsetMin: Int?, dataStart: Millis? = nil) {
+                tzOffsetMin: Int?, dataStart: Millis? = nil, generationMemo: ArenaMemo = ArenaMemo()) {
+        self.generationMemo = generationMemo
         let m = meters.mapValues { $0.sorted { ($0.tEvent, $0.utilPct ?? -1) < ($1.tEvent, $1.utilPct ?? -1) } }
         let s = spend.mapValues { $0.sorted { $0.tEvent < $1.tEvent } }
         self.meters = m
