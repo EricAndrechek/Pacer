@@ -45,7 +45,7 @@ struct AccuracyFormatTests {
 
         let what = "How far each model's call of the final has typically been off at this point in the window, "
             + "in percentage points; lower is better. Moments already at the cycle's final are left out."
-        let counted = " Counted where the models' calls differed by 2 points or more."
+        let counted = " Counted where the models' calls differed by more than 2 points."
         #expect(PacerAccuracyFormat.columnHelp(spanCycles: 0, disagreement: 2) == what + counted)
         #expect(PacerAccuracyFormat.columnHelp(spanCycles: 1, disagreement: 2)
             == what + counted + " Over your last completed cycle; a model scored on fewer says how many.")

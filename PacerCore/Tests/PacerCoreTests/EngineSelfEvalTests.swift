@@ -459,4 +459,25 @@ struct EngineSelfEvalTests {
         #expect(r.at == nil)
         #expect(r.pick == "b")
     }
+
+    // MARK: - Disagreement at the cap (#374)
+
+    /// Holding 98 against clamping to 100 is exactly 2 points apart, and is
+    /// not disagreement: only a spread of more than the threshold is.
+    @Test func aSpreadOfExactlyTheThresholdIsNotDisagreement() {
+        // Two cycles where the models spread exactly 2 points, one where they
+        // spread 5: only the last one's moments count.
+        let rows = (0..<3).flatMap { p -> [EngineSelfEval.Record] in
+            let period = EngineSelfEval.periodKeyRL(Self.now.addingTimeInterval(Double(p) * 7 * 86_400))
+            let spread = p < 2 ? 2.0 : 5.0
+            return EngineSelfEval.rlGrading.cuts.flatMap { cut -> [EngineSelfEval.Record] in
+                let b = EngineSelfEval.rlGrading.bucket(cut)
+                return [.init(method: "low", bucket: b, periodKey: period, predicted: 80, truth: 90),
+                        .init(method: "high", bucket: b, periodKey: period, predicted: 80 + spread, truth: 90)]
+            }
+        }
+        let r = EngineSelfEval.rankRL(rows, weekly: true, at: 0.85, depth: 17, tieRelative: 0.05, disagreement: 2)
+        #expect(r.standing("high")?.typicalAbsError == 5)
+        #expect(r.standing("low")?.typicalAbsError == 10)
+    }
 }

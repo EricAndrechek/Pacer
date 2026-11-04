@@ -58,7 +58,7 @@ public enum PacerAccuracyFormat {
         let what = "How far each model's call of the final has typically been off at this point in the window, "
             + "in percentage points; lower is better. Moments already at the cycle's final are left out."
         let counted = disagreement > 0
-            ? " Counted where the models' calls differed by \(String(format: "%g", disagreement)) points or more."
+            ? " Counted where the models' calls differed by more than \(String(format: "%g", disagreement)) points."
             : ""
         guard n > 0 else { return what + counted }
         let over = n == 1 ? "your last completed cycle" : "your last \(n) completed cycles"

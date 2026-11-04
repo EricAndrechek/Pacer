@@ -770,7 +770,7 @@ extension EngineSelfEval {
     ///   reading is exactly right there. When every moment near `at` is
     ///   settled, the open ones at every cut count alike.
     /// - With `disagreement` (points), only the moments where the models'
-    ///   forecasts spread at least that far count. Where every model said
+    ///   forecasts spread more than that count. Where every model said
     ///   the same, the meter's outcome tells nothing about which is better,
     ///   and on an account with quiet cycles those moments outnumber the
     ///   rest: every miss read ±0 and the simplest model won whatever the
@@ -817,13 +817,18 @@ extension EngineSelfEval {
             let m = Moment(period: r.periodKey, cut: cut)
             if let reading = r.reading { readingAt[m] = max(readingAt[m] ?? reading, reading) }
             if disagreement != nil {
-                spread[m] = spread[m].map { (min($0.lo, r.predicted), max($0.hi, r.predicted)) }
-                    ?? (r.predicted, r.predicted)
+                // On the meter's scale: no displayed value passes 100.
+                let p = min(100, r.predicted)
+                spread[m] = spread[m].map { (min($0.lo, p), max($0.hi, p)) } ?? (p, p)
             }
         }
+        // Strictly more than the threshold: on a cycle that stayed at 98%,
+        // the models that hold the reading and the ones that clamp to 100
+        // spread exactly 2 points, and those moments passed `>=` as
+        // disagreement (#374).
         func disagreed(_ period: String, _ cut: Double) -> Bool {
             guard let disagreement, let s = spread[Moment(period: period, cut: cut)] else { return true }
-            return s.hi - s.lo >= disagreement
+            return s.hi - s.lo > disagreement
         }
         func open(_ period: String, _ g: Graded) -> Bool {
             guard let reading = g.reading ?? readingAt[Moment(period: period, cut: g.cut)] else { return true }

@@ -448,7 +448,10 @@ struct RuntimeUnifiedGraderTests {
         Turncoat.turnsAt = ArenaTime.millis(Self.reset(20))
         let container = try Fixtures.seeded(cycles: Self.cycles)
         try Self.engineRecord(container, 0...31, linearRecentMiss: 0, otherMiss: 5)
-        try Self.engineRecord(container, 32...Self.cycles - 1, linearRecentMiss: 5, otherMiss: 5)
+        // 10, not 5: at 5 the engine's 55 and the turncoat's 57 on some
+        // cycles spread exactly the 2-point disagreement threshold, which
+        // counts only when exceeded (#374), and those cycles dropped out.
+        try Self.engineRecord(container, 32...Self.cycles - 1, linearRecentMiss: 10, otherMiss: 10)
         let engine = await Fixtures.engine(container)
         let rt = Fixtures.runtime(container, roster: [Self.turncoat], engine: engine)
         await engine.adopt(arena: rt.link)
