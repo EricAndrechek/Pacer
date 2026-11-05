@@ -43,8 +43,15 @@ public struct LoginSwitchEvidence: Sendable, Equatable {
 
     public let switches: [Switch]
 
-    public init(switches: [Switch]) {
+    /// Whether a switcher is installed at all, as opposed to one whose log
+    /// this could not read. A switcher that is there but yields no switches
+    /// is the broken-parse case #382 counts; no switcher is the ordinary
+    /// `/login`-only machine, where every change is rightly unexplained.
+    public let switcherPresent: Bool
+
+    public init(switches: [Switch], switcherPresent: Bool? = nil) {
         self.switches = switches
+        self.switcherPresent = switcherPresent ?? !switches.isEmpty
     }
 
     public static let none = LoginSwitchEvidence(switches: [])
@@ -115,7 +122,11 @@ extension LoginSwitchEvidence {
                       timeZone: TimeZone = .current) -> LoginSwitchEvidence {
         guard let sequence,
               let root = (try? JSONSerialization.jsonObject(with: sequence)) as? [String: Any],
-              let accounts = root["accounts"] as? [String: Any] else { return .none }
+              let accounts = root["accounts"] as? [String: Any] else {
+            // A roster that is there but unreadable is a switcher this cannot
+            // parse, which the audit (#382) must see; no roster is no switcher.
+            return LoginSwitchEvidence(switches: [], switcherPresent: sequence != nil)
+        }
         var slots: [Int: String] = [:]
         for (slot, raw) in accounts {
             guard let number = Int(slot), let fields = raw as? [String: Any],
@@ -144,7 +155,7 @@ extension LoginSwitchEvidence {
            let at = ISO8601DateFormatter().date(from: stamp) {
             switches.append(Switch(at: at, accountId: org))
         }
-        return LoginSwitchEvidence(switches: switches)
+        return LoginSwitchEvidence(switches: switches, switcherPresent: true)
     }
 
     /// The end of `url`, at most `bytes` of it, cut to whole lines.
@@ -205,5 +216,141 @@ public final class LoginSwitchEvidenceReader: @unchecked Sendable {
             signature = now
             return cached
         }
+    }
+}
+
+// MARK: - Audit (#382)
+
+/// Counts the default-login changes a switcher's log explains and the ones it
+/// does not, so a log whose format or timezone handling changed shows up.
+///
+/// **Why.** Every rotation then looks unexplained, and sessions are judged on
+/// the old, often nearly full, account and pause for nothing after each
+/// switch. Replayed over a month, 109 of 110 changes were explained and the
+/// one left was a real `/login`, so the healthy rate is near zero and a few a
+/// day means the parse broke.
+///
+/// Each change is counted once: judged entries are kept in a file in the App
+/// Group container, which also lets `pacer report` say so without asking the
+/// app anything, and stops a relaunch counting them again. Entries carry a
+/// time and a verdict, never an account.
+public final class LoginChangeAudit: @unchecked Sendable {
+    public struct Entry: Sendable, Equatable {
+        public let at: Date
+        public let explained: Bool
+        public init(at: Date, explained: Bool) {
+            self.at = at
+            self.explained = explained
+        }
+    }
+
+    /// The process's audit. Inert in a test process, like the marker.
+    public static let shared = LoginChangeAudit(url: LaunchMode.isNormalLaunch ? fileURL() : nil)
+
+    public static let fileName = "login-changes.json"
+
+    /// For the command line as well as the app.
+    public static func fileURL() -> URL? {
+        guard !PacerPreferences.isTestProcess else { return nil }
+        return try? PacerStore.sharedContainerURL().appendingPathComponent(fileName)
+    }
+
+    /// How far back a change is judged, and how long `pacer report` looks.
+    public static let window: TimeInterval = 24 * 3600
+
+    /// A change is judged only once it is this old. Pacer can see the login
+    /// move before the switcher's log line is readable, and judging at once
+    /// would call that race a parse failure.
+    public static let grace: TimeInterval = 120
+
+    /// `pacer report` says something from this many unexplained changes.
+    public static let noteThreshold = 2
+
+    private let url: URL?
+    private let add: @Sendable (String, Int) -> Void
+    private let lock = NSLock()
+    private var entries: [Entry]?
+
+    /// `url` nil keeps the tally in memory only.
+    public init(url: URL?, add: @escaping @Sendable (String, Int) -> Void = { TelemetryCounters.add($0, $1) }) {
+        self.url = url
+        self.add = add
+    }
+
+    /// Judge the changes in `changes` (newest first, as `LoginSwitchEvidence.changes`
+    /// returns them) that are new since the last call. Counts each once, logs
+    /// each unexplained one, and returns how many unexplained there were in
+    /// the last day. Nothing is judged when no switcher is present: there is
+    /// no log to disagree with.
+    @discardableResult
+    public func observe(_ changes: [(change: AccountTrail.LoginChange, followed: Bool)],
+                        switcherPresent: Bool, now: Date) -> Int {
+        guard switcherPresent else { return 0 }
+        var fresh: [Entry] = []
+        let unexplainedToday: Int = lock.withLock {
+            var known = entries ?? Self.read(from: url)
+            let seen = Set(known.map { Self.key($0.at) })
+            for (change, followed) in changes {
+                guard change.at > now.addingTimeInterval(-Self.window),
+                      change.at <= now.addingTimeInterval(-Self.grace),
+                      !seen.contains(Self.key(change.at)) else { continue }
+                fresh.append(Entry(at: change.at, explained: followed))
+            }
+            let before = known.count
+            known.append(contentsOf: fresh)
+            known = known.filter { $0.at > now.addingTimeInterval(-2 * Self.window) }
+            entries = known
+            if known.count != before || !fresh.isEmpty { Self.write(known, to: url) }
+            return Self.unexplained(in: known, now: now)
+        }
+        let explained = fresh.filter(\.explained).count
+        if explained > 0 { add("accounts.login_change.explained", explained) }
+        if fresh.count > explained { add("accounts.login_change.unexplained", fresh.count - explained) }
+        for _ in 0..<(fresh.count - explained) {
+            Log.write("LoginSwitch", "unexplained default-login change; \(unexplainedToday) today")
+        }
+        return unexplainedToday
+    }
+
+    /// Unexplained changes in the last day.
+    public static func unexplained(in entries: [Entry], now: Date) -> Int {
+        entries.filter { !$0.explained && $0.at > now.addingTimeInterval(-window) && $0.at <= now }.count
+    }
+
+    /// The one line `pacer report` adds, or nil below the threshold.
+    public static func reportNote(unexplained count: Int) -> String? {
+        count >= noteThreshold
+            ? "note: \(count) login changes today had no switch behind them — check the switcher's log"
+            : nil
+    }
+
+    private static func key(_ date: Date) -> Int64 { Int64((date.timeIntervalSince1970 * 1000).rounded()) }
+
+    nonisolated(unsafe) private static let stamp: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+
+    /// The file's entries; empty for a missing or unreadable one.
+    public static func read(from url: URL?) -> [Entry] {
+        guard let url, let data = FileManager.default.contents(atPath: url.path),
+              let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let list = root["changes"] as? [[String: Any]] else { return [] }
+        return list.compactMap {
+            guard let text = $0["at"] as? String, let at = stamp.date(from: text),
+                  let explained = $0["explained"] as? Bool else { return nil }
+            return Entry(at: at, explained: explained)
+        }
+    }
+
+    private static func write(_ entries: [Entry], to url: URL?) {
+        guard let url else { return }
+        let list = entries.map { "{\"at\": \"\(stamp.string(from: $0.at))\", \"explained\": \($0.explained)}" }
+        let body = "{\"version\": 1, \"changes\": [\(list.joined(separator: ", "))]}\n"
+        let tmp = url.appendingPathExtension("tmp.\(ProcessInfo.processInfo.processIdentifier)")
+        guard (try? Data(body.utf8).write(to: tmp)) != nil else { return }
+        // rename(2): a reader sees the old file or the new one, never half.
+        if rename(tmp.path, url.path) != 0 { try? FileManager.default.removeItem(at: tmp) }
     }
 }

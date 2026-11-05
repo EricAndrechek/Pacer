@@ -495,6 +495,26 @@ enum PaceFormat {
         return String(format: "%02d:%02dZ", second / 3_600, second % 3_600 / 60)
     }
 
+    nonisolated(unsafe) private static let dayFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "EEE"
+        return f
+    }()
+
+    nonisolated(unsafe) private static let timeFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "h:mm a"
+        return f
+    }()
+
+    /// When something frees up, as `Sat` or, within a day, `5:00 PM`.
+    static func until(_ seconds: Int, now: Date) -> String {
+        let at = Date(timeIntervalSince1970: floor(now.timeIntervalSince1970) + Double(seconds))
+        return seconds < 86_400 ? timeFormatter.string(from: at) : dayFormatter.string(from: at)
+    }
+
     /// `61.99999` → `62`; `4.5` → `4.5`.
     static func percent(_ text: String?) -> String {
         guard let text, !text.isEmpty, text != "null" else { return "?" }
@@ -514,4 +534,99 @@ enum PaceFormat {
 
     /// `date -u +%Y-%m-%dT%H:%M:%SZ`.
     static func utcStamp(_ date: Date) -> String { isoFormatter.string(from: date) }
+}
+
+/// The logins other than the one a report is about, split the way the gate
+/// splits a window: spent when any account-wide window is at or over its safe
+/// limit, with room otherwise (#293).
+///
+/// Only account-wide windows decide. A per-model cap (Ultra's, or Fable's) is
+/// not the login's capacity, and an Ultra login has no 5-hour window at all,
+/// so it is judged on its weekly one alone.
+struct PaceOtherLogins: Equatable, Sendable {
+    struct Window: Equatable, Sendable {
+        let label: String
+        let percentText: String
+        let resetsIn: Int?
+    }
+
+    struct Login: Equatable, Sendable {
+        let account: String
+        let windows: [Window]
+        /// The windows over their limit, which is what the login waits on.
+        let spent: [Window]
+        var hasRoom: Bool { spent.isEmpty }
+        /// When it is usable again: the last of its spent windows to reset.
+        var freeIn: Int? { spent.compactMap(\.resetsIn).max() }
+        var peak: Double { windows.map { PaceFormat.number($0.percentText) }.max() ?? 0 }
+    }
+
+    let logins: [Login]
+
+    /// Nil when `rows` holds no login with an account-wide window.
+    init?(rows: [PaceRow]) {
+        var order: [String] = []
+        for row in rows where row.model.isEmpty && !order.contains(row.account) { order.append(row.account) }
+        logins = order.map { account in
+            let own = rows.filter { $0.account == account && $0.model.isEmpty }
+            var windows: [Window] = []
+            var spent: [Window] = []
+            for row in own {
+                let window = Window(label: row.label, percentText: row.percentText, resetsIn: row.resetSeconds)
+                windows.append(window)
+                // A reset already due describes the window that just ended,
+                // as in `PaceRules.evaluate`.
+                if let secs = row.resetsIn, PaceFormat.number(secs) <= 0 { continue }
+                if row.percent >= PaceRules.limit(row, cap: .safe, margin: 0) { spent.append(window) }
+            }
+            return Login(account: account, windows: windows, spent: spent)
+        }
+        if logins.isEmpty { return nil }
+    }
+
+    var withRoom: [Login] { logins.filter(\.hasRoom) }
+    var spent: [Login] { logins.filter { !$0.hasRoom } }
+
+    /// The login with the most room: the lowest peak.
+    var best: Login? { withRoom.min { $0.peak < $1.peak } }
+
+    /// When the first spent login is usable again.
+    var spentUntil: Int? { spent.compactMap(\.freeIn).min() }
+
+    private static func text(_ windows: [Window]) -> String {
+        windows.map { "\($0.label) \(PaceFormat.percent($0.percentText))%" }.joined(separator: ", ")
+    }
+
+    /// `other logins: 1 with room (7d 4%), 2 spent until Sat`
+    func line(now: Date) -> String {
+        var parts: [String] = []
+        if let best {
+            parts.append("\(withRoom.count) with room (\(Self.text(best.windows)))")
+        }
+        if !spent.isEmpty {
+            let when = spentUntil.map { " until " + PaceFormat.until($0, now: now) } ?? ""
+            parts.append("\(spent.count) spent" + when)
+        }
+        return "other logins: " + parts.joined(separator: ", ")
+    }
+
+    private static func json(_ windows: [Window]) -> String {
+        "[" + windows.map {
+            "{\"label\": \"\($0.label)\", \"usedPercent\": \(PaceFormat.awkNumber(PaceFormat.number($0.percentText))), "
+            + "\"resetsInSeconds\": \($0.resetsIn.map(String.init) ?? "null")}"
+        }.joined(separator: ", ") + "]"
+    }
+
+    /// For `pacer json`: each login with its account-wide windows, and for a
+    /// spent one when it is usable again.
+    var json: String {
+        let items = logins.map { login in
+            "{\"account\": \"\(login.account)\", \"state\": \"\(login.hasRoom ? "room" : "spent")\", "
+            + "\"freeInSeconds\": \(login.hasRoom ? "null" : login.freeIn.map(String.init) ?? "null"), "
+            + "\"windows\": \(Self.json(login.windows))}"
+        }
+        return "{\"withRoom\": \(withRoom.count), \"spent\": \(spent.count), "
+            + "\"spentUntilSeconds\": \(spentUntil.map(String.init) ?? "null"), "
+            + "\"logins\": [" + items.joined(separator: ", ") + "]}"
+    }
 }

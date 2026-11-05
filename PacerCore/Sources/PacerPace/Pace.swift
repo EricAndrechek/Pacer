@@ -28,6 +28,9 @@ public struct PaceIO: @unchecked Sendable {
     /// `status` notice a verdict gated before a login switch without asking
     /// Pacer anything. Nil when there is none to read, which skips the check.
     public var loginMarker: () -> DefaultLoginMarker?
+    /// Default-login changes the app judged, explained or not (#382). Empty
+    /// when there is none to read.
+    public var loginChanges: () -> [LoginChangeAudit.Entry]
 
     public init(out: @escaping (String) -> Void, err: @escaping (String) -> Void,
                 now: @escaping () -> Date, sleep: @escaping (TimeInterval) -> Void,
@@ -36,7 +39,8 @@ public struct PaceIO: @unchecked Sendable {
                 nap: @escaping (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) },
                 telemetry: PaceTelemetry = .off,
                 source: @escaping () -> CLIRunLog.Source = { .none },
-                loginMarker: @escaping () -> DefaultLoginMarker? = { nil }) {
+                loginMarker: @escaping () -> DefaultLoginMarker? = { nil },
+                loginChanges: @escaping () -> [LoginChangeAudit.Entry] = { [] }) {
         self.out = out
         self.err = err
         self.now = now
@@ -47,6 +51,7 @@ public struct PaceIO: @unchecked Sendable {
         self.telemetry = telemetry
         self.source = source
         self.loginMarker = loginMarker
+        self.loginChanges = loginChanges
     }
 
     /// The real thing: stdout, stderr, the wall clock, URLSession and git.
@@ -84,7 +89,8 @@ public struct PaceIO: @unchecked Sendable {
             gitBranch: PaceHTTP.gitBranch,
             telemetry: .live(),
             source: { tracker.value },
-            loginMarker: { DefaultLoginMarker.read(from: DefaultLoginMarker.fileURL()) })
+            loginMarker: { DefaultLoginMarker.read(from: DefaultLoginMarker.fileURL()) },
+            loginChanges: { LoginChangeAudit.read(from: LoginChangeAudit.fileURL()) })
     }
 }
 
@@ -419,6 +425,9 @@ final class PaceRun {
 
     private var scope: [URLQueryItem] = []
     private var allAccounts = 0
+    /// Every point of the last unscoped answer, kept so `report` and `json`
+    /// can name the other logins without a second read (#293).
+    private var lastPoints: [PaceMetricPoint] = []
     private var want: String
 
     private var sessionModel = ""
@@ -754,6 +763,7 @@ final class PaceRun {
                     // Counted before narrowing, or the caveat about several
                     // signed-in accounts could never fire.
                     allAccounts = points.filter { $0.name == "pacer_account_info" }.count
+                    lastPoints = points
                     rows = Self.rows(from: points, want: want)
                     if !rows.isEmpty {
                         fetchReason = nil
@@ -1098,6 +1108,30 @@ final class PaceRun {
                    + rate + full + " · resets in " + Self.pad(PaceFormat.human(row.resetsIn), 7)
                    + " (" + PaceFormat.clock(row.resetsIn, now: now) + ")" + mine + "\n")
         }
+        // After the windows, so the lines above are the same for a machine
+        // with one login. An agent that read only the active login's windows
+        // took them for the machine's capacity (#293).
+        if let others = otherLogins() { io.out(others.line(now: now) + "\n") }
+        if let note = LoginChangeAudit.reportNote(
+            unexplained: LoginChangeAudit.unexplained(in: io.loginChanges(), now: now)) {
+            io.out(note + "\n")
+        }
+    }
+
+    /// The logins other than the ones `rows` shows, judged as the gate judges
+    /// them. Nil on a one-login machine, and for `--account all`, which
+    /// already lists every login.
+    private func otherLogins() -> PaceOtherLogins? {
+        if account == "all" { return nil }
+        var points = lastPoints
+        // A scoped answer holds one login; the others need an unscoped read.
+        if !scope.isEmpty {
+            guard let response = get(api), !response.body.isEmpty else { return nil }
+            points = PaceMetricsText.parse(response.body)
+        }
+        let shown = Set(rows.map(\.account))
+        let everything = Self.rows(from: points, want: "all").filter { !shown.contains($0.account) }
+        return PaceOtherLogins(rows: everything)
     }
 
     private func cmdJSON() throws {
@@ -1119,6 +1153,7 @@ final class PaceRun {
         if !sessionMayStillBill.isEmpty {
             text += "  \"mayStillBill\": [" + sessionMayStillBill.map { "\"\($0)\"" }.joined(separator: ", ") + "],\n"
         }
+        if let others = otherLogins() { text += "  \"otherAccounts\": " + others.json + ",\n" }
         text += "  \"windows\": [\n"
         text += selected.map { row in
             "    {\"account\": \"\(row.account)\", \"identity\": \"\(row.identity)\", \"label\": \"\(row.label)\", "
