@@ -1417,6 +1417,11 @@ public final class SamplePersister {
                 sampleSessionIds.insert(sid)
             }
         }
+        // Computed for this and then never stored, so an index written after
+        // a walk with no insert behind it claimed nothing: the next launch
+        // read every row back as "newer than the index" through `enumerate`
+        // — 880k rows, a 4.4 GB footprint and 86 s on a real store copy.
+        if maxSampledAt > indexWatermark { indexWatermark = maxSampledAt }
 
         let walkMs = Date().timeIntervalSince(tWalk) * 1000
         let tGaps = Date()

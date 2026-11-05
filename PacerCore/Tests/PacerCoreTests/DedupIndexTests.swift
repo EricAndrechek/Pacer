@@ -1,4 +1,5 @@
 import Foundation
+import SwiftData
 import Testing
 @testable import PacerCore
 
@@ -94,5 +95,41 @@ import Testing
         let url = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("definitely-absent-\(UUID().uuidString).bin")
         #expect(DedupIndex.load(from: url) == nil)
+    }
+
+    // MARK: - Written after a store walk
+
+    /// An index rebuilt by walking the store accounts for every row it read,
+    /// so its watermark is the newest of them. It used to stay at 1970 when
+    /// nothing was inserted before the write, and the next launch then read
+    /// the whole table back as "newer than the index".
+    @ScanActor
+    @Test func anIndexWrittenAfterAWalkCoversWhatTheWalkRead() throws {
+        let container = try ModelContainer(
+            for: TokenSample.self, DailyAggregate.self, HourlyAggregate.self,
+            ProjectDailyAggregate.self, SessionInfo.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true))
+        let scratch = ModelContext(container)
+        let base = Date(timeIntervalSince1970: 1_790_000_000)
+        for i in 0..<12 {
+            let at = base.addingTimeInterval(Double((i * 5) % 12) * 3_600)
+            scratch.insert(TokenSample(
+                sampledAt: at, date: TokenSample.formatDate(at), model: "claude-opus-5",
+                inputTokens: 1, outputTokens: Int64(i), cacheReadTokens: 0,
+                cacheCreation5mTokens: 0, cacheCreation1hTokens: 0,
+                dedupKey: "msg_\(i):req_\(i)", sessionId: "s"))
+        }
+        try scratch.save()
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("dedup-\(UUID().uuidString).bin")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let persister = try SamplePersister(context: ModelContext(container), indexURL: url)
+        try persister.ensurePreloaded()
+        persister.writeDedupIndexIfNeeded(force: true)
+
+        let written = try #require(DedupIndex.load(from: url))
+        #expect(written.rowCount == 12)
+        #expect(written.watermark == base.addingTimeInterval(11 * 3_600))
     }
 }
