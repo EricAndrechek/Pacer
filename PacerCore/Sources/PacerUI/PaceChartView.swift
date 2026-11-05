@@ -23,7 +23,9 @@ import PacerCore
 /// (0/50/100%); `Style.compact` hides both for tight widget canvases.
 public struct PaceChartView: View {
 
-    public struct Data: Equatable {
+    /// `Sendable` so the dashboard can build it off the main actor
+    /// (`PaceSeriesPrep`) and hand it across.
+    public struct Data: Equatable, Sendable {
         public let cycleStart: Date
         public let resetsAt: Date
         public let durationSeconds: TimeInterval

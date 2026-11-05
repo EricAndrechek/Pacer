@@ -55,12 +55,13 @@ struct EngineFeatures: Sendable {
     let rateLimit: [String: [(at: Date, usedPercentage: Double, resetsAt: Date)]]
 
     /// The window SET the engine forecasts, driving every per-window loop
-    /// (`makeFit`, `recompute`, `newRLOutcomes`, `snapshotDrafts`). Always the
-    /// two fixed blocks first (`five_hour`, `seven_day`, in that order — matching
-    /// the old `RateLimitWindowKind.allCases` iteration), then any discovered
-    /// scoped per-model windows, deterministically ordered. Each spec carries
-    /// the `(key, duration)` the pure per-window statics already take, so the
-    /// fixed windows reproduce the old behaviour exactly.
+    /// (`makeFit`, `recompute`, `newRLOutcomes`, `snapshotDrafts`, the record
+    /// backfill and the arena's grading streams). The fixed blocks the account
+    /// has come first (`five_hour`, `seven_day`, in that order — matching the
+    /// old `RateLimitWindowKind.allCases` iteration; see `presentFixedWindows`),
+    /// then any discovered scoped per-model windows, deterministically ordered.
+    /// Each spec carries the `(key, duration)` the pure per-window statics
+    /// already take, so the fixed windows reproduce the old behaviour exactly.
     let windows: [WindowSpec]
 
     /// `[weekday 0=Sun…6=Sat][hour 0…23]` probability that the cell has any
@@ -162,12 +163,19 @@ struct EngineFeatures: Sendable {
             guard let resets = s.resetsAt else { continue }
             rateLimit[s.identity, default: []].append((s.at, s.usedPercentage, resets))
         }
+        // The window set: the fixed blocks this account has (canonical order),
+        // then the scoped identities present in the latest batch, ordered
+        // deterministically by identity so iteration and persistence are
+        // reproducible.
+        var windows = presentFixedWindows(rate)
+        // A fixed window the account no longer has keeps its rows in the store
+        // (never deleted), but not here: with no series, every answer for it is
+        // "insufficient" and nothing downstream can fit, grade, snapshot or
+        // project it from history that stopped at the change.
+        for spec in WindowSpec.fixedWindows where !windows.contains(spec) {
+            rateLimit[spec.key] = nil
+        }
         for k in rateLimit.keys { rateLimit[k]?.sort { $0.at < $1.at } }
-
-        // The window set: fixed blocks first (canonical order), then the scoped
-        // identities present in the latest batch, ordered deterministically by
-        // identity so iteration and persistence are reproducible.
-        var windows = WindowSpec.fixedWindows
         windows.append(contentsOf: scopedWindows(scoped))
 
         // Binding scoped identities (latest batch, is_active) — the widget hint.
@@ -181,6 +189,33 @@ struct EngineFeatures: Sendable {
             todayElapsed: todayElapsed,
             rateLimit: rateLimit, windows: windows, activityGrid: activityGrid,
             lastArrivalAt: lastArrivalAt, activeScopedIdentities: activeScoped)
+    }
+
+    /// The fixed windows the account actually has, judged by its latest poll
+    /// (#366). Since 2026-10-30 a verified Ultra account's polls carry
+    /// `seven_day` and no `five_hour`, and #361 made every surface follow that
+    /// rule (`LimitSamplePoint.hasNoFiveHourWindow`). The engine kept fitting,
+    /// grading, snapshotting and asking the arena about `five_hour` from the
+    /// history before the change: work for a window nothing shows, and grading
+    /// rows for cycles that will never come again.
+    ///
+    /// The same rule, applied to the same rows the fit reads, so the engine
+    /// cannot disagree with the card about whether the window exists. A poll
+    /// with neither window (no reading yet, a failed read) keeps both, and a
+    /// 5-hour window that comes back (an unverified Ultra account keeps a
+    /// temporary cap) is fitted again from the next refit.
+    static func presentFixedWindows(_ rate: [RateRow]) -> [WindowSpec] {
+        guard let newest = rate.lazy.map(\.at).max() else { return WindowSpec.fixedWindows }
+        // Only the newest poll matters; `latestBatch` applies its own
+        // tolerance inside this generous slice, so the rule is the shared one
+        // rather than a copy of it.
+        let cutoff = newest.addingTimeInterval(-60)
+        let tail = rate.lazy.filter { $0.at >= cutoff }.map {
+            LimitSamplePoint(sampledAt: $0.at, window: $0.window,
+                             usedPercentage: $0.usedPercentage, resetsAt: $0.resetsAt)
+        }
+        guard Array(tail).hasNoFiveHourWindow else { return WindowSpec.fixedWindows }
+        return WindowSpec.fixedWindows.filter { $0.key != RateLimitWindowName.fiveHour }
     }
 
     /// Resolve the scoped `WindowSpec` set from scoped rows: one spec per

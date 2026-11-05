@@ -29,9 +29,9 @@ struct PaceChartCard: View {
     /// comparisons.
     let onCompare: ((String, String?) -> Void)?
 
-    /// 8-day window of fixed rate-limit samples. Body never reads the array —
-    /// pre-bucketed by window in `bucketed` so neither fixed column does its
-    /// own filter pass.
+    /// 8-day window of fixed rate-limit samples. Body never walks the arrays:
+    /// `PaceSeriesPrep` reduces them off the main actor once per change and
+    /// once a minute (`prepared`), and the body assembles columns from that.
     ///
     /// **Loaded on a signal, not through `@Query`.** `@Query` re-runs when the
     /// context changes, and Pacer's context changes on every scan cycle
@@ -48,7 +48,7 @@ struct PaceChartCard: View {
     /// `label` is nil and nothing is decorated. Under "all accounts" on a
     /// machine that runs them in parallel there is one per account, and the
     /// columns say whose they are.
-    struct AccountSeries: Identifiable {
+    struct AccountSeries: Identifiable, Sendable {
         let accountId: String?
         let label: String?
         var fixed: [LimitSamplePoint] = []
@@ -61,6 +61,49 @@ struct PaceChartCard: View {
     }
 
     @State private var series: [AccountSeries] = []
+
+    /// Bumped every time `series` is replaced, so a reduction built from an
+    /// older one is never drawn against a newer one.
+    @State private var seriesGeneration: UInt64 = 0
+
+    /// `series` reduced to what the columns draw (`PaceSeriesPrep`), built
+    /// off the main actor (#367).
+    ///
+    /// The body used to derive it from the raw points on every pass: 38,448
+    /// points on a four-account store, several walks each, 100–150 ms of main
+    /// thread on a Debug build. And the body ran on every poll's account save,
+    /// every top-up, every forecast pass and every minute: ~300 stalls an hour
+    /// with the dashboard open. Now a reload builds it with the series and
+    /// assigns both together, and the minute tick rebuilds it at the new
+    /// clock before advancing `minute`, so the body only looks values up.
+    @State private var prepared: Prepared?
+
+    struct Prepared: Equatable {
+        /// The `seriesGeneration` it was built from.
+        let generation: UInt64
+        /// One per `series` entry, in the same order.
+        let series: [PaceSeriesPrep]
+    }
+
+    /// The one case the body builds the reduction itself: the first frame of
+    /// a card seeded from `PaceSeriesCache` (a tab switch back), before any
+    /// reload or tick has built one. That is the work the old body did on
+    /// every pass, done once; a reference so the body can fill it (`@State`
+    /// cannot be written during a render), and nothing displays it.
+    private final class FirstRenderMemo {
+        var value: Prepared?
+    }
+    @State private var firstRenderMemo = FirstRenderMemo()
+
+    /// Bumped at the start of every `reload`, so one that finishes after a
+    /// newer one started (the reduction is a second suspension) is dropped
+    /// rather than putting older rows back on screen.
+    @State private var reloadSequence: UInt64 = 0
+
+    /// Body passes and reductions, summed and logged every ten minutes while
+    /// the card is up, so the cost of drawing it is a number in the log
+    /// rather than an inference from stalls. Nothing displays it.
+    @State private var drawStats = DrawStats()
 
     /// The newest scoped `limits[]` rows, newest first — just enough to resolve
     /// the latest poll's batch, which is what decides the scoped column set.
@@ -270,6 +313,8 @@ struct PaceChartCard: View {
         // itself cannot race ahead of it. See `loadedScopeKey`.
         let key = scopeKey
         loadedScopeKey = key
+        reloadSequence &+= 1
+        let sequence = reloadSequence
         let history = RateLimitWriteSignal.shared.historyGeneration
         let historyRewritten = history != loadedHistory
         loadedHistory = history
@@ -321,8 +366,17 @@ struct PaceChartCard: View {
                 continue
             }
             let fetchStarted = Date()
-            let loaded = await Task.detached(priority: .userInitiated) {
-                await Self.load(container: container, account: account, through: through)
+            // The merge goes with the fetch, off the main actor: prepending a
+            // top-up to ~27,000 points and trimming what aged out is a copy
+            // and a walk of the whole series, and on the main actor it was
+            // one more stall per poll.
+            let base = entry
+            let incremental = through != nil
+            let fetched = await Task.detached(priority: .userInitiated) {
+                let loaded = await Self.load(container: container, account: account, through: through)
+                let merged = Self.merge(base, with: loaded, incremental: incremental)
+                return (entry: merged.entry, changed: merged.changed,
+                        rows: loaded.fixed.count + loaded.scoped.count, timings: loaded.timings)
             }.value
             // Per-target detail, because the aggregate line below cannot say
             // which of two accounts was slow, whether it was a cold read or a
@@ -332,42 +386,15 @@ struct PaceChartCard: View {
             // ruled out (slow loads sit near a write 35% of the time, fast
             // ones 39%). Recorded so the next look is one pass rather than
             // another round of hypotheses.
-            let breakdown = loaded.timings.sorted { $0.value > $1.value }
+            let breakdown = fetched.timings.sorted { $0.value > $1.value }
                 .map { "\($0.key):\($0.value)" }.joined(separator: ",")
             fetchMillis.append((account.map { String($0.suffix(4)) } ?? "all",
-                                through == nil ? "cold" : "top-up",
-                                loaded.fixed.count + loaded.scoped.count,
+                                incremental ? "top-up" : "cold",
+                                fetched.rows,
                                 Int(Date().timeIntervalSince(fetchStarted) * 1000),
                                 breakdown))
-
-            if through != nil {
-                // Incremental. A poll adds a handful of rows to an 8-day window
-                // of ~31,000, so re-reading the whole window each time would
-                // re-materialize all of them to learn about three. Newest-first
-                // order is preserved by prepending, which is why the fetch is
-                // ordered the same way.
-                if !loaded.fixed.isEmpty || !loaded.scoped.isEmpty { changed = true }
-                if !loaded.fixed.isEmpty { entry.fixed = loaded.fixed + entry.fixed }
-                if !loaded.scoped.isEmpty { entry.scoped = loaded.scoped + entry.scoped }
-                if !loaded.windows.isEmpty, loaded.windows != entry.windows {
-                    entry.windows = loaded.windows
-                    changed = true
-                }
-                // Drop what has aged out, so the window stays 8 days rather
-                // than growing for as long as Pacer is open.
-                let kept = entry.fixed.count + entry.scoped.count
-                entry.fixed.removeAll { $0.sampledAt < loaded.cutoff }
-                entry.scoped.removeAll { $0.sampledAt < loaded.cutoff }
-                if entry.fixed.count + entry.scoped.count != kept { changed = true }
-            } else {
-                entry.fixed = loaded.fixed
-                entry.scoped = loaded.scoped
-                entry.windows = loaded.windows
-                changed = true
-            }
-
-            entry.loadedThrough = [entry.fixed.first?.sampledAt, entry.scoped.first?.sampledAt]
-                .compactMap { $0 }.max() ?? entry.loadedThrough
+            if fetched.changed { changed = true }
+            entry = fetched.entry
             entry.writeGeneration = written
             PaceSeriesCache.shared.store(
                 .init(fixed: entry.fixed, scoped: entry.scoped, windows: entry.windows,
@@ -380,9 +407,21 @@ struct PaceChartCard: View {
         // fetch does. A cold read of the old account landing after the new
         // one's put its charts under the new label, with nothing to correct
         // it until the next write. The per-account cache above is still right.
-        guard loadedScopeKey == key else { return }
+        guard loadedScopeKey == key, reloadSequence == sequence else { return }
+        if changed {
+            // Reduced before it is shown, and both assigned in one main-actor
+            // turn: a body between the two would have to reduce the new series
+            // itself, on the main thread, which is the work this moves off it.
+            let reduction = await Self.prepareOffMain(next, priority: .userInitiated)
+            drawStats.notePrep(reduction.ms, offMain: true)
+            Self.logIfSlowPrep(reduction.ms, series: next, reason: "reload")
+            guard loadedScopeKey == key, reloadSequence == sequence else { return }
+            series = next
+            seriesGeneration &+= 1
+            prepared = Prepared(generation: seriesGeneration, series: reduction.series)
+            firstRenderMemo.value = nil
+        }
         isLoading = false
-        if changed { series = next }
         PaceSeriesCache.shared.storeTargets(targets, forPickedScope: UsageScope.shared.accountId)
         // A pass that read nothing from the store is the common case now, and
         // logging each one would say so ~100 times an hour. Every pass that
@@ -426,6 +465,144 @@ struct PaceChartCard: View {
         return accounts
             .sorted(by: Account.listOrder)
             .map { (accountId: Optional($0.id), label: Optional($0.shortLabel)) }
+    }
+
+    /// Fold a fetch into the series it tops up, or replace it on a cold read.
+    /// Returns whether anything drawn changed. Off the main actor, beside the
+    /// fetch: see `reload`.
+    private nonisolated static func merge(_ base: AccountSeries, with loaded: Loaded,
+                                          incremental: Bool) -> (entry: AccountSeries, changed: Bool) {
+        var entry = base
+        var changed = false
+        if incremental {
+            // A poll adds a handful of rows to an 8-day window of ~31,000, so
+            // re-reading the whole window each time would re-materialize all
+            // of them to learn about three. Newest-first order is preserved by
+            // prepending, which is why the fetch is ordered the same way.
+            if !loaded.fixed.isEmpty || !loaded.scoped.isEmpty { changed = true }
+            if !loaded.fixed.isEmpty { entry.fixed = loaded.fixed + entry.fixed }
+            if !loaded.scoped.isEmpty { entry.scoped = loaded.scoped + entry.scoped }
+            if !loaded.windows.isEmpty, loaded.windows != entry.windows {
+                entry.windows = loaded.windows
+                changed = true
+            }
+            // Drop what has aged out, so the window stays 8 days rather than
+            // growing for as long as Pacer is open.
+            let kept = entry.fixed.count + entry.scoped.count
+            entry.fixed.removeAll { $0.sampledAt < loaded.cutoff }
+            entry.scoped.removeAll { $0.sampledAt < loaded.cutoff }
+            if entry.fixed.count + entry.scoped.count != kept { changed = true }
+        } else {
+            entry.fixed = loaded.fixed
+            entry.scoped = loaded.scoped
+            entry.windows = loaded.windows
+            changed = true
+        }
+        entry.loadedThrough = [entry.fixed.first?.sampledAt, entry.scoped.first?.sampledAt]
+            .compactMap { $0 }.max() ?? entry.loadedThrough
+        return (entry, changed)
+    }
+
+    /// Every series reduced at `now` (`PaceSeriesPrep`).
+    private nonisolated static func prepare(_ series: [AccountSeries], now: Date) -> [PaceSeriesPrep] {
+        series.map { PaceSeriesPrep.prepare(fixed: $0.fixed, scoped: $0.scoped, windows: $0.windows, now: now) }
+    }
+
+    /// `prepare` on the cooperative pool, at the clock it starts at, with its
+    /// cost.
+    private static func prepareOffMain(_ series: [AccountSeries],
+                                       priority: TaskPriority) async -> (series: [PaceSeriesPrep], ms: Int) {
+        await Task.detached(priority: priority) {
+            let started = Date()
+            let built = Self.prepare(series, now: started)
+            return (built, Int(Date().timeIntervalSince(started) * 1000))
+        }.value
+    }
+
+    /// One line for a slow reduction. On the main thread (the first-frame
+    /// fallback) anything a person would feel; off it, only what is worth
+    /// knowing about as CPU.
+    private static func logIfSlowPrep(_ ms: Int, series: [AccountSeries], reason: String, onMain: Bool = false) {
+        guard ms >= (onMain ? 100 : 250) else { return }
+        let points = series.reduce(0) { $0 + $1.fixed.count + $1.scoped.count }
+        Log.write("PaceChartCard", "prepared \(series.count) series (\(points) points) in \(ms)ms "
+                  + (onMain ? "on the main thread" : "off main") + " (\(reason))")
+    }
+
+    /// The reduction the body draws from: the one built with the series, else
+    /// (the first frame after a seed from `PaceSeriesCache`) one built here,
+    /// once.
+    private func preparedSeries() -> [PaceSeriesPrep] {
+        if let prepared, prepared.generation == seriesGeneration, prepared.series.count == series.count {
+            return prepared.series
+        }
+        if let memo = firstRenderMemo.value, memo.generation == seriesGeneration, memo.series.count == series.count {
+            return memo.series
+        }
+        let started = Date()
+        let built = Self.prepare(series, now: started)
+        let ms = Int(Date().timeIntervalSince(started) * 1000)
+        firstRenderMemo.value = Prepared(generation: seriesGeneration, series: built)
+        drawStats.notePrep(ms, offMain: false)
+        Self.logIfSlowPrep(ms, series: series, reason: "first frame", onMain: true)
+        return built
+    }
+
+    /// The minute tick (#140): everything the card draws is judged against
+    /// the clock — the line's "now" tail, the burn rate's half hour, "resets
+    /// in", the roll into "awaiting a new cycle". The reduction is rebuilt at
+    /// the new clock off the main actor, then it and `minute` change in one
+    /// turn, so the body runs once for the tick.
+    private func tick() async {
+        let input = series
+        let generation = seriesGeneration
+        let reduction = await Self.prepareOffMain(input, priority: .userInitiated)
+        drawStats.notePrep(reduction.ms, offMain: true)
+        Self.logIfSlowPrep(reduction.ms, series: input, reason: "minute")
+        // A reload that replaced the series meanwhile brought its own.
+        if generation == seriesGeneration, prepared != Prepared(generation: generation, series: reduction.series) {
+            prepared = Prepared(generation: generation, series: reduction.series)
+            firstRenderMemo.value = nil
+        }
+        minute += 1
+        drawStats.flushIfDue()
+    }
+
+    /// Body passes and reductions over ten minutes, for one log line. Not
+    /// `@Observable` and never read by a body: counters, not state.
+    @MainActor
+    final class DrawStats {
+        private var since = Date()
+        private var bodies = 0, bodyMs = 0, bodyMax = 0
+        private var mainPreps = 0, mainPrepMs = 0
+        private var offPreps = 0, offPrepMs = 0, offPrepMax = 0
+
+        func noteBody(_ ms: Int) {
+            bodies += 1; bodyMs += ms; bodyMax = max(bodyMax, ms)
+        }
+
+        func notePrep(_ ms: Int, offMain: Bool) {
+            if offMain {
+                offPreps += 1; offPrepMs += ms; offPrepMax = max(offPrepMax, ms)
+            } else {
+                mainPreps += 1; mainPrepMs += ms
+            }
+        }
+
+        /// Six lines an hour while the dashboard is up, none while it is not.
+        func flushIfDue(now: Date = Date()) {
+            guard now.timeIntervalSince(since) >= 600 else { return }
+            if bodies > 0 || mainPreps > 0 || offPreps > 0 {
+                Log.write("PaceChartCard",
+                          "last \(Int(now.timeIntervalSince(since) / 60)) min: \(bodies) body pass(es) "
+                            + "\(bodyMs)ms (max \(bodyMax)ms), \(mainPreps) prep(s) on main \(mainPrepMs)ms, "
+                            + "\(offPreps) off main \(offPrepMs)ms (max \(offPrepMax)ms)")
+            }
+            since = now
+            bodies = 0; bodyMs = 0; bodyMax = 0
+            mainPreps = 0; mainPrepMs = 0
+            offPreps = 0; offPrepMs = 0; offPrepMax = 0
+        }
     }
 
     private struct Loaded: Sendable {
@@ -649,66 +826,11 @@ struct PaceChartCard: View {
 
     // MARK: - Column set
 
-    private struct Bucketed {
-        var fiveHour: [LimitSamplePoint] = []
-        var sevenDay: [LimitSamplePoint] = []
-        var latest: LimitSamplePoint?
-        var latestFiveHourAt: Date?
-        var latestSevenDayAt: Date?
-
-        /// The account's latest poll had a 7-day window and no 5-hour one:
-        /// it has no 5-hour limit (verified Ultra, since 2026-10-30), so the
-        /// card shows no 5-hour column rather than one that reads as an
-        /// account that stopped being polled. Same rule as `latestBatch`,
-        /// folded into this pass so the history is walked once.
-        var hasNoFiveHourWindow: Bool {
-            guard let latest else { return false }
-            let cutoff = latest.sampledAt.addingTimeInterval(-2)
-            return LimitSamplePoint.hasNoFiveHourWindow(
-                hasFiveHour: (latestFiveHourAt ?? .distantPast) >= cutoff,
-                hasSevenDay: (latestSevenDayAt ?? .distantPast) >= cutoff)
-        }
-    }
-
-    /// Derived synchronously from `samples` so the first render already has the
-    /// real layout — see the perf note in git history for why this isn't
-    /// `@State` + `.onAppear`.
-    private func bucketed(_ entry: AccountSeries) -> Bucketed {
-        var b = Bucketed()
-        for s in entry.fixed {
-            if s.window == RateLimitWindowName.fiveHour {
-                b.fiveHour.append(s)
-                if s.sampledAt > (b.latestFiveHourAt ?? .distantPast) { b.latestFiveHourAt = s.sampledAt }
-            } else if s.window == RateLimitWindowName.sevenDay {
-                b.sevenDay.append(s)
-                if s.sampledAt > (b.latestSevenDayAt ?? .distantPast) { b.latestSevenDayAt = s.sampledAt }
-            }
-            if s.sampledAt > (b.latest?.sampledAt ?? .distantPast) { b.latest = s }
-        }
-        return b
-    }
-
     /// True once any series has a reading — the card's "there is something to
-    /// draw" test, replacing the single-account `b.latest != nil`.
+    /// draw" test (`PaceSeriesPrep.hasReading`).
     private var hasAnyReading: Bool {
-        series.contains { bucketed($0).latest != nil || !$0.windows.latestBatch().isEmpty }
+        preparedSeries().contains(where: \.hasReading)
     }
-
-    /// The scoped rows to render, one per model/surface-scoped identity in the
-    /// latest poll, ordered active-first then hottest (the `latestBatch` order).
-    /// Account-wide `session`/`weekly_all` rows are excluded — the fixed 5h/7d
-    /// hero columns already own those (Decision C).
-    /// Already filtered to model/surface-scoped identities by the loader — the
-    /// account-wide `session`/`weekly_all` rows the fixed 5h/7d heroes own are
-    /// excluded in the fetch predicate (Decision C).
-    private func scopedRows(_ entry: AccountSeries) -> [ScopedWindowRow] {
-        entry.windows.latestBatch()
-    }
-
-    /// Fixed 5-hour / 7-day durations — the anchors both the sort (which side a
-    /// scoped window snaps to) and the fixed columns share.
-    private static let fiveHourDuration: TimeInterval = 5 * 3600
-    private static let sevenDayDuration: TimeInterval = 7 * 86400
 
     /// The full ordered column set, arranged by a single comparator so the two
     /// account-wide heroes stay glued together: scoped **session**-side windows,
@@ -726,33 +848,45 @@ struct PaceChartCard: View {
     /// puzzle. The active login leads.
     private func columns(now: Date) -> [Column] {
         typealias Side = PaceColumnLayout.Side
+        // Everything here is a lookup in the reduction (`preparedSeries`) plus
+        // the per-render inputs: the live meter's value, the labels, who is
+        // signed in. The walks over the history happen off the main actor.
+        let preps = preparedSeries()
         // The freshest thing Pacer knows, across every account — the yardstick a
         // column uses to tell "quiet everywhere" from "this one stopped".
-        let newestAny = series.compactMap { $0.fixed.first?.sampledAt }.max()
+        let newestAny = preps.compactMap(\.newestFixedAt).max()
         var out: [Column] = []
-        for entry in series {
-            let b = bucketed(entry)
-            let pollGap = ReadingFreshness.typicalGap(readingTimes: entry.fixed.map(\.sampledAt))
+        for (entry, p) in zip(series, preps) {
+            let pollGap = p.typicalPollGap
             var tagged: [(side: Side, col: Column)] = []
-            if !b.hasNoFiveHourWindow {
+            // The account's latest poll had a 7-day window and no 5-hour one:
+            // it has no 5-hour limit (verified Ultra, since 2026-10-30), so the
+            // card shows no 5-hour column rather than one that reads as an
+            // account that stopped being polled.
+            if !p.hasNoFiveHourWindow {
                 tagged.append(
                 (.fiveHour, fixedColumn(entry, title: "5-hour", key: RateLimitWindowName.fiveHour,
-                                        duration: Self.fiveHourDuration, samples: b.fiveHour, now: now,
+                                        duration: PaceSeriesPrep.fiveHourDuration, window: p.fiveHour, now: now,
                                         newestAnyAccountAt: newestAny, typicalPollGap: pollGap)))
             }
             tagged += [
                 (.sevenDay, fixedColumn(entry, title: "7-day", key: RateLimitWindowName.sevenDay,
-                                        duration: Self.sevenDayDuration, samples: b.sevenDay, now: now,
+                                        duration: PaceSeriesPrep.sevenDayDuration, window: p.sevenDay, now: now,
                                         newestAnyAccountAt: newestAny, typicalPollGap: pollGap)),
             ]
-            for row in scopedRows(entry) {
-                let duration = WindowSpec.scopedDuration(group: row.group)
+            // One per model/surface-scoped identity in the latest poll, in the
+            // `latestBatch` order. The account-wide `session`/`weekly_all`
+            // rows the fixed heroes own are excluded in the fetch (Decision C).
+            for window in p.scoped {
+                let row = window.row
+                let duration = window.duration
                 let severity: Column.SeverityTag? = row.severityValue.isElevated
                     ? .init(text: row.severity.lowercased(), band: row.displayBand)
                     : nil
                 let side = PaceColumnLayout.scopedSide(
                     group: row.group, duration: duration,
-                    fiveHourDuration: Self.fiveHourDuration, sevenDayDuration: Self.sevenDayDuration)
+                    fiveHourDuration: PaceSeriesPrep.fiveHourDuration,
+                    sevenDayDuration: PaceSeriesPrep.sevenDayDuration)
                 let readout = Self.readout(account: entry.accountId, key: row.identity,
                                            at: row.sampledAt, percent: row.percent,
                                            resetsAt: row.resetsAt, now: now)
@@ -769,12 +903,8 @@ struct PaceChartCard: View {
                     readingAt: readout.reading.at, newestAnyAccountAt: newestAny,
                     typicalPollGap: pollGap,
                     resetsAt: row.resetsAt,
-                    recentBurn: RecentBurn.percentPerHour(
-                        readings: entry.scoped.filter { $0.identity == row.identity }
-                            .map { .init(at: $0.sampledAt, percent: $0.percent, resetsAt: $0.resetsAt) },
-                        now: now, duration: duration),
-                    baseChart: .cycle(scoped: row, history: entry.scoped,
-                                      duration: duration, now: now),
+                    recentBurn: window.recentBurn,
+                    baseChart: window.baseChart,
                     isActive: row.isActive, isActiveAccount: isActiveAccount(entry),
                     severity: severity, isScoped: true)))
             }
@@ -824,9 +954,9 @@ struct PaceChartCard: View {
 
     private func fixedColumn(_ entry: AccountSeries, title: String, key: String,
                              duration: TimeInterval,
-                             samples: [LimitSamplePoint], now: Date,
+                             window: PaceSeriesPrep.Fixed, now: Date,
                              newestAnyAccountAt: Date?, typicalPollGap: TimeInterval?) -> Column {
-        let latest = samples.first
+        let latest = window.latest
         let readout = latest.map {
             Self.readout(account: entry.accountId, key: key, at: $0.sampledAt, percent: $0.usedPercentage,
                          resetsAt: $0.resetsAt, now: now)
@@ -840,10 +970,8 @@ struct PaceChartCard: View {
             readingAt: readout?.reading.at ?? latest?.sampledAt, newestAnyAccountAt: newestAnyAccountAt,
             typicalPollGap: typicalPollGap,
             resetsAt: latest?.resetsAt,
-            recentBurn: RecentBurn.percentPerHour(
-                readings: samples.map { .init(at: $0.sampledAt, percent: $0.usedPercentage, resetsAt: $0.resetsAt) },
-                now: now, duration: duration),
-            baseChart: .cycle(fixed: samples, duration: duration, now: now),
+            recentBurn: window.recentBurn,
+            baseChart: window.baseChart,
             isActive: false, isActiveAccount: isActiveAccount(entry),
             severity: nil, isScoped: false)
     }
@@ -909,9 +1037,16 @@ struct PaceChartCard: View {
         // One ask per account, against that account's own fit. Keys are the
         // composite column ids, so two accounts' 5-hour answers cannot
         // overwrite each other.
-        let plan: [(accountId: String?, scoped: [String])] = series.map {
-            ($0.accountId, scopedRows($0).map(\.identity))
-        }
+        // Only the windows a column is drawn for: an account whose latest poll
+        // has no 5-hour window (a verified Ultra one) gets no 5-hour column,
+        // and asking the engine for one anyway was a forecast for nothing
+        // (#366).
+        let plan: [(accountId: String?, fixed: [RateLimitWindowKind], scoped: [String])] =
+            zip(series, preparedSeries()).map { entry, p in
+                (entry.accountId,
+                 RateLimitWindowKind.allCases.filter { !(p.hasNoFiveHourWindow && $0 == .fiveHour) },
+                 p.scoped.map(\.row.identity))
+            }
         // The live values the columns show, so every forecast starts where
         // the number on screen is (#318). Taken here, on the main actor,
         // and handed to the ask as values.
@@ -927,6 +1062,7 @@ struct PaceChartCard: View {
         for entry in plan {
             let engine = engines.engine(forAccount: entry.accountId)
             let account = entry.accountId
+            let fixed = entry.fixed
             let scoped = entry.scoped
             let live = account.flatMap { liveByAccount[$0] } ?? [:]
             let computed = await askEngine {
@@ -955,7 +1091,7 @@ struct PaceChartCard: View {
                             : "no model can project (\(list.first?.unavailableReason ?? "?"))"
                     }
                 }
-                for window in RateLimitWindowKind.allCases {
+                for window in fixed {
                     let v = live[window.rawValue]
                     absorb(key: window.rawValue,
                            outlook: await engine.burnOutlook(window: window, live: v),
@@ -1017,7 +1153,11 @@ struct PaceChartCard: View {
         let now = Date()
         let cols = columns(now: now)
         let buildMs = Int(Date().timeIntervalSince(t0) * 1000)
-        if buildMs >= 100 {
+        drawStats.noteBody(buildMs)
+        // Assembly only, now: the reduction is built off the main actor, so
+        // anything over 50 ms here is a regression (or the first-frame
+        // fallback, which logs its own line).
+        if buildMs >= 50 {
             let points = series.reduce(0) { $0 + $1.fixed.count + $1.scoped.count }
             Log.write("PaceChartCard",
                       "body build \(buildMs)ms for \(points) point(s)"
@@ -1032,7 +1172,15 @@ struct PaceChartCard: View {
         // refits). Not on each tenth: that moves every scan cycle while
         // busy, and the chart already re-anchors the drawn forecast on the
         // tip, so a tenth changes nothing the asks would.
-        let liveKey = cols.compactMap { c in c.readout?.live.map { "\(c.id)=\(Int($0.percent))" } }
+        //
+        // Keyed on the whole number shown, estimate or reading alike. Keyed
+        // on the live value alone, as it was, the key changed twice on every
+        // poll without the number moving: a new reading sets aside the
+        // estimate built on the previous one (its entry left the key), and
+        // the live meter's rebuild on the new reading put it back. That was
+        // one forecast pass for all twelve windows per poll, ~110 an hour,
+        // each a redraw of the card (#367).
+        let liveKey = cols.compactMap { c in c.readout.map { "\(c.id)=\(Int($0.wholePercent))" } }
             .joined(separator: ",")
 
         // The "via oauth · just now" freshness chip lives in the page header
@@ -1130,7 +1278,11 @@ struct PaceChartCard: View {
         // `reload` reuses entries by account id, so nothing drawn is wrong.
         .onChange(of: scopeKey) { old, key in
             guard key != loadedScopeKey else { return }
-            if Self.pickedPart(of: old) != Self.pickedPart(of: key) { series = [] }
+            if Self.pickedPart(of: old) != Self.pickedPart(of: key) {
+                series = []
+                seriesGeneration &+= 1
+                prepared = Prepared(generation: seriesGeneration, series: [])
+            }
             Task { await reload() }
         }
         // Awaited directly, not scheduled: this is the path that first fills
@@ -1147,7 +1299,7 @@ struct PaceChartCard: View {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(60))
                 if Task.isCancelled { break }
-                minute += 1
+                await tick()
             }
         }
     }
