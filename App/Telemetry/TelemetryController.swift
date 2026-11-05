@@ -33,6 +33,8 @@ final class TelemetryController {
     private var sessionDay: String?
     /// Whether the scope carries the PostHog person link; nil until first set.
     private var postHogLinked: Bool?
+    /// Held for the life of the process; see `HangReporter`.
+    private var hangWatch: HangWatch?
     private var observers: [NSObjectProtocol] = []
 
     // MARK: - Start
@@ -55,6 +57,12 @@ final class TelemetryController {
         }
         isRunning = true
         Telemetry.install(SentryTelemetrySink())
+        // Before the store opens (this runs in `PacerAppDelegate.init`), so a
+        // migration that freezes the launch is caught while it is frozen.
+        HangReporter.reportLeftover()
+        hangWatch = HangWatch(runLoop: CFRunLoopGetMain(), threshold: HangReporter.threshold,
+                              heartbeat: HangReporter.heartbeat, startsBusy: true,
+                              handler: HangReporter.handle)
         tagScope()
         syncPostHogLink()
         if Self.performanceAllowed { startSession() }
@@ -70,6 +78,14 @@ final class TelemetryController {
         sessionDay = nil
         TelemetryBudget.shared.flush()
         SentrySDK.flush(timeout: 2)
+    }
+
+    /// Send what is queued now, waiting at most `timeout`: for a report made
+    /// just before the app ends itself (the store alert's `exit`), which
+    /// would otherwise wait on disk for a next launch that may never come.
+    func flush(timeout: TimeInterval) {
+        guard isRunning else { return }
+        SentrySDK.flush(timeout: timeout)
     }
 
     /// Scope tags every crash, hang and MetricKit report carries.
@@ -125,8 +141,13 @@ final class TelemetryController {
         o.enableAutoSessionTracking = false
 
         o.enableUncaughtNSExceptionReporting = true
-        o.enableAppHangTracking = true
-        o.appHangTimeoutInterval = 2
+        // Hangs are Pacer's own (`HangWatch`, `HangReporter`), which sends the
+        // same event. On macOS the SDK has only its first tracker: it records
+        // nothing when its own thread wakes late, says "at least 2000 ms" for a
+        // one-minute freeze, keeps hangs that end in a kill to iOS, and wakes
+        // 2.5 times a second while the app idles. A user's frozen 0.8.1
+        // launches (2026-11-05) reached Sentry as sessions and nothing else.
+        o.enableAppHangTracking = false
         o.enableMetricKit = true
 
         // Off: everything automatic that could carry a token, a path or a
@@ -157,7 +178,8 @@ final class TelemetryController {
 
         o.beforeSend = { event in
             guard TelemetryController.crashAllowed else { return nil }
-            // User feedback is budgeted where it is sent (ReportProblemView).
+            // Transactions arrive here too and are budgeted in `tracesSampler`;
+            // feedback is budgeted where it is sent (ReportProblemView).
             if let kind = TelemetryController.budgetKind(event), !TelemetryBudget.shared.take(kind) {
                 return nil
             }
@@ -181,15 +203,13 @@ final class TelemetryController {
         }
     }
 
-    /// Which daily budget an event spends; nil for feedback, which the
-    /// Report a Problem sheet budgets itself.
+    /// Which daily budget an event spends (`TelemetryBudget.kind`); nil for
+    /// transactions and feedback, which are budgeted elsewhere.
     nonisolated static func budgetKind(_ event: Event) -> TelemetryBudget.Kind? {
-        if event.type == "feedback" { return nil }
         let mechanism = event.exceptions?.first?.mechanism
-        if mechanism?.type == "AppHang" { return .hang }
-        if mechanism?.type.hasPrefix("mx_") == true { return .diagnostic }
-        if event.level == .fatal || mechanism?.handled == false { return .crash }
-        return .error
+        return TelemetryBudget.kind(eventType: event.type, mechanism: mechanism?.type,
+                                    fatal: event.level == .fatal,
+                                    handled: mechanism?.handled?.boolValue)
     }
 
     nonisolated private static func scrub(_ event: Event) {

@@ -269,7 +269,14 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             case .success(let prepared):
                 self.storeDidPrepare(prepared, began: began)
             case .failure(let error):
-                Log.write("Store", "prepare failed after \(Self.milliseconds(since: began)) ms: \(error)")
+                let elapsed = Date().timeIntervalSince(began)
+                Log.write("Store", "prepare failed after \(Int(elapsed * 1000)) ms: \(error)")
+                // Before the alert, which ends the app (#380): the error's
+                // domain and code, never its description, which carries the
+                // store's path. Flushed, briefly, because the app exits next.
+                Telemetry.problem(StorePrepareTelemetry.failedMessage,
+                                  attributes: StorePrepareTelemetry.failure(error, before: schema, elapsed: elapsed))
+                TelemetryController.shared.flush(timeout: 1)
                 self.storeLoader.markFailed(error)
                 // The same alert an open that fails in `init` puts up.
                 Self.showFatalContainerError(error)
@@ -308,6 +315,8 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard launchFinished, !storeServicesStarted,
               let store = storeLoader.ready, let backgroundService else { return }
         storeServicesStarted = true
+        // An update may relaunch Pacer from here on, not in a migration.
+        UpdateInstallScheduler.shared.noteStoreReady()
         // If the bundle was just replaced under us (Sparkle auto-update
         // or `make install`), the old widget extension is still running
         // its now-stale binary and chronod won't relaunch it on its own.
@@ -661,7 +670,12 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // whether every step of SwiftData's migration is one.
             await storeOpenTask?.value
             await backgroundService?.stop()
-            await NotificationCoordinator.shared.notifyCollectionPaused()
+            // Sparkle relaunches Pacer straight after an update, which can now
+            // happen with nobody watching (`UpdateInstallScheduler`): "Pacer
+            // paused, reopen it" would be wrong.
+            if !UpdateInstallScheduler.shared.isRelaunchingForUpdate {
+                await NotificationCoordinator.shared.notifyCollectionPaused()
+            }
             AnalyticsUsage.shared.appQuit()
             TelemetryController.shared.prepareForTermination()
             AnalyticsController.shared.prepareForTermination()

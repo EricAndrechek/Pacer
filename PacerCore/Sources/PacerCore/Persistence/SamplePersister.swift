@@ -1115,10 +1115,25 @@ public final class SamplePersister {
         // a cost-recompute version bump and every HourlyAggregate
         // would silently keep its pre-bump cost numbers.
         descriptor.propertiesToFetch = [\.date, \.model, \.projectPath, \.sessionId, \.sampledAt, \.localHour]
-        // Paged through throwaway contexts, for the same reason the preload
-        // is (#337): marking only reads. The turns this cycle hasn't saved
-        // yet aren't in the store, so they are marked from the context.
-        try ModelWalk.forEach(descriptor, in: context.container, pageSize: walkPageSize) { markForRebuild($0) }
+        // Straight from SQLite when the store is a file (#335): the saved rows
+        // the walk below reads, without a model object per row — on a 744k-row
+        // store this walk was most of a rebuild's ~15 s prep, read again by
+        // the snapshot moments later. Any surprise in the file and it walks
+        // instead; a read that stopped early has marked only real buckets,
+        // and the walk marks the rest.
+        let readRaw = RawSampleReader.storeURL(of: context.container).map { url in
+            RawSampleReader.forEach(storeURL: url) { row in
+                markForRebuild(date: row.date, model: row.model, projectPath: row.projectPath,
+                               sessionId: row.sessionId, hour: row.localHour)
+            }
+        } ?? false
+        if !readRaw {
+            // Paged through throwaway contexts, for the same reason the preload
+            // is (#337): marking only reads.
+            try ModelWalk.forEach(descriptor, in: context.container, pageSize: walkPageSize) { markForRebuild($0) }
+        }
+        // The turns this cycle hasn't saved yet aren't in the store, so they
+        // are marked from the context.
         for case let sample as TokenSample in context.insertedModelsArray { markForRebuild(sample) }
 
         // Backfill the stored hour on rows written before the field existed:
@@ -1145,7 +1160,15 @@ public final class SamplePersister {
     /// Mark every bucket `sample` feeds dirty AND polluted — see
     /// `markEverySampleDirty`.
     private func markForRebuild(_ sample: TokenSample) {
-        let pair = DateModelPair(date: sample.date, model: sample.model)
+        markForRebuild(date: sample.date, model: sample.model, projectPath: sample.projectPath,
+                       sessionId: sample.sessionId, hour: Self.localHour(of: sample))
+    }
+
+    /// `hour` is the stored one, or derived where the row predates it, as
+    /// `localHour(of:)` and `SampleSnapshot.Row.localHour` both do.
+    private func markForRebuild(date: String, model: String, projectPath: String?,
+                                sessionId: String?, hour: Int) {
+        let pair = DateModelPair(date: date, model: model)
         dirtyPairs.insert(pair)
         // Pollute so any concurrent insert(_:) in the same cycle
         // doesn't trip the recomputer's fast path. The whole reason
@@ -1153,16 +1176,14 @@ public final class SamplePersister {
         // have wrong cost — incrementally ADDING to them would
         // compound the error. Full recompute is mandatory.
         pollutedDailyPairs.insert(pair)
-        let path = sample.projectPath ?? ProjectDailyAggregate.unknownProjectPath
-        let projectPair = ProjectDatePair(projectPath: path, date: sample.date)
+        let path = projectPath ?? ProjectDailyAggregate.unknownProjectPath
+        let projectPair = ProjectDatePair(projectPath: path, date: date)
         dirtyProjectDates.insert(projectPair)
         pollutedProjectPairs.insert(projectPair)
-        let hour = Self.localHour(of: sample)
-        let hourBucket = DateHourModelTriple(
-            date: sample.date, hour: hour, model: sample.model)
+        let hourBucket = DateHourModelTriple(date: date, hour: hour, model: model)
         dirtyHourBuckets.insert(hourBucket)
         pollutedHourBuckets.insert(hourBucket)
-        if let sid = sample.sessionId, !sid.isEmpty {
+        if let sid = sessionId, !sid.isEmpty {
             dirtySessionIds.insert(sid)
             polluteSession(sid, .all)
         }
@@ -1396,6 +1417,11 @@ public final class SamplePersister {
                 sampleSessionIds.insert(sid)
             }
         }
+        // Computed for this and then never stored, so an index written after
+        // a walk with no insert behind it claimed nothing: the next launch
+        // read every row back as "newer than the index" through `enumerate`
+        // — 880k rows, a 4.4 GB footprint and 86 s on a real store copy.
+        if maxSampledAt > indexWatermark { indexWatermark = maxSampledAt }
 
         let walkMs = Date().timeIntervalSince(tWalk) * 1000
         let tGaps = Date()

@@ -26,8 +26,8 @@ struct ModelBoardListTests {
             row("linear-recent", .ranked(typicalMiss: 2.6, cycles: 24), drawn: true),
             row("recent-rate", .ranked(typicalMiss: 3.1, cycles: 24), drawn: true),
             row("saturating", .ranked(typicalMiss: 3.3, cycles: 24)),
-            row("arena-c", .scoring(done: 5, total: 8, eta: 15 * 60)),
-            row("arena-d", .scoring(done: 1, total: 8, eta: nil)),
+            row("arena-c", .scoring(done: 5, total: 8)),
+            row("arena-d", .queued(done: 1, total: 8)),
             row("arena-net", .downloading(fraction: 0.41)),
             row("diurnal-rate", .unavailable("not enough history yet")),
             row("arena-y", .wellBehind(typicalMiss: 6.2, cycles: 24)),
@@ -200,14 +200,19 @@ struct ModelBoardListTests {
         #expect(text(.ranked(typicalMiss: 0.42, cycles: 24)) == "within ±0.4%")
         #expect(text(.ranked(typicalMiss: 2.4, cycles: 12)) == "within ±2% · 12 cycles")
         #expect(text(.wellBehind(typicalMiss: 6.2, cycles: 24)) == "within ±6%")
-        #expect(text(.scoring(done: 5, total: 8, eta: 15 * 60)) == "scoring 62% · 15 min left")
-        #expect(text(.scoring(done: 1, total: 8, eta: nil)) == "scoring 12%")
+        // The time left is the board's line, never a row's.
+        #expect(text(.scoring(done: 5, total: 8)) == "scoring 62%")
+        #expect(text(.scoring(done: 1, total: 8)) == "scoring 12%")
+        #expect(text(.queued(done: 0, total: 8)) == "queued")
+        #expect(text(.queued(done: 3, total: 8)) == "queued · 37%")
         #expect(text(.downloading(fraction: 0.41)) == "downloading 41%")
         #expect(text(.downloading(fraction: nil)) == "downloading")
         #expect(text(.unavailable("not enough history yet")) == "not enough history yet")
         #expect(ModelBoardList.isRecord(.ranked(typicalMiss: 1, cycles: 1)))
         #expect(ModelBoardList.isRecord(.wellBehind(typicalMiss: 1, cycles: 1)))
-        #expect(!ModelBoardList.isRecord(.scoring(done: 1, total: 2, eta: nil)))
+        #expect(!ModelBoardList.isRecord(.scoring(done: 1, total: 2)))
+        #expect(!ModelBoardList.isRecord(.queued(done: 1, total: 2)))
+        #expect(ModelBoardList.canDraw(Self.row("q", .queued(done: 0, total: 2))))
     }
 
     /// A board whose record has no evidence at this point of the window
@@ -238,7 +243,7 @@ struct ModelBoardListTests {
         #expect(text(row(.wellBehind(typicalMiss: 9, cycles: 24), .init(done: 0, total: 120, eta: nil)))
                 == "within ±9% · re-grading 0%")
         #expect(text(row(.ranked(typicalMiss: 4.2, cycles: 24), nil)) == "within ±4%")
-        #expect(text(row(.scoring(done: 3, total: 8, eta: nil), nil)) == "scoring 37%")
+        #expect(text(row(.scoring(done: 3, total: 8), nil)) == "scoring 37%")
         #expect(ModelBoardList.isRecord(row(.ranked(typicalMiss: 4.2, cycles: 24), .init(done: 1, total: 2, eta: nil)).status))
     }
 
@@ -247,6 +252,59 @@ struct ModelBoardListTests {
             == "Scoring your history: 62% · about 15 min left")
         #expect(ModelBoardList.progressText(.init(done: 346, total: 698, eta: nil)) == "Scoring your history: 49%")
         #expect(ModelBoardList.progressText(.init(done: 0, total: 0, eta: nil)) == "Scoring your history: 0%")
+    }
+
+    /// Every stage says what the grader is doing, and the pace says what
+    /// holds it back: one line, a point estimate, nothing when unknown.
+    @Test func eachStageAndWhatHoldsItBack() {
+        typealias P = MeterModelBoard.Progress
+        let text = { (p: P, pace: ArenaPace?) in ModelBoardList.progressText(p, pace: pace) }
+        let inUse = ArenaPace(mode: .share(.inUse))
+        #expect(text(P(done: 0, total: 0, eta: nil, stage: .waiting), inUse) == "Waiting to score your history")
+        #expect(text(P(done: 0, total: 0, eta: nil, stage: .reading), inUse)
+                == "Reading your history · slowed while in use")
+        #expect(text(P(done: 40, total: 100, eta: 12 * 60, stage: .scoring), inUse)
+                == "Scoring your history: 40% · about 12 min left · slowed while in use")
+        #expect(text(P(done: 8, total: 100, eta: 3 * 3600, stage: .slower), ArenaPace(mode: .share(.battery)))
+                == "Scoring the slower models: 8% · about 3 hr left · slowed on battery")
+        #expect(text(P(done: 8, total: 100, eta: nil, stage: .slower), ArenaPace(mode: .share(.lowPower)))
+                == "Scoring the slower models: 8% · slowed in Low Power Mode")
+        #expect(text(P(done: 8, total: 100, eta: nil, stage: .scoring), ArenaPace(mode: .share(.thermal)))
+                == "Scoring your history: 8% · slowed while the Mac is hot")
+        // Plugged in and idle: the full core it takes on its own, nothing to say.
+        #expect(text(P(done: 40, total: 100, eta: 90, stage: .scoring), ArenaPace(mode: .fullCore))
+                == "Scoring your history: 40% · about 2 min left")
+        let sped = ArenaPace(mode: .fullCore, speedUpUntil: Date())
+        #expect(text(P(done: 40, total: 100, eta: 25 * 60, stage: .scoring), sped)
+                == "Scoring your history: 40% · about 25 min left · sped up")
+        // Sped up, and held back anyway by what a speed-up leaves alone.
+        #expect(ModelBoardList.paceNote(ArenaPace(mode: .share(.thermal), speedUpUntil: Date()))
+                == "slowed while the Mac is hot")
+        #expect(ModelBoardList.paceNote(nil) == nil)
+    }
+
+    /// Offered while the grader works and something it lifts holds it back;
+    /// on while it holds; never before the grader has started, without a
+    /// governor, or against heat and Low Power Mode alone.
+    @Test func theSpeedUpControl() {
+        typealias P = MeterModelBoard.Progress
+        let scoring = P(done: 4, total: 100, eta: nil, stage: .scoring)
+        let control = { (p: P?, pace: ArenaPace?) in ModelBoardList.speedUp(p, pace: pace) }
+        #expect(control(scoring, ArenaPace(mode: .share(.inUse))) == .offered)
+        #expect(control(scoring, ArenaPace(mode: .share(.battery))) == .offered)
+        #expect(control(scoring, ArenaPace(mode: .fullCore)) == .offered)
+        #expect(control(P(done: 0, total: 0, eta: nil, stage: .reading), ArenaPace(mode: .share(.inUse))) == .offered)
+        #expect(control(P(done: 0, total: 9, eta: nil, stage: .slower), ArenaPace(mode: .share(.inUse))) == .offered)
+        #expect(control(scoring, ArenaPace(mode: .fullCore, speedUpUntil: Date())) == .on)
+        #expect(control(scoring, ArenaPace(mode: .share(.thermal), speedUpUntil: Date())) == .on)
+        #expect(control(scoring, ArenaPace(mode: .share(.thermal))) == nil)
+        #expect(control(scoring, ArenaPace(mode: .share(.lowPower))) == nil)
+        #expect(control(scoring, nil) == nil)
+        #expect(control(nil, ArenaPace(mode: .share(.inUse))) == nil)
+        #expect(control(P(done: 0, total: 0, eta: nil, stage: .waiting), ArenaPace(mode: .share(.inUse))) == nil)
+        #expect(ModelBoardList.speedUpTitle == "Speed up")
+        #expect(ModelBoardList.speedUpHelp(.offered) == "Use a full core until this is done, for up to an hour")
+        #expect(ModelBoardList.speedUpHelp(.on) == "Back to the usual pace")
     }
 
     @Test func timeLeft() {

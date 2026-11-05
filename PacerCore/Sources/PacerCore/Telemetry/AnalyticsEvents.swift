@@ -181,6 +181,29 @@ extension AnalyticsEvent {
         return AnalyticsEvent(.notificationAction, properties: p)
     }
 
+    // MARK: - Forecast models
+
+    /// What happened to the compare sheet's speed-up (`ArenaSpeedUp`): the
+    /// user turned it on or off, or it ended on its own.
+    public enum SpeedUpAction: String, Sendable, CaseIterable {
+        case start, stop, caughtUp = "caught_up", timeUp = "time_up"
+    }
+
+    /// What the arena's budget was held to when the speed-up started
+    /// (`ArenaBudgetPolicy`): in use, on battery, or already the full core.
+    public enum SpeedUpFrom: String, Sendable, CaseIterable {
+        case inUse = "in_use", battery, lowPower = "low_power", thermal, full, unknown
+    }
+
+    /// `from` on a start; `heldSeconds`, sent as coarse minutes, on every end.
+    public static func arenaSpeedUp(_ action: SpeedUpAction, from: SpeedUpFrom? = nil,
+                                    heldSeconds: TimeInterval? = nil) -> AnalyticsEvent {
+        var p: Analytics.Properties = ["action": .string(action.rawValue)]
+        if let from { p["from"] = .string(from.rawValue) }
+        if let heldSeconds { p["minutes"] = .int(coarseMinutes(heldSeconds)) }
+        return AnalyticsEvent(.arenaSpeedUp, properties: p)
+    }
+
     // MARK: - Coarse numbers
 
     /// Seconds, exact under a minute, then to 10 s under 10 minutes, then to

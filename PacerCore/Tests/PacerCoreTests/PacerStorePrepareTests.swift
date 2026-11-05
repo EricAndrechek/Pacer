@@ -150,4 +150,33 @@ struct PacerStorePrepareTests {
         #expect(PacerStore.schemaState(at: url) == .unknown)
         #expect(throws: (any Error).self) { _ = try PacerStore.prepareStore(at: url) }
     }
+
+    /// #380: the failure is reported by domain and code. Its description names
+    /// the store's path (the user's home), so no value may carry any of it.
+    @Test("a failed prepare reports domain, code, before-state and time, nothing from the description")
+    func failedPrepareReport() throws {
+        let url = try tempStoreURL()
+        try Data("not a database".utf8).write(to: url)
+        let before = PacerStore.schemaState(at: url)
+        var caught: Error?
+        do { _ = try PacerStore.prepareStore(at: url) } catch { caught = error }
+        let error = try #require(caught)
+
+        let report = StorePrepareTelemetry.failure(error, before: before, elapsed: 1.2345)
+        let ns = error as NSError
+        #expect(report["error.domain"] == .string(ns.domain))
+        #expect(report["error.code"] == .string(String(ns.code)))
+        #expect(report["store.before"] == .string("unknown"))
+        #expect(report["elapsed_ms"] == .int(1235))
+        let keys = Set(report.keys)
+        let allowed: Set<String> = ["error.domain", "error.code", "error.underlying_domain",
+                                    "error.underlying_code", "store.before", "elapsed_ms"]
+        #expect(keys.isSubset(of: allowed))
+        for value in report.values {
+            guard case .string(let s) = value else { continue }
+            #expect(!s.contains(url.deletingLastPathComponent().lastPathComponent))
+            #expect(!s.contains("/"))
+            #expect(s != error.localizedDescription)
+        }
+    }
 }

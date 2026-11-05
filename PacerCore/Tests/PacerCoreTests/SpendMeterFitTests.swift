@@ -444,7 +444,8 @@ struct SpendMeterFitWorkerTests {
     /// Two weeks of a synthetic account in a store: the 5-hour and 7-day
     /// meters, a Fable weekly cap, the account-wide scoped rows that
     /// duplicate the fixed windows, and the hourly spend behind them.
-    private func seed(_ context: ModelContext, account: String = "acct-a") throws {
+    private func seed(_ context: ModelContext, account: String = "acct-a",
+                      fiveHourEnds: Date? = nil) throws {
         var rng = SplitMix(seed: 3)
         let hours = 15 * 24
         let start = spanStart
@@ -457,7 +458,7 @@ struct SpendMeterFitWorkerTests {
                                   rates: [opus: 0.045, fable: 0.11, sonnet: 0.03], intercept: 0) { plan[$0]?[$1] ?? 0 }
         let cap = SyntheticMeter(start: start, hours: hours, timeZone: utc, duration: 7 * 86_400,
                                  rates: [fable: 0.9], intercept: 0) { plan[$0]?[$1] ?? 0 }
-        for r in five.readings {
+        for r in five.readings where fiveHourEnds.map({ r.at < $0 }) ?? true {
             context.insert(RateLimitSample(sampledAt: r.at, window: "five_hour", usedPercentage: r.percent,
                                            resetsAt: r.resetsAt, source: "oauth", accountId: account))
         }
@@ -501,6 +502,25 @@ struct SpendMeterFitWorkerTests {
         let cap = try #require(byWindow["weekly_scoped|Fable|"])
         #expect(abs((cap.modelRates[fable] ?? 0) - 0.9) < 1e-6)
         #expect((cap.modelRates[opus] ?? 0) < 1e-9)
+    }
+
+    @Test("no 5-hour fit once the latest poll has no 5-hour window; one that returns is fitted again (#381)")
+    func ultraHasNoFiveHourFit() async throws {
+        func windows(fiveHourEnds: Date?) async throws -> Set<String> {
+            let container = try ModelContainer(for: Schema(PacerStore.allModelTypes),
+                                               configurations: ModelConfiguration(isStoredInMemoryOnly: true))
+            try seed(ModelContext(container), fiveHourEnds: fiveHourEnds)
+            let report = try await SpendMeterFitWorker(modelContainer: container)
+                .refit(now: fitDay, timeZone: utc, persist: false)
+            return Set(report.entries.map(\.window))
+        }
+        // Ultra: the 5-hour readings stop a week before the fit, the 7-day go on.
+        let ultra = try await windows(fiveHourEnds: fitDay.addingTimeInterval(-7 * 86_400))
+        #expect(ultra == ["seven_day", "weekly_scoped|Fable|"])
+        // Max: both windows to the end, unchanged.
+        #expect(try await windows(fiveHourEnds: nil) == ["five_hour", "seven_day", "weekly_scoped|Fable|"])
+        // The 5-hour window is back in the latest poll.
+        #expect(try await windows(fiveHourEnds: fitDay.addingTimeInterval(86_400)).contains("five_hour"))
     }
 
     @Test("fits every window, stores one row each, and a same-day refit replaces them")

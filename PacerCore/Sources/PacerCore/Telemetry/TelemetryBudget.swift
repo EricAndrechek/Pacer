@@ -125,6 +125,28 @@ public final class TelemetryBudget: @unchecked Sendable {  // UserDefaults is th
 
     public static func isExemptTransaction(op: String) -> Bool { op == checkInTransactionOp }
 
+    /// Which daily budget a Sentry event spends in `beforeSend`, from the
+    /// event's type, its first exception's mechanism, its level and whether
+    /// that exception was handled. nil when `beforeSend` must not spend one.
+    ///
+    /// Transactions are nil: sentry-cocoa 9 runs `beforeSend` on transactions
+    /// too (`SentryClient.m`, the non-V10 branch), and they used to fall
+    /// through to `.error`. Every root transaction then spent an error, so a
+    /// Mac sent its first 25 transactions of a UTC day (10 on a Debug build)
+    /// and dropped the rest, the "never capped" check-in and every handled
+    /// error after them included: development accepted exactly 10
+    /// transactions a day on 2026-11-04 and 11-05, and ~360 spans a day were
+    /// discarded as `before_send`. Transactions are budgeted where they are
+    /// sampled (`tracesSampler`, `takeTransaction`). Feedback is budgeted
+    /// where it is sent (the Report a Problem sheet, the CLI).
+    public static func kind(eventType: String?, mechanism: String?, fatal: Bool, handled: Bool?) -> Kind? {
+        if eventType == "transaction" || eventType == "feedback" { return nil }
+        if mechanism == "AppHang" { return .hang }
+        if mechanism?.hasPrefix("mx_") == true { return .diagnostic }
+        if fatal || handled == false { return .crash }
+        return .error
+    }
+
     /// PostHog events that are never capped: one a day each by construction.
     public static let exemptAnalyticsEvents: Set<String> = ["daily_checkin", "widget_inventory"]
     /// PostHog events with the higher per-name cap.

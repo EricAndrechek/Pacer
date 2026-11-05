@@ -67,6 +67,8 @@ the active login. `--account all` shows every account, prefixed by id;
 `--account <id>` picks one, and the 8-character id `accounts` prints is
 enough. A `wait` looks the session's account up again on every poll, so a switch onto a login with headroom ends it. A `/login` run in another session does not move sessions already running: they keep their token. After a login change no switcher explains, such a session is judged on every login it may still be billing (the most constrained decides) and the verdict says so. Switching away and back with your account switcher moves every session and ends that.
 
+`pacer report` prints the active login's windows, then, when other logins exist, one line: `other logins: 1 with room (7d 4%), 2 spent until Sat`. "Spent" means an account-wide window is at or over its safe limit (the gate's rule). A login with room is a rotation away, so before calling capacity short for a fan-out, run `pacer accounts`: a window is account-wide, not machine-wide. The line is omitted with one login and under `--account all`. `pacer json` carries the same in `otherAccounts` (`withRoom`, `spent`, `spentUntilSeconds`, per-login windows). `report` may also print `note: N login changes today had no switch behind them — check the switcher's log`: the switcher's log is not being read, so sessions may be judged on the old login.
+
 ## 2. Who else is spending this budget
 
 **A rate-limit window is account-wide.** Every session signed into an account

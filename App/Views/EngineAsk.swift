@@ -17,9 +17,16 @@ import PacerCore
 /// at the top of main-thread time — 590 of the samples in a ten-second window,
 /// inside a **7.9 second** stall.
 ///
+/// And when the engine is busy it is worse, not better: an engine is a
+/// `@ModelActor`, whose executor makes the caller wait on the context's queue.
+/// Awaiting a busy one from the main actor holds the main thread for as long as
+/// the engine stays busy — the whole wait (`ModelActorCallerBlockProbe`: a
+/// 1.8 s wait was a 1.8 s main-thread gap) — and a refit, the record backfill
+/// or an arena batch can be a minute on a loaded Mac.
+///
 /// A detached task has no isolation to inherit, so the work goes to the
-/// cooperative pool where it belongs. Every engine ask from a view goes through
-/// here.
+/// cooperative pool where it belongs. Every engine ask from a view, or from
+/// anything else on the main actor, goes through here.
 @discardableResult
 func askEngine<T: Sendable>(
     _ body: @escaping @Sendable () async -> T

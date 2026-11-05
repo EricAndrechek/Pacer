@@ -18,10 +18,13 @@ import WidgetKit
 ///   runs and `api_request` tallies.
 /// Plan and field lists: docs/telemetry-plan.md ("Signals", "PostHog").
 ///
-/// **When**: at launch if nothing was sent today (after a short settle delay so
-/// it never competes with startup), and on the `PacerToday` day rollover. No
-/// timer of its own. The last-sent day is persisted, so quitting and
-/// relaunching all day sends once.
+/// **When**: at launch if nothing was sent today or the last check-in came
+/// from another release (after a short settle delay so it never competes with
+/// startup), and on the `PacerToday` day rollover. No timer of its own. The
+/// last-sent day and release are persisted (`CheckInSchedule`), so quitting
+/// and relaunching all day sends once, and an update sends again the same day
+/// so its adoption shows at once. That second one leaves out what reports the
+/// day before, which the first already sent.
 ///
 /// **What it never carries**: account or org ids, emails, project names,
 /// paths, costs or exact token counts. Plan tier, window kind and model id are
@@ -42,7 +45,6 @@ final class DailyCheckIn {
     private let launchedAt = Date()
     private var cpuSecondsAtLastCheckIn: Double = 0
 
-    private static let lastDayKey = "pacer.telemetry.checkin.lastDay"
     private static let runningKey = "pacer.telemetry.lifecycle.running"
     nonisolated private static let launchesKey = "pacer.telemetry.lifecycle.launches"
     nonisolated private static let uncleanKey = "pacer.telemetry.lifecycle.unclean"
@@ -135,10 +137,19 @@ final class DailyCheckIn {
         guard !sending, sentry || posthog, let container, let engines else { return }
         let store = PacerPreferences.store
         let today = PacerToday.shared.key
-        guard store.string(forKey: Self.lastDayKey) != today else { return }
+        let release = TelemetryController.release
+        guard let reason = CheckInSchedule.due(
+            lastDay: store.string(forKey: CheckInSchedule.lastDayKey),
+            lastRelease: store.string(forKey: CheckInSchedule.lastReleaseKey),
+            today: today, release: release) else { return }
         // Marked before the work, not after: a send that takes a while must
         // not be started twice by a rollover landing in the middle of it.
-        store.set(today, forKey: Self.lastDayKey)
+        store.set(today, forKey: CheckInSchedule.lastDayKey)
+        store.set(release, forKey: CheckInSchedule.lastReleaseKey)
+        // Yesterday's tallies (CLI runs, widget build times and refreshes,
+        // forecast accuracy) went with the day's first check-in; a second one
+        // from a new version must not count them twice.
+        let firstToday = reason == .day
         sending = true
         defer { sending = false }
 
@@ -180,7 +191,8 @@ final class DailyCheckIn {
         }.value
         let storeEnd = Date()
 
-        var attributes: Telemetry.Attributes = ["checkin.day": .string(today)]
+        var attributes: Telemetry.Attributes = ["checkin.day": .string(today),
+                                                "checkin.reason": .string(reason.rawValue)]
         for part in [settings, lifecycle, gathered.attributes, widgets] {
             attributes.merge(part) { _, new in new }
         }
@@ -193,8 +205,8 @@ final class DailyCheckIn {
         // PostHog: the whole approved snapshot, with person properties. Sent
         // before the Sentry part, which awaits the forecast engines.
         Self.sendAnalytics(attributes: attributes, installed: installed,
-                           refreshes: gathered.widgetRefreshes, cliRuns: gathered.cliRuns,
-                           counters: counters)
+                           refreshes: firstToday ? gathered.widgetRefreshes : [:],
+                           cliRuns: gathered.cliRuns, counters: counters)
 
         // Sentry, minimal since 2026-11 (usage moved to PostHog): the
         // snapshot metric and the span carry only `coreKeys`. A real span with
@@ -220,6 +232,7 @@ final class DailyCheckIn {
             Telemetry.gauge("energy.cpu_seconds", seconds, unit: .second)
         }
 
+        guard firstToday else { return }
         Self.sendCLISummary(gathered.cli, since: startOfYesterday, until: startOfToday)
         // Widget build times, from the extension's own log (it has no network).
         for d in gathered.widgetDurations {
@@ -235,7 +248,7 @@ final class DailyCheckIn {
     /// that gives crash rates per version a denominator. Everything else in
     /// the snapshot is usage data and goes to PostHog only.
     private static let coreKeys: Set<String> = [
-        "checkin.day", "env.macos", "env.model", "env.model_name", "build.config",
+        "checkin.day", "checkin.reason", "env.macos", "env.model", "env.model_name", "build.config",
     ]
 
     // MARK: - PostHog
@@ -599,9 +612,11 @@ final class DailyCheckIn {
             if Self.reportsFiveHour(accountId: scope.accountId, accounts: accounts) {
                 windows.insert(("five_hour", "five_hour"), at: 0)
             }
-            windows += await engine.scopedWindowKinds().map { ($0.key, $0.kind) }
+            // Off the main actor: awaiting a busy engine (`@ModelActor`) from
+            // here holds the main thread until it is free. See `askEngine`.
+            windows += await askEngine { await engine.scopedWindowKinds() }.map { ($0.key, $0.kind) }
             for (windowKey, window) in windows {
-                let board = await engine.meterModelBoard(windowKey: windowKey)
+                let board = await askEngine { await engine.meterModelBoard(windowKey: windowKey) }
                 var ranked: [(id: String, miss: Double, isPick: Bool)] = []
                 for row in board.rows {
                     switch row.status {

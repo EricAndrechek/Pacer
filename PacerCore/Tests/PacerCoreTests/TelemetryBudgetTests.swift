@@ -180,4 +180,24 @@ struct TelemetryBudgetTests {
         clock.advance(86_400)
         #expect(budget.takeAnalytics(event: "menubar_item_clicked"))
     }
+
+    /// sentry-cocoa runs `beforeSend` on transactions too; one that fell
+    /// through to `.error` spent the error budget, and past 25 a day every
+    /// transaction (the check-in included) and every handled error was dropped.
+    @Test("beforeSend budgets: transactions and feedback spend nothing there")
+    func beforeSendKinds() {
+        func kind(_ type: String?, _ mechanism: String? = nil, fatal: Bool = false,
+                  handled: Bool? = nil) -> TelemetryBudget.Kind? {
+            TelemetryBudget.kind(eventType: type, mechanism: mechanism, fatal: fatal, handled: handled)
+        }
+        #expect(kind("transaction") == nil)
+        #expect(kind("feedback") == nil)
+        #expect(kind(nil, "AppHang") == .hang)
+        #expect(kind("event", "AppHang", handled: false) == .hang)
+        #expect(kind(nil, "mx_hang_diagnostic") == .diagnostic)
+        #expect(kind(nil, "signal", fatal: true) == .crash)
+        #expect(kind(nil, "nsexception", handled: false) == .crash)
+        #expect(kind(nil) == .error)
+        #expect(kind("event", "generic", handled: true) == .error)
+    }
 }

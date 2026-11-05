@@ -234,7 +234,7 @@ every signal in `docs/telemetry-plan.md`; README "Privacy" is the short public
 promise). Read this before adding any signal.
 
 - **The doors.** PacerCore code reports through `Telemetry` (count,
-  distribution, gauge, after-the-fact `Span`, breadcrumb) or, for anything
+  distribution, gauge, after-the-fact `Span`, breadcrumb, `problem` for an issue: a fixed message plus domain/code-style attributes, never an error description) or, for anything
   frequent, `TelemetryCounters.add`, which the daily check-in drains. Both are
   no-ops until the app installs its Sentry sink. Never `import Sentry` outside
   `App/Telemetry/`: the widget and the CLI link PacerCore and must never run the
@@ -1046,6 +1046,7 @@ which showed nothing new and hid cards that were missing their own updates.
   found SwiftData still selects every column. This is not yet verified in
   Pacer (run with `-com.apple.CoreData.SQLDebug 1` to check). Until then,
   the dependable levers are a tight predicate and `fetchLimit`.
+- **Never await a `@ModelActor` from the main actor.** SwiftData's executor makes the caller wait on the context's queue: a busy engine holds the main thread until it is free (`ModelActorCallerBlockProbe`: a 1.8 s wait is a 1.8 s gap), and an idle one runs the call on main. Ask through `askEngine`.
 - `ModelContext` is not `Sendable`. A `Task.detached` has no actor, so
   create its own `ModelContext(container)` inside and return Sendable values.
   A detached task is **not cancelled** with the task that spawned it.
@@ -1088,6 +1089,7 @@ first). One that writes a handful of rows the cycle reads back through its own
 instances finds them with `forEach` and writes them through that context (#338).
 A new large transient allocation also needs a `MemoryHygiene.relieve` afterwards.
 The hourly `[Memory]` log line is how a regression shows up.
+A rebuild reads `TokenSample` through `RawSampleReader` (its own read-only SQLite connection, `Z_PK` order); the SwiftData walk is the fallback (#335).
 
 ### Default to scoped fetches; nothing should fetch then filter
 
