@@ -121,7 +121,7 @@ public final class FMStructModel: ArenaModel {
             for f in rates.keys { need[NeedKey(account: acct, family: f)] = max(need[NeedKey(account: acct, family: f)] ?? 0, hours) }
             plans.append(Plan(tr: tr, start: st, rates: rates, hours: hours))
         }
-        let spend = need.isEmpty ? [:] : child(history, now: now, need: need)
+        let spend = need.isEmpty ? [:] : try child(history, now: now, need: need)
         var out: [String: ArenaTargetForecast] = [:]
         for p in plans { out[p.tr.key] = meter(now: now, p, spend: spend) }
         return ArenaForecast(byKey: out)
@@ -153,7 +153,7 @@ public final class FMStructModel: ArenaModel {
 
     /// The child's paths per (account, family); empty when it fails (the
     /// meter is then flat, and the failure logged, as in the arena).
-    func child(_ history: ArenaHistory, now: Millis, need: [NeedKey: Int]) -> [NeedKey: [[Double]]] {
+    func child(_ history: ArenaHistory, now: Millis, need: [NeedKey: Int]) throws -> [NeedKey: [[Double]]] {
         let name = cfg.string("child", "")
         do {
             guard let spec = ctx.runner.registry[name] else { throw ArenaError.unknownModel(name) }
@@ -171,6 +171,8 @@ public final class FMStructModel: ArenaModel {
             var out: [NeedKey: [[Double]]] = [:]
             for k in need.keys { if let p = fc[Self.key(k.account, k.family)] { out[k] = p } }
             return out
+        } catch ArenaError.cancelled {
+            throw ArenaError.cancelled
         } catch {
             ctx.log("child \(name) failed: \(error)")
             return [:]

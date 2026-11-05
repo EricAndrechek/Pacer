@@ -137,4 +137,35 @@ struct RuntimeRunnerMemoTests {
         try Self.ask(runner, "memo-leaf", store: store, at: oldest)
         #expect(Self.counts.of("memo-leaf") == fitted + 1)
     }
+
+    /// Runners that share a memo (the grader's workers): what one made as a
+    /// child, the other is answered from, and neither keeps a top-level answer.
+    @Test func runnersSharingAMemoShareTheirChildren() throws {
+        Self.counts = Counts()
+        let store = Self.store(), memo = ArenaForecastMemo()
+        let a = ArenaRunner(registry: Self.registry, memo: memo), b = ArenaRunner(registry: Self.registry, memo: memo)
+        let now = Self.t0 + 30 * Self.hour + 20 * ArenaTime.minute
+        try Self.ask(a, "memo-parent", store: store, at: now)
+        let fitted = Self.counts.of("memo-leaf")
+        #expect(fitted > 0)
+        #expect(memo.count == fitted)
+        try Self.ask(b, "memo-parent", store: store, at: now)
+        #expect(Self.counts.of("memo-leaf") == fitted)
+        #expect(memo.hits >= fitted)
+        memo.removeAll()
+        #expect(a.memoCount == 0 && b.memoValueCount == 0)
+    }
+
+    /// A forecast made while its worker is being stopped may have answered from
+    /// less than it should: it is not left for anyone else to read.
+    @Test func anAbandonedForecastIsNotRemembered() throws {
+        Self.counts = Counts()
+        let store = Self.store(), memo = ArenaForecastMemo()
+        let abandoned = ArenaServices(isAbandoned: { true })
+        let runner = ArenaRunner(registry: Self.registry, services: abandoned, memo: memo)
+        let now = Self.t0 + 30 * Self.hour + 20 * ArenaTime.minute
+        try Self.ask(runner, "memo-parent", store: store, at: now)
+        #expect(Self.counts.of("memo-leaf") > 0)
+        #expect(memo.count == 0)
+    }
 }
