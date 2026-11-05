@@ -141,7 +141,8 @@ struct ArchiveImporter: BulkTranscriptImporter {
                                  '$.message.usage.cache_creation.ephemeral_5m_input_tokens',
                                  '$.message.usage.cache_creation.ephemeral_1h_input_tokens',
                                  '$.message.usage.cache_creation_input_tokens',
-                                 '$.costUSD', '$.isApiErrorMessage', '$.message.usage.iterations']) AS x,
+                                 '$.costUSD', '$.isApiErrorMessage', '$.message.usage.iterations',
+                                 '$.message.usage.output_tokens_details.thinking_tokens']) AS x,
                 fname
             FROM lines
         ),
@@ -166,6 +167,7 @@ struct ArchiveImporter: BulkTranscriptImporter {
             s[10]                                                        AS entrypoint,
             s[11]                                                        AS speed,
             s[12]                                                        AS inference_geo,
+            TRY_CAST(x[10] AS BIGINT)                                    AS thinking_tokens,
             -- Only multi-call responses need the per-iteration split (#218);
             -- everything else stays on the top-level fields, as before.
             CASE WHEN json_array_length(x[9]) > 1 THEN CAST(x[9] AS VARCHAR) END AS iterations,
@@ -216,7 +218,7 @@ struct ArchiveImporter: BulkTranscriptImporter {
                explicit_5m, explicit_1h, summed_cc, source_cost,
                message_id, request_id, session_id, cwd, cc_version,
                is_complete, api_error, entrypoint, fname,
-               speed, inference_geo, iterations
+               speed, inference_geo, iterations, thinking_tokens
         FROM ranked WHERE rn = 1
         """
     }
@@ -289,7 +291,7 @@ struct ArchiveImporter: BulkTranscriptImporter {
             let complete = Column(chunk, 14), apiError = Column(chunk, 15)
             let entrypoint = Column(chunk, 16), fileName = Column(chunk, 17)
             let speed = Column(chunk, 18), inferenceGeo = Column(chunk, 19)
-            let iterations = Column(chunk, 20)
+            let iterations = Column(chunk, 20), thinking = Column(chunk, 21)
 
             for row in 0..<rows {
                 guard let timestampText = ts.string(row),
@@ -354,7 +356,8 @@ struct ArchiveImporter: BulkTranscriptImporter {
                     isApiErrorMessage: apiError.bool(row),
                     isComplete: complete.bool(row),
                     speed: speed.string(row),
-                    inferenceGeo: inferenceGeo.string(row))
+                    inferenceGeo: inferenceGeo.string(row),
+                    thinkingTokens: thinking.optionalInt64(row).map(Int.init))
                 // The same per-iteration split the line parser makes, by the
                 // same code, so the two ingest paths agree.
                 for entry in JSONLLineParser.expand(base, iterationsJSON: iterations.string(row)) {
@@ -459,6 +462,13 @@ struct ArchiveImporter: BulkTranscriptImporter {
 
         func int64(_ row: Int) -> Int64 {
             guard isValid(row), let data else { return 0 }
+            return data.assumingMemoryBound(to: Int64.self)[row]
+        }
+
+        /// Nil for SQL NULL, unlike `int64`, which reads NULL as 0: for a
+        /// field where "not reported" and "reported as 0" differ.
+        func optionalInt64(_ row: Int) -> Int64? {
+            guard isValid(row), let data else { return nil }
             return data.assumingMemoryBound(to: Int64.self)[row]
         }
 

@@ -150,6 +150,7 @@ struct IngestParityProbe {
             parts += [String(s.cacheCreation5mTokens), String(s.cacheCreation1hTokens), cost]
             parts += [s.sessionId ?? "-", s.projectPath ?? "-", s.originalProjectPath ?? "-"]
             parts += [s.ccVersion ?? "-", s.accountId ?? "-", s.speed ?? "-", s.inferenceGeo ?? "-"]
+            parts += [s.thinkingTokens.map { String($0) } ?? "-"]
             lines.append(parts.joined(separator: "\t"))
         }
         lines.sort()

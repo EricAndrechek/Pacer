@@ -139,6 +139,11 @@ public final class TokenSample {
     /// `usage.inference_geo` — `"us"` for a US-residency turn (1.1x on
     /// Claude 4.6+); nil otherwise.
     public var inferenceGeo: String?
+    /// `usage.output_tokens_details.thinking_tokens` (#362): the thinking share
+    /// of `outputTokens`, already inside it and already priced. Nil = not
+    /// reported: every row ingested before the field was parsed (never
+    /// backfilled) and every line without it. 0 only when reported as 0.
+    public var thinkingTokens: Int?
 
     public init(
         sampledAt: Date,
@@ -232,5 +237,6 @@ extension TokenSample {
         )
         self.speed = entry.speed
         self.inferenceGeo = entry.inferenceGeo
+        self.thinkingTokens = entry.thinkingTokens
     }
 }

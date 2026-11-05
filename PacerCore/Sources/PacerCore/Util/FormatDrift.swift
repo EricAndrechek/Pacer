@@ -86,7 +86,7 @@ public enum FormatDrift {
     /// would be billed and not counted.
     static let knownUsageKeys: Set<String> = [
         "input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens",
-        "cache_creation", "speed", "inference_geo", "iterations",
+        "cache_creation", "speed", "inference_geo", "iterations", "output_tokens_details",
         "service_tier", "server_tool_use",
     ]
 

@@ -39,12 +39,15 @@ struct IngestParityTests {
     static func line(
         _ id: String, _ ts: String, output: Int64, stop: String?,
         session: String = "s-main", sidechain: Bool = false, request: String? = nil,
-        iterations: String? = nil
+        iterations: String? = nil, thinking: Int? = nil
     ) -> String {
         let stopJSON: String = stop.map { "\"\($0)\"" } ?? "null"
         let requestId: String = request ?? "r-\(id)"
         let requestJSON: String = requestId.isEmpty ? "" : "\"requestId\":\"\(requestId)\","
         let iterationsJSON: String = iterations.map { ",\"iterations\":\($0)" } ?? ""
+        let detailsJSON: String = thinking.map {
+            ",\"output_tokens_details\":{\"thinking_tokens\":\($0)}"
+        } ?? ""
         // Typed pieces, joined: as one long `+` chain of interpolated
         // literals Xcode 16's type checker times out (macOS 15 CI).
         let parts: [String] = [
@@ -52,7 +55,7 @@ struct IngestParityTests {
             "\"sessionId\":\"\(session)\",\"isSidechain\":\(sidechain),\"cwd\":\"/tmp/acme\",",
             "\"version\":\"2.1.0\",\"message\":{\"id\":\"m-\(id)\",\"model\":\"\(opus)\",",
             "\"stop_reason\":\(stopJSON),\"usage\":{\"input_tokens\":10,\"output_tokens\":\(output),",
-            "\"cache_read_input_tokens\":1000\(iterationsJSON)}}}",
+            "\"cache_read_input_tokens\":1000\(iterationsJSON)\(detailsJSON)}}}",
         ]
         return parts.joined()
     }
@@ -81,16 +84,16 @@ struct IngestParityTests {
         let main: [String] = [
             // A: streamed — two mid-stream copies, then the finished one.
             line("A", "2026-03-01T10:00:00.000Z", output: 1, stop: nil),
-            line("A", "2026-03-01T10:00:01.000Z", output: 1, stop: nil),
-            line("A", "2026-03-01T10:00:02.000Z", output: 289, stop: "tool_use"),
+            line("A", "2026-03-01T10:00:01.000Z", output: 1, stop: nil, thinking: 0),
+            line("A", "2026-03-01T10:00:02.000Z", output: 289, stop: "tool_use", thinking: 200),
             // B: stored mid-stream by an older build; this repairs it.
-            line("B", "2026-03-01T10:05:00.000Z", output: 500, stop: "end_turn"),
+            line("B", "2026-03-01T10:05:00.000Z", output: 500, stop: "end_turn", thinking: 60),
             // C: one finished message logged twice; the subagent has it earlier.
             line("C", "2026-03-01T10:10:05.000Z", output: 40, stop: "end_turn"),
             line("C", "2026-03-01T10:10:09.000Z", output: 40, stop: "end_turn"),
             // D: streamed here; the subagent's finished copy carries the
             // partial copy's timestamp.
-            line("D", "2026-03-01T10:20:00.000Z", output: 8, stop: nil),
+            line("D", "2026-03-01T10:20:00.000Z", output: 8, stop: nil, thinking: 5),
             line("D", "2026-03-01T10:20:04.000Z", output: 584, stop: "tool_use"),
             // F: a two-call response that never finished. Each call keeps its
             // own best copy: the Fable call ties, so its earliest; the Opus
@@ -102,7 +105,7 @@ struct IngestParityTests {
             // G: a streamed two-call response; only the finished line has calls.
             line("G", "2026-03-01T10:40:00.000Z", output: 1, stop: nil),
             line("G", "2026-03-01T10:40:05.000Z", output: 120, stop: "end_turn",
-                 iterations: calls(fable: 3000, opus: 120)),
+                 iterations: calls(fable: 3000, opus: 120), thinking: 100),
             // K: no requestId, so no dedup key: kept as it is, by both.
             line("K", "2026-03-01T10:50:00.000Z", output: 5, stop: "end_turn", request: ""),
             // I, J: the resumed copy is earlier, though its text sorts later.
@@ -170,6 +173,8 @@ struct IngestParityTests {
         var model: String { fields[3] }
         var output: Int64 { Int64(fields[6]) ?? -1 }
         var session: String { fields[11] }
+        /// "-" when the line did not report thinking tokens.
+        var thinking: String { fields[18] }
     }
 
     struct Outcome {
@@ -205,6 +210,7 @@ struct IngestParityTests {
             f += [s.sourceCostUSD.map { String($0) } ?? "-"]
             f += [s.sessionId ?? "-", s.projectPath ?? "-", s.originalProjectPath ?? "-"]
             f += [s.ccVersion ?? "-", s.accountId ?? "-", s.speed ?? "-", s.inferenceGeo ?? "-"]
+            f += [s.thinkingTokens.map { String($0) } ?? "-"]
             rows.append(Row(fields: f))
         }
         var rollups: [String] = []
@@ -239,6 +245,16 @@ struct IngestParityTests {
         // mid-stream copy upgraded in place.
         #expect(try row("m-A:r-A").output == 289)
         #expect(try row("m-A:r-A").sampledAt == at("2026-03-01T10:00:02.000Z"))
+        // Thinking rides on the kept copy: the finished A reported 200, though
+        // an earlier mid-stream copy said 0; B's stored row had none and takes
+        // the finished copy's; D's finished copy reports none, so the partial's
+        // 5 must not survive; calls and plain lines without it stay nil.
+        #expect(try row("m-A:r-A").thinking == "200")
+        #expect(try row("m-B:r-B").thinking == "60")
+        #expect(try row("m-D:r-D").thinking == "-")
+        #expect(try row("m-G:r-G").thinking == "100")
+        #expect(try row("m-G:r-G#0").thinking == "-")
+        #expect(try row("m-C:r-C").thinking == "-")
         // The stored mid-stream row is repaired; its own timestamp stays.
         #expect(try row("m-B:r-B").output == 500)
         #expect(try row("m-B:r-B").sampledAt == at("2026-03-01T10:04:58.000Z"))
