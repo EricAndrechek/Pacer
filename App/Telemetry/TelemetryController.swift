@@ -80,6 +80,14 @@ final class TelemetryController {
         SentrySDK.flush(timeout: 2)
     }
 
+    /// Send what is queued now, waiting at most `timeout`: for a report made
+    /// just before the app ends itself (the store alert's `exit`), which
+    /// would otherwise wait on disk for a next launch that may never come.
+    func flush(timeout: TimeInterval) {
+        guard isRunning else { return }
+        SentrySDK.flush(timeout: timeout)
+    }
+
     /// Scope tags every crash, hang and MetricKit report carries.
     /// `arena.cpu_mode` follows the arena's governor (full core when plugged
     /// in and idle, a fifth otherwise), so a CPU report says which was on.

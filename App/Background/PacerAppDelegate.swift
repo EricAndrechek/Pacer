@@ -269,7 +269,14 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             case .success(let prepared):
                 self.storeDidPrepare(prepared, began: began)
             case .failure(let error):
-                Log.write("Store", "prepare failed after \(Self.milliseconds(since: began)) ms: \(error)")
+                let elapsed = Date().timeIntervalSince(began)
+                Log.write("Store", "prepare failed after \(Int(elapsed * 1000)) ms: \(error)")
+                // Before the alert, which ends the app (#380): the error's
+                // domain and code, never its description, which carries the
+                // store's path. Flushed, briefly, because the app exits next.
+                Telemetry.problem(StorePrepareTelemetry.failedMessage,
+                                  attributes: StorePrepareTelemetry.failure(error, before: schema, elapsed: elapsed))
+                TelemetryController.shared.flush(timeout: 1)
                 self.storeLoader.markFailed(error)
                 // The same alert an open that fails in `init` puts up.
                 Self.showFatalContainerError(error)
