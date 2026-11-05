@@ -25,14 +25,20 @@
 // between two identical runs, #154), and a real change is not: a glyph's edge
 // moves by tens or hundreds of levels.
 //
-// One exception to "no count" (#291): a card's rounded edge can land a pixel
-// off between runs, which moves ~14 pixels by a lot, in a strip 3 px wide and
-// 270 long. That is told apart from a real change by SHAPE, not size: at most
-// `edgeBudget` pixels past the tolerance, whose bounding box is a thin sliver
-// (short side <= `edgeThickness`, long side >= `edgeAspect` times the short
-// one). A glyph or a label change is blob-shaped and far bigger, so it still
-// counts. The tolerated region is logged to stderr.
-//
+// One exception to "no count" (#291): a widget card's edge and shadow can land a
+// fraction of a pixel off between runs. On a real pair that moved ~5,800 pixels
+// by 3-8 levels in a band 19 px wide and 342 long (the shadow), plus 14 pixels
+// by a lot in a 3 x 270 strip (the anti-aliased edge itself). That is told apart
+// from a real change by SHAPE, not size, in two tiers:
+//   - every pixel past `tolerance` lies in one band: short side <= `edgeBand`,
+//     long side >= `edgeAspect` times the short one;
+//   - the pixels that moved a lot (past `faint` levels) number at most
+//     `edgeBudget` and themselves form a sliver: short side <= `edgeThickness`,
+//     long side >= `edgeAspect` times it.
+// A glyph or label change moves hundreds of pixels by tens of levels in a blob,
+// so it still counts, even inside a band-shaped row. The tolerated region is
+// logged to stderr.
+
 // Both images are drawn into the same 8-bit sRGB bitmap and the bytes are
 // compared, so two encodings of one picture (different compression, chunk
 // order, stripped metadata) compare equal.
@@ -56,15 +62,35 @@ func pixels(of path: String) -> (width: Int, height: Int, bytes: Data)? {
 }
 
 let tolerance: UInt8 = 2
+let faint: UInt8 = 16
 let edgeBudget = 64
 let edgeThickness = 4
+let edgeBand = 24
 let edgeAspect = 8
+
+/// Bounding box of the pixels added to it.
+struct Box {
+    var minX = Int.max, minY = Int.max, maxX = -1, maxY = -1
+    var count = 0
+    mutating func add(_ x: Int, _ y: Int) {
+        count += 1
+        minX = min(minX, x); maxX = max(maxX, x)
+        minY = min(minY, y); maxY = max(maxY, y)
+    }
+    var width: Int { maxX - minX + 1 }
+    var height: Int { maxY - minY + 1 }
+    /// Short side at most `thickness`, long side at least `edgeAspect` times it.
+    func isStrip(thickness: Int) -> Bool {
+        let thin = min(width, height), long = max(width, height)
+        return thin <= thickness && long >= thin * edgeAspect
+    }
+}
 
 func samePixels(_ a: Data, _ b: Data, width: Int, height: Int, rects: [CGRect]?) -> Bool {
     guard a.count == b.count else { return false }
     let regions = rects ?? [CGRect(x: 0, y: 0, width: width, height: height)]
-    var count = 0
-    var minX = Int.max, minY = Int.max, maxX = -1, maxY = -1
+    var moved = Box()   // past `tolerance`
+    var strong = Box()  // past `faint`
     let over: Bool = a.withUnsafeBytes { pa in
         b.withUnsafeBytes { pb in
             for r in regions {
@@ -74,16 +100,17 @@ func samePixels(_ a: Data, _ b: Data, width: Int, height: Int, rects: [CGRect]?)
                 for row in y0..<y1 {
                     for col in x0..<x1 {
                         let i = (row * width + col) * 4
-                        var differs = false
+                        var delta: UInt8 = 0
                         for c in 0..<4 {
                             let p = pa[i + c], q = pb[i + c]
-                            if (p > q ? p - q : q - p) > tolerance { differs = true }
+                            delta = max(delta, p > q ? p - q : q - p)
                         }
-                        guard differs else { continue }
-                        count += 1
-                        if count > edgeBudget { return true }
-                        minX = min(minX, col); maxX = max(maxX, col)
-                        minY = min(minY, row); maxY = max(maxY, row)
+                        guard delta > tolerance else { continue }
+                        moved.add(col, row)
+                        if delta > faint {
+                            strong.add(col, row)
+                            if strong.count > edgeBudget { return true }
+                        }
                     }
                 }
             }
@@ -91,12 +118,13 @@ func samePixels(_ a: Data, _ b: Data, width: Int, height: Int, rects: [CGRect]?)
         }
     }
     if over { return false }
-    if count == 0 { return true }
-    let w = maxX - minX + 1, h = maxY - minY + 1
-    let thin = min(w, h), long = max(w, h)
-    guard thin <= edgeThickness, long >= thin * edgeAspect else { return false }
+    if moved.count == 0 { return true }
+    guard moved.isStrip(thickness: edgeBand),
+          strong.count == 0 || strong.isStrip(thickness: edgeThickness) else { return false }
     FileHandle.standardError.write(Data(
-        "png-pixels-equal: ignoring \(count) edge pixels in x=\(minX) y=\(minY) \(w)x\(h)\n".utf8))
+        ("png-pixels-equal: ignoring an edge: \(moved.count) faint pixels in "
+         + "x=\(moved.minX) y=\(moved.minY) \(moved.width)x\(moved.height), "
+         + "\(strong.count) strong\n").utf8))
     return true
 }
 
