@@ -49,6 +49,10 @@ enum LiveRenderMode {
         case dashboard, history, projects, models, now, pace, badges, settings
         /// The compare-models sheet for the scope's 5-hour and 7-day windows.
         case projection, projectionWeekly
+        /// The 5-hour sheet with the grader line and Speed up control a
+        /// catch-up shows (`ProjectionCompareModal.catchUpPreview`): a render
+        /// has no arena runtime, so it never has a catch-up of its own.
+        case projectionCatchUp
         /// Every model's info popover, for both windows.
         case modelInfo
         /// The menu bar's dropdown: the SwiftUI content of the status menu
@@ -64,7 +68,7 @@ enum LiveRenderMode {
             case .settings: return 820
             case .pace: return 1100
             case .now, .badges: return 900
-            case .projection, .projectionWeekly: return 760
+            case .projection, .projectionWeekly, .projectionCatchUp: return 760
             case .modelInfo: return 1040
             case .menu: return MenuStatusContent.popoverWidth
             }
@@ -89,6 +93,9 @@ enum LiveRenderMode {
             case .projectionWeekly:
                 ProjectionCompareModal(windowKey: RateLimitWindowName.sevenDay,
                                        limitAccountId: UsageScope.shared.limitAccountId)
+            case .projectionCatchUp:
+                ProjectionCompareModal(windowKey: RateLimitWindowName.fiveHour,
+                                       limitAccountId: UsageScope.shared.limitAccountId, catchUpPreview: true)
             case .menu:
                 // On a menu's own surface, as it drops: the page canvas
                 // behind every other render is not what a menu sits on.

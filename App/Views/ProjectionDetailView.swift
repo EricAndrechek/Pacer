@@ -58,10 +58,22 @@ struct ProjectionCompareModal: View {
     /// showing a different question's answer.
     let limitAccountId: String?
 
-    init(windowKey: String, limitAccountId: String? = nil) {
+    /// `make render-live PAGES=projectionCatchUp` only: the list's grader
+    /// line and Speed up control as a catch-up would show them, over the
+    /// real board. A render has no arena runtime, so nothing else can show
+    /// them off-screen.
+    let catchUpPreview: Bool
+
+    init(windowKey: String, limitAccountId: String? = nil, catchUpPreview: Bool = false) {
         self.windowKey = windowKey
         self.limitAccountId = limitAccountId
+        self.catchUpPreview = catchUpPreview
     }
+
+    /// What the preview draws (`catchUpPreview`): a first catch-up while
+    /// the Mac is in use.
+    static let previewProgress = MeterModelBoard.Progress(done: 40, total: 100, eta: 2 * 3600, stage: .scoring)
+    static let previewPace = ArenaPace(mode: .share(.inUse))
 
     private var isFixed: Bool {
         windowKey == RateLimitWindowName.fiveHour || windowKey == RateLimitWindowName.sevenDay
@@ -137,6 +149,10 @@ struct ProjectionCompareModal: View {
         // `PacerModalContent`'s stored closure, so read here too (#140;
         // AGENTS.md, "SwiftUI state and data flow").
         let _ = (trajectories, accuracy, board, lines, loaded, actualsLoaded, liveReview, extras)
+        // The arena budget's pace, read here by value and passed down: the
+        // grader line and its Speed up control follow a click, the Mac
+        // going idle or in use, and the speed-up ending, as they happen.
+        let pace = catchUpPreview ? Self.previewPace : ArenaSpeedUp.shared.status.pace
         // Read here, by value, so a poll written by any context reloads the
         // actuals (`RateLimitWriteSignal`).
         let writes = RateLimitWriteSignal.shared.generation
@@ -178,7 +194,9 @@ struct ProjectionCompareModal: View {
                     extras: extras,
                     onToggle: { toggleLine($0) },
                     liveReadout: readout?.isEstimate == true ? readout : nil,
-                    liveReview: liveReview
+                    liveReview: liveReview,
+                    pace: pace,
+                    onSpeedUp: { on in on ? ArenaSpeedUp.shared.start() : ArenaSpeedUp.shared.stop() }
                 )
             } else if loaded && actualsLoaded {
                 Text("Not enough data to compare models yet.")
@@ -212,6 +230,9 @@ struct ProjectionCompareModal: View {
             }
         }
         .onChange(of: livePercent) { _, _ in Task { await refresh() } }
+        // A new rate is a new time left (`ArenaScoringProgress.eta`), and a
+        // speed-up ending means the catch-up may be done: the list again.
+        .onChange(of: pace) { _, _ in Task { await refreshBoard() } }
         .onReceive(NotificationCenter.default.publisher(for: .pacerEngineDidRecompute)) { _ in
             Task { await refresh() }
         }
@@ -308,6 +329,8 @@ struct ProjectionCompareModal: View {
     /// A new board: the lines follow it (its defaults, until a click), and
     /// the on-demand ones follow the lines.
     private func take(_ next: MeterModelBoard) {
+        var next = next
+        if catchUpPreview { next.progress = Self.previewProgress }
         board = next
         lines.follow(next, key: extrasKey)
         syncExtras()
@@ -389,6 +412,11 @@ struct ProjectionDetailView: View {
     /// The readings against the live estimate just before each, and how close
     /// it has been today; nil without a live fit.
     var liveReview: LiveMeterDrift.Review? = nil
+    /// The arena budget's pace (`ArenaPaceStatus`), for the grader line and
+    /// its Speed up control; nil without a governor.
+    var pace: ArenaPace? = nil
+    /// Speed up turned on (true) or off.
+    var onSpeedUp: ((Bool) -> Void)? = nil
 
     /// Whether the "Well behind" group is open: closed each time the sheet
     /// opens, open in `make render-live`, which cannot click it (a render of
@@ -747,14 +775,25 @@ struct ProjectionDetailView: View {
     private func modelList(_ board: MeterModelBoard) -> some View {
         let sections = ModelBoardList.sections(board)
         VStack(alignment: .leading, spacing: 0) {
-            // While the scorer works through history: the rows' "scoring"
-            // states are why the list is still moving.
+            // While the grader works through history: the rows' "scoring"
+            // and "queued" states are why the list is still moving. The time
+            // left and what holds it back are said once, here.
             if let progress = board.progress {
-                Text(ModelBoardList.progressText(progress))
-                    .font(.system(size: 11).monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 10)
-                    .padding(.bottom, 6)
+                HStack(spacing: 8) {
+                    Text(ModelBoardList.progressText(progress, pace: pace))
+                        .font(.system(size: 11).monospacedDigit())
+                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 0)
+                    if let state = ModelBoardList.speedUp(progress, pace: pace), let onSpeedUp {
+                        Toggle(ModelBoardList.speedUpTitle,
+                               isOn: Binding(get: { state == .on }, set: { onSpeedUp($0) }))
+                            .toggleStyle(.button)
+                            .controlSize(.small)
+                            .help(ModelBoardList.speedUpHelp(state))
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.bottom, 6)
             }
             if selection.isFull {
                 Text(ModelBoardList.capNote)
