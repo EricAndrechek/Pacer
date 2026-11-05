@@ -499,8 +499,8 @@ App/
                                   Dock-icon visibility (.regular when window open,
                                   .accessory otherwise), AND the menu-bar NSStatusItem
                                   (custom rather than SwiftUI's MenuBarExtra so we get
-                                  right-click context menu, popover hosting, and pulse
-                                  animation). Redirects stderr to
+                                  a native NSMenu with a hosted SwiftUI content item,
+                                  and the label's own rendering). Redirects stderr to
                                   ~/Library/Logs/Pacer/Pacer.err.log so Log.write output
                                   survives non-terminal launches. Posts a "Pacer paused"
                                   banner from applicationShouldTerminate. Container open
@@ -555,9 +555,10 @@ App/
                                   dropdown — a block per account, a PacerFuelBar per
                                   window, one AccountCaption line, today's totals;
                                   `make render-live PAGES=menu` draws it off-screen).
-                                  PacerAppDelegate hosts both; right-click on
-                                  the status item shows a native NSMenu (Open Pacer /
-                                  Settings / Quit) instead of the popover.
+                                  PacerAppDelegate hosts both; there is one menu,
+                                  opened on click: the dropdown content as a custom-view
+                                  item, then native Open Pacer / Settings / Quit items.
+                                  No popover, no separate right-click menu.
 
     Components/
       CircularGauge.swift       — donut + percentage primitive used by PaceChart, MenuBar,
