@@ -97,8 +97,9 @@ enum RawSessionTurnReader {
 /// opened the store, read six hours of turns into fresh strings, and grouped
 /// them into new dictionaries to arrive at the answers it had last time.
 /// Between commits the answers cannot change: they read the stored turns,
-/// which only a commit moves, and the binding — the activation trail and the
-/// Desktop session accounts — which is compared. Time passing only ages
+/// which only a commit moves, and the binding — the activation trail, the
+/// Desktop session accounts and the switcher's record of switches (#357) —
+/// which is compared. Time passing only ages
 /// sessions out of the window, and the turns a surviving session's answer
 /// reads all lie inside it — so a kept answer is filtered, never recomputed.
 ///
@@ -115,7 +116,8 @@ final class LiveSessionCache: @unchecked Sendable {
     private var path: String?
     private var inode: UInt64?
     private var version: Int64?
-    private var binding: (trail: AccountTrail, desktopAccounts: [String: String])?
+    private var binding: (trail: AccountTrail, desktopAccounts: [String: String],
+                          switches: LoginSwitchEvidence)?
     /// The earliest `liveSince` the kept answers are good for.
     private var liveSince = Date.distantFuture
     private var answers: [String: PacerSessionLookup] = [:]
@@ -135,7 +137,8 @@ final class LiveSessionCache: @unchecked Sendable {
             return nil
         }
         if current == version, let kept = self.binding, kept.trail == binding.trail,
-           kept.desktopAccounts == binding.desktopAccounts, liveSince >= self.liveSince {
+           kept.desktopAccounts == binding.desktopAccounts, kept.switches == binding.switches,
+           liveSince >= self.liveSince {
             return answers.filter { ($0.value.lastActiveAt ?? .distantPast) >= liveSince }
         }
         guard let rows = RawSessionTurnReader.turns(db: db, since: readSince) else {
@@ -144,7 +147,7 @@ final class LiveSessionCache: @unchecked Sendable {
         }
         answers = compute(rows)
         version = current
-        self.binding = (binding.trail, binding.desktopAccounts)
+        self.binding = (binding.trail, binding.desktopAccounts, binding.switches)
         self.liveSince = liveSince
         return answers
     }

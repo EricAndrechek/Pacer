@@ -199,4 +199,114 @@ struct PaceLoginChangeTests {
         #expect(naps == 0)
         #expect(!gate.out.contains("moments ago"))
     }
+
+    // MARK: - A session in doubt between logins (#357)
+
+    /// The login moved to `org-new` (2% of its week) by `/login`; the old
+    /// login, `org-old`, is at 99%.
+    static let doubtMetrics = """
+    pacer_rate_limit_used_ratio{account="org-new",window="seven_day"} 0.02
+    pacer_rate_limit_reset_seconds{account="org-new",window="seven_day"} 300000
+    pacer_rate_limit_used_ratio{account="org-old",window="seven_day"} 0.99
+    pacer_rate_limit_reset_seconds{account="org-old",window="seven_day"} 200000
+    pacer_account_info{account="org-new",name="n",active="true"} 1
+    pacer_account_info{account="org-old",name="o",active="false"} 1
+    """
+
+    /// `/v1/session` as Pacer prints it: one key per line, arrays spread out.
+    static func session(inDoubt: Bool) -> String {
+        let doubt = inDoubt ? """
+          "mayStillBillAccountIds" : [
+            "org-old"
+          ],
+          "mayStillBillSince" : "2026-10-26T16:48:13Z",
+
+        """ : ""
+        return """
+        {
+          "accountId" : "org-new",
+          "currentAccountId" : "org-new",
+          "currentAccountSince" : "2026-10-26T16:48:13Z",
+        \(doubt)  "model" : "claude-opus-5",
+          "models" : [
+            "claude-opus-5"
+          ],
+          "sessionId" : "abc-123"
+        }
+        """
+    }
+
+    func gateInSession(_ box: PaceSandbox, inDoubt: Bool, _ args: [String] = ["gate", "--model", "opus"]) throws -> PaceResult {
+        let server = try PaceStubServer(status: 200, body: Self.session(inDoubt: inDoubt))
+        defer { server.stop() }
+        return runPace(box, args, extra: ["CLAUDE_CODE_SESSION_ID": "abc-123", "PACE_SESSION_API": server.base])
+    }
+
+    @Test func aSessionInDoubtIsJudgedOnEveryLoginItMayBill() throws {
+        let box = try PaceSandbox(metrics: Self.doubtMetrics)
+        let gate = try gateInSession(box, inDoubt: true)
+        // Paused on the old login's week, which this session may still be
+        // spending, and saying why.
+        #expect(gate.status == 10, "\(gate.out)")
+        #expect(gate.out.contains("PAUSE — 7d on org-old at 99% >= safe limit"), "\(gate.out)")
+        #expect(gate.out.contains("the login moved to org-new at 16:48Z without a switch that running sessions follow"),
+                "\(gate.out)")
+        #expect(gate.out.contains("may still be on org-old"), "\(gate.out)")
+        #expect(box.stateText.contains("may still be on org-old"))
+        #expect(box.stateText.contains("\"account\": \"org-new,org-old\""))
+        #expect(box.stateText.contains("\"followsLogin\": true"))
+    }
+
+    @Test func aSessionPacerIsSureOfIsJudgedOnItsLoginAlone() throws {
+        let box = try PaceSandbox(metrics: Self.doubtMetrics)
+        let gate = try gateInSession(box, inDoubt: false)
+        #expect(gate.status == 0, "\(gate.out)")
+        #expect(gate.out.contains("GO — 7d 2%"), "\(gate.out)")
+        #expect(!gate.out.contains("may still"))
+        #expect(box.stateText.contains("\"account\": \"org-new\""))
+    }
+
+    @Test func aGoInDoubtNamesWhoseWindowIsWhose() throws {
+        let box = try PaceSandbox(metrics: Self.doubtMetrics.replacingOccurrences(of: "} 0.99", with: "} 0.40"))
+        let gate = try gateInSession(box, inDoubt: true)
+        #expect(gate.status == 0, "\(gate.out)")
+        #expect(gate.out.contains("GO — org-new 7d 2%, org-old 7d 40%"), "\(gate.out)")
+    }
+
+    @Test func reportAndJsonSayWhichLoginsAreInDoubt() throws {
+        let box = try PaceSandbox(metrics: Self.doubtMetrics)
+        let report = try gateInSession(box, inDoubt: true, ["report", "--model", "opus"])
+        #expect(report.out.contains("pace: judged on every login this session may be billing"), "\(report.out)")
+        #expect(report.out.contains("org-old"), "\(report.out)")
+        let json = try gateInSession(box, inDoubt: true, ["json", "--model", "opus"])
+        let object = try JSONSerialization.jsonObject(with: Data(json.out.utf8)) as? [String: Any]
+        #expect(object?["account"] as? String == "org-new")
+        #expect(object?["mayStillBill"] as? [String] == ["org-old"])
+        let sure = try gateInSession(box, inDoubt: false, ["json", "--model", "opus"])
+        #expect(!sure.out.contains("mayStillBill"))
+    }
+
+    @Test func sessionsSaysWhichMayStillBillAnother() throws {
+        let box = try PaceSandbox(metrics: Self.doubtMetrics)
+        let v1 = box.dir.appendingPathComponent("v1")
+        try FileManager.default.createDirectory(at: v1, withIntermediateDirectories: true)
+        try """
+        {
+          "schemaVersion" : 1,
+          "sessions" : [
+            {"sessionId": "abc-123", "accountId": "org-new", "currentAccountId": "org-new",
+             "model": "claude-opus-5", "projectPath": "/tmp/acme", "project": "acme",
+             "activity": "active", "mayStillBillAccountIds": ["org-old"]},
+            {"sessionId": "def-456", "accountId": "org-new", "currentAccountId": "org-new",
+             "model": "claude-opus-5", "projectPath": "/tmp/acme", "project": "acme", "activity": "active"}
+          ]
+        }
+        """.write(to: v1.appendingPathComponent("sessions"), atomically: true, encoding: .utf8)
+        let result = runPace(box, ["sessions"])
+        #expect(result.status == 0, "\(result.out)")
+        let lines = result.out.split(separator: "\n")
+        #expect(lines.count == 2)
+        #expect(lines.first?.hasSuffix("(may still bill org-old)") == true, "\(result.out)")
+        #expect(lines.last?.contains("may still") == false)
+    }
 }

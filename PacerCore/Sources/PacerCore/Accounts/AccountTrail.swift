@@ -127,6 +127,49 @@ public struct AccountTrail: Sendable, Equatable {
         defaultLogin.last { $0.endedAt == nil }
     }
 
+    /// One change of the default login: `to` became the login at `at`, after
+    /// `from`, which had been the login since `fromSince`.
+    public struct LoginChange: Sendable, Equatable {
+        public let at: Date
+        public let from: String
+        public let fromSince: Date
+        public let to: String
+
+        public init(at: Date, from: String, fromSince: Date, to: String) {
+            self.at = at
+            self.from = from
+            self.fromSince = fromSince
+            self.to = to
+        }
+    }
+
+    /// A closed default-login span shorter than this is left out of
+    /// `defaultLoginChanges` unless the caller knows it was real. Such spans
+    /// are usually a stale config write the trail accepted and the
+    /// credential refuted seconds later, not a login any session ran on. A
+    /// switcher's switch away and back is short too, and is real.
+    public static let loginBlip: TimeInterval = 120
+
+    /// The default login's changes, oldest first. Refuted (zero-length) spans
+    /// are left out, and so are spans shorter than `loginBlip` that
+    /// `keepShort` does not vouch for; consecutive spans of one account are
+    /// taken as one.
+    public func defaultLoginChanges(keepingShort keepShort: (Span) -> Bool = { _ in false }) -> [LoginChange] {
+        var kept: [Span] = []
+        for span in defaultLogin {
+            if let end = span.endedAt {
+                let length = end.timeIntervalSince(span.startedAt)
+                if length <= 0 { continue }
+                if length < Self.loginBlip, !keepShort(span) { continue }
+            }
+            if let last = kept.last, last.accountId == span.accountId { continue }
+            kept.append(span)
+        }
+        return zip(kept, kept.dropFirst()).map {
+            LoginChange(at: $1.startedAt, from: $0.accountId, fromSince: $0.startedAt, to: $1.accountId)
+        }
+    }
+
     /// Every distinct account the trail has ever seen active.
     public var accountIds: Set<String> {
         var ids = Set(defaultLogin.map(\.accountId))
