@@ -84,3 +84,43 @@ import Testing
         #expect(ArenaBudgetPolicy.telemetryName(.share(.battery)) == "fifth")
     }
 }
+
+/// The check-in goes once a local day, and again on the day a new release
+/// first runs, so its adoption shows that day.
+@Suite("Check-in schedule")
+struct CheckInScheduleTests {
+
+    private let release = "com.ericandrechek.pacer@0.8.3+1"
+
+    @Test("a new day is due; the same day on the same release is not")
+    func daily() {
+        #expect(CheckInSchedule.due(lastDay: "2026-11-04", lastRelease: release,
+                                    today: "2026-11-05", release: release) == .day)
+        #expect(CheckInSchedule.due(lastDay: "2026-11-05", lastRelease: release,
+                                    today: "2026-11-05", release: release) == nil)
+    }
+
+    @Test("a new release the same day is due again, once")
+    func newRelease() {
+        let old = "com.ericandrechek.pacer@0.8.2+1"
+        #expect(CheckInSchedule.due(lastDay: "2026-11-05", lastRelease: old,
+                                    today: "2026-11-05", release: release) == .version)
+        // Both are stored together before the work, so the next look finds nothing due.
+        #expect(CheckInSchedule.due(lastDay: "2026-11-05", lastRelease: release,
+                                    today: "2026-11-05", release: release) == nil)
+    }
+
+    @Test("a first run is a day check-in; an update from before the release key is a version one")
+    func missingKeys() {
+        #expect(CheckInSchedule.due(lastDay: nil, lastRelease: nil,
+                                    today: "2026-11-05", release: release) == .day)
+        #expect(CheckInSchedule.due(lastDay: "2026-11-05", lastRelease: nil,
+                                    today: "2026-11-05", release: release) == .version)
+    }
+
+    @Test("a new day on a new release is a day check-in")
+    func dayWins() {
+        #expect(CheckInSchedule.due(lastDay: "2026-11-04", lastRelease: "x",
+                                    today: "2026-11-05", release: release) == .day)
+    }
+}
