@@ -27,7 +27,9 @@ public final class MemoryPressure: @unchecked Sendable {
         }
     }
 
-    public static let shared = MemoryPressure(watching: true)
+    /// A test process reads normal whatever the machine is doing: what a refit
+    /// asks the arena for must not depend on what else the Mac is up to.
+    public static let shared = MemoryPressure(watching: !PacerPreferences.isTestProcess)
 
     private let lock = NSLock()
     // Guarded by `lock`.

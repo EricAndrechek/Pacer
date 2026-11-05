@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import SwiftData
 import PacerCore
@@ -795,7 +796,7 @@ final class AppBackgroundService {
         // thread for as long.
         let arenaLink = arenaRuntime().link
         let adopting = engines.all.map(\.engine)
-        let started = Date()
+        let meter = WorkMeter()
         //
         // Still concurrent, and deliberately so after trying the alternative.
         // Serialising them looked right — 83% of the pace card's multi-second
@@ -820,7 +821,10 @@ final class AppBackgroundService {
                 }
             }
         }.value
-        let refitMs = Int(Date().timeIntervalSince(started) * 1000)
+        let reading = meter.finish()
+        // Awake time: a refit the Mac slept through took no time at all. Wall
+        // time made this metric's p95 39 minutes on one production Mac (#389).
+        let refitMs = reading.awakeMilliseconds
         await exportEngineSnapshots(live)
         NotificationCenter.default.post(name: .pacerEngineDidRecompute, object: nil)
         startRecordBackfill(live.map { $0.engine })
@@ -836,12 +840,15 @@ final class AppBackgroundService {
         if refitMs >= 1_000 || engineRefitCount % 20 == 0 {
             // Sampled on the same gate as the log (slow ones and every 20th),
             // not every refit: a refit can run every 20 s.
+            var attributes = reading.attributes()
+            attributes["slow"] = .bool(refitMs >= 1_000)
+            attributes["window"] = .string(NSApp?.activationPolicy() == .regular ? "open" : "closed")
             Telemetry.distribution("engine.refit_ms", Double(refitMs), unit: .millisecond,
-                                   attributes: ["slow": .bool(refitMs >= 1_000)])
+                                   attributes: attributes)
             let duty = Double(engineRefitTotalMs) / max(1, Double(engineRefitCount))
                 / floor / 10.0
             Log.write("Engine",
-                      "refit \(engineRefitCount): \(refitMs) ms "
+                      "refit \(engineRefitCount): \(refitMs) ms \(reading.summary) "
                       + String(format: "(avg %d ms, ~%.0f%% duty at %.0fs interval)",
                                engineRefitTotalMs / max(1, engineRefitCount),
                                duty, floor))
