@@ -77,15 +77,39 @@ public final class EngineHost {
     }
 
     nonisolated(unsafe) private var activationObserver: NSObjectProtocol?
+    private let pressure: MemoryPressure
+    nonisolated(unsafe) private var pressureListener: UUID?
 
-    public init(container: ModelContainer) {
+    public init(container: ModelContainer, pressure: MemoryPressure = .shared) {
         self.container = container
+        self.pressure = pressure
         _ = engine(for: .allAccounts)
         observeActivations()
+        listenForPressure()
+    }
+
+    private func listenForPressure() {
+        pressureListener = pressure.listen { [weak self] level in
+            guard level == .critical else { return }
+            Task { @MainActor [weak self] in self?.shedCaches() }
+        }
     }
 
     deinit {
         if let activationObserver { NotificationCenter.default.removeObserver(activationObserver) }
+        if let pressureListener { pressure.unlisten(pressureListener) }
+    }
+
+    /// At `.critical` only: every engine lets go of its scoreboard, and the next
+    /// refit reads it back. Off the main actor, because a hop onto a busy engine
+    /// blocks the calling thread until the engine is free.
+    private func shedCaches() {
+        let engines = all.map(\.engine)
+        Task.detached(priority: .utility) {
+            for engine in engines { await engine.shedRebuildableCaches() }
+            MemoryHygiene.relieve()
+            Log.write("Engine", "memory pressure (critical): \(engines.count) engine(s) shed their scoreboards")
+        }
     }
 
     private func observeActivations() {
@@ -119,11 +143,13 @@ public final class EngineHost {
     /// screenshot lost its projections, its at-reset chips and its
     /// pace-vs-normal chip.
     public init(container: ModelContainer, preseeded: [EngineScope: UsageIntelligenceEngine],
-                activeAccountId: String? = nil) {
+                activeAccountId: String? = nil, pressure: MemoryPressure = .shared) {
         self.container = container
+        self.pressure = pressure
         self.engines = preseeded
         self.activeAccountId = activeAccountId
         if engines[.allAccounts] == nil { _ = engine(for: .allAccounts) }
+        listenForPressure()
     }
 
     /// The all-accounts engine — what anything that must not follow the

@@ -173,6 +173,15 @@ public actor UsageIntelligenceEngine {
     /// started, chained, so tests can wait for them (`settleRecordCleanup`).
     private var recordCleanup: Task<Void, Never>?
 
+    /// Let go of what the next refit can read again. The scoreboard is the one
+    /// thing an engine holds that grows with history: on a four-account store it
+    /// was 51 of the engines' 77 MB, about 280 bytes a row. The fit stays, so
+    /// every ask still answers; the next refit reads the rows back (about a
+    /// second per engine), which is why only `.critical` asks for this.
+    public func shedRebuildableCaches() {
+        evalRowsCache = nil
+    }
+
     /// Wait for the store deletes the refits have started (tests).
     public func settleRecordCleanup() async { await recordCleanup?.value }
 
@@ -534,6 +543,7 @@ public actor UsageIntelligenceEngine {
     // MARK: - Diagnostics (see `EngineScopeProbe`)
 
     public func windowSpecsForProbe() -> [WindowSpec] { features?.windows ?? [] }
+    public func evalRowCountForProbe() -> Int { evalRowsCache?.count ?? 0 }
     public func rateLimitHistoryCountForProbe(_ key: String) -> Int {
         features?.rateLimit[key]?.count ?? 0
     }
@@ -2359,13 +2369,16 @@ extension UsageIntelligenceEngine {
 
     /// Ask the runtime for this fit's arena projections. Returns at once.
     func requestArenaLive(_ f: EngineFeatures, arena: ArenaEngineLink) {
+        let pressure = MemoryPressure.shared.level
         var requests: [ArenaLiveRequest] = []
         for (key, rf) in fit.rl {
             guard let binding = rf.arenaBinding, !rf.arenaIds.isEmpty, let samples = f.rateLimit[key] else { continue }
             let (current, _) = BurnTrajectory.segment(samples: samples, duration: rf.duration, now: f.now)
             guard let current, current.resetsAt > f.now, let last = current.samples.last else { continue }
+            let models = EngineRefitPolicy.liveModels(rf.arenaIds, pressure: pressure)
+            guard !models.isEmpty else { continue }
             requests.append(ArenaLiveRequest(binding: binding, resetsAt: current.resetsAt,
-                                             latestReadingAt: last.at, models: rf.arenaIds))
+                                             latestReadingAt: last.at, models: models))
         }
         if !requests.isEmpty { arena.requestLive(requests) }
     }

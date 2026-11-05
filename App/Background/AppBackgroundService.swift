@@ -80,6 +80,12 @@ final class AppBackgroundService {
     private var engineRefitCount = 0
     private var engineRefitTotalMs = 0
     private var lastEngineRecomputeAt: Date?
+    /// A refit is running. A Mac in dark wake polls, passes the floor and starts
+    /// another while the last is still parked on the engines, and one production
+    /// Mac woke to six stacked refits finishing together (#389).
+    private var engineRefitRunning = false
+    /// A forced refit arrived while one was running: run it right after.
+    private var engineRefitQueued = false
     /// The once-per-launch full-history record pass; see `startRecordBackfill`.
     private var recordBackfillTask: Task<Void, Never>?
     /// The ported arena forecasters (`ArenaRuntime`): scored over every
@@ -697,7 +703,8 @@ final class AppBackgroundService {
     /// puts them to use (bands, cycle facts, selection) without waiting for
     /// the next poll.
     private func startRecordBackfill(_ engines: [UsageIntelligenceEngine]) {
-        guard recordBackfillTask == nil else { return }
+        guard recordBackfillTask == nil,
+              EngineRefitPolicy.recordBackfillAllowed(pressure: MemoryPressure.shared.level) else { return }
         recordBackfillTask = Task.detached(priority: .background) { [weak self] in
             var added = 0
             for engine in engines { added += await engine.backfillRateLimitRecordIfNeeded() }
@@ -766,11 +773,27 @@ final class AppBackgroundService {
     private func recomputeEngineIfDue(force: Bool = false,
                                       rateLimitsChanged: Bool = true) async -> Bool {
         let now = Date()
-        let floor = rateLimitsChanged
+        let base = rateLimitsChanged
             ? Self.engineRecomputeMinInterval
             : Self.engineRecomputeIdleInterval
-        if !force, let last = lastEngineRecomputeAt,
-           now.timeIntervalSince(last) < floor { return false }
+        let floor = EngineRefitPolicy.floor(base: base, pressure: MemoryPressure.shared.level)
+        if !force, let last = lastEngineRecomputeAt, now.timeIntervalSince(last) < floor {
+            if now.timeIntervalSince(last) >= base { TelemetryCounters.add("engine.refit.deferred_pressure") }
+            return false
+        }
+        guard !engineRefitRunning else {
+            TelemetryCounters.add("engine.refit.skipped_running")
+            if force { engineRefitQueued = true }
+            return false
+        }
+        engineRefitRunning = true
+        defer {
+            engineRefitRunning = false
+            if engineRefitQueued {
+                engineRefitQueued = false
+                Task { @MainActor [weak self] in await self?.recomputeEngineIfDue(force: true) }
+            }
+        }
         lastEngineRecomputeAt = now
         // Recompute OFF the main actor. `recomputeEngineIfDue` runs on
         // `@MainActor`, so `await engine.recompute(...)` would resume the

@@ -93,3 +93,54 @@ struct EngineHostLiveScopesTests {
         #expect(await engine.scope == .account("orgB"))
     }
 }
+
+/// Critical memory pressure takes back what a refit can read again (#389).
+@Suite("Engines under critical memory pressure", .serialized)
+@MainActor
+struct EngineHostPressureTests {
+
+    private func scoreboardContainer() throws -> ModelContainer {
+        let container = try ModelContainer(for: Schema(PacerStore.allModelTypes),
+                                           configurations: ModelConfiguration(isStoredInMemoryOnly: true))
+        let context = ModelContext(container)
+        for day in 0..<5 {
+            context.insert(EngineEvalOutcome(
+                surface: EngineSelfEval.surfaceEOD, method: "model-a", bucket: "cut=0.50|all",
+                periodKey: "2026-10-0\(day + 1)", predicted: 10, truth: 12))
+        }
+        try context.save()
+        return container
+    }
+
+    private func held(_ engine: UsageIntelligenceEngine, until expected: Int) async -> Int {
+        for _ in 0..<500 {
+            let rows = await engine.evalRowCountForProbe()
+            if rows == expected { return rows }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return await engine.evalRowCountForProbe()
+    }
+
+    @Test func onlyCriticalShedsAndTheNextRefitReadsItBack() async throws {
+        let container = try scoreboardContainer()
+        let pressure = MemoryPressure()
+        let engine = UsageIntelligenceEngine(modelContainer: container)
+        let host = EngineHost(container: container, preseeded: [.allAccounts: engine], pressure: pressure)
+        await Task.detached { await engine.recompute() }.value
+        let rows = await engine.evalRowCountForProbe()
+        #expect(rows >= 5)
+
+        pressure.set(.warning)
+        try? await Task.sleep(for: .milliseconds(100))
+        #expect(await engine.evalRowCountForProbe() == rows)
+
+        pressure.set(.critical)
+        #expect(await held(engine, until: 0) == 0)
+        // Still answers: the fit stays, only the record is gone from memory.
+        #expect(await engine.fittedAt() != nil)
+
+        await Task.detached { await engine.recompute() }.value
+        #expect(await engine.evalRowCountForProbe() == rows)
+        _ = host
+    }
+}
