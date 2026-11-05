@@ -729,7 +729,10 @@ struct MenuStatusContent: View {
     @State private var rateLimits: [LimitSamplePoint] = []
     @Query private var globalToday: [DailyAggregate]
     @Query private var scopedToday: [AccountDailyAggregate]
-    @State private var menuScope = UsageScope.shared
+    /// An input, not a read of the stored value: a render walks scopes
+    /// ephemerally (`UsageScope.selectEphemeral`), and the live menu follows the
+    /// same observable, so both group by the scope they were handed (#324).
+    private let menuScope: UsageScope
 
     /// Follows the window's account scope. The menu bar is ambient, so an
     /// argument exists for it always showing every account — but two numbers
@@ -778,7 +781,7 @@ struct MenuStatusContent: View {
     /// login switch under "All accounts" counts; the store lookup is only the
     /// cold-start fallback.
     var reloadKey: String {
-        let account = menuScope.limitAccountId ?? UsageScope.limitAccountId(in: menuModelContext)
+        let account = menuScope.resolvedLimitAccountId(in: menuModelContext)
         // Which clients are active moves the grouping (#245), including when
         // a Desktop's 30 minutes run out with nothing written.
         return "\(RateLimitWriteSignal.shared.generation):\(account ?? "none")"
@@ -787,7 +790,7 @@ struct MenuStatusContent: View {
 
     @MainActor
     func reloadWindows() {
-        let account = UsageScope.limitAccountId(in: menuModelContext)
+        let account = menuScope.resolvedLimitAccountId(in: menuModelContext)
         let loaded = MenuBarWindowSource.load(menuModelContext, account: account)
         rateLimits = loaded.fixed
         scopedSamples = loaded.scoped
@@ -868,7 +871,7 @@ struct MenuStatusContent: View {
         // is "all accounts", and it is the surface read without opening the
         // app, so a percentage with no owner is a number you cannot act on.
         let all = (try? menuModelContext.fetch(FetchDescriptor<Account>())) ?? []
-        let shown = UsageScope.limitAccountId(in: menuModelContext)
+        let shown = menuScope.resolvedLimitAccountId(in: menuModelContext)
         let name = all.count > 1 ? all.first { $0.id == shown }?.shortLabel : nil
         let signedIn = shown.map { id in all.first { $0.isActive }?.id == id } ?? true
         return [Block(id: Self.scopeBlock, account: loadedAccount, name: name,
@@ -953,12 +956,12 @@ struct MenuStatusContent: View {
         // comes from the same scope's engine: otherwise the dropdown would
         // show one account's cost above every account's projection.
         guard let host = engines else { return }
-        let engine = host.engine(forAccount: UsageScope.storedAccountId)
+        let engine = host.engine(forAccount: menuScope.accountId)
         // Rate limits are per account: under "all accounts" the one-account
         // block is the active login's, from its own engine, the one the
         // dashboard's column for that account reads (#303). Each concurrent
         // block asks its own account's engine (#163).
-        let limitsEngine = UsageScope.storedAccountId.map { host.engine(forAccount: $0) }
+        let limitsEngine = menuScope.accountId.map { host.engine(forAccount: $0) }
             ?? host.rateLimitEngine
         let asked = plans.map { plan in
             (plan: plan, engine: plan.block == Self.scopeBlock ? limitsEngine : host.engine(forAccount: plan.account))
@@ -998,14 +1001,14 @@ struct MenuStatusContent: View {
         return next
     }
 
-    init() {
+    /// `scope` defaults to the shared observable, which is what AppKit-built
+    /// hosts have: no parent view can pass it down. Their host is built once
+    /// and kept, so a scope change reaches the `@Query` predicates below only
+    /// because `MenuBarKeyedContent` rebuilds the view when the scope moves.
+    init(scope: UsageScope = .shared) {
+        menuScope = scope
         let today = TokenSample.formatDate(Date())
-        // Read from the shared store rather than taken as a parameter: the
-        // menu bar is constructed by AppKit, not by a parent view that could
-        // pass it down. Its host is built once and kept, so a scope change
-        // reaches this only because `MenuBarKeyedContent` rebuilds the view
-        // when the scope moves.
-        let acct = UsageScope.storedAccountId ?? UsageScope.noAccountSentinel
+        let acct = scope.accountId ?? UsageScope.noAccountSentinel
         _globalToday = Query(
             filter: #Predicate<DailyAggregate> { $0.date == today }
         )
