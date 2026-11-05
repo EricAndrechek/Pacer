@@ -72,6 +72,20 @@ public struct SampleSnapshot: Sendable {
     /// on a 746k-row store; a whole rebuild through `ModelWalk` peaked at
     /// 317 MB.
     public static func fetch(from container: ModelContainer) throws -> SampleSnapshot {
+        // Straight from SQLite when the store is a file (#335): a few seconds
+        // instead of tens, and no fetch on the coordinator the main thread's
+        // reads share. An in-memory store, or any surprise in the file, walks
+        // it through SwiftData as before.
+        if let url = RawSampleReader.storeURL(of: container),
+           let rows = RawSampleReader.rows(storeURL: url) {
+            return SampleSnapshot(rows: rows)
+        }
+        return try fetchThroughSwiftData(from: container)
+    }
+
+    /// The SwiftData walk: the fallback, and the reference the raw reader is
+    /// held to (`RawSampleReaderParityTests`).
+    static func fetchThroughSwiftData(from container: ModelContainer) throws -> SampleSnapshot {
         var rows: [Row] = []
         // A SQL COUNT, and it saves ~20 regrowth copies of a 750k-row array.
         rows.reserveCapacity(try ModelContext(container).fetchCount(FetchDescriptor<TokenSample>()))

@@ -37,7 +37,10 @@ import Testing
 /// directory for a byte-exact dump of every rollup row and a digest of every
 /// sample, so two builds' results can be compared with `cmp`.
 /// `PACER_UPGRADE_PROBE_FORCE_REBUILD` drops the stored `costRecomputeVersion`
-/// first, so every rollup is rebuilt from every sample.
+/// first, so every rollup is rebuilt from every sample. While the cycle runs,
+/// `MainActorWatch` records how long the main actor went without running (and
+/// fails above 250 ms); `PACER_UPGRADE_PROBE_MAIN` picks what it keeps on the
+/// main thread meanwhile.
 @Suite("Real-store upgrade probe",
        .enabled(if: ProcessInfo.processInfo.environment["PACER_UPGRADE_PROBE_STORE"] != nil))
 struct RealStoreUpgradeProbe {
@@ -80,6 +83,8 @@ struct RealStoreUpgradeProbe {
             try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
         }
 
+        // Line-buffered, so a run that stalls shows how far it got.
+        setvbuf(stdout, nil, _IOLBF, 0)
         let opened = Date()
         let container = try PacerStore.makeModelContainer(at: storeURL)
         // Token sums only, through a slim paged fetch: whatever this walk
@@ -88,6 +93,7 @@ struct RealStoreUpgradeProbe {
         let before = try Self.tokenSums(container)
         log(String(format: "opened copy (migration applied) in %.1f s", Date().timeIntervalSince(opened)))
         log("before  rows=\(before.rows) tokens=\(before.tokens)")
+        let scanVersionBefore = try Self.meta(container, ClaudeCodeMetaKey.scanVersion)
         if env["PACER_UPGRADE_PROBE_FORCE_REBUILD"] != nil {
             // Every rollup rebuilt from every sample, as a `costRecomputeVersion`
             // bump does: the worst case for memory, and with an empty Claude
@@ -125,6 +131,9 @@ struct RealStoreUpgradeProbe {
 
         let priority = Self.cyclePriority()
         log("cycle priority: \(priority)")
+        let watchMode = MainActorWatch.Mode(rawValue: env["PACER_UPGRADE_PROBE_MAIN"] ?? "") ?? .reader
+        let watch = await MainActorWatch.start(container: container, mode: watchMode)
+        log("main actor watch: \(watchMode.rawValue)")
         let sampler = ResourceSampler()
         sampler.start()
         let started = Date()
@@ -139,8 +148,15 @@ struct RealStoreUpgradeProbe {
         }
         let wall = Date().timeIntervalSince(started)
         let usage = sampler.stop()
+        let mainActor = await watch.stop()
         let report = try outcome.get()
-        #expect(report.wasFullScan)
+        // A copy the current build wrote is already on this scan version;
+        // only a forced rebuild runs on one, and it rebuilds without re-reading.
+        #expect(report.wasFullScan == (scanVersionBefore != ScanCoordinator.currentScanVersion))
+        for line in mainActor.lines { log("main actor: \(line)") }
+        // The bar for the first launch after an update (#376): the main
+        // thread is never held for more than a quarter second at a time.
+        #expect(mainActor.longestGapMs < 250, "the main actor was held \(Int(mainActor.longestGapMs)) ms")
 
         let p = report.phaseTimings
         log(String(format: "cycle %.1f s wall · %.2f cores average · peak %.2f cores (1 s window) at +%.0f s",
@@ -251,6 +267,12 @@ struct RealStoreUpgradeProbe {
                 to: outDir.appendingPathComponent("models.tsv"), atomically: true, encoding: .utf8)
             log("wrote rollups.tsv, models.tsv and timeline.tsv to \(outDir.path)")
         }
+    }
+
+    @ScanActor
+    static func meta(_ container: ModelContainer, _ key: String) throws -> String? {
+        try ModelContext(container).fetch(FetchDescriptor<ClaudeCodeMeta>(
+            predicate: #Predicate { $0.key == key })).first?.value
     }
 
     // MARK: - Steady state and memory
@@ -424,6 +446,167 @@ struct RealStoreUpgradeProbe {
             lines.append("acct-session\t\(r.accountSessionKey)\t" + bits(r.costComponents, r.rollupTotalCostUSD))
         }
         return lines.sorted().joined(separator: "\n") + "\n"
+    }
+}
+
+/// How long the main actor goes without running while the upgrade cycle runs
+/// off it (#376): the first launch after an update must never hold it for
+/// more than a quarter second at a time.
+///
+/// A heartbeat on the main actor sleeps 10 ms and records how late it wakes;
+/// a wake that is late by a second means the main thread could not run a
+/// job, a click or a frame for that second. The modes add what the app keeps
+/// on the main thread during a rebuild, so the cost of each can be told apart:
+///
+/// Chosen with `PACER_UPGRADE_PROBE_MAIN`:
+///
+/// - `off`: no watch at all.
+/// - `beat`: the heartbeat alone, the store's main context never created.
+///   What the rebuild itself sends to the main actor.
+/// - `context`: plus `container.mainContext`, which the app always has, and
+///   which SwiftData merges every other context's saves into on the main
+///   thread.
+/// - `reader` (the default): plus the menu bar label's own reads, on the
+///   main context, after every save any context makes, as its `@Query`s do —
+///   the menu-bar-only user's always-mounted surface.
+@MainActor
+final class MainActorWatch {
+    enum Mode: String { case off, beat, context, reader }
+
+    struct Report {
+        var longestGapMs = 0.0
+        var lines: [String] = []
+    }
+
+    private let mode: Mode
+    private let container: ModelContainer
+    private let origin = Date()
+    private var task: Task<Void, Never>?
+    private var observer: (any NSObjectProtocol)?
+    private var readerQueued = false
+    private var gaps: [(at: Double, ms: Double, step: String)] = []
+    private var beats = 0
+    private var readerPasses = 0
+    private var readerTotalMs = 0.0
+    private var readerLongest: (at: Double, ms: Double) = (0, 0)
+    private var saves = 0
+    private let account: String
+
+    private init(container: ModelContainer, mode: Mode, account: String) {
+        self.container = container
+        self.mode = mode
+        self.account = account
+    }
+
+    static func start(container: ModelContainer, mode: Mode) async -> MainActorWatch {
+        // The account the menu bar would be scoped to: the one with the most
+        // turns, read before the watch starts so it costs the cycle nothing.
+        let account = await Task.detached {
+            let ctx = ModelContext(container)
+            let ids = ((try? ctx.fetch(FetchDescriptor<Account>())) ?? []).map(\.id)
+            return ids.max { a, b in
+                let ca = (try? ctx.fetchCount(FetchDescriptor<TokenSample>(
+                    predicate: #Predicate { $0.accountId == a }))) ?? 0
+                let cb = (try? ctx.fetchCount(FetchDescriptor<TokenSample>(
+                    predicate: #Predicate { $0.accountId == b }))) ?? 0
+                return ca < cb
+            } ?? UsageScope.noAccountSentinel
+        }.value
+        let watch = MainActorWatch(container: container, mode: mode, account: account)
+        watch.begin()
+        return watch
+    }
+
+    private func begin() {
+        guard mode != .off else { return }
+        if mode != .beat { _ = container.mainContext }
+        if mode == .reader {
+            observer = NotificationCenter.default.addObserver(
+                forName: ModelContext.didSave, object: nil, queue: nil
+            ) { [weak self] _ in
+                Task { @MainActor in self?.saveSeen() }
+            }
+            read()
+        }
+        task = Task { @MainActor [weak self] in
+            let clock = ContinuousClock()
+            var last = clock.now
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(10))
+                let now = clock.now
+                let late = (now - last) / .milliseconds(1) - 10
+                last = now
+                self?.beat(lateMs: late)
+            }
+        }
+    }
+
+    private func now() -> Double { Date().timeIntervalSince(origin) }
+
+    private func beat(lateMs: Double) {
+        beats += 1
+        guard lateMs >= 100 else { return }
+        let step = HistoryRebuildStatus.shared.step.map { "\($0)" } ?? "-"
+        gaps.append((now() - lateMs / 1000, lateMs, step))
+    }
+
+    /// Coalesced like a `@Query` refresh: one pass per main-actor turn,
+    /// however many saves landed in it.
+    private func saveSeen() {
+        saves += 1
+        guard !readerQueued else { return }
+        readerQueued = true
+        Task { @MainActor in
+            self.readerQueued = false
+            self.read()
+        }
+    }
+
+    /// `MenuBarLabel`'s four `@Query`s and `MenuBarWindowSource.load`'s two
+    /// fetches, on the main context.
+    private func read() {
+        let began = Date()
+        let ctx = container.mainContext
+        let today = TokenSample.formatDate(Date())
+        let acct = account
+        _ = try? ctx.fetch(FetchDescriptor<DailyAggregate>(predicate: #Predicate { $0.date == today }))
+        _ = try? ctx.fetch(FetchDescriptor<AccountDailyAggregate>(
+            predicate: #Predicate { $0.date == today && $0.accountId == acct }))
+        var newest = FetchDescriptor<TokenSample>(sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
+        newest.fetchLimit = 1
+        _ = try? ctx.fetch(newest)
+        var scopedNewest = FetchDescriptor<TokenSample>(
+            predicate: #Predicate { $0.accountId == acct },
+            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
+        scopedNewest.fetchLimit = 1
+        _ = try? ctx.fetch(scopedNewest)
+        _ = try? ctx.fetch(LimitScope.rateLimits(account: acct, limit: 8))
+        _ = try? ctx.fetch(LimitScope.modelScopedLimits(account: acct, limit: 64))
+        let ms = Date().timeIntervalSince(began) * 1000
+        readerPasses += 1
+        readerTotalMs += ms
+        if ms > readerLongest.ms { readerLongest = (now() - ms / 1000, ms) }
+    }
+
+    func stop() -> Report {
+        task?.cancel()
+        if let observer { NotificationCenter.default.removeObserver(observer) }
+        var r = Report()
+        r.longestGapMs = gaps.map(\.ms).max() ?? 0
+        let held = gaps.reduce(0) { $0 + $1.ms }
+        r.lines.append(String(
+            format: "%@ · %d beats · longest gap %.0f ms · %d gap(s) ≥ 100 ms, %d ≥ 250 ms, %d ≥ 1 s · %.1f s held in all",
+            mode.rawValue, beats, r.longestGapMs, gaps.count, gaps.filter { $0.ms >= 250 }.count,
+            gaps.filter { $0.ms >= 1000 }.count, held / 1000))
+        if mode == .reader {
+            r.lines.append(String(
+                format: "reader: %d pass(es) after %d save(s), longest %.0f ms at +%.1f s, %.1f s in all",
+                readerPasses, saves, readerLongest.ms, readerLongest.at, readerTotalMs / 1000))
+        }
+        for g in gaps.sorted(by: { $0.ms > $1.ms }).prefix(12) {
+            r.lines.append(String(format: "  gap %6.0f ms at +%6.1f s during %@", g.ms, g.at, g.step))
+        }
+        return r
     }
 }
 

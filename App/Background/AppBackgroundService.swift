@@ -417,27 +417,26 @@ final class AppBackgroundService {
     /// of headroom, and idle enough to read as housekeeping.
     private static let historyPruneInterval: TimeInterval = 7 * 24 * 3600
 
-    /// Prune unused persistent history at launch, then weekly. Runs on
-    /// the main actor (`StoreMaintenance.pruneHistory` is `@MainActor`);
-    /// `deleteHistory` is a cheap metadata operation, so doing it inline
-    /// on the first tick during launch is fine.
+    /// Prune unused persistent history at launch, then weekly, off the main
+    /// thread. `deleteHistory` is not a metadata operation: it deletes every
+    /// change row past the horizon in one statement, and a launch finds a
+    /// day or more of them. On a copy of a real store it held the main actor
+    /// 1.2 s for the ~200k rows a next-day launch prunes and 5.0 s for 2.1M
+    /// (its busiest days wrote ~500k each), at every launch, beside the menu
+    /// bar's first reads.
     private func startHistoryPruneTask() {
         guard historyPruneTask == nil else { return }
         let container = self.container
-        // Off the main actor and before the prune: building an index takes the
+        let interval = Self.historyPruneInterval
+        // Before the prune, in the same task: building an index takes the
         // store's write lock for as long as it takes, and it only ever has
         // work to do on the first launch after a schema change.
-        Task.detached(priority: .utility) {
-            guard let url = try? PacerStore.storeURL() else { return }
-            StoreIndexRepair.run(storeURL: url)
-        }
-        historyPruneTask = Task { @MainActor in
+        historyPruneTask = Task.detached(priority: .utility) {
+            if let url = try? PacerStore.storeURL() { StoreIndexRepair.run(storeURL: url) }
             while !Task.isCancelled {
                 StoreMaintenance.pruneHistory(container: container)
                 do {
-                    try await Task.sleep(
-                        nanoseconds: UInt64(Self.historyPruneInterval * 1_000_000_000)
-                    )
+                    try await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
                 } catch {
                     return
                 }
@@ -968,15 +967,27 @@ final class AppBackgroundService {
         // Which account's window slot the warning lands in, and which mute it
         // honours: the active login's, the one the engine fits.
         let account = Account.activeId(in: context)
-        for window in RateLimitWindowKind.allCases {
-            // The engine's claim: the latest-plausible crossing, at or above
-            // the level floor, confirmed across two consecutive refits (#304),
-            // the same claim the chip and the menu bar make. The two-refit
-            // debounce used to live here alone, so the chip went red on a
-            // single refit's point crossing. The per-cycle dedup stays in the
-            // coordinator.
-            guard let outlook = await engine.burnOutlook(window: window),
-                  outlook.willHitLimitBeforeReset else { continue }
+        // The engine's claim: the latest-plausible crossing, at or above the
+        // level floor, confirmed across two consecutive refits (#304), the
+        // same claim the chip and the menu bar make. The two-refit debounce
+        // used to live here alone, so the chip went red on a single refit's
+        // point crossing. The per-cycle dedup stays in the coordinator.
+        //
+        // Asked off the main actor (`askEngine`). An engine is a `@ModelActor`,
+        // and awaiting a busy one from here holds the main thread for as long
+        // as it stays busy — the whole wait, measured
+        // (`ModelActorCallerBlockProbe`) — which after a poll is another
+        // refit, the record backfill or an arena batch: a minute on a loaded
+        // Mac. An idle one runs `DiurnalBurnModel.fit` inline on it instead.
+        let outlooks = await askEngine {
+            var out: [(window: RateLimitWindowKind, outlook: UsageIntelligenceEngine.BurnOutlook)] = []
+            for window in RateLimitWindowKind.allCases {
+                if let outlook = await engine.burnOutlook(window: window) { out.append((window, outlook)) }
+            }
+            return out
+        }
+        for (window, outlook) in outlooks {
+            guard outlook.willHitLimitBeforeReset else { continue }
             let projection = BurnRate.Projection(
                 slopePercentPerHour: outlook.slopePercentPerHour,
                 projectedFullAt: outlook.projectedFullAt,
@@ -1020,15 +1031,21 @@ final class AppBackgroundService {
     /// alert rules are kept, untouched) and resumes when it reappears.
     private func checkScopedBurnRateWarnings(context: ModelContext, account: String?) async {
         let engine = engines.rateLimitEngine   // see checkBurnRateWarning
-        let scopedSpecs = await engine.scopedWindows()
-        guard !scopedSpecs.isEmpty else { return }
+        // Off the main actor, as in `checkBurnRateWarning`.
+        let scoped = await askEngine {
+            var out: [(spec: WindowSpec, outlook: UsageIntelligenceEngine.BurnOutlook)] = []
+            for spec in await engine.scopedWindows() {
+                if let outlook = await engine.burnOutlook(windowKey: spec.key) { out.append((spec, outlook)) }
+            }
+            return out
+        }
+        guard !scoped.isEmpty else { return }
         let rules = (try? context.fetch(FetchDescriptor<AlertRule>())) ?? []
 
-        for spec in scopedSpecs {
+        for (spec, outlook) in scoped {
             let identity = spec.key
             // The engine's confirmed claim, as on the fixed path (#304).
-            guard let outlook = await engine.burnOutlook(windowKey: identity),
-                  outlook.willHitLimitBeforeReset else { continue }
+            guard outlook.willHitLimitBeforeReset else { continue }
             // Opt-in + cold-start + used-floor gate (pure, unit-tested). A window
             // with no configured scoped alert, too few completed cycles, or below
             // the floor is not warned.
