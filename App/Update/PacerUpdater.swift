@@ -20,9 +20,10 @@ final class PacerUpdater: ObservableObject {
     // it controls the version text in Sparkle's standard update dialogs.
     private let uiDelegate = PacerUserDriverDelegate()
 
-    // Observing-only delegate for the telemetry check-in (every build). Held
+    // The updater delegate in Release: telemetry outcomes plus the
+    // install-at-a-quiet-moment hand-off (`UpdateInstallScheduler`). Held
     // strongly for the same reason as the Debug delegate below.
-    private let outcomeObserver: UpdateOutcomeObserver
+    private let outcomeObserver: PacerUpdaterDelegate
 
     #if DEBUG
     // Retained for the updater's lifetime — `SPUUpdater` holds its
@@ -42,8 +43,11 @@ final class PacerUpdater: ObservableObject {
         // `self.uiDelegate` until every stored property (incl. `controller`)
         // is assigned. Capture it in a local to pass into the controller.
         let userDriverDelegate = uiDelegate
-        let outcomes = UpdateOutcomeObserver()
+        let outcomes = PacerUpdaterDelegate()
         self.outcomeObserver = outcomes
+        // Now, not when an update first arrives: the policy needs to know when
+        // Pacer was last in use, which it only learns by watching from launch.
+        _ = UpdateInstallScheduler.shared
         #if DEBUG
         // Local Debug builds: install a delegate that vetoes automatic
         // (launch + scheduled) update checks. See DevBuildUpdaterDelegate.
@@ -69,15 +73,23 @@ final class PacerUpdater: ObservableObject {
     var updater: SPUUpdater { controller.updater }
 }
 
-/// Writes what Sparkle did to `UpdateOutcomeLog`, for the daily check-in. It
-/// only observes: none of these callbacks can change what Sparkle does (the
-/// only veto in this file is the Debug-only `mayPerform`, below). Every build
-/// uses it; the Debug delegate subclasses it so both keep reporting.
+/// Writes what Sparkle did to `UpdateOutcomeLog`, for the daily check-in, and
+/// takes over installing a downloaded update (`willInstallUpdateOnQuit`), which
+/// Sparkle would otherwise leave until a quit that a menu-bar agent never does:
+/// see `UpdateInstallScheduler`. That hand-off is the one callback here that
+/// changes what Sparkle does, besides the Debug-only `mayPerform` veto below.
+/// Every build uses it; the Debug delegate subclasses it so both keep
+/// reporting. In Debug the hand-off never fires: it comes only from the
+/// automatic (background) driver, and the veto stops every background check
+/// before it downloads anything.
 ///
 /// Sparkle delivers "you're up to date" through the error channel
 /// (`SUNoUpdateError`), so that code is mapped to its own outcome rather than
 /// recorded as a failure.
-private class UpdateOutcomeObserver: NSObject, SPUUpdaterDelegate {
+///
+/// Sparkle calls every method here on the main thread (`SPUUpdater` is
+/// main-thread only), which is what the `assumeIsolated` calls rely on.
+private class PacerUpdaterDelegate: NSObject, SPUUpdaterDelegate {
     func updater(_ updater: SPUUpdater, didFindValidUpdate item: SUAppcastItem) {
         UpdateOutcomeLog.record(.found, version: item.displayVersionString)
     }
@@ -91,10 +103,36 @@ private class UpdateOutcomeObserver: NSObject, SPUUpdaterDelegate {
     }
 
     func updater(_ updater: SPUUpdater, willInstallUpdate item: SUAppcastItem) {
-        UpdateOutcomeLog.record(.willInstall, version: item.displayVersionString)
+        let byPolicy = MainActor.assumeIsolated { UpdateInstallScheduler.shared.installingByPolicy }
+        UpdateOutcomeLog.record(byPolicy ? .idleInstall : .willInstall, version: item.displayVersionString)
+    }
+
+    // Returning true keeps the automatic driver, and so Sparkle's session,
+    // alive until the block runs: no check can resume this update or find
+    // another behind it meanwhile (`UpdateInstallScheduler` has the source
+    // walk-through). Sparkle still installs on quit if Pacer quits first.
+    func updater(_ updater: SPUUpdater, willInstallUpdateOnQuit item: SUAppcastItem,
+                 immediateInstallationBlock immediateInstallHandler: @escaping () -> Void) -> Bool {
+        let version = item.displayVersionString
+        let held = MainActor.assumeIsolated {
+            UpdateInstallScheduler.shared.hold(version: version, updater: updater, install: immediateInstallHandler)
+        }
+        if held { UpdateOutcomeLog.record(.readyToInstall, version: version) }
+        return held
+    }
+
+    func updaterWillRelaunchApplication(_ updater: SPUUpdater) {
+        MainActor.assumeIsolated { UpdateInstallScheduler.shared.noteRelaunching() }
+    }
+
+    func updater(_ updater: SPUUpdater, didAbortWithError error: any Error) {
+        MainActor.assumeIsolated { UpdateInstallScheduler.shared.release() }
     }
 
     func updater(_ updater: SPUUpdater, didFinishUpdateCycleFor updateCheck: SPUUpdateCheck, error: (any Error)?) {
+        // A held update's cycle only ends when its driver is gone, and the
+        // block with it.
+        MainActor.assumeIsolated { UpdateInstallScheduler.shared.release() }
         guard let error else { return }
         let ns = error as NSError
         if ns.domain == UpdateOutcomeLog.sparkleErrorDomain, ns.code == UpdateOutcomeLog.sparkleNoUpdateCode {
@@ -169,7 +207,7 @@ private final class PacerUserDriverDelegate: NSObject, SPUStandardUserDriverDele
 /// leak into a release build sharing the same bundle identifier.
 ///
 /// Compiled out of Release builds entirely.
-private final class DevBuildUpdaterDelegate: UpdateOutcomeObserver {
+private final class DevBuildUpdaterDelegate: PacerUpdaterDelegate {
     func updater(_ updater: SPUUpdater, mayPerform updateCheck: SPUUpdateCheck) throws {
         // `.updatesInBackground` is the launch/scheduled check;
         // `.updates` is the user clicking "Check for Updates…".
@@ -188,6 +226,10 @@ private final class DevBuildUpdaterDelegate: UpdateOutcomeObserver {
 /// updater's `canCheckForUpdates` (true except during an active check)
 /// and disables the menu item accordingly. Sparkle's recommended
 /// SwiftUI integration shape.
+///
+/// While a downloaded update waits for a quiet moment (`UpdateInstallScheduler`)
+/// Sparkle's session stays open and no check can run, so the item installs
+/// that update instead, as "Relaunch to Update".
 struct CheckForUpdatesView: View {
     @ObservedObject private var checker: UpdaterChecker
 
@@ -196,10 +238,18 @@ struct CheckForUpdatesView: View {
     }
 
     var body: some View {
-        Button("Check for Updates…") {
-            checker.updater.checkForUpdates()
+        // Read here, in this body, so the title follows the hold.
+        let waiting = UpdateInstallScheduler.shared.readyVersion != nil
+        Button(waiting ? "Relaunch to Update" : "Check for Updates…") {
+            // Decided at the click, not from the render: the hold can end
+            // between the two.
+            if UpdateInstallScheduler.shared.readyVersion != nil {
+                UpdateInstallScheduler.shared.installNow()
+            } else {
+                checker.updater.checkForUpdates()
+            }
         }
-        .disabled(!checker.canCheckForUpdates)
+        .disabled(!waiting && !checker.canCheckForUpdates)
     }
 }
 
