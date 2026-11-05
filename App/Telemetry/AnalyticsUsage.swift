@@ -49,9 +49,17 @@ final class AnalyticsUsage {
         Analytics.capture(.appQuit(uptimeSeconds: Date().timeIntervalSince(launchedAt)))
     }
 
-    /// Person properties that are cheap to read at any time (`$set`). The
-    /// daily check-in adds accounts, install age and widgets.
-    static func personProperties() -> Analytics.Properties {
+    /// The Mac model, read once: `hw.model` never changes while running.
+    nonisolated private static let macModel: (id: String, name: String) = {
+        let id = DailyCheckIn.sysctlString("hw.model")
+        return (id, MacModelName.name(for: id))
+    }()
+
+    /// Person properties that are cheap to read at any time (`$set`): a few
+    /// defaults reads and constants, so the sink recomputes them for every
+    /// event (`AnalyticsProfile.stamped`). The daily check-in adds accounts,
+    /// install age and widgets, saved through `AnalyticsProfile`.
+    nonisolated static func personProperties() -> Analytics.Properties {
         let store = PacerPreferences.store
         let os = ProcessInfo.processInfo.operatingSystemVersion
         let consent = TelemetryConsent.state(store: store)
@@ -60,6 +68,8 @@ final class AnalyticsUsage {
             "version": .string(AnalyticsController.appVersion),
             "build.config": .string(TelemetryController.buildConfig),
             "macos": .string("\(os.majorVersion).\(os.minorVersion)"),
+            "env.model": .string(macModel.id),
+            "env.model_name": .string(macModel.name),
             "menu_bar.shown": .bool(!chips.split(separator: ",").isEmpty),
             "menu_bar.chips": .string(AnalyticsSettings.chipsSummary(chips)),
             "menu_bar.icon_style": .string(AnalyticsSettings.sendable(
