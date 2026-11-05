@@ -46,7 +46,20 @@ release is the version), all performance metrics and spans (stalls, click
 delay, slow scans, rebuilds, downloads, arena passes, CLI durations, widget
 timeline times, `energy.cpu_seconds`), forecast accuracy, and the health
 counters (`data.*`, `oauth.*`, `cred.*`, `telemetry.*`, `main_thread.*`,
-`api.snapshot_ms.*`, `ui.click.delay.*`).
+`api.snapshot_ms.*`, `ui.click.delay.*`, `accounts.*`).
+
+`accounts.login_change.explained` / `accounts.login_change.unexplained`: counters of default-login changes a switcher's own log does / does not account for, drained by the daily check-in. No ids. A healthy machine has near zero unexplained; several a day means the switcher-log parse broke (#382). Non-usage counters, so Sentry metrics.
+
+## Hangs (since 2026-11-05)
+`HangWatch` watches the main run loop. A stretch runs from waking to sleeping or polling. A `.strict` one-shot timer is armed only while a stretch is open, so an idle app has no wakeups. Launch counts as busy from `PacerAppDelegate.init` until the loop first sleeps.
+- Stuck 2 s and still stuck: an `App Hanging` event (mechanism AppHang, all thread stacks, tag `hang.phase` launch/running), under the `.hang` cap and the crash toggle.
+- Every 5 s while stuck: `hang-in-progress.json` is updated.
+- When it ends: `main_thread.hang_ms` with `ended=recovered`.
+- Next launch, if the file is still there: `main_thread.hang_ms` with `ended=terminated` and `version` (a lower bound).
+- Not sent while a debugger is attached.
+`beforeSend` budgets errors, hangs, crashes and MetricKit (`TelemetryBudget.kind`). Transactions also pass through it, spend nothing there, and are budgeted in `tracesSampler`.
+The check-in also runs when the Sentry release differs from `pacer.telemetry.checkin.lastRelease`, with `checkin.reason` = `day`/`version`. A `version` check-in omits `cli.*`, `widget.timeline_ms`, `widget_inventory` `refreshes.*` and `forecast.*`. Count Macs by unique users.
+`Telemetry.problem`: a fixed message, with string/bool attributes as tags and numbers as extra; crash toggle and `.error` cap. First use is "Store prepare failed": `error.domain`, `error.code`, `error.underlying_*`, `store.before`, extra `elapsed_ms`.
 
 ## PostHog
 
@@ -137,6 +150,7 @@ frame or forecast):
 | `api_request` | daily, tallied per route and client | `endpoint` (allow-listed route), `client` (family from User-Agent: `curl`, `python`, `prometheus`, …; the header is never sent), `count` |
 | `notification_shown` | after a banner is posted | `kind` (`threshold`, `reset`, `burn_rate`, `global_reset`, `daily_cost`, `project_budget`, `custom_rule`, `daily_summary`, `test`), `window` (kind) |
 | `notification_action` | notification response | `action`: `mute`, `open`, `click`, `dismiss`; `window` |
+| `arena_speed_up` | compare sheet's Speed up (`ArenaSpeedUp`), and when a speed-up ends on its own | `action`: `start`, `stop`, `caught_up`, `time_up`; `from` (start only): `in_use`, `battery`, `low_power`, `thermal`, `full`, `unknown`; `minutes` (every end, coarse) |
 | `daily_checkin` | daily check-in | every field the Sentry `checkin.snapshot` carried until 2026-11 (settings, clients, accounts and plans, usage bands, lifecycle, environment, install, widgets, models present, `counter.*`) |
 
 **Doors.** PacerCore code calls `Analytics.capture` (no-op until the app
@@ -266,10 +280,7 @@ Debug is `#if DEBUG` (`build.config` debug).
 - `cacheDirectoryPath` = a `Sentry/` folder in the App Group container, so the install ID survives
   cache cleaners and the CLI can read it.
 - Crash handler on; `enableUncaughtNSExceptionReporting = true`.
-- App hangs: `enableAppHangTracking = true`, 2 s threshold (captures the main-thread stack during
-  the hang, which our run-loop watchdog cannot). `enableMetricKit = true`. Both capped per Mac per
-  day in `beforeSend` (see "Send caps"). Idle-CPU cost of Sentry's watchdog thread measured before
-  shipping (perf invariant).
+- App hangs: `enableAppHangTracking = false` since 2026-11-05; Pacer's own `HangWatch` + `HangReporter` send the same event (see "Hangs"). `enableMetricKit = true`, capped in `beforeSend`.
 - Off: `enableSwizzling` (kills network/file auto-instrumentation in one go),
   `enableNetworkTracking`, `enableNetworkBreadcrumbs`, `enableCaptureFailedRequests`,
   `tracePropagationTargets = []`, `enableFileIOTracing`, `enableCoreDataTracing`,
@@ -523,7 +534,7 @@ if they rarely do, download them only when cheaper models leave room to improve.
     counts, archive size, transcript file count, both config dirs present, `CLAUDE_CONFIG_DIR`
     set, time-zone offset (day-boundary bugs).
 14. **Lifecycle**: launched at login or by hand, uptime, restarts per day, unclean exits, Sparkle
-    check/install failures, time from a release to each Mac running it.
+    check/install failures, time from a release to each Mac running it. `lifecycle.update_result` is one of `no_update`, `found`, `download_failed`, `will_install`, `ready_to_install` (downloaded, waiting for a quiet moment), `idle_install` (relaunched to install at one), `error_<domain>_<code>`.
 15. **Energy**: process CPU seconds per hour and while idle (the 0 % idle invariant, fleet-wide).
 16. **Feature errors**: notification permission state, API server port in use, skill install
     failures, widget timeline failures.
