@@ -157,7 +157,8 @@ final class TelemetryController {
 
         o.beforeSend = { event in
             guard TelemetryController.crashAllowed else { return nil }
-            // User feedback is budgeted where it is sent (ReportProblemView).
+            // Transactions arrive here too and are budgeted in `tracesSampler`;
+            // feedback is budgeted where it is sent (ReportProblemView).
             if let kind = TelemetryController.budgetKind(event), !TelemetryBudget.shared.take(kind) {
                 return nil
             }
@@ -181,15 +182,13 @@ final class TelemetryController {
         }
     }
 
-    /// Which daily budget an event spends; nil for feedback, which the
-    /// Report a Problem sheet budgets itself.
+    /// Which daily budget an event spends (`TelemetryBudget.kind`); nil for
+    /// transactions and feedback, which are budgeted elsewhere.
     nonisolated static func budgetKind(_ event: Event) -> TelemetryBudget.Kind? {
-        if event.type == "feedback" { return nil }
         let mechanism = event.exceptions?.first?.mechanism
-        if mechanism?.type == "AppHang" { return .hang }
-        if mechanism?.type.hasPrefix("mx_") == true { return .diagnostic }
-        if event.level == .fatal || mechanism?.handled == false { return .crash }
-        return .error
+        return TelemetryBudget.kind(eventType: event.type, mechanism: mechanism?.type,
+                                    fatal: event.level == .fatal,
+                                    handled: mechanism?.handled?.boolValue)
     }
 
     nonisolated private static func scrub(_ event: Event) {
