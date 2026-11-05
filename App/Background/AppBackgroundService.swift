@@ -91,9 +91,13 @@ final class AppBackgroundService {
     /// The ported arena forecasters (`ArenaRuntime`): scored over every
     /// account's history in the background and competing for each window's
     /// forecast through the engine's own record. Made on the first refit,
-    /// scoring from two minutes after it, stopped at quit. See `startArena`.
+    /// scoring once launch's own work has ended (`arenaGate`), stopped at
+    /// quit. See `startArena`.
     private var arena: ArenaRuntime?
     private var arenaStarted = false
+    /// What the grader waits for on a launch. Made in `start`, which runs once
+    /// the store is ready (`StoreLoader`).
+    private var arenaGate: ArenaStartGate?
     /// Bridges `pacerScanCycleDidComplete` notifications to per-kind
     /// `WidgetCenter.reloadTimelines` calls so the WidgetKit extension
     /// — which can't observe SwiftData — refreshes when new data
@@ -137,6 +141,12 @@ final class AppBackgroundService {
 
     func start() {
         guard coordinator == nil else { return }
+        let gate = ArenaStartGate(start: { [weak self] in
+            Task { @MainActor [weak self] in self?.startArena() }
+        })
+        arenaGate = gate
+        gate.armSafetyNet()
+        gate.mark(.store)
         RateLimitWriteSignal.shared.seed(from: container.mainContext)
         // The live meter every surface reads (#318), rebuilt on each reading
         // and each scan cycle that wrote turns.
@@ -171,7 +181,8 @@ final class AppBackgroundService {
                 // Injected rather than imported by PacerCore so the widget
                 // extension never links the engine. Incremental cycles are
                 // untouched. See `BulkTranscriptImporter`.
-                bulkImporter: ArchiveImporter()),
+                bulkImporter: ArchiveImporter(),
+                onFirstCycleEnded: { gate.mark(.firstScan) }),
             oauthClient: oauthClient,
             oauthPoolStore: KeychainTokenPoolStore()
         )
@@ -188,6 +199,7 @@ final class AppBackgroundService {
                 Log.write("AppBackground", "scan loop exited")
             } catch {
                 Log.write("AppBackground", "scan loop failed: \(error)")
+                gate.mark(.firstScan)
                 await MainActor.run { self?.coordinator = nil }
                 throw error
             }
@@ -211,7 +223,8 @@ final class AppBackgroundService {
     func stop() async {
         guard coordinator != nil else { return }
         Log.write("AppBackground", "stopping")
-        // The arena scorer stops at its next model boundary; its outcomes so
+        arenaGate?.cancel()
+        // The arena scorer's workers stop at their next check; the outcomes so
         // far are saved, and the next launch resumes after them.
         await arena?.stop()
         if let coord = coordinator {
@@ -705,9 +718,11 @@ final class AppBackgroundService {
     private func startRecordBackfill(_ engines: [UsageIntelligenceEngine]) {
         guard recordBackfillTask == nil,
               EngineRefitPolicy.recordBackfillAllowed(pressure: MemoryPressure.shared.level) else { return }
+        let gate = arenaGate
         recordBackfillTask = Task.detached(priority: .background) { [weak self] in
             var added = 0
             for engine in engines { added += await engine.backfillRateLimitRecordIfNeeded() }
+            gate?.mark(.recordBackfill)
             if added > 0 { _ = await self?.recomputeEngineIfDue(force: true) }
         }
     }
@@ -748,26 +763,24 @@ final class AppBackgroundService {
     }
 
     /// Start back-computing the arena models over every account's history,
-    /// once per launch, two minutes after the first refit: the first pass
-    /// reads months of limits and turns, and launch has enough to do. At
+    /// once per launch, when `arenaGate` opens: the first pass reads months of
+    /// limits and turns, and launch has its own work to finish first. At
     /// background priority and a fifth of one core in CPU time, live
     /// projections included (`ArenaCPUBudget`), one full core while the Mac
-    /// is plugged in and idle (`ArenaBudgetGovernor`); the cheap models first
-    /// over the whole history, newest cycles first, resuming after whatever
-    /// an earlier launch saved.
+    /// is plugged in and idle, more if the user speeds it up
+    /// (`ArenaBudgetGovernor`); the cheap models first over the whole history,
+    /// newest cycles first, resuming after whatever an earlier launch saved.
+    /// A Mac with nothing to catch up pays for that first reading and nothing
+    /// else, a few CPU-seconds an account.
     private func startArena() {
         guard !arenaStarted else { return }
         arenaStarted = true
-        let runtime = arenaRuntime()
         let container = self.container
-        Task.detached(priority: .background) {
-            try? await Task.sleep(for: .seconds(120))
-            // The active login first: its windows are the ones on screen.
-            runtime.start(accounts: {
-                ((try? ModelContext(container).fetch(FetchDescriptor<Account>())) ?? [])
-                    .sorted { $0.isActive && !$1.isActive }.map(\.id)
-            })
-        }
+        // The active login first: its windows are the ones on screen.
+        arenaRuntime().start(accounts: {
+            ((try? ModelContext(container).fetch(FetchDescriptor<Account>())) ?? [])
+                .sorted { $0.isActive && !$1.isActive }.map(\.id)
+        })
     }
 
     private func recomputeEngineIfDue(force: Bool = false,
@@ -850,8 +863,8 @@ final class AppBackgroundService {
         let refitMs = reading.awakeMilliseconds
         await exportEngineSnapshots(live)
         NotificationCenter.default.post(name: .pacerEngineDidRecompute, object: nil)
+        arenaGate?.mark(.firstRefit)
         startRecordBackfill(live.map { $0.engine })
-        startArena()
 
         // The refit is the most expensive recurring thing Pacer does and it
         // had never been timed — which is how it went unnoticed that it runs

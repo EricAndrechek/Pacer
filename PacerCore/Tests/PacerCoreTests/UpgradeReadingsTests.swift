@@ -93,6 +93,37 @@ import Testing
         #expect(readings.value > 0, "no rate-limit reading landed while the first cycle ran")
     }
 
+    /// What the grader waits for (`ArenaStartGate`): told once, after the first
+    /// cycle's rollups, whatever else the loop does.
+    @ScanActor
+    @Test func theFirstCycleEndingIsAnnouncedOnce() async throws {
+        let r = try root(files: ["a.jsonl": [line("1", at: "2026-04-30T12:00:00.000Z")]])
+        defer { try? FileManager.default.removeItem(at: r) }
+        final class Counts: @unchecked Sendable {
+            let lock = NSLock()
+            var ended = 0, rollups = 0, rollupsAtEnd = -1
+        }
+        let counts = Counts()
+        let coordinator = ScanCoordinator(
+            container: try PacerStore.makeInMemoryContainer(),
+            configuration: .init(costMode: .display, watcherMode: .manual, probeStatsCache: false,
+                                 onFirstCycleEnded: {
+                                     counts.lock.withLock {
+                                         counts.ended += 1
+                                         counts.rollupsAtEnd = counts.rollups
+                                     }
+                                 }),
+            resolver: ClaudePathResolver(environment: ["CLAUDE_CONFIG_DIR": r.path]))
+        coordinator.beforeRecomputeHook = { counts.lock.withLock { counts.rollups += 1 } }
+        let run = Task { try await coordinator.runForever() }
+        let announced = await eventually { counts.lock.withLock { counts.ended > 0 } }
+        let stopped = try await stopAndAwait(coordinator, running: run)
+        #expect(stopped, "stop() or runForever didn't return")
+        #expect(announced)
+        #expect(counts.lock.withLock { counts.ended } == 1)
+        #expect(counts.lock.withLock { counts.rollupsAtEnd } == 1)
+    }
+
     /// `stop()` can land anywhere in `runForever`'s startup — the app's quit
     /// can come that early, and with the poller, the watcher and a main-actor
     /// hop now ahead of the first cycle there are more places for it to land.
