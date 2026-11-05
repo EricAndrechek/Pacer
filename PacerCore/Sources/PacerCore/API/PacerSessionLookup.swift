@@ -138,9 +138,16 @@ struct PacerSessionBinding {
     static func load(context: ModelContext,
                      desktop: DesktopSessionDirectory? = .shared,
                      switches: LoginSwitchEvidenceReader = .shared) -> PacerSessionBinding {
-        PacerSessionBinding(trail: AccountParallelism.trail(context: context),
-                            desktopAccounts: desktop?.accounts ?? [:],
-                            switches: switches.current())
+        let binding = PacerSessionBinding(trail: AccountParallelism.trail(context: context),
+                                          desktopAccounts: desktop?.accounts ?? [:],
+                                          switches: switches.current())
+        // The one place the real switcher's evidence meets the real trail
+        // (#382); a test that injects its own reader never reaches the shared audit.
+        if switches === LoginSwitchEvidenceReader.shared {
+            LoginChangeAudit.shared.observe(binding.changes, switcherPresent: binding.switches.switcherPresent,
+                                            now: Date())
+        }
+        return binding
     }
 
     /// How far back a login change can leave a session in doubt (#357): the
