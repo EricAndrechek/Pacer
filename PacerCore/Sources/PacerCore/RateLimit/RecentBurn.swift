@@ -33,14 +33,22 @@ public enum RecentBurn {
     /// cadence, short enough that a burst still dominates it.
     public static let defaultLookback: TimeInterval = 1800
 
+    /// Two readings closer than this are one reading: two poller lanes landing
+    /// together.
+    static let minSpan: TimeInterval = 1
+
     /// Percentage points per hour across `lookback`, or nil when the readings
     /// cannot support one.
     ///
     /// **Same cycle only.** A window that reset inside the lookback went from
     /// 90% to 0%, and a slope fitted across that is a large negative number
-    /// describing nothing. Membership uses `RateLimitCycle`, so the
-    /// sub-second drift in the server's reset time is absorbed rather than
-    /// read as a rollover.
+    /// describing nothing. `currentCycle` keeps the newest reading's cycle,
+    /// which also holds when that reading carries no reset (#339). Never
+    /// negative, then: inside one cycle usage does not fall.
+    ///
+    /// Nil when the newest reading's own window had closed by `now`: what it
+    /// measured was the last cycle's burn, and the next reading starts a new
+    /// one.
     public static func percentPerHour(
         readings: [Reading],
         now: Date = Date(),
@@ -48,22 +56,59 @@ public enum RecentBurn {
         lookback: TimeInterval = defaultLookback
     ) -> Double? {
         let cutoff = now.addingTimeInterval(-lookback)
-        let sorted = readings.filter { $0.at >= cutoff }.sorted { $0.at < $1.at }
-        guard let newest = sorted.last else { return nil }
-        // Anchor on the newest reading's cycle: anything older that belongs to
-        // a previous one is a different window's worth of usage.
-        let anchor = newest.resetsAt
-        let inCycle = sorted.filter { reading in
-            guard let anchor else { return true }
-            return RateLimitCycle.contains(sampleReset: reading.resetsAt,
-                                           resets: anchor, duration: duration)
+        // Ties by percent: two lanes landing in the same instant are not a
+        // drop, and within a cycle the higher of them is the later state.
+        let sorted = readings.filter { $0.at >= cutoff }
+            .sorted { ($0.at, $0.percent) < ($1.at, $1.percent) }
+        let cycle = currentCycle(sorted, duration: duration)
+        guard let first = cycle.first, let newest = cycle.last, cycle.count >= 2 else { return nil }
+        if let reset = newest.resetsAt, reset <= now { return nil }
+        let seconds = newest.at.timeIntervalSince(first.at)
+        guard seconds >= minSpan else { return nil }
+        return (newest.percent - first.percent) / (seconds / 3600)
+    }
+
+    /// The newest reading's cycle: the run of readings back from it that
+    /// stays in one window. The run stops at the first reading that
+    ///
+    /// - is higher than the one after it. Usage never falls inside a window,
+    ///   so a fall is a reset wherever the anchors say; that includes an
+    ///   off-schedule reset that kept the old anchor, and a reading at 0%
+    ///   whose `resets_at` is null because the new window has not opened yet;
+    /// - carries a reset at or before the newest reading: its window had
+    ///   already closed;
+    /// - carries a reset outside the run's anchor (`RateLimitCycle.contains`,
+    ///   never `==`: the server's reset jitters in the milliseconds). The
+    ///   anchor is the newest reset in the run, so a newest reading with
+    ///   null `resets_at` takes the one before it.
+    ///
+    /// A null reset, on its own, stops nothing: it is the server's 0% at the
+    /// start of a window and says nothing about which one.
+    ///
+    /// Anchoring on the newest reading's reset alone (#339) let every older
+    /// reading in whenever that reset was null, which the server sends at 0%
+    /// on about a quarter of 5-hour readings: right after a reset, 9% → 0%
+    /// read −19%/h and held there for the half hour. Replayed on the owner's
+    /// store (a moment every 10 minutes over every reading of four
+    /// accounts), 142 of 15,396 five-hour moments and 6 of 18,521 weekly ones
+    /// read negative; none do now.
+    static func currentCycle(_ sorted: [Reading], duration: TimeInterval) -> ArraySlice<Reading> {
+        guard let newest = sorted.last else { return [] }
+        var anchor = newest.resetsAt
+        var start = sorted.endIndex - 1
+        while start > sorted.startIndex {
+            let earlier = sorted[start - 1]
+            if earlier.percent > sorted[start].percent { break }
+            if let reset = earlier.resetsAt {
+                if reset <= newest.at { break }
+                if let anchor, !RateLimitCycle.contains(sampleReset: reset, resets: anchor, duration: duration) {
+                    break
+                }
+                anchor = anchor ?? reset
+            }
+            start -= 1
         }
-        guard let first = inCycle.first, inCycle.count >= 2 else { return nil }
-        let hours = newest.at.timeIntervalSince(first.at) / 3600
-        // Two readings from the same instant (two poller lanes landing
-        // together) are one reading for this purpose.
-        guard hours > 1.0 / 3600 else { return nil }
-        return (newest.percent - first.percent) / hours
+        return sorted[start...]
     }
 
     /// Under this a window counts as not moving: it would print "+0.0".

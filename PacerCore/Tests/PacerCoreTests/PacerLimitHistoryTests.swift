@@ -256,6 +256,112 @@ struct RecentBurnTests {
         #expect(RecentBurn.percentPerHour(readings: readings, now: now, duration: 5 * 3600) == nil)
     }
 
+    // MARK: - Cycles (#339)
+
+    /// The live case: a 5-hour window reset at 9% and the server's next
+    /// reading said 0% with `resets_at: null`. With nothing to anchor on,
+    /// every older reading counted and the rate read −19%/h for the half hour.
+    @Test func aNullAnchoredReadingAfterAResetIsNotANegativeSlope() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let ended = now.addingTimeInterval(-5 * 60)
+        let readings = [reading(26, 9, reset: ended, now: now),
+                        reading(16, 9, reset: ended, now: now),
+                        reading(7, 9, reset: ended, now: now),
+                        reading(3, 0, now: now)]
+        // One reading of the new cycle: no rate, and above all not −19.
+        #expect(RecentBurn.percentPerHour(readings: readings, now: now, duration: 5 * 3600) == nil)
+        // Polled again at 0%, still null: idle, which is 0.
+        let later = now.addingTimeInterval(10 * 60)
+        let held = readings + [reading(0, 0, now: later)]
+        #expect(RecentBurn.percentPerHour(readings: held, now: later, duration: 5 * 3600) == 0)
+    }
+
+    /// The next message opens the new window: 0% (null) → 3% with the new
+    /// reset is that window's own climb, counted from its start.
+    @Test func theNewWindowCountsFromItsFirstNullReading() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let ended = now.addingTimeInterval(-25 * 60)
+        let opened = now.addingTimeInterval(5 * 3600 - 10 * 60)
+        let readings = [reading(28, 40, reset: ended, now: now),
+                        reading(20, 0, now: now),
+                        reading(10, 0, now: now),
+                        reading(0, 3, reset: opened, now: now)]
+        let burn = RecentBurn.percentPerHour(readings: readings, now: now, duration: 5 * 3600)
+        #expect(abs((burn ?? -1) - 9) < 0.001)   // 3 points in 20 minutes
+    }
+
+    /// A null reset in the middle of a cycle (the server sends one now and
+    /// then above 0%) borrows the run's anchor instead of letting another
+    /// cycle in: here an earlier window that closed below today's level, so
+    /// no fall marks the boundary, and a reading carrying a reset a whole
+    /// window away from the run's.
+    @Test func aNullNewestReadingKeepsOtherCyclesOut() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let cycle = now.addingTimeInterval(3600)
+        let closed = now.addingTimeInterval(-4 * 3600)
+        let elsewhere = cycle.addingTimeInterval(5 * 3600)
+        for other in [closed, elsewhere] {
+            let readings = [reading(29, 30, reset: other, now: now),
+                            reading(20, 40, reset: cycle, now: now),
+                            reading(10, 44, reset: cycle, now: now),
+                            reading(0, 48, now: now)]
+            let burn = RecentBurn.percentPerHour(readings: readings, now: now, duration: 5 * 3600)
+            #expect(abs((burn ?? -1) - 24) < 0.001)  // 40% → 48% in 20 minutes
+        }
+    }
+
+    /// An off-schedule reset can zero a window and keep its anchor (seen on
+    /// 2026-06-20). Usage never falls inside a cycle, so the fall is the
+    /// boundary, whatever `resets_at` says.
+    @Test func aFallUnderTheSameAnchorIsAReset() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let reset = now.addingTimeInterval(2 * 3600)
+        let readings = [reading(25, 60, reset: reset, now: now),
+                        reading(15, 64, reset: reset, now: now),
+                        reading(10, 1, reset: reset, now: now),
+                        reading(0, 3, reset: reset, now: now)]
+        let burn = RecentBurn.percentPerHour(readings: readings, now: now, duration: 5 * 3600)
+        #expect(abs((burn ?? -1) - 12) < 0.001)  // 1% → 3% in 10 minutes
+    }
+
+    /// The newest reading's window has closed by `now`: its burn was the old
+    /// cycle's, and the next reading is a new one's.
+    @Test func aWindowThatHasClosedHasNoBurn() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let ended = now.addingTimeInterval(-60)
+        let readings = [reading(20, 80, reset: ended, now: now),
+                        reading(2, 90, reset: ended, now: now)]
+        #expect(RecentBurn.percentPerHour(readings: readings, now: now, duration: 5 * 3600) == nil)
+        #expect(RecentBurn.percentPerHour(readings: readings, now: now.addingTimeInterval(-90),
+                                          duration: 5 * 3600) != nil)
+    }
+
+    /// Walked minute by minute across two resets, with null anchors at 0%
+    /// and a stale anchor after them, no moment reads a negative burn.
+    @Test func noMomentAcrossResetsIsNegative() {
+        let t0 = Date(timeIntervalSince1970: 1_800_000_000)
+        let first = t0.addingTimeInterval(3600)
+        let second = t0.addingTimeInterval(3 * 3600)
+        var readings: [RecentBurn.Reading] = []
+        for minute in stride(from: 0, through: 240, by: 3) {
+            let at = t0.addingTimeInterval(Double(minute) * 60)
+            switch minute {
+            case ..<60: readings.append(.init(at: at, percent: 50 + Double(minute) / 2, resetsAt: first))
+            case 60..<90: readings.append(.init(at: at, percent: 0, resetsAt: nil))
+            case 90..<180: readings.append(.init(at: at, percent: Double(minute - 90) / 4,
+                                                 resetsAt: second.addingTimeInterval(Double(minute % 2) * 0.3)))
+            default: readings.append(.init(at: at, percent: minute < 200 ? 0 : 5, resetsAt: nil))
+            }
+        }
+        for minute in 0...240 {
+            let now = t0.addingTimeInterval(Double(minute) * 60 + 30)
+            let seen = readings.filter { $0.at <= now }
+            if let burn = RecentBurn.percentPerHour(readings: seen, now: now, duration: 5 * 3600) {
+                #expect(burn >= 0, "minute \(minute): \(burn)")
+            }
+        }
+    }
+
     @Test func readingsOlderThanTheLookbackAreIgnored() {
         let now = Date(timeIntervalSince1970: 1_800_000_000)
         let reset = now.addingTimeInterval(3600)
