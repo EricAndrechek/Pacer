@@ -107,7 +107,12 @@ test:  ## Run the PacerCore unit + ground-truth tests.
 	@# running app reads, and one leaked `orgA` scoped the live app (and the
 	@# screenshot renderer) to an account with no rows. PacerPreferences also
 	@# detects a test process on its own; this is the half that cannot drift.
-	@cd PacerCore && PACER_ISOLATED_DEFAULTS=1 swift test 2>&1 | tail -3
+	@# pipefail: without it the recipe exits with `tail`'s status, so a failing
+	@# run still "passed". Each test process leaves a per-process defaults
+	@# plist in ~/Library/Preferences (cfprefsd writes it back even after the
+	@# domain is removed), so they are swept here, whatever the result (#336).
+	@set -o pipefail; cd PacerCore && PACER_ISOLATED_DEFAULTS=1 swift test 2>&1 | tail -3; \
+		status=$$?; rm -f "$$HOME"/Library/Preferences/pacer.testprocess.*.plist; exit $$status
 
 test-ingest-parity: vendor  ## Both ingest paths (line parser, DuckDB importer) over one fixture tree must leave identical rows (#334). CI runs it.
 	@bin/dev-ingest-parity.sh --fixtures
