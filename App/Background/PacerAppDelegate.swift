@@ -308,6 +308,8 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard launchFinished, !storeServicesStarted,
               let store = storeLoader.ready, let backgroundService else { return }
         storeServicesStarted = true
+        // An update may relaunch Pacer from here on, not in a migration.
+        UpdateInstallScheduler.shared.noteStoreReady()
         // If the bundle was just replaced under us (Sparkle auto-update
         // or `make install`), the old widget extension is still running
         // its now-stale binary and chronod won't relaunch it on its own.
@@ -661,7 +663,12 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // whether every step of SwiftData's migration is one.
             await storeOpenTask?.value
             await backgroundService?.stop()
-            await NotificationCoordinator.shared.notifyCollectionPaused()
+            // Sparkle relaunches Pacer straight after an update, which can now
+            // happen with nobody watching (`UpdateInstallScheduler`): "Pacer
+            // paused, reopen it" would be wrong.
+            if !UpdateInstallScheduler.shared.isRelaunchingForUpdate {
+                await NotificationCoordinator.shared.notifyCollectionPaused()
+            }
             AnalyticsUsage.shared.appQuit()
             TelemetryController.shared.prepareForTermination()
             AnalyticsController.shared.prepareForTermination()

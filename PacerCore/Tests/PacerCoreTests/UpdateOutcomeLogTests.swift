@@ -47,4 +47,24 @@ struct UpdateOutcomeLogTests {
         UpdateOutcomeLog.record("error_sparkle_2001", endOfCycle: true, now: t.addingTimeInterval(600), store: s)
         #expect(UpdateOutcomeLog.last(store: s)?.result == "error_sparkle_2001")
     }
+
+    @Test("an end-of-cycle error does not replace a fresh idle install")
+    func endOfCycleKeepsIdleInstall() {
+        let s = suite()
+        let t = Date(timeIntervalSince1970: 1_800_000_000)
+        UpdateOutcomeLog.record(.idleInstall, version: "0.8.3", now: t, store: s)
+        UpdateOutcomeLog.record("error_sparkle_4005", endOfCycle: true, now: t.addingTimeInterval(5), store: s)
+        #expect(UpdateOutcomeLog.last(store: s)?.result == "idle_install")
+        #expect(UpdateOutcomeLog.last(store: s)?.version == "0.8.3")
+    }
+
+    @Test("a waiting update is not protected: the error that ends its cycle is the news")
+    func endOfCycleReplacesReady() {
+        let s = suite()
+        let t = Date(timeIntervalSince1970: 1_800_000_000)
+        UpdateOutcomeLog.record(.readyToInstall, version: "0.8.3", now: t, store: s)
+        #expect(UpdateOutcomeLog.last(store: s)?.result == "ready_to_install")
+        UpdateOutcomeLog.record("error_sparkle_4005", endOfCycle: true, now: t.addingTimeInterval(5), store: s)
+        #expect(UpdateOutcomeLog.last(store: s)?.result == "error_sparkle_4005")
+    }
 }
