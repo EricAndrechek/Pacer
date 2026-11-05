@@ -25,6 +25,14 @@
 // between two identical runs, #154), and a real change is not: a glyph's edge
 // moves by tens or hundreds of levels.
 //
+// One exception to "no count" (#291): a card's rounded edge can land a pixel
+// off between runs, which moves ~14 pixels by a lot, in a strip 3 px wide and
+// 270 long. That is told apart from a real change by SHAPE, not size: at most
+// `edgeBudget` pixels past the tolerance, whose bounding box is a thin sliver
+// (short side <= `edgeThickness`, long side >= `edgeAspect` times the short
+// one). A glyph or a label change is blob-shaped and far bigger, so it still
+// counts. The tolerated region is logged to stderr.
+//
 // Both images are drawn into the same 8-bit sRGB bitmap and the bytes are
 // compared, so two encodings of one picture (different compression, chunk
 // order, stripped metadata) compare equal.
@@ -48,26 +56,48 @@ func pixels(of path: String) -> (width: Int, height: Int, bytes: Data)? {
 }
 
 let tolerance: UInt8 = 2
+let edgeBudget = 64
+let edgeThickness = 4
+let edgeAspect = 8
 
 func samePixels(_ a: Data, _ b: Data, width: Int, height: Int, rects: [CGRect]?) -> Bool {
     guard a.count == b.count else { return false }
     let regions = rects ?? [CGRect(x: 0, y: 0, width: width, height: height)]
-    return a.withUnsafeBytes { pa in
+    var count = 0
+    var minX = Int.max, minY = Int.max, maxX = -1, maxY = -1
+    let over: Bool = a.withUnsafeBytes { pa in
         b.withUnsafeBytes { pb in
             for r in regions {
                 let x0 = max(0, Int(r.minX)), x1 = min(width, Int(r.maxX))
                 let y0 = max(0, Int(r.minY)), y1 = min(height, Int(r.maxY))
                 guard x0 < x1, y0 < y1 else { continue }
-                for y in y0..<y1 {
-                    for i in (y * width + x0) * 4..<(y * width + x1) * 4 {
-                        let x = pa[i], y = pb[i]
-                        if (x > y ? x - y : y - x) > tolerance { return false }
+                for row in y0..<y1 {
+                    for col in x0..<x1 {
+                        let i = (row * width + col) * 4
+                        var differs = false
+                        for c in 0..<4 {
+                            let p = pa[i + c], q = pb[i + c]
+                            if (p > q ? p - q : q - p) > tolerance { differs = true }
+                        }
+                        guard differs else { continue }
+                        count += 1
+                        if count > edgeBudget { return true }
+                        minX = min(minX, col); maxX = max(maxX, col)
+                        minY = min(minY, row); maxY = max(maxY, row)
                     }
                 }
             }
-            return true
+            return false
         }
     }
+    if over { return false }
+    if count == 0 { return true }
+    let w = maxX - minX + 1, h = maxY - minY + 1
+    let thin = min(w, h), long = max(w, h)
+    guard thin <= edgeThickness, long >= thin * edgeAspect else { return false }
+    FileHandle.standardError.write(Data(
+        "png-pixels-equal: ignoring \(count) edge pixels in x=\(minX) y=\(minY) \(w)x\(h)\n".utf8))
+    return true
 }
 
 func sidecarRects(_ path: String) -> [CGRect]? {
