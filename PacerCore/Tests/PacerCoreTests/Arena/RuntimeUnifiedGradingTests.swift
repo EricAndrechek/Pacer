@@ -298,14 +298,15 @@ struct RuntimeUnifiedRankingTests {
             + Self.records("a-third", 0..<17) { _, _ in 2 } + Self.records("a-new", 14..<17) { _, _ in 0.1 }
         let ranking = Self.rank(rows, at: 0.4)
         let specs = ["a-best", "a-second", "a-third", "a-new", "a-net", "a-silent", "a-broken"].map { Self.spec($0) }
+        let at = Date(timeIntervalSince1970: 1_800_000_000)
         let progress = ArenaScoringProgress(phase: .cheap, cyclesDone: 3, cyclesTotal: 17, models: ["a-new"],
-                                            updatedAt: Date(), windowDepth: ["five_hour": 17], secondsPerCycle: 2,
-                                            eta: 74)
+                                            updatedAt: at, windowDepth: ["five_hour": 17],
+                                            pace: .init(share: 10, full: 2), cyclesAhead: 37)
         let board = UsageIntelligenceEngine.board(
             windowKey: "five_hour", weekly: false, ranking: ranking, current: ranking, engineIds: engineIds,
             specs: specs, complexity: [:], selected: "a-best", shown: "a-best", cutFraction: 0.4, canRunArena: true,
             weightsPresent: { $0.name != "a-net" }, liveFailure: { $0 == "a-broken" ? "no forecast this cycle" : nil },
-            progress: progress, gradedThrough: false, drawLimit: 4)
+            progress: progress, gradedThrough: false, drawLimit: 4, fullCore: true, now: at)
         func status(_ id: String) -> MeterModelBoard.Status? { board.rows.first { $0.id == id }?.status }
 
         #expect(board.rows.count == engineIds.count + specs.count)
@@ -315,8 +316,9 @@ struct RuntimeUnifiedRankingTests {
         #expect(status("saturating") == .ranked(typicalMiss: 2.5, cycles: 17))
         #expect(status("linear-recent") == .wellBehind(typicalMiss: 3, cycles: 17))
         #expect(status("recent-rate") == .wellBehind(typicalMiss: 9, cycles: 17))
-        #expect(status("a-new") == .scoring(done: 3, total: 17, eta: 74))
-        #expect(status("a-silent") == .scoring(done: 0, total: 17, eta: nil))
+        #expect(status("a-new") == .scoring(done: 3, total: 17))
+        // Not among the models the grader is on: waiting its turn.
+        #expect(status("a-silent") == .queued(done: 0, total: 17))
         #expect(status("a-net") == .downloading(fraction: nil))
         #expect(status("a-broken") == .unavailable("no forecast this cycle"))
         #expect(board.rows.filter(\.isPick).map(\.id) == ["a-best"])
@@ -325,7 +327,8 @@ struct RuntimeUnifiedRankingTests {
         #expect(board.rows.filter(\.drawnByDefault).map(\.id) == ["a-best", "a-second", "a-third", "saturating",
                                                                    "linear-recent"])
         #expect(board.spanCycles == 17 && board.cutFraction == 0.4)
-        #expect(board.progress == .init(done: 3, total: 17, eta: 74))
+        // The time left at the full core's measured pace: 37 cycles at 2 s.
+        #expect(board.progress == .init(done: 3, total: 17, eta: 74, stage: .scoring))
         #expect(board.rows.first { $0.id == "linear-recent" }?.name == BurnTrajectory.displayName("linear-recent"))
 
         // The grader is through: a model with nothing graded declined every cycle.
@@ -348,6 +351,83 @@ struct RuntimeUnifiedRankingTests {
         #expect(none.rows.first { $0.id == "linear-recent" }?.status
                 == .unavailable(UsageIntelligenceEngine.boardThinHistoryReason))
         #expect(none.rows.filter(\.isPick).map(\.id) == ["linear-recent"])
+    }
+
+    /// What a fresh install shows, stage by stage. Before the grader reaches
+    /// the account every arena model is queued and the board says it is
+    /// waiting; while the grader reads the history, still queued; then the
+    /// models it is on are scoring and the rest queued, with the time left at
+    /// the pace measured at the budget's current rate (none until that rate
+    /// has one). An engine method is graded by the engine, never queued.
+    @Test func aFreshInstallSaysWhatEachModelWaitsFor() {
+        let engineIds = ["linear-recent", "recent-rate"]
+        let specs = ["a-quick", "a-slow"].map { Self.spec($0) }
+        let ranking = Self.rank(Self.records("linear-recent", 0..<17) { _, _ in 3 }, at: 0.4)
+        let at = Date(timeIntervalSince1970: 1_800_000_000)
+        func board(_ p: ArenaScoringProgress?, fullCore: Bool = false, now: Date? = nil,
+                   hasGrader: Bool = true) -> MeterModelBoard {
+            UsageIntelligenceEngine.board(
+                windowKey: "five_hour", weekly: false, ranking: ranking, current: ranking, engineIds: engineIds,
+                specs: specs, complexity: [:], selected: "linear-recent", shown: "linear-recent", cutFraction: 0.4,
+                canRunArena: true, weightsPresent: { _ in true }, liveFailure: { _ in nil }, progress: p,
+                gradedThrough: false, drawLimit: 4, hasGrader: hasGrader, fullCore: fullCore, now: now ?? at)
+        }
+        func status(_ b: MeterModelBoard, _ id: String) -> MeterModelBoard.Status? {
+            b.rows.first { $0.id == id }?.status
+        }
+
+        // Launched, the grader not started on the account yet.
+        let before = board(nil)
+        #expect(status(before, "a-quick") == .queued(done: 0, total: 17))
+        #expect(status(before, "recent-rate") == .scoring(done: 0, total: 17))
+        #expect(before.progress == .init(done: 0, total: 0, eta: nil, stage: .waiting))
+        // No runtime at all (the off-screen render): no claim that one will come.
+        let render = board(nil, hasGrader: false)
+        #expect(status(render, "a-quick") == .scoring(done: 0, total: 17))
+        #expect(render.progress == nil)
+
+        // A full pass reading the account's history.
+        let reading = board(.reading(at: at))
+        #expect(status(reading, "a-quick") == .queued(done: 0, total: 17))
+        #expect(reading.progress == .init(done: 0, total: 0, eta: nil, stage: .reading))
+
+        // Phase 1: the quick model is being scored, the slow one waits; a
+        // cycle has been timed at the everyday share only.
+        let p1 = ArenaScoringProgress(phase: .cheap, cyclesDone: 6, cyclesTotal: 17, models: ["a-quick"],
+                                      updatedAt: at, windowDepth: ["five_hour": 17],
+                                      pace: .init(share: 60, full: nil), cyclesAhead: 11)
+        let share = board(p1)
+        #expect(status(share, "a-quick") == .scoring(done: 0, total: 17))
+        #expect(status(share, "a-slow") == .queued(done: 0, total: 17))
+        #expect(status(share, "recent-rate") == .scoring(done: 0, total: 17))
+        #expect(share.progress == .init(done: 6, total: 17, eta: 11 * 60, stage: .scoring))
+        // The cycle under way counts down, up to one cycle's time.
+        func eta(after s: TimeInterval) -> Double { board(p1, now: at.addingTimeInterval(s)).progress?.eta ?? -1 }
+        #expect(abs(eta(after: 30) - (11 * 60 - 30)) < 1e-6)
+        #expect(abs(eta(after: 600) - 10 * 60) < 1e-6)
+        // Sped up, with nothing timed at the full core yet: no time left
+        // rather than the slow one.
+        #expect(board(p1, fullCore: true).progress == .init(done: 6, total: 17, eta: nil, stage: .scoring))
+
+        // Phase 2: the slow models.
+        let p2 = ArenaScoringProgress(phase: .heavy, cyclesDone: 2, cyclesTotal: 17, models: ["a-slow"],
+                                      updatedAt: at, windowDepth: ["five_hour": 17],
+                                      pace: .init(share: 300, full: 40), cyclesAhead: 15)
+        let slower = board(p2, fullCore: true)
+        #expect(status(slower, "a-slow") == .scoring(done: 0, total: 17))
+        #expect(slower.progress == .init(done: 2, total: 17, eta: 600, stage: .slower))
+
+        // Every row ranked: an incremental pass grading the newest cycle
+        // says nothing.
+        let all = Self.records("linear-recent", 0..<17) { _, _ in 3 } + Self.records("recent-rate", 0..<17) { _, _ in 4 }
+            + Self.records("a-quick", 0..<17) { _, _ in 2 } + Self.records("a-slow", 0..<17) { _, _ in 2.5 }
+        let ranked = Self.rank(all, at: 0.4)
+        let caughtUp = UsageIntelligenceEngine.board(
+            windowKey: "five_hour", weekly: false, ranking: ranked, current: ranked, engineIds: engineIds,
+            specs: specs, complexity: [:], selected: "a-quick", shown: "a-quick", cutFraction: 0.4,
+            canRunArena: true, weightsPresent: { _ in true }, liveFailure: { _ in nil }, progress: p1,
+            gradedThrough: false, drawLimit: 4, now: at)
+        #expect(caughtUp.progress == nil)
     }
 }
 

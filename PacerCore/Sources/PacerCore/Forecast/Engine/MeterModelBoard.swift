@@ -7,15 +7,16 @@ import Foundation
 /// the old sheet (drawn rows, "More models") cannot disagree.
 public struct MeterModelBoard: Sendable, Equatable {
     public var windowKey: String
-    /// Best first: ranked rows by typical miss, then scoring, downloading,
-    /// unavailable, and the well-behind group last.
+    /// Best first: ranked rows by typical miss, then scoring and queued,
+    /// downloading, unavailable, and the well-behind group last.
     public var rows: [Row]
     /// How far through its window the live cycle is (0…1), the point the
     /// ranking is matched to; nil with no live cycle.
     public var cutFraction: Double?
     /// The past cycles every ranked number covers (the same for every row).
     public var spanCycles: Int
-    /// Grading still to do for this meter's account; nil when caught up.
+    /// Grading still to do for this meter's account, while any row waits on
+    /// it; nil when caught up.
     public var progress: Progress?
 
     public init(windowKey: String, rows: [Row], cutFraction: Double?, spanCycles: Int, progress: Progress?) {
@@ -71,8 +72,13 @@ public struct MeterModelBoard: Sendable, Equatable {
         /// Graded over the span, but the record has no evidence at this
         /// point of the window (`RLRanking.noEvidence`): no number to show.
         case noEvidence(cycles: Int)
-        /// Still being graded over history.
-        case scoring(done: Int, total: Int, eta: TimeInterval?)
+        /// Being graded over history now: cycles graded of the window's
+        /// depth. The time left is the board's (`Progress`), not each row's.
+        case scoring(done: Int, total: Int)
+        /// Waiting its turn: the grader is reading the history or scoring
+        /// other models first (the quick before the slow), or has not reached
+        /// this account yet.
+        case queued(done: Int, total: Int)
         /// Its network is downloading (nil: progress unknown).
         case downloading(fraction: Double?)
         /// Cannot forecast this meter yet, and why ("not enough history").
@@ -80,11 +86,27 @@ public struct MeterModelBoard: Sendable, Equatable {
     }
 
     public struct Progress: Sendable, Equatable {
+        /// What the grader is doing for this account.
+        public enum Stage: Sendable, Equatable {
+            /// Not started on it: the grader begins a couple of minutes after
+            /// launch, and takes the accounts in turn.
+            case waiting
+            /// Reading its months of history, before any cycle is graded.
+            case reading
+            /// Grading the quick models over every cycle,
+            case scoring
+            /// then the slow ones.
+            case slower
+        }
+
+        public var stage: Stage
+        /// Cycles graded of those the stage planned (0 of 0 before it plans).
         public var done: Int
         public var total: Int
+        /// At the pace measured at the budget's current rate; nil until one is.
         public var eta: TimeInterval?
-        public init(done: Int, total: Int, eta: TimeInterval?) {
-            self.done = done; self.total = total; self.eta = eta
+        public init(done: Int, total: Int, eta: TimeInterval?, stage: Stage = .scoring) {
+            self.done = done; self.total = total; self.eta = eta; self.stage = stage
         }
     }
 }

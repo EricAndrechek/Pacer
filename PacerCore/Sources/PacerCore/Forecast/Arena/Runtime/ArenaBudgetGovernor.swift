@@ -6,7 +6,9 @@ import Synchronization
 
 // How much CPU the arena may use right now: one full core while the Mac is
 // plugged in, cool, not in Low Power Mode and nobody has touched it for two
-// minutes; a fifth of one core otherwise (`ArenaCPUBudget`).
+// minutes; a fifth of one core otherwise (`ArenaCPUBudget`). The user can
+// waive the plugged-in and idle conditions for the catch-up, for up to an
+// hour (`ArenaSpeedUp`); never the other two.
 //
 // The first launch's back-scoring is hours of CPU at a fifth of a core. Most
 // Macs that run Pacer sit plugged in and idle for long stretches (overnight,
@@ -88,11 +90,16 @@ public enum ArenaBudgetPolicy {
         case thermal, lowPower = "low power mode", battery = "on battery", inUse = "in use"
     }
 
-    public static func mode(_ s: ArenaBudgetSignals) -> Mode {
+    /// `spedUp`: the user asked for the full core (`ArenaSpeedUp`), which
+    /// lifts the battery and idle gates. Not the thermal or Low Power Mode
+    /// ones: those are the Mac's own state, and a forecast sheet is no place
+    /// to overrule them.
+    public static func mode(_ s: ArenaBudgetSignals, spedUp: Bool = false) -> Mode {
         // The first reason that holds, the machine's own state before the
         // user's: a hot Mac is held back however long it has been idle.
         if s.thermal == .serious || s.thermal == .critical { return .share(.thermal) }
         if s.lowPowerMode { return .share(.lowPower) }
+        if spedUp { return .fullCore }
         if !s.onACPower { return .share(.battery) }
         if !(s.idleSeconds >= idleSeconds) { return .share(.inUse) }
         return .fullCore
@@ -112,10 +119,11 @@ public enum ArenaBudgetPolicy {
         mode == .fullCore ? "full" : "fifth"
     }
 
-    /// What the log says: `full core (plugged in, idle)`, `20% of a core (on battery)`.
-    public static func describe(_ mode: Mode, shareRate: Double) -> String {
+    /// What the log says: `full core (plugged in, idle)`, `full core (sped
+    /// up)`, `20% of a core (on battery)`.
+    public static func describe(_ mode: Mode, shareRate: Double, spedUp: Bool = false) -> String {
         switch mode {
-        case .fullCore: return "full core (plugged in, idle)"
+        case .fullCore: return spedUp ? "full core (sped up)" : "full core (plugged in, idle)"
         case .share(let reason): return String(format: "%.0f%% of a core (%@)", shareRate * 100, reason.rawValue)
         }
     }
@@ -123,7 +131,10 @@ public enum ArenaBudgetPolicy {
 
 /// Sets the arena budget's rate from the policy, every 30 s, every 2 s while
 /// the full core is in use (so the user's return is seen at once), and at
-/// once on a thermal or power-mode notification. Logs each change of rate.
+/// once on a thermal or power-mode notification or a speed-up turned on or
+/// off. Logs each change of rate. Ends a speed-up once nothing is left to
+/// catch up (`pending`) or its time is up, and publishes the pace the sheet
+/// shows (`ArenaSpeedUp.status`).
 public final class ArenaBudgetGovernor: @unchecked Sendable {
     public static let interval: TimeInterval = 30
     public static let fullCoreInterval: TimeInterval = 2
@@ -147,22 +158,37 @@ public final class ArenaBudgetGovernor: @unchecked Sendable {
     private let fullRate: Double
     private let read: @Sendable () -> ArenaBudgetSignals
     private let log: @Sendable (String) -> Void
+    private let speedUp: ArenaSpeedUp?
+    private let pending: @Sendable () -> Bool
+    private let now: @Sendable () -> Date
     private let queue = DispatchQueue(label: "com.ericandrechek.pacer.arena.governor", qos: .utility)
     private let lock = NSLock()
     // Guarded by `lock`.
     private var mode: ArenaBudgetPolicy.Mode?
     private var timer: DispatchSourceTimer?
     private var observers: [NSObjectProtocol] = []
+    private var listener: UUID?
 
     /// - Parameters:
     ///   - shareRate: the everyday share (a fifth of a core).
-    ///   - fullRate: plugged in and idle; at most one core.
+    ///   - fullRate: plugged in and idle, or sped up; at most one core.
+    ///   - speedUp: the user's speed-up this governor honours and publishes
+    ///     its pace to; nil, none.
+    ///   - pending: whether catch-up work is still queued
+    ///     (`ArenaScoringProgressBoard.hasWork`): a speed-up ends once it
+    ///     is not.
+    ///   - now: the clock a speed-up's hour is measured on (tests pin it).
     public init(budget: ArenaCPUBudget, shareRate: Double, fullRate: Double = 1,
+                speedUp: ArenaSpeedUp? = nil, pending: @escaping @Sendable () -> Bool = { true },
+                now: @escaping @Sendable () -> Date = { Date() },
                 read: @escaping @Sendable () -> ArenaBudgetSignals = { ArenaBudgetSignals.current() },
                 log: @escaping @Sendable (String) -> Void = { Log.write("Arena", $0) }) {
         self.budget = budget
         self.shareRate = ArenaCPUBudget.clampRate(shareRate)
         self.fullRate = max(self.shareRate, ArenaCPUBudget.clampRate(fullRate))
+        self.speedUp = speedUp
+        self.pending = pending
+        self.now = now
         self.read = read
         self.log = log
     }
@@ -175,23 +201,34 @@ public final class ArenaBudgetGovernor: @unchecked Sendable {
     /// Read the signals and set the rate; returns the mode.
     @discardableResult
     public func evaluate() -> ArenaBudgetPolicy.Mode {
-        let next = ArenaBudgetPolicy.mode(read())
+        let spedUp = speedUpHolds(at: now())
+        let next = ArenaBudgetPolicy.mode(read(), spedUp: spedUp)
         lock.lock()
         let previous = mode
         mode = next
         lock.unlock()
+        speedUp?.publish(ArenaPace(mode: next, speedUpUntil: spedUp ? speedUp?.until : nil))
         let rate = next == .fullCore ? fullRate : shareRate
         let wasFull = previous == .fullCore
         if previous == nil || wasFull != (next == .fullCore) {
             budget.rate = rate
             budget.scorerQoS = ArenaBudgetPolicy.scorerQoS(next)
-            log("budget: " + ArenaBudgetPolicy.describe(next, shareRate: shareRate))
+            log("budget: " + ArenaBudgetPolicy.describe(next, shareRate: shareRate, spedUp: spedUp))
             let name = ArenaBudgetPolicy.telemetryName(next)
             Self.lastMode.withLock { $0 = name }
             Self.onModeChange(name)
             reschedule(full: next == .fullCore)
         }
         return next
+    }
+
+    /// Whether the user's speed-up holds at `at`; one whose hour is up, or
+    /// with nothing left to catch up, is ended here.
+    private func speedUpHolds(at: Date) -> Bool {
+        guard let speedUp, let until = speedUp.until else { return false }
+        if at >= until { speedUp.end(.timeUp, now: at); return false }
+        if !pending() { speedUp.end(.caughtUp, now: at); return false }
+        return true
     }
 
     /// Evaluate now and keep evaluating until `stop()`.
@@ -210,8 +247,14 @@ public final class ArenaBudgetGovernor: @unchecked Sendable {
                 self?.queue.async { self?.evaluate() }
             }
         }
+        // A speed-up turned on or off takes hold at once, not at the next tick.
+        let id = speedUp?.listen { [weak self] in
+            guard let queue = self?.queue else { return }
+            queue.async { [weak self] in self?.evaluate() }
+        }
         lock.lock()
         observers = tokens
+        listener = id
         lock.unlock()
         t.activate()
         queue.async { [weak self] in self?.evaluate() }
@@ -219,12 +262,14 @@ public final class ArenaBudgetGovernor: @unchecked Sendable {
 
     public func stop() {
         lock.lock()
-        let t = timer, obs = observers
+        let t = timer, obs = observers, id = listener
         timer = nil
         observers = []
+        listener = nil
         lock.unlock()
         t?.cancel()
         obs.forEach { NotificationCenter.default.removeObserver($0) }
+        if let id { speedUp?.unlisten(id) }
     }
 
     /// The next evaluations at the cadence the mode needs (a no-op before

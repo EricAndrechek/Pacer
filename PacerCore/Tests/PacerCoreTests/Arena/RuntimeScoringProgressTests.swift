@@ -138,6 +138,89 @@ struct RuntimeScoringProgressTests {
         #expect(rt.progress.progress(account: Fixtures.account) == nil)
     }
 
+    /// Every progress value a scorer's checkpoints saw: the CPU budget's
+    /// clock is read at each, from the history build to every forecast.
+    final class Checkpoints: @unchecked Sendable {
+        let lock = NSLock()
+        var seen: [ArenaScoringProgress?] = []
+        func note(_ p: ArenaScoringProgress?) { lock.lock(); seen.append(p); lock.unlock() }
+        var all: [ArenaScoringProgress?] { lock.lock(); defer { lock.unlock() }; return seen }
+    }
+
+    /// A scorer on its own budget whose clock notes `account`'s progress at
+    /// every checkpoint; nothing is ever spent, so nothing sleeps.
+    static func watchedPass(budgetRate: Double, accounts: [String]) async throws
+        -> (seen: [String: [ArenaScoringProgress?]], board: ArenaScoringProgressBoard) {
+        let board = ArenaScoringProgressBoard()
+        let notes = Dictionary(uniqueKeysWithValues: accounts.map { ($0, Checkpoints()) })
+        let clock = ArenaCPUBudget.Clock(
+            wall: { ArenaCPUBudget.Clock.system.wall() },
+            threadCPU: { for (a, n) in notes { n.note(board.progress(account: a)) }; return 0 },
+            threadID: { 1 }, sleep: { _ in })
+        let budget = ArenaCPUBudget(rate: budgetRate, burst: 1000, clock: clock)
+        let container = try RuntimeCostOrderTests.seeded(accounts: [accounts[0]], cycles: 6)
+        let spec = ArenaModelSpec(name: "test-progress-flat", targets: Fixtures.meters) { NaiveFlat(context: $0) }
+        let scorer = ArenaRecordScorer(container: container, roster: ArenaRoster(registry: [spec]),
+                                       history: ArenaHistoryCache(container: container), services: ArenaServices(),
+                                       budget: budget, cancel: ArenaCancelFlag(), config: ArenaRecordScorer.Config(),
+                                       progress: board, landed: { _, _ in })
+        _ = await scorer.pass(accounts: accounts, now: Fixtures.now)
+        return (notes.mapValues(\.all), board)
+    }
+
+    /// A full pass says it is reading before anything is planned; an account
+    /// found to have nothing to grade is cleared as soon as it is read, not
+    /// left reading while the rest of the pass runs; the pass leaves nothing.
+    @Test func aFullPassSaysItIsReadingFirst() async throws {
+        let accounts = ["acct-progress-read", "acct-progress-empty"]
+        let (seen, board) = try await Self.watchedPass(budgetRate: 0.2, accounts: accounts)
+        let mine = seen[accounts[0]] ?? []
+        let empty = seen[accounts[1]] ?? []
+        #expect(mine.first??.readingHistory == true)
+        #expect(mine.contains { $0?.readingHistory == false && ($0?.cyclesTotal ?? 0) > 0 })
+        // Read after the first account: reading until then, cleared once read.
+        #expect(empty.contains { $0?.readingHistory == true })
+        let lastReading = empty.lastIndex { $0?.readingHistory == true } ?? 0
+        #expect(empty[(lastReading + 1)...].allSatisfy { $0 == nil })
+        #expect(!board.hasWork)
+    }
+
+    /// Each cycle's time counts at the budget's rate when it ended, so the
+    /// estimate at either rate is that rate's own: here the everyday share,
+    /// then the full core, each measured and the other left unknown.
+    @Test func thePaceIsMeasuredAtEachRateApart() async throws {
+        let account = "acct-progress-pace"
+        let atShare = (try await Self.watchedPass(budgetRate: 0.2, accounts: [account])).seen[account] ?? []
+        let timed = atShare.compactMap { $0 }.filter { !$0.readingHistory && $0.pace != .init() }
+        #expect(!timed.isEmpty)
+        #expect(timed.allSatisfy { $0.pace.share != nil && $0.pace.full == nil })
+        #expect(timed.allSatisfy { $0.cyclesAhead > 0 })
+        #expect(timed.allSatisfy { $0.eta(fullCore: false) != nil && $0.eta(fullCore: true) == nil })
+
+        let atFull = (try await Self.watchedPass(budgetRate: 1, accounts: [account])).seen[account] ?? []
+        let fast = atFull.compactMap { $0 }.filter { !$0.readingHistory && $0.pace != .init() }
+        #expect(!fast.isEmpty)
+        #expect(fast.allSatisfy { $0.pace.full != nil && $0.pace.share == nil })
+    }
+
+    /// The time left counts down through the cycle under way, by at most
+    /// one cycle's time, and is never negative.
+    @Test func theTimeLeftCountsDownWithinACycle() {
+        let at = Date(timeIntervalSince1970: 1_800_000_000)
+        let p = ArenaScoringProgress(phase: .cheap, cyclesDone: 1, cyclesTotal: 9, models: ["m"], updatedAt: at,
+                                     pace: .init(share: 120, full: 20), cyclesAhead: 8)
+        func eta(_ full: Bool, after s: TimeInterval) -> Double { p.eta(fullCore: full, now: at.addingTimeInterval(s)) ?? -1 }
+        #expect(abs(eta(false, after: 0) - 960) < 1e-6)
+        #expect(abs(eta(false, after: 60) - 900) < 1e-6)
+        #expect(abs(eta(false, after: 3600) - 840) < 1e-6)
+        #expect(abs(eta(true, after: 5) - 155) < 1e-6)
+        #expect(abs(eta(false, after: -60) - 960) < 1e-6)
+        let none = ArenaScoringProgress(phase: .cheap, cyclesDone: 0, cyclesTotal: 9, models: [], updatedAt: at)
+        #expect(none.eta(fullCore: false) == nil && none.eta(fullCore: true) == nil)
+        #expect(ArenaScoringProgress(phase: .cheap, cyclesDone: 8, cyclesTotal: 9, models: ["m"], updatedAt: at,
+                                     pace: .init(share: 10), cyclesAhead: 0).eta(fullCore: false, now: at) == 0)
+    }
+
     @Test func theBoardIsPerAccountAndFractionIsBounded() {
         let board = ArenaScoringProgressBoard()
         let p = ArenaScoringProgress(phase: .heavy, cyclesDone: 3, cyclesTotal: 12, models: ["m"], updatedAt: .now)

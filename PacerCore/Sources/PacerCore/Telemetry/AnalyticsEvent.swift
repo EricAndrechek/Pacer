@@ -58,6 +58,8 @@ public enum AnalyticsEventName: String, Sendable, CaseIterable {
     case apiRequest = "api_request"
     case notificationShown = "notification_shown"
     case notificationAction = "notification_action"
+    // Forecast models
+    case arenaSpeedUp = "arena_speed_up"
     // Daily
     case dailyCheckin = "daily_checkin"
 }
