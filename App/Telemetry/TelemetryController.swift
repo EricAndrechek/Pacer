@@ -33,6 +33,8 @@ final class TelemetryController {
     private var sessionDay: String?
     /// Whether the scope carries the PostHog person link; nil until first set.
     private var postHogLinked: Bool?
+    /// Held for the life of the process; see `HangReporter`.
+    private var hangWatch: HangWatch?
     private var observers: [NSObjectProtocol] = []
 
     // MARK: - Start
@@ -55,6 +57,12 @@ final class TelemetryController {
         }
         isRunning = true
         Telemetry.install(SentryTelemetrySink())
+        // Before the store opens (this runs in `PacerAppDelegate.init`), so a
+        // migration that freezes the launch is caught while it is frozen.
+        HangReporter.reportLeftover()
+        hangWatch = HangWatch(runLoop: CFRunLoopGetMain(), threshold: HangReporter.threshold,
+                              heartbeat: HangReporter.heartbeat, startsBusy: true,
+                              handler: HangReporter.handle)
         tagScope()
         syncPostHogLink()
         if Self.performanceAllowed { startSession() }
@@ -125,8 +133,13 @@ final class TelemetryController {
         o.enableAutoSessionTracking = false
 
         o.enableUncaughtNSExceptionReporting = true
-        o.enableAppHangTracking = true
-        o.appHangTimeoutInterval = 2
+        // Hangs are Pacer's own (`HangWatch`, `HangReporter`), which sends the
+        // same event. On macOS the SDK has only its first tracker: it records
+        // nothing when its own thread wakes late, says "at least 2000 ms" for a
+        // one-minute freeze, keeps hangs that end in a kill to iOS, and wakes
+        // 2.5 times a second while the app idles. A user's frozen 0.8.1
+        // launches (2026-11-05) reached Sentry as sessions and nothing else.
+        o.enableAppHangTracking = false
         o.enableMetricKit = true
 
         // Off: everything automatic that could carry a token, a path or a
