@@ -216,8 +216,10 @@ public enum Pace {
                                  io: PaceIO = .standard,
                                  logURL: URL? = CLIRunLog.defaultURL()) -> Int32 {
         let sub = arguments.first ?? "report"
-        // After `feedback` everything is the report's text, `--help` included.
-        let asksHelp = sub != "feedback" && arguments.contains { $0 == "-h" || $0 == "--help" }
+        // After `feedback` only the leading words are flags (`PaceFeedbackArguments`).
+        let asksHelp = sub == "feedback"
+            ? PaceFeedbackArguments.parse(Array(arguments.dropFirst())) == .help
+            : arguments.contains { $0 == "-h" || $0 == "--help" }
         guard !asksHelp, sub != "help", logURL != nil else {
             return run(arguments, environment: environment, io: io)
         }
@@ -1491,13 +1493,21 @@ final class PaceRun {
     /// here. Sending can fail and never fails the command: the local copy and
     /// the GitHub link are already the answer.
     private func cmdFeedback(_ allWords: [String]) throws {
-        var words = allWords
+        let parsed = PaceFeedbackArguments.parse(allWords)
+        let text: String
         var keepLocal = env["PACER_FEEDBACK"] == "local"
-        if words.first == "--local" {
-            keepLocal = true
-            words.removeFirst()
+        switch parsed {
+        case .help:
+            io.out(PaceFeedbackArguments.usage)
+            throw PaceExit(code: 0)
+        case .unknownFlag(let flag):
+            io.err("pace: feedback does not take \(flag). Text that starts with a dash goes after --.\n")
+            io.err(PaceFeedbackArguments.usage)
+            throw PaceExit(code: 1)
+        case .report(let reportText, let local):
+            text = reportText
+            keepLocal = keepLocal || local
         }
-        let text = words.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else {
             try die("feedback needs the text: pacer feedback \"what you ran, what it printed\"")
         }

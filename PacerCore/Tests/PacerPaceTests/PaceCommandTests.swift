@@ -1462,6 +1462,54 @@ struct PaceCommandTests {
         #expect(inbox(box).isEmpty)
     }
 
+    @Test func feedbackHelpPrintsUsageAndSavesNothing() throws {
+        for flag in ["--help", "-h"] {
+            let box = try PaceSandbox(metrics: Self.metrics)
+            let log = PaceRequestLog()
+            let result = runPace(box, ["feedback", flag], onGet: log.record)
+            #expect(result.status == 0, "\(flag): \(result.out)")
+            #expect(result.out.contains("usage: pacer feedback"), "\(flag): \(result.out)")
+            #expect(inbox(box).isEmpty, "\(flag) must not be filed as a report")
+            #expect(log.all.isEmpty)
+        }
+    }
+
+    @Test func feedbackRefusesAnUnknownLeadingFlag() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        let result = runPace(box, ["feedback", "--locl", "gate", "was", "wrong"])
+        #expect(result.status == 1)
+        #expect(result.out.contains("does not take --locl"))
+        #expect(result.out.contains("usage: pacer feedback"))
+        #expect(inbox(box).isEmpty)
+    }
+
+    @Test func feedbackKeepsDashesAfterTheFirstWordAndAfterTheTerminator() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        #expect(runPace(box, ["feedback", "gate", "--help", "said", "-x"]).status == 0)
+        #expect(runPace(box, ["feedback", "--", "--cap 85 paused me"]).status == 0)
+        #expect(runPace(box, ["feedback", "--local", "--", "--help"]).status == 0)
+        #expect(inbox(box).map { $0["text"] as? String }
+            == ["gate --help said -x", "--cap 85 paused me", "--help"])
+    }
+
+    @Test func feedbackWithOnlyATerminatorOrFlagsHasNoText() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        for args in [["feedback"], ["feedback", "--"], ["feedback", "--local"], ["feedback", "--", "   "]] {
+            let result = runPace(box, args)
+            #expect(result.status == 1, "\(args)")
+            #expect(result.out.contains("feedback needs the text"), "\(args)")
+        }
+        #expect(inbox(box).isEmpty)
+    }
+
+    @Test func feedbackArgumentParsing() {
+        #expect(PaceFeedbackArguments.parse(["-h"]) == .help)
+        #expect(PaceFeedbackArguments.parse(["--local", "--help"]) == .help)
+        #expect(PaceFeedbackArguments.parse(["--local", "hi"]) == .report(text: "hi", local: true))
+        #expect(PaceFeedbackArguments.parse(["-5%", "x"]) == .unknownFlag("-5%"))
+        #expect(PaceFeedbackArguments.parse(["-", "x"]) == .report(text: "- x", local: false))
+    }
+
     // MARK: - Knowing what you are
 
     private func sessionStub(_ models: [String]) throws -> PaceStubServer {
