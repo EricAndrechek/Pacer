@@ -28,7 +28,11 @@ public enum StoreMaintenance {
     /// pages *inside* the SQLite file (reused by future writes) but does
     /// not shrink the file on disk — that would need a VACUUM, which we
     /// deliberately don't do here.
-    @MainActor
+    ///
+    /// Through a context of its own, from any thread, and the app calls it
+    /// off the main one: a launch's prune deletes every change row past the
+    /// horizon in one statement, seconds on a real store
+    /// (`RealStoreHistoryPruneProbe`).
     public static func pruneHistory(
         container: ModelContainer,
         olderThan retention: TimeInterval = historyRetention,

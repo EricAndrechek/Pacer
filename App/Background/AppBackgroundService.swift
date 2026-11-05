@@ -417,27 +417,26 @@ final class AppBackgroundService {
     /// of headroom, and idle enough to read as housekeeping.
     private static let historyPruneInterval: TimeInterval = 7 * 24 * 3600
 
-    /// Prune unused persistent history at launch, then weekly. Runs on
-    /// the main actor (`StoreMaintenance.pruneHistory` is `@MainActor`);
-    /// `deleteHistory` is a cheap metadata operation, so doing it inline
-    /// on the first tick during launch is fine.
+    /// Prune unused persistent history at launch, then weekly, off the main
+    /// thread. `deleteHistory` is not a metadata operation: it deletes every
+    /// change row past the horizon in one statement, and a launch finds a
+    /// day or more of them. On a copy of a real store it held the main actor
+    /// 1.2 s for the ~200k rows a next-day launch prunes and 5.0 s for 2.1M
+    /// (its busiest days wrote ~500k each), at every launch, beside the menu
+    /// bar's first reads.
     private func startHistoryPruneTask() {
         guard historyPruneTask == nil else { return }
         let container = self.container
-        // Off the main actor and before the prune: building an index takes the
+        let interval = Self.historyPruneInterval
+        // Before the prune, in the same task: building an index takes the
         // store's write lock for as long as it takes, and it only ever has
         // work to do on the first launch after a schema change.
-        Task.detached(priority: .utility) {
-            guard let url = try? PacerStore.storeURL() else { return }
-            StoreIndexRepair.run(storeURL: url)
-        }
-        historyPruneTask = Task { @MainActor in
+        historyPruneTask = Task.detached(priority: .utility) {
+            if let url = try? PacerStore.storeURL() { StoreIndexRepair.run(storeURL: url) }
             while !Task.isCancelled {
                 StoreMaintenance.pruneHistory(container: container)
                 do {
-                    try await Task.sleep(
-                        nanoseconds: UInt64(Self.historyPruneInterval * 1_000_000_000)
-                    )
+                    try await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
                 } catch {
                     return
                 }
