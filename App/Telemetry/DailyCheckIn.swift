@@ -599,9 +599,11 @@ final class DailyCheckIn {
             if Self.reportsFiveHour(accountId: scope.accountId, accounts: accounts) {
                 windows.insert(("five_hour", "five_hour"), at: 0)
             }
-            windows += await engine.scopedWindowKinds().map { ($0.key, $0.kind) }
+            // Off the main actor: awaiting a busy engine (`@ModelActor`) from
+            // here holds the main thread until it is free. See `askEngine`.
+            windows += await askEngine { await engine.scopedWindowKinds() }.map { ($0.key, $0.kind) }
             for (windowKey, window) in windows {
-                let board = await engine.meterModelBoard(windowKey: windowKey)
+                let board = await askEngine { await engine.meterModelBoard(windowKey: windowKey) }
                 var ranked: [(id: String, miss: Double, isPick: Bool)] = []
                 for row in board.rows {
                     switch row.status {
