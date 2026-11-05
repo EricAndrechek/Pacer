@@ -56,7 +56,7 @@ extension UsageIntelligenceEngine {
             cutFraction: Self.liveFraction(f, window: window), canRunArena: binding != nil,
             weightsPresent: weightsPresent, liveFailure: failure, progress: progress,
             gradedThrough: account.map { arena?.gradedThrough($0) ?? false } ?? false,
-            drawLimit: arena?.compareLimit ?? 4)
+            drawLimit: arena?.compareLimit ?? 4, hasGrader: arena != nil, fullCore: arena?.fullCore() ?? false)
     }
 
     /// What a model with no grade at all says once the grader has been
@@ -76,21 +76,32 @@ extension UsageIntelligenceEngine {
     ///   unavailable ("not enough history yet");
     /// - nothing graded, while the grader is done with it (or the runtime
     ///   reported why it can't forecast): unavailable, with the reason;
-    /// - else scoring: cycles graded of the window's depth, and when the
-    ///   grader is on it, when it should be done.
+    /// - an arena model the grader is not on: queued, while a pass is
+    ///   running on the account (reading its history, or scoring other
+    ///   models first) or none has been through it yet (`hasGrader`: a
+    ///   runtime is attached, so one will);
+    /// - else scoring: cycles graded of the window's depth.
     ///
     /// While the window still ranks on the previous grading (a bump not yet
     /// covered), a ranked model keeps that standing and carries `regrading`:
     /// its cycles under the current grading of the depth. A model the
     /// previous grading never ranked is scoring, against the current one.
     ///
+    /// `progress`, the board's one line about the grader, is there only while
+    /// some row waits on it (scoring, queued or re-grading): what stage the
+    /// grader is at, how far, and the time left at the pace measured at the
+    /// budget's current rate (`fullCore`). Every row being scored would have
+    /// the same time left, so no row repeats it.
+    ///
     /// Order: ranked by typical miss (then complexity, then name), scoring
-    /// by how far along, downloading, unavailable, then well behind by miss.
+    /// and queued by how far along, downloading, unavailable, then well
+    /// behind by miss.
     static func board(
         windowKey: String, weekly: Bool, ranking: EngineSelfEval.RLRanking?, current: EngineSelfEval.RLRanking?,
         engineIds: [String], specs: [ArenaModelSpec], complexity: [String: Int], selected: String?, shown: String?,
         cutFraction: Double?, canRunArena: Bool, weightsPresent: (ArenaModelSpec) -> Bool,
-        liveFailure: (String) -> String?, progress: ArenaScoringProgress?, gradedThrough: Bool, drawLimit: Int
+        liveFailure: (String) -> String?, progress: ArenaScoringProgress?, gradedThrough: Bool, drawLimit: Int,
+        hasGrader: Bool = true, fullCore: Bool = false, now: Date = Date()
     ) -> MeterModelBoard {
         let minPeriods = EngineSelfEval.rlMinPeriods(weekly: weekly)
         let current = current ?? ranking
@@ -98,6 +109,10 @@ extension UsageIntelligenceEngine {
             ?? max(current?.depthCycles ?? 0, ranking?.depthCycles ?? 0)
         let bridging = ranking != nil && ranking?.grading != current?.grading
         let scoring = Set(progress?.models ?? [])
+        let eta = progress?.eta(fullCore: fullCore, now: now)
+        // The grader will reach a model it is not on now: a pass is running
+        // on the account, or none has been through it under these inputs.
+        let graderAhead = hasGrader && (progress != nil || !gradedThrough)
         let drawn = Set(drawnIds(pick: selected, ranking: ranking, limit: drawLimit) + (shown.map { [$0] } ?? []))
         let pick = shown ?? selected
         let specByName = Dictionary(specs.map { ($0.name, $0) }, uniquingKeysWith: { a, _ in a })
@@ -125,7 +140,7 @@ extension UsageIntelligenceEngine {
                 }
                 let done = current?.standing(id)?.cycles ?? 0
                 if bridging, done < depth {
-                    regrading = .init(done: done, total: depth, eta: scoring.contains(id) ? progress?.eta : nil)
+                    regrading = .init(done: done, total: depth, eta: scoring.contains(id) ? eta : nil)
                 }
             } else {
                 let done = current?.standing(id)?.cycles ?? 0
@@ -136,9 +151,10 @@ extension UsageIntelligenceEngine {
                     status = .unavailable(reason)
                 } else if spec != nil, done == 0, gradedThrough {
                     status = .unavailable(boardNoForecastsReason)
+                } else if spec != nil, !scoring.contains(id), graderAhead {
+                    status = .queued(done: done, total: max(depth, done))
                 } else {
-                    status = .scoring(done: done, total: max(depth, done),
-                                      eta: scoring.contains(id) ? progress?.eta : nil)
+                    status = .scoring(done: done, total: max(depth, done))
                 }
             }
             return MeterModelBoard.Row(
@@ -151,7 +167,7 @@ extension UsageIntelligenceEngine {
             switch r.status {
             case .ranked(let miss, _): return (0, miss)
             case .noEvidence: return (0, 0)
-            case .scoring(let done, _, _): return (1, -Double(done))
+            case .scoring(let done, _), .queued(let done, _): return (1, -Double(done))
             case .downloading: return (2, 0)
             case .unavailable: return (3, 0)
             case .wellBehind(let miss, _): return (4, miss)
@@ -167,6 +183,28 @@ extension UsageIntelligenceEngine {
         }
         return MeterModelBoard(
             windowKey: windowKey, rows: sorted, cutFraction: cutFraction, spanCycles: ranking?.span?.cycles ?? 0,
-            progress: progress.map { .init(done: $0.cyclesDone, total: $0.cyclesTotal, eta: $0.eta) })
+            progress: boardProgress(rows: sorted, progress: progress, eta: eta,
+                                    waitingToStart: graderAhead && canRunArena))
+    }
+
+    /// The board's line about the grader (see `board`): nil unless a row
+    /// waits on it. With no pass on the account yet, and a queued row, the
+    /// grader has not started on it.
+    static func boardProgress(rows: [MeterModelBoard.Row], progress: ArenaScoringProgress?, eta: TimeInterval?,
+                              waitingToStart: Bool) -> MeterModelBoard.Progress? {
+        let waits = rows.contains { r in
+            switch r.status {
+            case .scoring, .queued: return true
+            default: return r.regrading != nil
+            }
+        }
+        guard waits else { return nil }
+        if let p = progress {
+            let stage: MeterModelBoard.Progress.Stage = p.readingHistory ? .reading
+                : p.phase == .heavy ? .slower : .scoring
+            return .init(done: p.cyclesDone, total: p.cyclesTotal, eta: p.readingHistory ? nil : eta, stage: stage)
+        }
+        let queued = rows.contains { if case .queued = $0.status { true } else { false } }
+        return waitingToStart && queued ? .init(done: 0, total: 0, eta: nil, stage: .waiting) : nil
     }
 }

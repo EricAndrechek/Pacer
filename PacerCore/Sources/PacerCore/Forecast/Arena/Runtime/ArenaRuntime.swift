@@ -45,6 +45,10 @@ public struct ArenaEngineLink: Sendable {
     public let gradedThrough: @Sendable (String) -> Bool
     /// Where the grader is with an account (`ArenaScoringProgressBoard`).
     public let progress: @Sendable (String) -> ArenaScoringProgress?
+    /// Whether the budget runs at the full core now (plugged in and idle, or
+    /// sped up): which measured pace the board's time left is made from
+    /// (`ArenaScoringProgress.eta`).
+    public let fullCore: @Sendable () -> Bool
     /// Ask for live projections. Returns at once; they land in `cache`.
     public let requestLive: @Sendable ([ArenaLiveRequest]) -> Void
     /// Make one request's projections now, at the live lane's priority, and
@@ -57,10 +61,12 @@ public struct ArenaEngineLink: Sendable {
                 weightsPresent: @escaping @Sendable (ArenaModelSpec) -> Bool = { _ in true },
                 gradedThrough: @escaping @Sendable (String) -> Bool = { _ in false },
                 progress: @escaping @Sendable (String) -> ArenaScoringProgress? = { _ in nil },
+                fullCore: @escaping @Sendable () -> Bool = { false },
                 requestLive: @escaping @Sendable ([ArenaLiveRequest]) -> Void,
                 makeLive: (@Sendable (ArenaLiveRequest) async -> Void)? = nil) {
         self.roster = roster; self.cache = cache; self.compareLimit = compareLimit; self.requestLive = requestLive
         self.weightsPresent = weightsPresent; self.gradedThrough = gradedThrough; self.progress = progress
+        self.fullCore = fullCore
         self.makeLive = makeLive
     }
 }
@@ -430,16 +436,34 @@ public actor ArenaRecordScorer {
     private struct ProgressPlan {
         var cycles: [String: Int] = [:]
         var models: [String: Set<String>] = [:]
-        /// When the phase started and the cycles visited since, all
-        /// accounts: the measured pace the sheet's estimate is made from.
-        var started = SuspendingClock.now
-        var visited = 0
-        var secondsPerCycle: Double? {
-            guard visited > 0 else { return nil }
-            let d = SuspendingClock.now - started
-            return (Double(d.components.seconds) + Double(d.components.attoseconds) * 1e-18) / Double(visited)
+        /// When the last cycle ended (the phase's start before the first),
+        /// and the wall time and cycles visited since the phase began at
+        /// each of the budget's rates, all accounts: the measured paces the
+        /// sheet's estimate is made from (`ArenaScoringProgress.Pace`).
+        var mark = SuspendingClock.now
+        var spent: [Bool: (seconds: Double, cycles: Int)] = [:]
+
+        mutating func visited(fullCore: Bool) {
+            let now = SuspendingClock.now
+            let d = now - mark
+            mark = now
+            var e = spent[fullCore] ?? (0, 0)
+            e.seconds += Double(d.components.seconds) + Double(d.components.attoseconds) * 1e-18
+            e.cycles += 1
+            spent[fullCore] = e
+        }
+
+        var pace: ArenaScoringProgress.Pace {
+            func at(_ full: Bool) -> Double? {
+                spent[full].flatMap { $0.cycles > 0 ? $0.seconds / Double($0.cycles) : nil }
+            }
+            return .init(share: at(false), full: at(true))
         }
     }
+
+    /// Whether the budget gives the arena more than its everyday share now:
+    /// the governor's full core, plugged in and idle or sped up.
+    private var atFullCore: Bool { budget.rate > ArenaCPUBudget.clampRate(config.dutyCycle) }
 
     /// The models `phase` has something to score for in `cycles`: phase 2
     /// queues every model, but the cheap ones had every cycle in phase 1, so
@@ -475,11 +499,10 @@ public actor ArenaRecordScorer {
         let depth = Dictionary(mine.map { ($0.window.key, $0.depth) }, uniquingKeysWith: { a, _ in a })
         if remaining > 0 {
             let total = plan.cycles[account] ?? remaining
-            let spc = plan.secondsPerCycle
             progress.set(.init(phase: phase, cyclesDone: max(0, total - remaining), cyclesTotal: total,
                                models: (plan.models[account] ?? []).sorted(), updatedAt: Date(),
-                               windowDepth: depth, secondsPerCycle: spc,
-                               eta: spc.map { $0 * Double(cyclesUntilDone(streams, account: account)) }),
+                               windowDepth: depth, pace: plan.pace,
+                               cyclesAhead: cyclesUntilDone(streams, account: account)),
                          account: account)
             return
         }
@@ -494,7 +517,7 @@ public actor ArenaRecordScorer {
             models.formUnion(displayModels(s, .heavy, cycles: ahead))
         }
         progress.set(total > 0 ? .init(phase: .heavy, cyclesDone: 0, cyclesTotal: total, models: models.sorted(),
-                                       updatedAt: Date(), windowDepth: depth, secondsPerCycle: nil) : nil,
+                                       updatedAt: Date(), windowDepth: depth) : nil,
                      account: account)
     }
 
@@ -531,10 +554,21 @@ public actor ArenaRecordScorer {
         let prints = fingerprints(inputs)
         // What "graded through" means from here: a pass under these inputs.
         progress.setCurrentFingerprint(fingerprint)
+        // A full pass reads months of history per account before it can plan
+        // a single cycle: minutes at the everyday share, during which the
+        // sheet had nothing to say. Say that it is reading; an account found
+        // to have nothing to grade is cleared as soon as it is read.
+        // Incremental passes read a few weeks and say nothing.
+        let fullPass = Set(accounts.filter { coveredFingerprint[$0] != fingerprint })
+        for account in accounts where fullPass.contains(account) {
+            progress.set(.reading(at: Date()), account: account)
+        }
         for account in accounts {
             guard !cancel.isSet else { saveUnsaved(); return report }
-            let full = coveredFingerprint[account] != fingerprint
-            streams += await self.streams(account: account, now: now, full: full, prints: prints)
+            let mine = await self.streams(account: account, now: now, full: fullPass.contains(account),
+                                          prints: prints)
+            if mine.isEmpty, fullPass.contains(account) { progress.set(nil, account: account) }
+            streams += mine
             coveredFingerprint[account] = fingerprint
         }
         let depth = streams.reduce(0) { $0 + $1.cycles.count }
@@ -603,7 +637,7 @@ public actor ArenaRecordScorer {
                         let news = score(cycle, in: &streams[i], models: models, slot: slot, report: &report)
                         report.cycles += 1
                         report.phaseCycles[phase.rawValue, default: 0] += 1
-                        plan.visited += 1
+                        plan.visited(fullCore: atFullCore)
                         publishProgress(streams, account: account, phase: phase, plan: plan)
                         if !news.isEmpty {
                             report.outcomes += news.count
@@ -1172,8 +1206,11 @@ public final class ArenaRuntime: Sendable {
     public let live: ArenaLiveForecaster
     /// The arena's share of the CPU, scorer and live together.
     public let budget: ArenaCPUBudget
-    /// Raises the share while the Mac is plugged in and idle, from `start`.
+    /// Raises the share while the Mac is plugged in and idle, or sped up,
+    /// from `start`.
     public let governor: ArenaBudgetGovernor?
+    /// The user's speed-up the governor honours (`ArenaSpeedUp`).
+    public let speedUp: ArenaSpeedUp
     /// Where the scorer is with each account (`ArenaScoringProgress`).
     public let progress: ArenaScoringProgressBoard
     let cancel = ArenaCancelFlag()
@@ -1208,6 +1245,8 @@ public final class ArenaRuntime: Sendable {
     ///     (`UsageIntelligenceEngine.refreshArenaResolution`).
     ///   - progress: where the scorer publishes its progress; the app's
     ///     sheet reads `ArenaScoringProgressBoard.shared`.
+    ///   - speedUp: the speed-up the governor honours; the app's sheet
+    ///     turns on `ArenaSpeedUp.shared`.
     ///   - clock: the time the live lane asks its history to be known at
     ///     (tests pin it).
     public init(container: ModelContainer, roster: ArenaRoster = .standard,
@@ -1216,12 +1255,14 @@ public final class ArenaRuntime: Sendable {
                 config: ArenaRecordScorer.Config = .init(), compareLimit: Int = 4,
                 costs: ArenaModelCosts = ArenaModelCosts(defaults: nil),
                 progress: ArenaScoringProgressBoard = .shared,
+                speedUp: ArenaSpeedUp = .shared,
                 clock: @escaping @Sendable () -> Date = { Date() },
                 onRecordLanded: @escaping @Sendable (String, [EngineSelfEval.NewOutcome]) async -> Void,
                 onLiveLanded: @escaping @Sendable (Set<String>) async -> Void) {
         self.roster = roster
         self.compareLimit = compareLimit
         self.progress = progress
+        self.speedUp = speedUp
         self.ensureWeights = ensureWeights
         self.weights = weights
         self.presence = ArenaWeightsPresence(roster: roster, weights: weights)
@@ -1234,8 +1275,10 @@ public final class ArenaRuntime: Sendable {
         let cancel = self.cancel
         let budget = ArenaCPUBudget(rate: config.dutyCycle)
         self.budget = budget
+        // A speed-up holds while any account has catch-up queued.
         self.governor = config.adaptiveBudget
-            ? ArenaBudgetGovernor(budget: budget, shareRate: config.dutyCycle, fullRate: config.idleDutyCycle)
+            ? ArenaBudgetGovernor(budget: budget, shareRate: config.dutyCycle, fullRate: config.idleDutyCycle,
+                                  speedUp: speedUp, pending: { progress.hasWork })
             : nil
         // The history pays like the rest but never waits for the urgent lane:
         // the live forecaster is often what it is building for, and waits on it.
@@ -1275,11 +1318,12 @@ public final class ArenaRuntime: Sendable {
 
     /// What every engine adopts.
     public var link: ArenaEngineLink {
-        let live = self.live, board = self.progress, presence = self.presence
+        let live = self.live, board = self.progress, presence = self.presence, governor = self.governor
         return ArenaEngineLink(roster: roster, cache: cache, compareLimit: compareLimit,
                                weightsPresent: { presence.present($0) },
                                gradedThrough: { board.isGradedThrough(account: $0) },
                                progress: { board.progress(account: $0) },
+                               fullCore: { governor?.current == .fullCore },
                                requestLive: { reqs in Task.detached(priority: .utility) { await live.submit(reqs) } },
                                makeLive: { req in await live.makeNow(req) })
     }
