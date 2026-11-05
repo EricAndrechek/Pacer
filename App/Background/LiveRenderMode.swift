@@ -49,9 +49,11 @@ enum LiveRenderMode {
         case dashboard, history, projects, models, now, pace, badges, settings
         /// The compare-models sheet for the scope's 5-hour and 7-day windows.
         case projection, projectionWeekly
-        /// The 5-hour sheet with the grader line and Speed up control a
+        /// The 7-day sheet with the grader line and Speed up control a
         /// catch-up shows (`ProjectionCompareModal.catchUpPreview`): a render
-        /// has no arena runtime, so it never has a catch-up of its own.
+        /// has no arena runtime, so it never has a catch-up of its own. The
+        /// weekly window because every plan has one; an Ultra account has no
+        /// 5-hour window, so a 5-hour sheet renders empty there.
         case projectionCatchUp
         /// Every model's info popover, for both windows.
         case modelInfo
@@ -94,7 +96,7 @@ enum LiveRenderMode {
                 ProjectionCompareModal(windowKey: RateLimitWindowName.sevenDay,
                                        limitAccountId: UsageScope.shared.limitAccountId)
             case .projectionCatchUp:
-                ProjectionCompareModal(windowKey: RateLimitWindowName.fiveHour,
+                ProjectionCompareModal(windowKey: RateLimitWindowName.sevenDay,
                                        limitAccountId: UsageScope.shared.limitAccountId, catchUpPreview: true)
             case .menu:
                 // On a menu's own surface, as it drops: the page canvas
