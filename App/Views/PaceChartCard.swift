@@ -794,7 +794,8 @@ struct PaceChartCard: View {
         let typicalPollGap: TimeInterval?
         /// Window rollover (nil ⇒ idle / server anchored no cycle).
         let resetsAt: Date?
-        /// Measured burn over the last half hour of readings
+        /// Measured burn from the latest readings (the last half hour, or the last
+        /// ticks when it rose under 2 points in that time; see `RecentBurn`)
         /// (`RecentBurn.percentPerHour`, the figure `pacer report` prints as
         /// "now"), for the grey burn-rate chip. Nil below two readings.
         let recentBurn: Double?

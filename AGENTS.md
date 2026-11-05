@@ -194,6 +194,7 @@ These are subtle, easy to miss, and break user-visible numbers:
    in SQL; `IngestParityTests` (`make test-ingest-parity`) fails if the line
    parser and the bulk importer leave any row differently (#334). See
    `docs/duckdb-archive.md`.
+   `thinkingTokens` (#362) is a subset of output, optional (nil = not reported, never backfilled), and rides on the kept copy; it is not in `TokenBreakdown`.
 8. **Verify ingest changes against a REAL store, not a synthetic one.**
    Both performance bugs and the dedup bug above were invisible on a
    fresh in-memory store — an empty store has nothing to upgrade and no
@@ -512,6 +513,10 @@ App/
                                   start() is idempotent; stop() is awaited from
                                   applicationShouldTerminate so saves flush before exit.
 
+    StoreLoader.swift           — `.opening/.ready/.failed` for the store; ordinary launches open it
+                                  synchronously in `init`; the first launch after a schema change
+                                  migrates it off main (`PacerStore.prepareStore`, #376) and store
+                                  users wait for `.ready`.
   Settings/
     PacerSettings.swift         — App Group UserDefaults wrapper + enum types for menu bar
                                   style/icon and notification thresholds. Single source of
@@ -533,6 +538,8 @@ App/
                                   totals). RFC 4180 escape, NSSavePanel, NSAlert on error.
 
   Views/
+    StoreOpeningView.swift      — `DashboardRoot` (dashboard content + container/engines once ready)
+                                  and the "Updating your data…" placeholder.
     DashboardView.swift         — header + WelcomeCard + Today + LiveActivity + PaceChart +
                                   DailyCost + PerModelToday.
     HistoryView.swift           — Lifetime + Heatmap + Monthly + TopDays. Sheet to DayDetail.
@@ -1136,6 +1143,9 @@ The hourly `[Memory]` log line is how a regression shows up.
   `.onChange(of: scanMeta.first?.value)` — the scan-meta tick is the
   canonical "data changed" signal. Pattern in `TodayTimelineCard`,
   `HeatmapCard`, `ModelsView`, `ProjectsView`, `ProjectDetailView`.
+- **A view that draws from thousands of rows reduces them off the main actor
+  once per data change and once per minute tick, and assigns the reduction in
+  the same turn as its data (`PaceSeriesPrep`); the body only looks values up.**
 - **Never iterate raw `TokenSample`s in a view body.** Always go
   through a rollup. The four rollups (`DailyAggregate`,
   `HourlyAggregate`, `ProjectDailyAggregate`, `SessionInfo`) cover
@@ -1169,6 +1179,8 @@ The hourly `[Memory]` log line is how a regression shows up.
   rate-limit window-filter sweep).
 
 ### Widget extension — share one ModelContainer
+
+- **Readers never migrate:** `sharedModelContainer()` refuses a store needing migration.
 
 - **Use `PacerStore.sharedModelContainer()`, not `makeModelContainer()`,
   from widget providers.** Container open is 50–200ms of SQLite open +

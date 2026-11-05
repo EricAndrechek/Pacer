@@ -96,6 +96,7 @@ prose rationale together.
 | 13 | `22742bb` | `StatsCacheProbe` throttled to 60 s | probe 30-278 ms→0 ms between runs |
 | 14 | `fddc31a` | `visibleBackstop` 60 s → 300 s | ~70 % of idle-window cycles eliminated |
 | 15 | `ba2abe1` | One-shot stale-cursor prune at startup | 1072→931 cursors, perm reduction |
+| 16 | `23aff7d6` | PaceChartCard body no longer walks the history: PaceSeriesPrep built off main once per reload and once per minute, assigned with its data; liveKey on whole shown % | Debug body 100–150 ms → lookups; forecast passes ~110/h → refits + whole-point moves |
 
 Plus a `bin/dev-install.sh` `PACER_DEV_SKIP_NOTARIZE=1` escape hatch
 when the notarytool keychain profile is missing (the user's

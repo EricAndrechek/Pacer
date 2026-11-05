@@ -521,6 +521,8 @@ Those two report no `currentAccountSince`. The pinned-profile test has one
 blind spot: a profile on the same account the default login held at that
 instant looks like the default login until its next turn.
 
+That holds for a switcher's switch. Sessions already running do not follow a `/login` run elsewhere, so where a default-login change has no switcher switch behind it (`LoginSwitchEvidence`), `/v1/session` also reports `mayStillBillAccountIds`/`mayStillBillSince`, and `pacer` judges the session on all of them.
+
 `/v1/session` is answered from the API snapshot for every session seen in the
 last six hours, so a store stall cannot slow a gate or send it to the wrong
 account. An older id is read from the store, as before. The snapshot reads

@@ -217,6 +217,8 @@ rank after the split, and it skips hidden paths. Ranking every tie in Swift
 instead was measured and rejected: rank-1 rows are 705k of 744k, so the result
 set would nearly double.
 
+The importer also projects `thinking_tokens` (`$.message.usage.output_tokens_details.thinking_tokens`), NULL when absent. A subset of output_tokens; carried on the kept copy.
+
 On the same store copy and the real tree, the two paths afterwards left
 **750,395 byte-identical rows**: every field of every sample, and both 0
 upgrades, 378,671 skips, the same insert count. The only differences were 10

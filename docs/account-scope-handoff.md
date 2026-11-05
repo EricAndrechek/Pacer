@@ -485,7 +485,7 @@ account shares, and gets persisted, so a restart inherits it.
 `externalLastPollAt` is the separate fact.
 
 **The secondary sweep is a second caller and had a partial copy of the rule.**
-`dueSecondaryLaneIndex` checked cooldown, Pacer's own interval, and an
+The poller's old `dueSecondaryLaneIndex` (now `OAuthPollScheduler.decideSweep`, #350) checked cooldown, Pacer's own interval, and an
 announced *future* external request — but nothing about requests already made.
 That path is where the collisions actually were: it polls the account you are
 not signed into, whose credential is exactly the one cswap has parked. Both
@@ -512,6 +512,8 @@ which `OAuthPoller` publishes through `SignedInCredentialMonitor`.
 `ScanCoordinator` moves the poller's active account when the trail's login
 changes, and only then, so a pick made in the Tokens settings holds until the
 login actually moves. Do not add a second decider.
+
+The default login is also written to `default-login.json` in the App Group container (`DefaultLoginMarker`) after each save, so `pacer status` can re-gate across a switch (#343).
 
 The poller used to be a second one. It switched the active account whenever a
 lane labelled `.keychain` named another org. After a switch, the outgoing

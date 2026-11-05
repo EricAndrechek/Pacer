@@ -66,6 +66,7 @@ the lever the poller pulls.
     lanes sustain — `max(activeInterval floor 60s, perTokenMin/lanes)`.
     So 5 tokens → ~1 min, 2 → ~2.5 min, 1 → 5 min.
   - **Idle:** relax to `idleInterval` (600s).
+  - **Non-active accounts** (`OAuthPollScheduler.decideSweep`): every lane at the per-token floor, the account's polls kept `perTokenMin / lanes in rotation` apart, so n tokens give a reading every 5/n minutes rather than n readings at once (#350).
   - **Poll-on-wake:** the `ScanCoordinator` calls `notifyActivity()` when
     fresh usage lands, waking the loop to re-evaluate (still bounded by the
     per-token floor, so a nudge can never over-poll).
