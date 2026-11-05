@@ -205,8 +205,16 @@ public actor SpendMeterFitWorker {
             }
         }
 
+        // The window set is the engine's rule (#381): a fixed window the latest
+        // poll no longer reports (a verified Ultra account's 5-hour) is not
+        // fitted from the history that stopped at the change.
+        let present = Set(EngineFeatures.presentFixedWindows(
+            fixed.flatMap { window, rows in
+                rows.map { EngineFeatures.RateRow(window: window, at: $0.at,
+                                                  usedPercentage: $0.percent, resetsAt: $0.resetsAt) }
+            }).map(\.key))
         var out: [WindowReadings] = []
-        for kind in RateLimitWindowKind.allCases {
+        for kind in RateLimitWindowKind.allCases where present.contains(kind.rawValue) {
             guard let rows = fixed[kind.rawValue], let duration = PaceMath.windowDuration(for: kind.rawValue)
             else { continue }
             out.append(WindowReadings(key: kind.rawValue, duration: duration, readings: rows))
