@@ -913,16 +913,19 @@ public actor OAuthPoller: TokenPoolTesting {
                 _ = await pollLane(idx)
                 await publishStatus()
             case .wait(let fastWait):
-                // A secondary (non-active) account may be due for its slow
-                // sweep even while the fast pool waits. Poll one if so; each
-                // secondary lane is still gated to ≤ 1×/5min.
-                if let sIdx = dueSecondaryLaneIndex(now: now) {
+                // A non-active account may be due for its sweep even while the
+                // fast pool waits. Each of its lanes is still gated to ≤ 1×/5min,
+                // and its lanes take turns rather than going together (#350).
+                let sweep = scheduler.decideSweep(
+                    lanes: lanes.map(\.state), accountKeys: lanes.map(\.accountKey),
+                    interval: configuration.secondarySweepInterval, now: now)
+                if case .poll(let sIdx)? = sweep {
                     _ = await pollLane(sIdx)
                     await publishStatus()
                     continue
                 }
-                let secWait = nextSecondaryWait(now: now)
-                let wait = [fastWait, secWait].compactMap { $0 }.min() ?? fastWait
+                var wait = fastWait
+                if case .wait(let sweepWait)? = sweep { wait = min(wait, sweepWait) }
                 nextPollAt = now.addingTimeInterval(wait)
                 await publishStatus()
                 await nap(wait)
@@ -1206,50 +1209,6 @@ public actor OAuthPoller: TokenPoolTesting {
             guard let newest = (try? context.fetch(d))?.first else { return true }
             return at > newest.sampledAt
         }
-    }
-
-    /// The least-recently-polled secondary lane that's due for its sweep now
-    /// (past its per-lane interval and not cooling), or nil.
-    ///
-    /// **Per lane, deliberately — that is the multi-token design working.**
-    /// The budget Anthropic enforces is per *token*, so an account holding five
-    /// credentials really can be read five times as often without costing any
-    /// other account anything. Spreading load across an account's tokens to
-    /// shorten its refresh interval is the point of the token pool.
-    ///
-    /// This was briefly changed to budget per account, on the theory that five
-    /// Desktop lanes were starving the signed-in account's single lane. That
-    /// theory was wrong: the 429s only ever landed on the signed-in account's
-    /// own token, never on the five that were being polled twelve times as
-    /// often, which is exactly what a per-token budget looks like. The real
-    /// contention was Pacer and `cswap` polling the *same* token — fixed by
-    /// reading cswap's cache instead. Throttling by account fixed nothing and
-    /// gave up a real feature, so it is reverted.
-    ///
-    /// Eligibility itself is `OAuthPollScheduler.readyAt`, the same rule the
-    /// fast pool uses, differing only in the interval. This method had its own
-    /// partial copy of it — cooldown and Pacer's own spacing, plus half of the
-    /// external check — so a secondary lane could keep its distance from
-    /// Pacer's polls while landing squarely on another client's.
-    private func dueSecondaryLaneIndex(now: Date) -> Int? {
-        let interval = configuration.secondarySweepInterval
-        return lanes.indices
-            .filter {
-                lanes[$0].state.account == .secondary
-                    && scheduler.readyAt(lanes[$0].state, interval: interval, now: now) <= now
-            }
-            .min { (lanes[$0].state.lastPolledAt ?? .distantPast) < (lanes[$1].state.lastPolledAt ?? .distantPast) }
-    }
-
-    /// Seconds until the earliest secondary lane becomes due, or nil if
-    /// there are no secondary lanes.
-    private func nextSecondaryWait(now: Date) -> TimeInterval? {
-        let interval = configuration.secondarySweepInterval
-        let readyTimes = lanes.filter { $0.state.account == .secondary }.map {
-            scheduler.readyAt($0.state, interval: interval, now: now)
-        }
-        guard let earliest = readyTimes.min() else { return nil }
-        return max(configuration.scheduler.minWait, earliest.timeIntervalSince(now))
     }
 
     /// Cancellable sleep. `notifyActivity()` / `stop()` cancel the inner
