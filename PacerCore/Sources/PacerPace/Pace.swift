@@ -24,6 +24,10 @@ public struct PaceIO: @unchecked Sendable {
     /// Where this run's answers came from, for the run log: the app's local
     /// API, the store directly, or (never asked) neither.
     public var source: () -> CLIRunLog.Source
+    /// The default login as the app last wrote it down (#343): what lets
+    /// `status` notice a verdict gated before a login switch without asking
+    /// Pacer anything. Nil when there is none to read, which skips the check.
+    public var loginMarker: () -> DefaultLoginMarker?
 
     public init(out: @escaping (String) -> Void, err: @escaping (String) -> Void,
                 now: @escaping () -> Date, sleep: @escaping (TimeInterval) -> Void,
@@ -31,7 +35,8 @@ public struct PaceIO: @unchecked Sendable {
                 gitBranch: @escaping (String) -> String?,
                 nap: @escaping (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) },
                 telemetry: PaceTelemetry = .off,
-                source: @escaping () -> CLIRunLog.Source = { .none }) {
+                source: @escaping () -> CLIRunLog.Source = { .none },
+                loginMarker: @escaping () -> DefaultLoginMarker? = { nil }) {
         self.out = out
         self.err = err
         self.now = now
@@ -41,6 +46,7 @@ public struct PaceIO: @unchecked Sendable {
         self.nap = nap
         self.telemetry = telemetry
         self.source = source
+        self.loginMarker = loginMarker
     }
 
     /// The real thing: stdout, stderr, the wall clock, URLSession and git.
@@ -77,7 +83,8 @@ public struct PaceIO: @unchecked Sendable {
             },
             gitBranch: PaceHTTP.gitBranch,
             telemetry: .live(),
-            source: { tracker.value })
+            source: { tracker.value },
+            loginMarker: { DefaultLoginMarker.read(from: DefaultLoginMarker.fileURL()) })
     }
 }
 
@@ -302,7 +309,8 @@ public enum Pace {
       status                 read the state file; 0=go 10=paused 3=unknown or
                              stale. A stale, expired or missing verdict is
                              re-gated first, by one reader for all of them
-                             (--no-refresh: never ask Pacer). A GO runs out
+                             (--no-refresh: never ask Pacer). So is one
+                             gated before the login switched. A GO runs out
                              early when a window it binds is projected to
                              reach its limit: `go (until 22:41Z)`
       wait  [--cap N]        block until the tripping window resets; 0=resume
@@ -396,6 +404,10 @@ final class PaceRun {
     private var seenBurn: [String: Double] = [:]
     /// When the last GO this run wrote runs out, for the gate's line.
     private var lastGoUntil: Date?
+    /// Set when the gate's data still named another account than the login
+    /// the app wrote down, after waiting for it to catch up (#343): the
+    /// verdict is written short-lived, so it is looked at again soon.
+    private var loginLag: (login: String, judged: String)?
     private var model: String
     /// The model was `auto` before it was resolved, so a verdict records
     /// that and a later `wait` or refresh asks again rather than reusing
@@ -413,6 +425,10 @@ final class PaceRun {
     private var sessionModels: [String] = []
     private var sessionAccount = ""
     private var sessionAccountSince = ""
+    /// Other accounts Pacer says this session may still be billing, and the
+    /// login change behind that (#357). Judged alongside `sessionAccount`.
+    private var sessionMayStillBill: [String] = []
+    private var sessionMayStillBillSince = ""
     private var sessionLookedUp = false
     private var autoNote = ""
 
@@ -609,6 +625,9 @@ final class PaceRun {
         sessionAccount = Self.quotedField(body, key: "currentAccountId") ?? ""
         if sessionAccount.isEmpty { sessionAccount = Self.quotedField(body, key: "accountId") ?? "" }
         sessionAccountSince = Self.quotedField(body, key: "currentAccountSince") ?? ""
+        sessionMayStillBill = Self.strings(in: body, key: "mayStillBillAccountIds")
+            .filter { $0 != sessionAccount }
+        sessionMayStillBillSince = Self.quotedField(body, key: "mayStillBillSince") ?? ""
         sessionModels = Self.models(in: body)
         return !sessionModel.isEmpty || !sessionAccount.isEmpty
     }
@@ -626,19 +645,22 @@ final class PaceRun {
     }
 
     /// Every string in the `"models"` array.
-    static func models(in body: String) -> [String] {
+    static func models(in body: String) -> [String] { strings(in: body, key: "models") }
+
+    /// Every string in the array named `key`; empty when there is none.
+    static func strings(in body: String, key: String) -> [String] {
         let lines = body.replacingOccurrences(of: ",", with: "\n").split(separator: "\n")
         var inside = false
         var out: [String] = []
         for line in lines {
-            if !inside, line.contains("\"models\"") { inside = true }
+            if !inside, line.contains("\"\(key)\"") { inside = true }
             guard inside else { continue }
             var rest = Substring(line)
             while let open = rest.firstIndex(of: "\"") {
                 let after = rest.index(after: open)
                 guard let close = rest[after...].firstIndex(of: "\"") else { break }
                 let value = String(rest[after..<close])
-                if value != "models" { out.append(value) }
+                if value != key { out.append(value) }
                 rest = rest[rest.index(after: close)...]
             }
             if line.contains("]") { break }
@@ -674,6 +696,11 @@ final class PaceRun {
         if !account.isEmpty, account != "all" {
             scope = [URLQueryItem(name: "account", value: account)]
             want = account
+        } else if !sessionAccount.isEmpty, !sessionMayStillBill.isEmpty {
+            // In doubt between logins (#357): every account's windows, then
+            // kept to the ones this session may be billing, all judged.
+            scope = []
+            want = ([sessionAccount] + sessionMayStillBill).joined(separator: ",")
         } else if !sessionAccount.isEmpty {
             scope = [URLQueryItem(name: "account", value: sessionAccount)]
             want = sessionAccount
@@ -692,6 +719,9 @@ final class PaceRun {
         if account.isEmpty || account == "all" {
             sessionLookedUp = false
             sessionAccount = ""
+            sessionAccountSince = ""
+            sessionMayStillBill = []
+            sessionMayStillBillSince = ""
             resolveSession()
         }
         setScope()
@@ -742,6 +772,8 @@ final class PaceRun {
     /// One row per (account, window) with a reading, narrowed to one login:
     /// `want` if given (a prefix: `accounts` prints ids cut to 8, #184), else
     /// the login `pacer_account_info` marks active, else the only account.
+    /// A comma-separated `want` keeps each login it names, in that order: a
+    /// session in doubt between logins is judged on all of them (#357).
     static func rows(from points: [PaceMetricPoint], want: String) -> [PaceRow] {
         struct Slot: Hashable { let account: String; let window: String }
         var order: [Slot] = []
@@ -784,8 +816,15 @@ final class PaceRun {
         var wanted = want
         if wanted.isEmpty { wanted = !active.isEmpty ? active : (accounts.count == 1 ? accounts[0] : "") }
         if wanted == "all" { wanted = "" }
-        return order.compactMap { s in
-            guard wanted.isEmpty || s.account.hasPrefix(wanted), let reading = pct[s] else { return nil }
+        let prefixes = wanted.split(separator: ",").map(String.init)
+        func rank(_ account: String) -> Int? {
+            prefixes.isEmpty ? 0 : prefixes.firstIndex { account.hasPrefix($0) }
+        }
+        let ranked = order.enumerated().sorted {
+            (rank($0.element.account) ?? 0, $0.offset) < (rank($1.element.account) ?? 0, $1.offset)
+        }.map(\.element)
+        return ranked.compactMap { s in
+            guard rank(s.account) != nil, let reading = pct[s] else { return nil }
             func f(_ name: String) -> String? { fields[name]?[s] }
             // Judge the live value (#318) when Pacer served one on a reading
             // recent enough for its measured error to hold; else the reading.
@@ -845,7 +884,8 @@ final class PaceRun {
         if trip.why == "eta" {
             return "\(trip.label) at \(PaceFormat.percent(trip.percentText))% is projected to fill in \(PaceFormat.human(trip.hitEta)) (horizon \(PaceFormat.human(eta)))"
         }
-        let at = "\(trip.label) at \(PaceFormat.percent(trip.percentText))% >= "
+        let on = Set(bindingRows.map(\.account)).count > 1 ? " on \(trip.account.prefix(8))" : ""
+        let at = "\(trip.label)\(on) at \(PaceFormat.percent(trip.percentText))% >= "
         if case .value(let text) = cap, !trip.fromSafe { return at + "cap \(text)%" }
         if margin > 0 { return at + "safe limit \(trip.safe)% − \(margin)" }
         return at + "safe limit \(PaceFormat.awkNumber(trip.limit))%"
@@ -856,7 +896,7 @@ final class PaceRun {
     /// margined safe limits, of which each window takes the lower.
     private func capNote() -> String {
         let safe = "safe limit " + bindingRows.map {
-            "\($0.label) \(PaceRules.safeLimit($0))%" + (margin > 0 ? " − \(margin)" : "")
+            "\(accountTag($0))\($0.label) \(PaceRules.safeLimit($0))%" + (margin > 0 ? " − \(margin)" : "")
         }.joined(separator: ", ")
         switch cap {
         case .safe:
@@ -867,7 +907,90 @@ final class PaceRun {
     }
 
     private func summary() -> String {
-        bindingRows.map { "\($0.label) \(String(format: "%.0f", $0.percent))%" }.joined(separator: ", ")
+        bindingRows.map { "\(accountTag($0))\($0.label) \(String(format: "%.0f", $0.percent))%" }
+            .joined(separator: ", ")
+    }
+
+    /// `e34c1234 ` before a window's label when more than one login is being
+    /// judged (#357), so "7d 87%, 7d 2%" says whose is whose. Nothing
+    /// otherwise: one login's line reads as it always did.
+    private func accountTag(_ row: PaceRow) -> String {
+        Set(bindingRows.map(\.account)).count > 1 ? "\(row.account.prefix(8)) " : ""
+    }
+
+    /// Why this session is judged on more than one login (#357), said the
+    /// way the gate says it could not identify a session: in the verdict.
+    /// Empty when it is not.
+    private func doubtReason() -> String {
+        guard !sessionMayStillBill.isEmpty, Set(rows.map(\.account)).count > 1 else { return "" }
+        let others = sessionMayStillBill.map { String($0.prefix(8)) }.joined(separator: ", ")
+        let when = PaceFormat.isoFormatter.date(from: sessionMayStillBillSince)
+            .map { " at \(PaceFormat.utcClock($0))" } ?? ""
+        return "judged on every login this session may be billing: the login moved to "
+            + "\(sessionAccount.prefix(8))\(when) without a switch that running sessions follow, "
+            + "and this session was running before it, so it may still be on \(others); "
+            + "switching away and back with an account switcher moves every session"
+    }
+
+    private func doubtNoteText() -> String {
+        let reason = doubtReason()
+        return reason.isEmpty ? "" : " (\(reason))"
+    }
+
+    /// Whether the account this run judges moves with the default login
+    /// (#343), decided the way `setScope` picked it: an explicit `--account`
+    /// does not; a session Pacer knows does when it is on the default login
+    /// (Pacer gives a `currentAccountSince` for exactly those); a pinned
+    /// `CLAUDE_CONFIG_DIR` does not; the active login does.
+    private var followsLogin: Bool {
+        if !account.isEmpty { return false }
+        if !sessionAccount.isEmpty { return !sessionAccountSince.isEmpty }
+        if let dir = env["CLAUDE_CONFIG_DIR"], !dir.isEmpty { return false }
+        return true
+    }
+
+    /// The accounts the rows were judged on, in order, once each.
+    private var judgedAccounts: [String] {
+        var seen = Set<String>()
+        return rows.map(\.account).filter { seen.insert($0).inserted }
+    }
+
+    /// How long after the app writes a new login a gate whose data still
+    /// names the old one waits for it to catch up (#343). The API snapshot
+    /// is rebuilt the moment the login moves, so this is about one build. A
+    /// disagreement older than this is not lag (a pick in Settings moves the
+    /// active account without the login), and waiting would only slow every
+    /// gate down.
+    static let loginCatchUpWindow: TimeInterval = 60
+    /// Looks, 0.5 s apart, a gate takes for the data to catch up: about 5 s.
+    static let loginCatchUpLooks = 10
+    /// The life of a GO written while the data still disagreed: a minute, so
+    /// the next `status` after it re-gates on caught-up data.
+    static let laggingGoLife: TimeInterval = 60
+
+    /// After a login switch the API snapshot can still be the old login's
+    /// for a build, and a gate that read it would record the old account as
+    /// if it were the new login's verdict: exactly the stale GO #343 is
+    /// about, shortened to the moments after a switch. So when the account a
+    /// login-following gate judged is not the login the app wrote down a
+    /// moment ago, look again until it is. If it never is, `loginLag` says so
+    /// and the verdict is written short-lived.
+    private func catchUpWithLogin() {
+        loginLag = nil
+        guard followsLogin, let marker = io.loginMarker(),
+              io.now().timeIntervalSince(marker.changedAt) < Self.loginCatchUpWindow,
+              !judgedAccounts.contains(marker.accountId) else { return }
+        for _ in 0..<Self.loginCatchUpLooks {
+            io.nap(0.5)
+            let kept = (rows, allAccounts)
+            refreshScope()
+            if !fetchRows() {
+                (rows, allAccounts) = kept
+                fetchReason = nil
+            }
+            if judgedAccounts.contains(marker.accountId) || !followsLogin { return }
+        }
+        loginLag = (marker.accountId, judgedAccounts.joined(separator: ","))
     }
 
     /// A GO is written with when it runs out (#313), from the rows it was
@@ -875,14 +998,24 @@ final class PaceRun {
     private func writeState(_ status: String, trip: String = "", percent: String? = nil,
                             resets: String? = nil, note: String, tripped: PaceRules.Trip? = nil) {
         let now = io.now()
-        lastGoUntil = status == "go" ? now.addingTimeInterval(PaceRules.goLife(goExpiry(), maxAge: maxAge)) : nil
+        var life = PaceRules.goLife(goExpiry(), maxAge: maxAge)
+        if loginLag != nil { life = min(life, Self.laggingGoLife) }
+        lastGoUntil = status == "go" ? now.addingTimeInterval(life) : nil
         PaceStateFile(path: statePath).write(.init(
             status: status, tripWindow: trip, model: model, cap: cap, eta: eta, window: window,
             modelAuto: modelAuto, margin: margin, resumeHeadroom: resumeHeadroom,
             usedPercent: percent, resetsIn: resets,
-            note: note + autoNoteText(),
+            note: note + autoNoteText() + doubtNoteText() + lagNoteText(),
             tripIdentity: tripped?.identity ?? "", tripAccount: tripped?.account ?? "",
-            tripLimit: tripped?.limit, goUntil: lastGoUntil), now: now)
+            tripLimit: tripped?.limit, goUntil: lastGoUntil,
+            account: judgedAccounts.joined(separator: ","), accountFlag: account,
+            login: io.loginMarker()?.accountId ?? "", followsLogin: followsLogin), now: now)
+    }
+
+    /// Said when the gate's data had not caught up with a login switch.
+    private func lagNoteText() -> String {
+        guard let lag = loginLag else { return "" }
+        return " (the login moved to \(lag.login.prefix(8)) moments ago and Pacer's data still says \(lag.judged.prefix(8)); judged on that, re-gating within a minute)"
     }
 
     private func goExpiry() -> PaceRules.Expiry? {
@@ -928,6 +1061,8 @@ final class PaceRun {
         guard fetchRows() else { apiOffNote(); throw PaceExit(code: offExitCode) }
         try requireSelection()
         if !autoNote.isEmpty { io.out("pace: \(autoNote)\n") }
+        let doubt = doubtReason()
+        if !doubt.isEmpty { io.out("pace: \(doubt)\n") }
         let multi = Set(rows.map(\.account)).count > 1
         let now = io.now()
         for row in selectedRows {
@@ -978,7 +1113,13 @@ final class PaceRun {
         let since = (!acct.isEmpty && acct == sessionAccount) ? sessionAccountSince : ""
         var text = "{\n  \"ok\": true,\n  \"at\": \"\(PaceFormat.utcStamp(io.now()))\",\n"
         text += "  \"account\": \(acct.isEmpty ? "null" : "\"\(acct)\""),\n"
-        text += "  \"accountSince\": \(since.isEmpty ? "null" : "\"\(since)\""),\n  \"windows\": [\n"
+        text += "  \"accountSince\": \(since.isEmpty ? "null" : "\"\(since)\""),\n"
+        // Only when there is doubt, so a session Pacer is sure of reads as
+        // it always did (#357).
+        if !sessionMayStillBill.isEmpty {
+            text += "  \"mayStillBill\": [" + sessionMayStillBill.map { "\"\($0)\"" }.joined(separator: ", ") + "],\n"
+        }
+        text += "  \"windows\": [\n"
         text += selected.map { row in
             "    {\"account\": \"\(row.account)\", \"identity\": \"\(row.identity)\", \"label\": \"\(row.label)\", "
             + "\"model\": \"\(row.model)\", \"usedPercent\": \(PaceFormat.awkNumber(row.readingPercent)), "
@@ -1009,14 +1150,15 @@ final class PaceRun {
             throw PaceExit(code: offExitCode)
         }
         try requireSelection()
+        catchUpWithLogin()
         guard let trip = PaceRules.evaluate(bindingRows, cap: cap, margin: margin, horizon: eta) else {
             writeState("go", note: "\(summary()) (\(capNote()))")
-            io.out("pace: GO — \(summary()) (\(capNote())).\(untilText())\(autoNoteText())\(scopeCaveat())\n")
+            io.out("pace: GO — \(summary()) (\(capNote())).\(untilText())\(autoNoteText())\(doubtNoteText())\(scopeCaveat())\(lagNoteText())\n")
             throw PaceExit(code: 0)
         }
         writeState("paused", trip: trip.label, percent: trip.percentText, resets: trip.resetsIn,
                    note: "\(tripReason(trip)); resets in \(PaceFormat.human(trip.resetsIn))", tripped: trip)
-        io.out("pace: PAUSE — \(tripReason(trip)), resets in \(PaceFormat.human(trip.resetsIn)) (\(PaceFormat.clock(trip.resetsIn, now: io.now()))).\(autoNoteText())\n")
+        io.out("pace: PAUSE — \(tripReason(trip)), resets in \(PaceFormat.human(trip.resetsIn)) (\(PaceFormat.clock(trip.resetsIn, now: io.now()))).\(autoNoteText())\(doubtNoteText())\(lagNoteText())\n")
         throw PaceExit(code: 10)
     }
 
@@ -1028,6 +1170,10 @@ final class PaceRun {
         /// A GO past its `goUntil`: a window it binds was projected to reach
         /// its limit by then (#313).
         case spent(until: Date)
+        /// The default login is no longer the one the verdict was gated
+        /// under, and the verdict follows it (#343): it describes an account
+        /// the caller is no longer billing.
+        case loginMoved(to: String, gated: String)
 
         /// For the line saying it was re-gated.
         var reason: String {
@@ -1036,6 +1182,7 @@ final class PaceRun {
             case .old(let age): return "the verdict was \(age < 60 ? "\(age)s" : "\(age / 60)m") old"
             case .expired(let trip): return "the \(trip.isEmpty ? "window" : trip) pause had expired"
             case .spent(let until): return "the go verdict ran out at \(PaceFormat.utcClock(until))"
+            case .loginMoved(let to, _): return "the login moved to \(to.prefix(8))"
             }
         }
     }
@@ -1044,6 +1191,12 @@ final class PaceRun {
         guard state.exists else { return .missing }
         guard let age = state.age(now: io.now()) else { return nil }
         if age > maxAge { return .old(age: age) }
+        // One small file read, no Pacer: the login the app wrote down against
+        // the one the verdict was gated under. No marker, no check.
+        if state.followsLogin, let marker = io.loginMarker(),
+           (state.quoted("login") ?? "") != marker.accountId {
+            return .loginMoved(to: marker.accountId, gated: state.quoted("account") ?? "")
+        }
         if state.quoted("status") == "paused",
            let resetIn = state.bare("resetsInSeconds"), let secs = Int(resetIn), resetIn.allSatisfy(\.isNumber),
            age >= secs {
@@ -1072,6 +1225,12 @@ final class PaceRun {
         let gatedMargin = state.bare("margin").flatMap { Int($0) } ?? 0
         if given.contains("margin"), gatedMargin != margin {
             return "unknown: last gate was with margin \(gatedMargin), not \(margin) — re-gate."
+        }
+        // And an account named outright (#343): a verdict about this
+        // session's login says nothing about an account asked for by id.
+        let gatedFlag = state.quoted("accountFlag") ?? ""
+        if !account.isEmpty, gatedFlag != account {
+            return "unknown: last gate was for \(gatedFlag.isEmpty ? "this session's account" : "account '\(gatedFlag)'"), not '\(account)' — re-gate."
         }
         return nil
     }
@@ -1113,6 +1272,12 @@ final class PaceRun {
             // Near a limit a GO lasts minutes, not the whole shelf life: past
             // this, the window it was judged on is projected at its limit.
             io.out("stale: the go verdict ran out at \(PaceFormat.utcClock(until)) — at the burn it was gated on, a window it binds is at its limit by now; re-gate.\n")
+            throw PaceExit(code: 3)
+        case .loginMoved(let to, let gated)?:
+            // Whatever it says, it says it about an account this session has
+            // stopped billing.
+            let was = gated.isEmpty ? "" : " (it was gated for \(gated.split(separator: ",").map { $0.prefix(8) }.joined(separator: ", ")))"
+            io.out("stale: the login moved to \(to.prefix(8)) since this verdict was gated\(was); re-gate.\n")
             throw PaceExit(code: 3)
         default:
             break
@@ -1242,6 +1407,13 @@ final class PaceRun {
         if force || !given.contains("window"), let w = state.quoted("window"), !w.isEmpty {
             window = w
             if w != "all" { taken.append("--window \(w)") }
+        }
+        // An account the gate was told outright (#343). Without it a refresh
+        // re-gated this session's login instead, and a bare `wait` read the
+        // difference as a switch.
+        if account.isEmpty, let flag = state.quoted("accountFlag"), !flag.isEmpty {
+            account = flag
+            taken.append("--account \(flag)")
         }
         return taken
     }
@@ -1678,8 +1850,11 @@ final class PaceRun {
             // the full path is on the same row.
             if whereText.count > 34 { whereText = String(whereText.prefix(33)) + "…" }
             let repo = str("repository")
+            // Billing another login than the one it is listed under, maybe (#357).
+            let others = (s["mayStillBillAccountIds"] as? [String] ?? []).map { String($0.prefix(8)) }
+            let doubt = others.isEmpty ? "" : "  (may still bill \(others.joined(separator: ", ")))"
             io.out(Self.pad(str("activity"), 7) + " " + Self.pad(acct, 9) + " " + Self.pad(whereText, 34) + " "
-                   + Self.pad(modelName, 18) + " " + path + (repo.isEmpty ? "" : "  ← \(repo)") + "\n")
+                   + Self.pad(modelName, 18) + " " + path + (repo.isEmpty ? "" : "  ← \(repo)") + doubt + "\n")
             printed = true
         }
         if !printed { io.out("No sessions in the last hour.\n") }

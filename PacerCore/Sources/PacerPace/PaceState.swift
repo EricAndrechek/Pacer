@@ -44,6 +44,17 @@ struct PaceStateFile {
         /// the soonest binding window's projected arrival at its limit,
         /// within the shelf life (#313). `status` re-gates it after.
         var goUntil: Date?
+        /// The account(s) whose windows were judged, comma-separated (#343).
+        var account = ""
+        /// The `--account` (or `PACE_ACCOUNT`) it was gated with, if any, so
+        /// a refresh re-gates that account rather than the session's.
+        var accountFlag = ""
+        /// The default login when it was written, per `DefaultLoginMarker`
+        /// (empty when there was none to read), and whether the account it
+        /// judged moves with that login. A verdict that does is stale once
+        /// the login names another account (#343).
+        var login = ""
+        var followsLogin = true
     }
 
     /// Written to a temporary file and renamed into place, so a reader never
@@ -74,6 +85,10 @@ struct PaceStateFile {
           "tripAccount": "\(v.tripAccount)",
           "tripLimit": \(v.tripLimit.map(PaceFormat.awkNumber) ?? "null"),
           "goUntil": \(v.goUntil.map { "\"\(PaceFormat.utcStamp($0))\"" } ?? "null"),
+          "account": "\(v.account)",
+          "accountFlag": "\(v.accountFlag)",
+          "login": "\(v.login)",
+          "followsLogin": \(v.followsLogin),
           "note": "\(v.note)",
           "updatedAt": "\(PaceFormat.utcStamp(now))"
         }
@@ -154,6 +169,11 @@ struct PaceStateFile {
               let written = PaceFormat.isoFormatter.date(from: stamp) else { return nil }
         return Int(floor(now.timeIntervalSince1970)) - Int(written.timeIntervalSince1970)
     }
+
+    /// Whether the verdict is about whichever account the default login is
+    /// (#343). A verdict written before this was recorded is taken to be, so
+    /// it is re-gated once rather than trusted across a switch.
+    var followsLogin: Bool { bare("followsLogin") != "false" }
 
     /// When a GO runs out (#313). Nil for a pause, for a verdict written
     /// before there was one, and for one that cannot be read: the shelf

@@ -62,6 +62,10 @@ public struct PacerSessionLookup: Codable, Sendable {
     /// switches (#211):
     /// - a Claude Desktop session bills Desktop's login;
     /// - a pinned profile's session bills that profile's login.
+    ///
+    /// And a session on the default login follows a switcher's switch but
+    /// not a `/login` run elsewhere: where it may not have followed, the
+    /// login it may still be on is in `mayStillBillAccountIds` (#357).
     public let currentAccountId: String?
     /// When the default login became `currentAccountId`: the last switch. A
     /// loop can compare it between reads to see a switch happen. Nil for a
@@ -71,6 +75,18 @@ public struct PacerSessionLookup: Codable, Sendable {
     /// Last path component of `projectPath`, for display.
     public let project: String?
     public let lastActiveAt: Date?
+    /// Accounts other than `currentAccountId` this session may still be
+    /// billing, newest first (#357); absent when Pacer has no doubt.
+    ///
+    /// A session follows a login change a switcher makes. It does not follow a
+    /// `/login` run in another session: it keeps the token it holds. So a
+    /// session on the default login that was already running when the login
+    /// moved in a way no switcher explains may still be on the login it had,
+    /// and nothing Pacer can see says which. A gate judges it on all of them,
+    /// the most constrained deciding. See `LoginSwitchEvidence`.
+    public var mayStillBillAccountIds: [String]? = nil
+    /// The newest login change behind `mayStillBillAccountIds`.
+    public var mayStillBillSince: Date? = nil
 
     public func encodedJSON() throws -> String { try pacerAPIEncodedJSON(self) }
 
@@ -80,7 +96,8 @@ public struct PacerSessionLookup: Codable, Sendable {
         Self(schemaVersion: schemaVersion, generatedAt: now, sessionId: sessionId,
              model: model, models: models, accountId: accountId,
              currentAccountId: currentAccountId, currentAccountSince: currentAccountSince,
-             projectPath: projectPath, project: project, lastActiveAt: lastActiveAt)
+             projectPath: projectPath, project: project, lastActiveAt: lastActiveAt,
+             mayStillBillAccountIds: mayStillBillAccountIds, mayStillBillSince: mayStillBillSince)
     }
 }
 
@@ -104,11 +121,65 @@ struct PacerSessionBinding {
     let trail: AccountTrail
     /// `DesktopSessionDirectory.accounts`: recorded session → its account.
     let desktopAccounts: [String: String]
+    /// The switches running sessions followed (#357).
+    let switches: LoginSwitchEvidence
+    /// The default login's changes, newest first, each with whether a
+    /// switcher explains it. Worked out once per binding, not per session.
+    let changes: [(change: AccountTrail.LoginChange, followed: Bool)]
+
+    init(trail: AccountTrail, desktopAccounts: [String: String],
+         switches: LoginSwitchEvidence = .none) {
+        self.trail = trail
+        self.desktopAccounts = desktopAccounts
+        self.switches = switches
+        changes = switches.changes(in: trail)
+    }
 
     static func load(context: ModelContext,
-                     desktop: DesktopSessionDirectory? = .shared) -> PacerSessionBinding {
+                     desktop: DesktopSessionDirectory? = .shared,
+                     switches: LoginSwitchEvidenceReader = .shared) -> PacerSessionBinding {
         PacerSessionBinding(trail: AccountParallelism.trail(context: context),
-                            desktopAccounts: desktop?.accounts ?? [:])
+                            desktopAccounts: desktop?.accounts ?? [:],
+                            switches: switches.current())
+    }
+
+    /// How far back a login change can leave a session in doubt (#357): the
+    /// span of turns a lookup reads, so that a session's start is known for
+    /// every change considered. A session older than that was running at
+    /// every change inside it.
+    static let loginChangeHorizon: TimeInterval = PacerSessionLookupBuilder.snapshotWindow
+
+    /// Whether any default-login change inside the horizon went unexplained:
+    /// when none did, no session can be in doubt and nothing more is read.
+    func hasUnfollowedChange(now: Date) -> Bool {
+        let horizon = now.addingTimeInterval(-Self.loginChangeHorizon)
+        return changes.contains { !$0.followed && $0.change.at > horizon && $0.change.at <= now }
+    }
+
+    /// The accounts other than `current` a session on the default login may
+    /// still be billing, and the newest change behind that, or nil (#357).
+    ///
+    /// `startedAt` is the session's first turn, nil when it may be older than
+    /// the horizon. Walking back from the newest change made after it: a
+    /// change a switcher explains is one the session followed, so it holds
+    /// that login and nothing older matters; any other change leaves it
+    /// possibly on the login before. The session that ran the `/login` is on
+    /// the new one, but nothing tells it from the others, so it is in doubt
+    /// with them and judged on both.
+    func mayStillBill(startedAt: Date?, current: String?,
+                      now: Date) -> (accounts: [String], since: Date)? {
+        let horizon = now.addingTimeInterval(-Self.loginChangeHorizon)
+        var others: [String] = []
+        var since: Date?
+        for (change, followed) in changes where change.at <= now {
+            if change.at <= horizon { break }
+            if let startedAt, change.at <= startedAt { break }
+            if followed { break }
+            since = since ?? change.at
+            if change.from != current, !others.contains(change.from) { others.append(change.from) }
+        }
+        guard let since, !others.isEmpty else { return nil }
+        return (others, since)
     }
 
     /// The account `sessionId`'s next turn bills to, and since when the
@@ -176,6 +247,9 @@ public struct PacerSessionList: Codable, Sendable {
         /// `active` (≤5 min), `recent` (≤1 h) or `idle`, the same thresholds
         /// the dashboard and menu bar use.
         public let activity: String
+        /// For an active session, other accounts it may still be billing
+        /// (`PacerSessionLookup.mayStillBillAccountIds`, #357).
+        public var mayStillBillAccountIds: [String]? = nil
     }
 
     public func encodedJSON() throws -> String { try pacerAPIEncodedJSON(self) }
@@ -202,7 +276,7 @@ public enum PacerSessionLookupBuilder {
     public static let snapshotWindow: TimeInterval = 6 * 60 * 60
 
     /// Every session seen within `snapshotWindow`, answered by the same rule
-    /// as `lookup(sessionId:)` (`answer(sessionId:turns:binding:now:)`), from
+    /// as `lookup(sessionId:)` (`answer(sessionId:turns:startedAt:binding:now:)`), from
     /// one read of the window's turns rather than one fetch per session.
     ///
     /// The read is raw SQLite (`RawSessionTurnReader`): through SwiftData it
@@ -254,16 +328,22 @@ public enum PacerSessionLookupBuilder {
                                     liveSince: Date, binding: PacerSessionBinding,
                                     now: Date) -> [String: PacerSessionLookup] {
         var bySession: [String: [PacerSessionTurn]] = [:]
+        // Each session's oldest turn read, past the cap: when it first wrote.
+        var earliest: [String: Date] = [:]
         for (sessionId, turn) in rows where !sessionId.isEmpty {
             // Newest first already; the same cap the store fetch applies.
             if bySession[sessionId, default: []].count < lookupTurnLimit {
                 bySession[sessionId, default: []].append(turn)
             }
+            earliest[sessionId] = turn.sampledAt
         }
         var out: [String: PacerSessionLookup] = [:]
         for (sessionId, turns) in bySession {
+            // The read starts `concurrencyWindow` before `liveSince`; a first
+            // turn in that margin may not be the session's first at all.
+            let first = earliest[sessionId].flatMap { $0 >= liveSince ? $0 : nil }
             guard let newest = turns.first, newest.sampledAt >= liveSince,
-                  let found = answer(sessionId: sessionId, turns: turns,
+                  let found = answer(sessionId: sessionId, turns: turns, startedAt: first,
                                      binding: binding, now: now) else { continue }
             out[sessionId] = found
         }
@@ -304,6 +384,31 @@ public enum PacerSessionLookupBuilder {
             return binding.current(sessionId: row.sessionId, newestAccount: row.accountId,
                                    newestAt: row.lastSeenAt).accountId ?? row.accountId
         }
+        // When each listed session first wrote, read only when a login change
+        // no switcher explains could leave an active one in doubt (#357).
+        var firstSeen: [String: Date] = [:]
+        let inDoubt = binding.hasUnfollowedChange(now: now)
+        if inDoubt {
+            let ids = Set(rows.map(\.sessionId))
+            var sessions = FetchDescriptor<SessionInfo>(predicate: #Predicate { $0.lastSeenAt >= cutoff })
+            sessions.fetchLimit = 400
+            for info in (try? context.fetch(sessions)) ?? [] where ids.contains(info.sessionId) {
+                firstSeen[info.sessionId] = info.firstSeenAt
+            }
+        }
+        func doubt(_ row: AccountSessionInfo) -> [String]? {
+            guard inDoubt,
+                  LiveSessionActivity.from(lastSeen: row.lastSeenAt, now: now) == .active else { return nil }
+            let bound = binding.current(sessionId: row.sessionId, newestAccount: row.accountId,
+                                        newestAt: row.lastSeenAt)
+            guard bound.since != nil else { return nil }
+            // Older than the horizon reads as "before every change in it", as
+            // the session lookup reads it.
+            let started = firstSeen[row.sessionId].flatMap {
+                $0 >= now.addingTimeInterval(-PacerSessionLookupBuilder.snapshotWindow) ? $0 : nil
+            }
+            return binding.mayStillBill(startedAt: started, current: bound.accountId, now: now)?.accounts
+        }
 
         // One lookup for every project involved, rather than one per session.
         let paths = Set(rows.map(\.projectPath))
@@ -324,7 +429,12 @@ public enum PacerSessionLookupBuilder {
         return PacerSessionList(
             schemaVersion: 1,
             generatedAt: now,
-            sessions: rows.filter { account == nil || current($0) == account }.map { row in
+            // A session that may still be billing `account` is drawing on its
+            // budget too, so it is listed under it (#357).
+            sessions: rows.filter { row in
+                guard let account else { return true }
+                return current(row) == account || doubt(row)?.contains(account) == true
+            }.map { row in
                 PacerSessionList.Row(
                     sessionId: row.sessionId,
                     accountId: row.accountId,
@@ -334,7 +444,8 @@ public enum PacerSessionLookupBuilder {
                     project: URL(fileURLWithPath: row.projectPath).lastPathComponent,
                     repository: origins[row.projectPath],
                     lastActiveAt: row.lastSeenAt,
-                    activity: LiveSessionActivity.from(lastSeen: row.lastSeenAt, now: now).label)
+                    activity: LiveSessionActivity.from(lastSeen: row.lastSeenAt, now: now).label,
+                    mayStillBillAccountIds: doubt(row))
             })
     }
 
@@ -363,7 +474,21 @@ public enum PacerSessionLookupBuilder {
             PacerSessionTurn(sampledAt: $0.sampledAt, model: $0.model,
                              accountId: $0.accountId, projectPath: $0.projectPath)
         }
-        return answer(sessionId: trimmed, turns: turns, binding: binding, now: now)
+        // When it first wrote: the oldest of these unless the fetch was cut
+        // off, and then asked for, but only when an unexplained login change
+        // could put the session in doubt (#357).
+        var startedAt = turns.count < lookupTurnLimit ? turns.last?.sampledAt : nil
+        if startedAt == nil, !turns.isEmpty, binding.hasUnfollowedChange(now: now) {
+            var first = FetchDescriptor<TokenSample>(
+                predicate: #Predicate { $0.sessionId == trimmed },
+                sortBy: [SortDescriptor(\.sampledAt)])
+            first.fetchLimit = 1
+            startedAt = (try? context.fetch(first))?.first?.sampledAt
+        }
+        // A first turn older than the window the snapshot reads is "older
+        // than every change it asks about", as the snapshot says it.
+        if let first = startedAt, first < now.addingTimeInterval(-snapshotWindow) { startedAt = nil }
+        return answer(sessionId: trimmed, turns: turns, startedAt: startedAt, binding: binding, now: now)
     }
 
     /// Enough turns to see a fan-out, not so many that an on-demand API call
@@ -375,8 +500,11 @@ public enum PacerSessionLookupBuilder {
     /// The lookup's rule, over a session's newest turns (newest first, at most
     /// `lookupTurnLimit`). Both the store fetch and the snapshot's raw read
     /// feed it, so the two answers cannot drift apart.
+    ///
+    /// `startedAt` is the session's first turn where the turns read reach it,
+    /// nil where it may be older (see `PacerSessionBinding.mayStillBill`).
     nonisolated static func answer(sessionId: String, turns: [PacerSessionTurn],
-                                   binding: PacerSessionBinding,
+                                   startedAt: Date?, binding: PacerSessionBinding,
                                    now: Date) -> PacerSessionLookup? {
         guard let newest = turns.first else { return nil }
 
@@ -394,6 +522,10 @@ public enum PacerSessionLookupBuilder {
         let path = newest.projectPath
         let current = binding.current(sessionId: sessionId, newestAccount: newest.accountId,
                                       newestAt: newest.sampledAt)
+        // Only a session on the default login (one with a `since`) follows,
+        // or fails to follow, its changes.
+        let doubt = current.since == nil ? nil
+            : binding.mayStillBill(startedAt: startedAt, current: current.accountId, now: now)
         return PacerSessionLookup(
             schemaVersion: 1,
             generatedAt: now,
@@ -405,6 +537,8 @@ public enum PacerSessionLookupBuilder {
             currentAccountSince: current.since,
             projectPath: path,
             project: path.map { URL(fileURLWithPath: $0).lastPathComponent },
-            lastActiveAt: newest.sampledAt)
+            lastActiveAt: newest.sampledAt,
+            mayStillBillAccountIds: doubt?.accounts,
+            mayStillBillSince: doubt?.since)
     }
 }
