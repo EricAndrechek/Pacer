@@ -909,8 +909,15 @@ struct PaceChartCard: View {
         // One ask per account, against that account's own fit. Keys are the
         // composite column ids, so two accounts' 5-hour answers cannot
         // overwrite each other.
-        let plan: [(accountId: String?, scoped: [String])] = series.map {
-            ($0.accountId, scopedRows($0).map(\.identity))
+        // Only the windows a column is drawn for: an account whose latest poll
+        // has no 5-hour window (a verified Ultra one) gets no 5-hour column,
+        // and asking the engine for one anyway was a forecast for nothing
+        // (#366).
+        let plan: [(accountId: String?, fixed: [RateLimitWindowKind], scoped: [String])] = series.map {
+            let noFiveHour = bucketed($0).hasNoFiveHourWindow
+            return ($0.accountId,
+                    RateLimitWindowKind.allCases.filter { !(noFiveHour && $0 == .fiveHour) },
+                    scopedRows($0).map(\.identity))
         }
         // The live values the columns show, so every forecast starts where
         // the number on screen is (#318). Taken here, on the main actor,
@@ -927,6 +934,7 @@ struct PaceChartCard: View {
         for entry in plan {
             let engine = engines.engine(forAccount: entry.accountId)
             let account = entry.accountId
+            let fixed = entry.fixed
             let scoped = entry.scoped
             let live = account.flatMap { liveByAccount[$0] } ?? [:]
             let computed = await askEngine {
@@ -955,7 +963,7 @@ struct PaceChartCard: View {
                             : "no model can project (\(list.first?.unavailableReason ?? "?"))"
                     }
                 }
-                for window in RateLimitWindowKind.allCases {
+                for window in fixed {
                     let v = live[window.rawValue]
                     absorb(key: window.rawValue,
                            outlook: await engine.burnOutlook(window: window, live: v),
