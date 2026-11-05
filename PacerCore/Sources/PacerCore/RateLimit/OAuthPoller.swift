@@ -1533,7 +1533,18 @@ public actor OAuthPoller: TokenPoolTesting {
         // that matters when two clients share one: a run of identical `ok`
         // lines could be one lane every minute or six lanes in rotation, and
         // there was no way to tell them apart from outside.
-        if !Self.sameCategory(previous, outcome) || previousLane != lastPolledLaneId {
+        //
+        // Except a non-active account's sweep, which rotates through its
+        // tokens by design, so every poll is a change of lane. Seven Desktop
+        // tokens wrote the same "tracked as secondary" line 84 times an hour.
+        // It gets one line an hour instead, saying how its polls were spread.
+        if case .secondaryAccount = outcome, idx < lanes.count, let key = lanes[idx].accountKey {
+            if let spread = noteSweepPoll(account: key, at: now, after: previous) {
+                Log.write("OAuthPoller", Self.summarize(
+                    outcome: outcome, laneCount: lanes.count, lane: lanes[idx],
+                    liveKeychainToken: liveKeychainToken) + spread)
+            }
+        } else if !Self.sameCategory(previous, outcome) || previousLane != lastPolledLaneId {
             Log.write("OAuthPoller", Self.summarize(
                 outcome: outcome, laneCount: lanes.count,
                 lane: idx < lanes.count ? lanes[idx] : nil,
@@ -1699,6 +1710,48 @@ public actor OAuthPoller: TokenPoolTesting {
     }
 
     // MARK: - Logging helpers
+
+    /// A non-active account's successful sweep polls since its last log line.
+    private struct SweepLogWindow {
+        var lastLineAt: Date?
+        var polls: [Date] = []
+    }
+    private var sweepLog: [String: SweepLogWindow] = [:]
+    static let sweepLineEvery: TimeInterval = 3_600
+
+    /// Record a successful sweep poll of `key` and say whether it gets a log
+    /// line: the account's first this launch, the first after a failure, and
+    /// then one an hour. Returns the line's suffix, or nil for no line.
+    private func noteSweepPoll(account key: String, at now: Date, after previous: PollOutcome?) -> String? {
+        var window = sweepLog[key] ?? SweepLogWindow()
+        window.polls.append(now)
+        defer { sweepLog[key] = window }
+        let recovering: Bool
+        switch previous {
+        case nil, .success?, .secondaryAccount?: recovering = false
+        default: recovering = true
+        }
+        if let last = window.lastLineAt, now.timeIntervalSince(last) < Self.sweepLineEvery, !recovering {
+            return nil
+        }
+        let spread = Self.sweepSpread(window.polls)
+        window.lastLineAt = now
+        window.polls = [now]
+        return spread
+    }
+
+    /// "; 84 polls in 60 min, gap median 43 s, shortest 42 s" — how one
+    /// account's sweep was spread, from the poll that wrote the last line to
+    /// this one. Evenly staggered, n lanes give gaps of interval/n (#350);
+    /// lanes firing together show as a shortest gap of a few seconds. Empty
+    /// until there are two gaps to describe.
+    static func sweepSpread(_ polls: [Date]) -> String {
+        guard polls.count >= 3, let first = polls.first, let last = polls.last else { return "" }
+        let gaps = zip(polls, polls.dropFirst()).map { $1.timeIntervalSince($0) }.sorted()
+        let minutes = Int((last.timeIntervalSince(first) / 60).rounded())
+        return "; \(polls.count - 1) polls in \(minutes) min, gap median \(Int(gaps[gaps.count / 2].rounded())) s"
+            + ", shortest \(Int(gaps[0].rounded())) s"
+    }
 
     private static func sameCategory(_ a: PollOutcome?, _ b: PollOutcome?) -> Bool {
         switch (a, b) {

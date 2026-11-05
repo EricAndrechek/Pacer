@@ -486,3 +486,19 @@ struct LaneStaggerSchedulerTests {
         #expect(scheduler.decideSweep(lanes: [], accountKeys: [], interval: 300, now: t0) == nil)
     }
 }
+
+@Suite("Sweep log line (#350)")
+struct SweepLogLineTests {
+    @Test("the hourly sweep line reports the spread of the account's polls")
+    func spreadSummary() {
+        let t0 = Date(timeIntervalSinceReferenceDate: 0)
+        let even = (0...84).map { t0.addingTimeInterval(Double($0) * 300 / 7) }
+        #expect(OAuthPoller.sweepSpread(even) == "; 84 polls in 60 min, gap median 43 s, shortest 43 s")
+        // Seven together, then a pause: the shape #350 reported.
+        let bunched = (0..<3).flatMap { round in
+            (0..<7).map { t0.addingTimeInterval(Double(round) * 300 + Double($0) * 6) }
+        }
+        #expect(OAuthPoller.sweepSpread(bunched) == "; 20 polls in 11 min, gap median 6 s, shortest 6 s")
+        #expect(OAuthPoller.sweepSpread([t0, t0.addingTimeInterval(40)]) == "")
+    }
+}
