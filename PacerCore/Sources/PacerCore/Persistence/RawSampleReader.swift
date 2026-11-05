@@ -52,6 +52,9 @@ enum RawSampleReader {
             return false
         }
         defer { sqlite3_close(db) }
+        // A WAL reader is rarely refused, but a refusal here costs the whole
+        // SwiftData walk, so give a moment's contention a second to clear.
+        sqlite3_busy_timeout(db, 1_000)
 
         let sql = """
             SELECT ZDATE, ZMODEL, ZPROJECTPATH, ZSESSIONID, ZSAMPLEDAT, ZLOCALHOUR, ZCCVERSION,
