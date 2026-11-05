@@ -1,9 +1,51 @@
+import CoreData
 import Foundation
 import Security
 import SwiftData
 
-public enum PacerStoreError: Error, Sendable {
+public enum PacerStoreError: Error, Sendable, LocalizedError {
     case appGroupContainerUnavailable(identifier: String)
+    /// The store on disk was written by a different schema, and this caller
+    /// is not the one that migrates it. See `openWithoutMigrating(at:types:)`.
+    case migrationPending
+
+    public var errorDescription: String? {
+        switch self {
+        case .appGroupContainerUnavailable(let identifier):
+            return "The App Group container \(identifier) is unavailable."
+        case .migrationPending:
+            return "Pacer is updating its data. Try again in a moment."
+        }
+    }
+}
+
+/// How the store on disk relates to the schema this build carries, read from
+/// the store's metadata without opening (or writing) it.
+public enum StoreSchemaState: String, Sendable, Equatable {
+    /// No store file yet: opening creates an empty one, which is quick.
+    case absent
+    /// Written by this schema: opening is an ordinary open.
+    case current
+    /// Written by another schema: opening migrates it in place, which takes
+    /// as long as the store is big.
+    case needsMigration = "needs-migration"
+    /// The metadata could not be read. Opening may migrate, or fail.
+    case unknown
+}
+
+/// What `PacerStore.prepareStore(at:types:)` did.
+public struct StorePreparation: Sendable {
+    /// The open container. `ModelContainer` is `Sendable`, so a container
+    /// opened off the main thread can be handed to it.
+    public let container: ModelContainer
+    public let before: StoreSchemaState
+    public let after: StoreSchemaState
+    public let seconds: Double
+    public let onMainThread: Bool
+
+    /// An open that started from another schema and left the store on this
+    /// one: SwiftData migrated it.
+    public var migrated: Bool { before != .current && before != .absent && after == .current }
 }
 
 public enum PacerStore {
@@ -76,13 +118,87 @@ public enum PacerStore {
     nonisolated(unsafe) private static var _cachedContainer: ModelContainer?
     private static let containerLock = NSLock()
 
+    /// The cached reader container (see `_cachedContainer`). Never migrates:
+    /// see `openWithoutMigrating(at:types:)`. A refused or failed open is not
+    /// cached, so the next call tries again.
     public static func sharedModelContainer() throws -> ModelContainer {
         containerLock.lock()
         defer { containerLock.unlock() }
         if let cached = _cachedContainer { return cached }
-        let new = try makeModelContainer()
+        let new = try openWithoutMigrating(at: try storeURL())
         _cachedContainer = new
         return new
+    }
+
+    /// Open the store, unless opening it would migrate it.
+    ///
+    /// The app migrates the store, off its main thread, at the first launch
+    /// after an update (`prepareStore`). Everything else that opens it reads
+    /// it: the widget extension (another process), and the App Intents and
+    /// HTTP API inside the app. If one of those opened a store still on the
+    /// old schema, SwiftData would start a second in-place migration of the
+    /// same file, racing the app's: from the widget, two processes altering
+    /// the same tables; in the app, a migration on whatever thread asked,
+    /// which for an App Intent is the main one. So they wait their turn
+    /// instead: this throws `migrationPending`, the widget draws its
+    /// not-fresh state, and the app's next scan cycle reloads the widget's
+    /// timelines once the store is ready.
+    ///
+    /// Only a definite `needsMigration` holds the open back. Metadata that
+    /// cannot be read opens as before, so a check that cannot decide never
+    /// leaves the widget blank.
+    public static func openWithoutMigrating(
+        at url: URL, types: [any PersistentModel.Type] = allModelTypes
+    ) throws -> ModelContainer {
+        if schemaState(at: url, types: types) == .needsMigration {
+            throw PacerStoreError.migrationPending
+        }
+        return try makeModelContainer(at: url, types: types)
+    }
+
+    /// Compare the store's metadata with the schema `types` describes.
+    ///
+    /// SwiftData has no API for "would opening this migrate it?", but it is
+    /// Core Data underneath: the store records each entity's version hash,
+    /// and `NSManagedObjectModel.makeManagedObjectModel(for:)` builds the
+    /// model SwiftData would open it with. Reads the metadata only, so it is
+    /// safe beside a process that has the store open, and cheap enough for
+    /// the main thread at launch.
+    public static func schemaState(
+        at url: URL, types: [any PersistentModel.Type] = allModelTypes
+    ) -> StoreSchemaState {
+        guard FileManager.default.fileExists(atPath: url.path) else { return .absent }
+        guard let model = NSManagedObjectModel.makeManagedObjectModel(for: types),
+              let metadata = try? NSPersistentStoreCoordinator.metadataForPersistentStore(
+                type: .sqlite, at: url)
+        else { return .unknown }
+        return model.isConfiguration(withName: nil, compatibleWithStoreMetadata: metadata)
+            ? .current : .needsMigration
+    }
+
+    /// Open the store on the calling thread, migrating it in place first if
+    /// the schema changed. Call it off the main thread: the migration takes
+    /// as long as the store is big, and it is the first launch after every
+    /// schema change that pays it (Sentry PACER-J, #376: 2+ s on the main
+    /// thread when this ran inside `PacerAppDelegate.init`).
+    ///
+    /// Returns the container rather than closing it for a second open on the
+    /// main thread: `ModelContainer` is `Sendable`, and that second open would
+    /// put the ordinary open's cost back on the main thread for nothing.
+    public static func prepareStore(
+        at url: URL, types: [any PersistentModel.Type] = allModelTypes
+    ) throws -> StorePreparation {
+        let began = Date()
+        let onMain = Thread.isMainThread
+        let before = schemaState(at: url, types: types)
+        let container = try makeModelContainer(at: url, types: types)
+        // Checked again, rather than assumed: "now current" in the log is the
+        // evidence that the metadata check and SwiftData agree, and the widget
+        // relies on that agreement (`openWithoutMigrating`).
+        let after = schemaState(at: url, types: types)
+        return StorePreparation(container: container, before: before, after: after,
+                                seconds: Date().timeIntervalSince(began),
+                                onMainThread: onMain)
     }
 
     /// Every `@Model` type the app registers. Single-sourced so the
@@ -138,6 +254,14 @@ public enum PacerStore {
     /// The on-disk container at an explicit path — for tools that verify a
     /// frozen *copy* of a real store and must never open the live one.
     public static func makeModelContainer(at url: URL) throws -> ModelContainer {
+        try makeModelContainer(at: url, types: allModelTypes)
+    }
+
+    /// `types` is a test seam: a migration test needs a store written by a
+    /// schema the app no longer has.
+    static func makeModelContainer(
+        at url: URL, types: [any PersistentModel.Type]
+    ) throws -> ModelContainer {
         let configuration = ModelConfiguration(url: url)
         // **Schema evolution:** Pacer relies on SwiftData's implicit
         // lightweight migration — safe for added optional fields and
@@ -150,7 +274,7 @@ public enum PacerStore {
         // user-facing safety net, but the right fix is to add the
         // migration plan before shipping the schema change.
         return try ModelContainer(
-            for: Schema(allModelTypes),
+            for: Schema(types),
             configurations: configuration
         )
     }

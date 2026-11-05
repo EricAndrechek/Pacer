@@ -15,10 +15,15 @@ import PacerCore
 /// concern.
 ///
 /// Lifecycle:
-/// - `init()` — open the SwiftData container, register defaults,
-///   construct the background service. No I/O or scan starts here;
-///   that waits for `applicationDidFinishLaunching`.
-/// - `applicationDidFinishLaunching` — start the background service.
+/// - `init()` — register defaults, start telemetry, open the SwiftData
+///   container and construct the background service. No scan starts
+///   here; that waits for `applicationDidFinishLaunching`. If the store
+///   needs migrating (the first launch after an update that changed the
+///   schema), the open moves off the main thread instead
+///   (`prepareStoreOffMain`, #376) and `storeLoader` starts `.opening`.
+/// - `applicationDidFinishLaunching` — start the background service and
+///   everything else that needs the store (`startStoreServicesIfReady`),
+///   or leave that to `storeDidPrepare` while a migration is running.
 ///   The service starts whether the user opened the app interactively
 ///   or it was auto-launched at login (so the LSUIElement-hidden
 ///   "agent" mode still does data collection).
@@ -45,8 +50,19 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// papering over.
     @MainActor static var pendingDestination: ContentView.Destination?
 
-    let container: ModelContainer
-    let backgroundService: AppBackgroundService
+    /// The store, once it is open. Everything that needs the container reads
+    /// it here, or waits for `.ready`: see `StoreLoader`.
+    let storeLoader: StoreLoader
+    /// Built in the same turn the store becomes ready, so it is non-nil
+    /// whenever `storeLoader` is `.ready`.
+    private(set) var backgroundService: AppBackgroundService?
+    /// `applicationDidFinishLaunching` has run. The store can become ready
+    /// before or after it, and the services that need both start once.
+    private var launchFinished = false
+    private var storeServicesStarted = false
+    /// The off-main open, while one runs; termination waits for it to settle
+    /// rather than quitting in the middle of a migration.
+    private var storeOpenTask: Task<Void, Never>?
 
     /// Observer lifecycle note: every `NSObjectProtocol` we stash on
     /// this delegate (`windowObservers`, `menuBarPrefObserver`) is added
@@ -97,6 +113,7 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // beachball in the app.
             Log.processTag = LiveRenderMode.isActive ? "render" : "shot"
             PacerSettings.registerDefaults()
+            let container: ModelContainer
             do {
                 // The live renderer is the same off-screen path pointed at the
                 // real store, read-only — see `LiveRenderMode`. Everything else
@@ -122,7 +139,12 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     """.utf8))
                 exit(2)
             }
-            backgroundService = AppBackgroundService(container: container)
+            // Diagnostic runs open their store synchronously, as they always
+            // have: nobody is waiting on their main thread, and their work
+            // starts from `applicationDidFinishLaunching` with the store in hand.
+            let service = AppBackgroundService(container: container)
+            backgroundService = service
+            storeLoader = StoreLoader(ready: .init(container: container, service: service))
             super.init()
             return
         }
@@ -136,6 +158,7 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if ColdStartProbe.isActive || ArchiveBackfill.isActive || ArchiveRoundTrip.isActive
             || AccountAssignMode.isActive {
             PacerSettings.registerDefaults()
+            let container: ModelContainer
             do {
                 // Which store a mode gets is part of its contract, so
                 // spell it out: the archive modes READ the real store,
@@ -153,7 +176,9 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             } catch {
                 Self.showFatalContainerError(error)
             }
-            backgroundService = AppBackgroundService(container: container)
+            let service = AppBackgroundService(container: container)
+            backgroundService = service
+            storeLoader = StoreLoader(ready: .init(container: container, service: service))
             super.init()
             return
         }
@@ -187,13 +212,117 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         TelemetryController.shared.startIfAllowed()
         // PostHog usage events (the "Usage data" toggle), beside Sentry.
         AnalyticsController.shared.startIfAllowed()
+
+        // Open the store here, synchronously, when that is an ordinary open —
+        // every launch but the first after a schema change, which keeps
+        // everything below exactly as it always was. When the store needs
+        // migrating, SwiftData does it inside the open, for as long as the
+        // store is big, and that hung the main thread before anything was on
+        // screen (Sentry PACER-J, #376). Then the open goes off the main
+        // thread and everything that needs the store waits for it.
+        let storeURL: URL
         do {
-            container = try PacerStore.makeModelContainer()
+            storeURL = try PacerStore.storeURL()
         } catch {
             Self.showFatalContainerError(error)
         }
-        backgroundService = AppBackgroundService(container: container)
+        let began = Date()
+        let schema = PacerStore.schemaState(at: storeURL)
+        // `.unknown` goes off the main thread too: metadata that can't be read
+        // may be a store that needs migrating, or one that fails to open, and
+        // either is better found out there.
+        guard schema == .current || schema == .absent else {
+            storeLoader = StoreLoader()
+            super.init()
+            storeOpenTask = prepareStoreOffMain(at: storeURL, schema: schema)
+            return
+        }
+        let container: ModelContainer
+        do {
+            container = try PacerStore.makeModelContainer(at: storeURL)
+        } catch {
+            Self.showFatalContainerError(error)
+        }
+        Log.write("Store", "opened in \(Self.milliseconds(since: began)) ms on main (\(schema.rawValue))")
+        let service = AppBackgroundService(container: container)
+        backgroundService = service
+        storeLoader = StoreLoader(ready: .init(container: container, service: service))
         super.init()
+    }
+
+    /// Open (and migrate) the store on a background thread, then hand it to
+    /// the main actor. The task settles once the store is ready or the open
+    /// has failed.
+    ///
+    /// Sentry is already running (started above), so a crash inside the
+    /// migration is still reported, and the breadcrumb says what it was doing.
+    private func prepareStoreOffMain(at url: URL, schema: StoreSchemaState) -> Task<Void, Never> {
+        Log.write("Store", "schema \(schema.rawValue): preparing off the main thread")
+        Telemetry.breadcrumb("store", "preparing store (\(schema.rawValue))")
+        let began = Date()
+        return Task { @MainActor in
+            // `.userInitiated`: the dashboard and the menu bar are waiting on it.
+            let result = await Task.detached(priority: .userInitiated) {
+                Result { try PacerStore.prepareStore(at: url) }
+            }.value
+            switch result {
+            case .success(let prepared):
+                self.storeDidPrepare(prepared, began: began)
+            case .failure(let error):
+                Log.write("Store", "prepare failed after \(Self.milliseconds(since: began)) ms: \(error)")
+                self.storeLoader.markFailed(error)
+                // The same alert an open that fails in `init` puts up.
+                Self.showFatalContainerError(error)
+            }
+        }
+    }
+
+    /// The off-main open finished: build what the store feeds, mark it ready
+    /// (which swaps the dashboard's placeholder for the dashboard), and start
+    /// the services if launch has already got that far.
+    private func storeDidPrepare(_ prepared: StorePreparation, began: Date) {
+        // `prepared.seconds` is the open itself; "ready" adds the hops to the
+        // background thread and back, which is what the dashboard waited.
+        Log.write("Store", "prepared in \(Int(prepared.seconds * 1000)) ms "
+                  + (prepared.onMainThread ? "ON main" : "off main")
+                  + " (migrated: \(prepared.migrated ? "yes" : "no"); "
+                  + "\(prepared.before.rawValue) → \(prepared.after.rawValue); "
+                  + "ready after \(Self.milliseconds(since: began)) ms)")
+        // Once per update that changed the schema: what the migration really
+        // costs, which the hang report (PACER-J) could only bound from below.
+        Telemetry.span(Telemetry.Span(
+            op: "store.prepare", name: "Store prepare", start: began, end: Date(),
+            attributes: ["migrated": .bool(prepared.migrated),
+                         "before": .string(prepared.before.rawValue),
+                         "after": .string(prepared.after.rawValue)]))
+        let service = AppBackgroundService(container: prepared.container)
+        backgroundService = service
+        storeLoader.markReady(.init(container: prepared.container, service: service))
+        startStoreServicesIfReady()
+    }
+
+    /// Everything launch starts that reads or writes the store. Runs once,
+    /// when both the store is ready and `applicationDidFinishLaunching` has
+    /// run, in whichever order those happen.
+    private func startStoreServicesIfReady() {
+        guard launchFinished, !storeServicesStarted,
+              let store = storeLoader.ready, let backgroundService else { return }
+        storeServicesStarted = true
+        // If the bundle was just replaced under us (Sparkle auto-update
+        // or `make install`), the old widget extension is still running
+        // its now-stale binary and chronod won't relaunch it on its own.
+        // Bounce it here so widgets pick up the new build's code + data.
+        // After the store is ready, not before: the new extension opens the
+        // store as soon as it starts, and would only find it mid-migration.
+        WidgetExtensionRelauncher.bounceIfBundleReplaced()
+        backgroundService.start()
+        // Telemetry services; each is a no-op unless TelemetryController is running.
+        DailyCheckIn.shared.start(container: store.container, engines: backgroundService.engines)
+        installMenuBar()
+    }
+
+    private static func milliseconds(since start: Date) -> Int {
+        Int(Date().timeIntervalSince(start) * 1000)
     }
 
     /// Container open failed — likely a corrupted store or permission
@@ -359,6 +488,8 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // Suppress any window macOS restores for the bundle — the same
             // guard the other diagnostic modes carry.
             Self.suppressWindowsWhileDiagnosticRuns()
+            // Opened synchronously in `init` for every diagnostic mode.
+            guard let container = storeLoader.container, let backgroundService else { exit(2) }
             Task { @MainActor in
                 await SampleCostCache.reload()
                 // The one mode that is *allowed* to touch the screen, and only
@@ -383,7 +514,7 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     // `make screenshots` stops instead.
                     guard ScreenshotMode.validateFixture(container) else { exit(3) }
                     await ScreenshotMode.captureAll(container: container,
-                                                    sceneEngines: self.backgroundService.engines,
+                                                    sceneEngines: backgroundService.engines,
                                                     installStatusItem: { self.installStatusItemForScreenshots() })
                     // Again afterwards: scenes that build their own series
                     // report through `ScreenshotMode.note` while rendering, and
@@ -416,6 +547,7 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // front of them. Close anything that appears for as long as the
             // mode runs; every one of these exits in seconds.
             Self.suppressWindowsWhileDiagnosticRuns()
+            guard let container = storeLoader.container else { exit(2) }
             Task { @MainActor in
                 if AccountAssignMode.isActive {
                     await AccountAssignMode.run(container: container)
@@ -476,16 +608,17 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 _ = self?.ensureMainWindowVisible()
             }
         }
-        // If the bundle was just replaced under us (Sparkle auto-update
-        // or `make install`), the old widget extension is still running
-        // its now-stale binary and chronod won't relaunch it on its own.
-        // Bounce it here so widgets pick up the new build's code + data.
-        WidgetExtensionRelauncher.bounceIfBundleReplaced()
         MainThreadStallWatchdog.shared.start()
         ClickLatencyProbe.shared.start()
-        backgroundService.start()
+        // The scan, the poller, the check-in, the menu bar item and the widget
+        // bounce all need the store. On an ordinary launch it opened in `init`
+        // and they start right here, as they always did; while the first
+        // launch after a schema change is still migrating it, they start from
+        // `storeDidPrepare` instead. Until then the dashboard window, if it
+        // opens, shows `StoreOpeningView`.
+        launchFinished = true
+        startStoreServicesIfReady()
         // Telemetry services; each is a no-op unless TelemetryController is running.
-        DailyCheckIn.shared.start(container: container, engines: backgroundService.engines)
         CrashReportForwardingService.shared.start()
         // The launch origin can depend on the login-item status, which is
         // resolved off the main thread; the event waits for it.
@@ -498,7 +631,6 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // this is the main thread at launch (Sentry PACER-N).
         Task.detached(priority: .utility) { LoginItemController.reconcileAtLaunch() }
         installWindowObservers()
-        installMenuBar()
         installGlobalHotkey()
         // Warm the shared sample-cost cache so views (LiveActivity,
         // DayDetail, TodayTimeline) can compute per-sample cost
@@ -524,7 +656,11 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // video up against.
         Log.write("Lifecycle", "terminating")
         Task { @MainActor in
-            await backgroundService.stop()
+            // A quit during a migration waits for it: SQLite would roll an
+            // interrupted transaction back, but there is no reason to find out
+            // whether every step of SwiftData's migration is one.
+            await storeOpenTask?.value
+            await backgroundService?.stop()
             await NotificationCoordinator.shared.notifyCollectionPaused()
             AnalyticsUsage.shared.appQuit()
             TelemetryController.shared.prepareForTermination()
@@ -975,6 +1111,9 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func buildStatusItem() {
+        // Installed only once the store is open (`startStoreServicesIfReady`),
+        // so this holds; the hosted views below need the container.
+        guard let store = storeLoader.ready else { return }
         // Start with a placeholder width; the host's fittingSize feeds
         // back into NSStatusItem.length once the SwiftUI body has had a
         // chance to lay out. `variableLength` alone *doesn't* size off a
@@ -1022,7 +1161,7 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             rootView: AnyView(
                 MenuBarKeyedContent {
                     MenuBarLabel(onTooltipChange: applyToolTip)
-                        .modelContainer(self.container)
+                        .modelContainer(store.container)
                 }
             )
         )
@@ -1059,7 +1198,7 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // motion). The popover variant we used to have did none of
         // these without manual button-highlight management and was a
         // tracking discontinuity vs the rest of the menu bar.
-        let menu = buildStatusMenu()
+        let menu = buildStatusMenu(store)
         item.menu = menu
 
         statusItem = item
@@ -1092,7 +1231,7 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// previous popover footer was a row of SwiftUI buttons that
     /// looked like custom UI in the middle of an otherwise-native
     /// menu-bar interaction.
-    private func buildStatusMenu() -> NSMenu {
+    private func buildStatusMenu(_ store: StoreLoader.Ready) -> NSMenu {
         let menu = NSMenu()
         // Re-measure the custom content view's height each time the menu opens
         // (see `menuWillOpen`) so dynamically-discovered scoped rows never clip.
@@ -1113,9 +1252,9 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             rootView: AnyView(
                 MenuBarKeyedContent {
                     MenuStatusContent()
-                        .modelContainer(self.container)
-                        .environment(\.usageEngine, self.backgroundService.engine)
-                        .environment(\.usageEngines, self.backgroundService.engines)
+                        .modelContainer(store.container)
+                        .environment(\.usageEngine, store.engine)
+                        .environment(\.usageEngines, store.engines)
                 }
             )
         )

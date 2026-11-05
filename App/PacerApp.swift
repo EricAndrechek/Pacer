@@ -59,17 +59,17 @@ struct PacerApp: App {
         // A singleton Window means `openWindow(id:)` reuses the one
         // we already have.
         Window("Pacer", id: "main") {
-            ContentView()
+            // The dashboard once the store is open, a placeholder while the
+            // first launch after an update migrates it (#376). The container
+            // and the engines are applied inside, because this scene exists
+            // before they do.
+            DashboardRoot(loader: appDelegate.storeLoader)
                 // Hands the placement code this scene's real NSWindow, so
                 // it stops having to guess which window is the dashboard.
+                // Outside the switch, so the window is registered while the
+                // placeholder is up too.
                 .background(DashboardWindowRegistrar())
-                // Hand the shared intelligence engine to the view tree so
-                // cards can ask it typed questions. Created in the background
-                // service's init, so it's non-nil here.
-                .environment(\.usageEngine, appDelegate.backgroundService.engine)
-                .environment(\.usageEngines, appDelegate.backgroundService.engines)
         }
-        .modelContainer(appDelegate.container)
         // A diagnostic run (`make render-live`, the probes) is a second
         // process of this bundle beside the owner's Pacer, and SwiftUI opens
         // the primary scene's window at launch, at the autosaved frame:
@@ -91,19 +91,7 @@ struct PacerApp: App {
         .commands {
             CommandGroup(after: .importExport) {
                 Divider()
-                Button("Export Daily Totals…") {
-                    let context = ModelContext(appDelegate.container)
-                    CSVExporter.dailyTotals(context: context)
-                }
-                .keyboardShortcut("e", modifiers: [.command, .shift])
-                Button("Export Daily by Model…") {
-                    let context = ModelContext(appDelegate.container)
-                    CSVExporter.dailyByModel(context: context)
-                }
-                Button("Export Project Totals…") {
-                    let context = ModelContext(appDelegate.container)
-                    CSVExporter.projectTotals(context: context)
-                }
+                ExportCommands(loader: appDelegate.storeLoader)
             }
             // Replace the macOS-standard "Settings…" item that SwiftUI
             // would otherwise create (because there's no `Settings`
@@ -248,5 +236,33 @@ struct PacerApp: App {
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentSize)
         .defaultPosition(.center)
+    }
+}
+
+/// File → Export. A view rather than inline buttons so the store's state is
+/// read in a body that redraws when it changes, here and not in `PacerApp`'s:
+/// the items are disabled while the first launch after an update is still
+/// migrating the store (#376).
+private struct ExportCommands: View {
+    let loader: StoreLoader
+
+    var body: some View {
+        let container = loader.container
+        Button("Export Daily Totals…") {
+            guard let container else { return }
+            CSVExporter.dailyTotals(context: ModelContext(container))
+        }
+        .keyboardShortcut("e", modifiers: [.command, .shift])
+        .disabled(container == nil)
+        Button("Export Daily by Model…") {
+            guard let container else { return }
+            CSVExporter.dailyByModel(context: ModelContext(container))
+        }
+        .disabled(container == nil)
+        Button("Export Project Totals…") {
+            guard let container else { return }
+            CSVExporter.projectTotals(context: ModelContext(container))
+        }
+        .disabled(container == nil)
     }
 }
