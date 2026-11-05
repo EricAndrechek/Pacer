@@ -376,6 +376,22 @@ public final class UsageScope {
         storedLimitAccountId ?? Account.activeId(in: context)
     }
 
+    /// `limitAccountId(in:)` for a scope this process holds: the observable
+    /// value (ephemeral ones included), then the store's active row. A view
+    /// that takes its scope as an input reads this rather than the stored
+    /// defaults, so a renderer's `selectEphemeral` reaches it (#324).
+    public func resolvedLimitAccountId(in context: ModelContext) -> String? {
+        Self.resolveLimitAccountId(scope: accountId, active: activeAccountId, in: context)
+    }
+
+    /// The rule behind it, on plain values: the picked scope, else the active
+    /// login, else the store's active row. Never the stored defaults.
+    public nonisolated static func resolveLimitAccountId(
+        scope: String?, active: String?, in context: ModelContext
+    ) -> String? {
+        scope ?? active ?? Account.activeId(in: context)
+    }
+
     /// The active login alone, ignoring what the window is showing.
     ///
     /// What a *decision* reads, as opposed to a display: the forecast engine
