@@ -58,6 +58,9 @@ import Testing
 ///   the reading beside it. The script never saw such a series, and no
 ///   fixture here carries one, so every case below still takes the reading
 ///   rule. `PaceCommandTests` covers the live one.
+/// - With other logins on the machine, `report` adds an `other logins:` line
+///   and `json` an `otherAccounts` field (#293); `withoutOtherLogins` drops
+///   them from the port's output. `PaceOtherLoginsTests` covers them.
 @Suite("pace: parity with pace.sh")
 struct PaceParityTests {
 
@@ -141,6 +144,14 @@ struct PaceParityTests {
         return out
     }()
 
+    /// The port's output without the other-logins line and field, which the
+    /// script never had.
+    static func withoutOtherLogins(_ text: String) -> String {
+        text.split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { !$0.hasPrefix("other logins:") && !$0.hasPrefix("  \"otherAccounts\":") }
+            .joined(separator: "\n")
+    }
+
     private struct Outcome: Equatable {
         let status: Int32
         let output: String
@@ -159,7 +170,7 @@ struct PaceParityTests {
                             sleep: { _ in }, get: PaceHTTP.get, gitBranch: { _ in nil })
             let ported = args.first == "status" ? args + ["--no-refresh"] : args
             return PaceResult(status: Pace.run(ported, environment: env, io: io),
-                              out: Self.withoutGoUntil(capture.text))
+                              out: Self.withoutOtherLogins(Self.withoutGoUntil(capture.text)))
         }.map { Outcome(status: $0.status, output: $0.output, state: Self.withoutAddedKeys($0.state)) }
         #expect(port.count == script.count)
         for (i, (s, p)) in zip(script, port).enumerated() {
