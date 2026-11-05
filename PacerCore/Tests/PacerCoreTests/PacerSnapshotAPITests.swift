@@ -491,4 +491,46 @@ struct PacerSnapshotAPITests {
         #expect(live.contains("\"liveAsOf\""))
         #expect(live.contains("\"usedPercent\" : 37"))
     }
+
+    // MARK: - Recent burn (#358)
+
+    /// Each fixed window's burn reads its own readings, back as far as its
+    /// rate reaches (`RecentBurn.lookbackLimit`), not whatever the snapshot's
+    /// 64 newest rows happen to hold: on a 5-hour window polled every 20
+    /// seconds those are under 20 minutes, and a weekly reading held at 98%
+    /// for 35 minutes while the week climbs 1.5%/h has its last ticks hours
+    /// back.
+    @MainActor
+    @Test func theBurnsReadTheirOwnHistory() throws {
+        let container = try Self.makeContainer()
+        let context = ModelContext(container)
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        context.insert(Account(id: Self.work, organizationId: Self.work, displayName: "Work",
+                               isActive: true, firstSeenAt: .distantPast, lastSeenAt: now))
+        let weekReset = now.addingTimeInterval(3 * 86400)
+        for ago in stride(from: 240, through: 0, by: -5) {
+            let meter = 92.875 + 1.5 * Double(240 - ago) / 60
+            context.insert(RateLimitSample(
+                sampledAt: now.addingTimeInterval(-Double(ago) * 60), window: RateLimitWindowName.sevenDay,
+                usedPercentage: meter.rounded(.down), resetsAt: weekReset,
+                source: RateLimitSource.oauth, accountId: Self.work))
+        }
+        // 12 points between 30 and 20 minutes ago, then nothing.
+        let sessionReset = now.addingTimeInterval(2 * 3600)
+        for ago in stride(from: 2400, through: 0, by: -20) {
+            let meter = 30 + 12 * min(1, max(0, Double(1800 - ago) / 600))
+            context.insert(RateLimitSample(
+                sampledAt: now.addingTimeInterval(-Double(ago)), window: RateLimitWindowName.fiveHour,
+                usedPercentage: meter.rounded(.down), resetsAt: sessionReset,
+                source: RateLimitSource.oauth, accountId: Self.work))
+        }
+        try context.save()
+
+        let limits = try Self.build(container, account: Self.work, now: now).limits
+        #expect(limits.sevenDay?.usedPercent == 98)
+        // 96% → 98% between their ticks, 80 minutes apart.
+        #expect(abs((limits.sevenDay?.recentBurnPercentPerHour ?? 0) - 1.5) < 1e-9)
+        // 30% → 42% over the half hour.
+        #expect(abs((limits.fiveHour?.recentBurnPercentPerHour ?? 0) - 24) < 1e-9)
+    }
 }
