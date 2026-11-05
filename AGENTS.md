@@ -194,6 +194,7 @@ These are subtle, easy to miss, and break user-visible numbers:
    in SQL; `IngestParityTests` (`make test-ingest-parity`) fails if the line
    parser and the bulk importer leave any row differently (#334). See
    `docs/duckdb-archive.md`.
+   `thinkingTokens` (#362) is a subset of output, optional (nil = not reported, never backfilled), and rides on the kept copy; it is not in `TokenBreakdown`.
 8. **Verify ingest changes against a REAL store, not a synthetic one.**
    Both performance bugs and the dedup bug above were invisible on a
    fresh in-memory store — an empty store has nothing to upgrade and no
@@ -499,8 +500,8 @@ App/
                                   Dock-icon visibility (.regular when window open,
                                   .accessory otherwise), AND the menu-bar NSStatusItem
                                   (custom rather than SwiftUI's MenuBarExtra so we get
-                                  right-click context menu, popover hosting, and pulse
-                                  animation). Redirects stderr to
+                                  a native NSMenu with a hosted SwiftUI content item,
+                                  and the label's own rendering). Redirects stderr to
                                   ~/Library/Logs/Pacer/Pacer.err.log so Log.write output
                                   survives non-terminal launches. Posts a "Pacer paused"
                                   banner from applicationShouldTerminate. Container open
@@ -512,6 +513,10 @@ App/
                                   start() is idempotent; stop() is awaited from
                                   applicationShouldTerminate so saves flush before exit.
 
+    StoreLoader.swift           — `.opening/.ready/.failed` for the store; ordinary launches open it
+                                  synchronously in `init`; the first launch after a schema change
+                                  migrates it off main (`PacerStore.prepareStore`, #376) and store
+                                  users wait for `.ready`.
   Settings/
     PacerSettings.swift         — App Group UserDefaults wrapper + enum types for menu bar
                                   style/icon and notification thresholds. Single source of
@@ -533,6 +538,8 @@ App/
                                   totals). RFC 4180 escape, NSSavePanel, NSAlert on error.
 
   Views/
+    StoreOpeningView.swift      — `DashboardRoot` (dashboard content + container/engines once ready)
+                                  and the "Updating your data…" placeholder.
     DashboardView.swift         — header + WelcomeCard + Today + LiveActivity + PaceChart +
                                   DailyCost + PerModelToday.
     HistoryView.swift           — Lifetime + Heatmap + Monthly + TopDays. Sheet to DayDetail.
@@ -555,9 +562,10 @@ App/
                                   dropdown — a block per account, a PacerFuelBar per
                                   window, one AccountCaption line, today's totals;
                                   `make render-live PAGES=menu` draws it off-screen).
-                                  PacerAppDelegate hosts both; right-click on
-                                  the status item shows a native NSMenu (Open Pacer /
-                                  Settings / Quit) instead of the popover.
+                                  PacerAppDelegate hosts both; there is one menu,
+                                  opened on click: the dropdown content as a custom-view
+                                  item, then native Open Pacer / Settings / Quit items.
+                                  No popover, no separate right-click menu.
 
     Components/
       CircularGauge.swift       — donut + percentage primitive used by PaceChart, MenuBar,
@@ -1135,6 +1143,9 @@ The hourly `[Memory]` log line is how a regression shows up.
   `.onChange(of: scanMeta.first?.value)` — the scan-meta tick is the
   canonical "data changed" signal. Pattern in `TodayTimelineCard`,
   `HeatmapCard`, `ModelsView`, `ProjectsView`, `ProjectDetailView`.
+- **A view that draws from thousands of rows reduces them off the main actor
+  once per data change and once per minute tick, and assigns the reduction in
+  the same turn as its data (`PaceSeriesPrep`); the body only looks values up.**
 - **Never iterate raw `TokenSample`s in a view body.** Always go
   through a rollup. The four rollups (`DailyAggregate`,
   `HourlyAggregate`, `ProjectDailyAggregate`, `SessionInfo`) cover
@@ -1168,6 +1179,8 @@ The hourly `[Memory]` log line is how a regression shows up.
   rate-limit window-filter sweep).
 
 ### Widget extension — share one ModelContainer
+
+- **Readers never migrate:** `sharedModelContainer()` refuses a store needing migration.
 
 - **Use `PacerStore.sharedModelContainer()`, not `makeModelContainer()`,
   from widget providers.** Container open is 50–200ms of SQLite open +

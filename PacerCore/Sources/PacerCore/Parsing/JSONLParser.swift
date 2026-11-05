@@ -146,7 +146,8 @@ public enum JSONLLineParser {
             // snapshot of it doesn't. See `ParsedUsageEntry.isComplete`.
             isComplete: raw.message?.stop_reason != nil,
             speed: usage?.speed,
-            inferenceGeo: usage?.inference_geo
+            inferenceGeo: usage?.inference_geo,
+            thinkingTokens: usage?.thinking_tokens
         )
     }
 
@@ -197,7 +198,10 @@ public enum JSONLLineParser {
                 isComplete: base.isComplete,
                 speed: base.speed,
                 inferenceGeo: base.inferenceGeo,
-                isIterationPart: true))
+                isIterationPart: true,
+                // The top-level usage describes the final call only (see
+                // above), so only that call can own its thinking tokens.
+                thinkingTokens: isLast ? base.thinkingTokens : nil))
         }
         return out.isEmpty ? [base] : out
     }

@@ -45,8 +45,7 @@ spend since the last one (the live meter), and writes that with one decimal
 and `est`, followed by the reading it started from and its age. A window
 nothing has been spent on since its reading shows the reading, `used`.
 
-**Two rates, and the difference is the point.** `now` is measured over the last
-half hour, straight from the readings. `avg` is the engine's fitted slope over
+**Two rates, and the difference is the point.** `now` is measured straight from the readings: over the last half hour, or, when the whole-point readings rose under 2 points in it (a weekly window at a few %/h usually does), between their last ticks, up to a tenth of the window back (16.8 hours on a weekly one), and never more than one point over the time since the last tick. `avg` is the engine's fitted slope over
 a much longer lookback — 90 minutes on a session window, 24 hours on a weekly
 one. It only appears when the two disagree by more than five points, and when
 it does you are in a burst: the 5-hour row above is climbing at 33%/h while its
@@ -66,8 +65,7 @@ gets that account's windows: the script hands Pacer the directory and Pacer
 resolves it, because only Pacer knows which login is signed into it. Otherwise
 the active login. `--account all` shows every account, prefixed by id;
 `--account <id>` picks one, and the 8-character id `accounts` prints is
-enough. A `wait` looks the session's account up again on every poll, so a
-`/login` switch to a login with headroom ends it.
+enough. A `wait` looks the session's account up again on every poll, so a switch onto a login with headroom ends it. A `/login` run in another session does not move sessions already running: they keep their token. After a login change no switcher explains, such a session is judged on every login it may still be billing (the most constrained decides) and the verdict says so. Switching away and back with your account switcher moves every session and ends that.
 
 ## 2. Who else is spending this budget
 
@@ -122,8 +120,8 @@ each curling it. So it is **one poller, many cheap readers**:
   **state file**.
 - **Many cheap readers** — every subagent runs `pacer status`, a **file
   read**, and obeys it. When the verdict has gone stale (older than
-  `--max-age`, or a pause whose window has reset) or there is none yet,
-  `status` re-gates it by the verdict's own settings — one reader takes a lock
+  `--max-age`, a pause whose window has reset, or one gated before the login switched to another account) or there is none yet,
+  `status` re-gates it by the verdict's own settings (an `--account` it was gated for included) — one reader takes a lock
   and reads Pacer, the rest wait up to ~3 s for its answer — so a lane that
   runs for an hour never goes blind, and a hundred lanes still cost one read
   per staleness period. `--no-refresh` keeps the pure file read.
@@ -150,10 +148,10 @@ same as each other:
 - **4, misconfigured** — Pacer answered and rejected the request, almost always
   a token set in Pacer but not in `PACE_TOKEN`. Proceed if you must, but **tell
   the user**: the run is unpaced and one line of configuration would fix it.
-- **3, unknown or stale** — the verdict is about another model or margin,
+- **3, unknown or stale** — the verdict is about another model, margin or `--account`,
   Pacer could not be read to refresh it, or (with `--no-refresh`) no gate has
   run, the last verdict is older than `--max-age` (default 15 min), it was a
-  pause whose window has reset since, or a GO past its projected expiry. A verdict has a shelf life: an
+  pause whose window has reset since, a GO past its projected expiry, or one gated before the login moved to another account. A verdict has a shelf life: an
   orchestrator that died an hour ago left its last word on disk, and obeying
   it is obeying a window that has since moved.
 
@@ -465,7 +463,7 @@ If a user asks how to make pacing automatic, that line is the answer.
   an account with one is read every 5 minutes while you are active and every
   10 when you are not. So a half-hour `now` rate rests on six readings in the
   first case and two in the second, and drops to `null` rather than guessing
-  when it has fewer than two. Nothing can make the *percentage* finer than the
+  when it has fewer than two, or when the newest reading is over half an hour old. Readings are whole points: a window that rose under 2 points in the half hour is measured from its last ticks instead, so a weekly window climbing 1–4%/h does not read 0 between ticks. Nothing can make the *percentage* finer than the
   poll — it is the server's number — but `/v1/limits/history?bucket=5m` gives
   you every reading Pacer has, to fit whatever you like.
 

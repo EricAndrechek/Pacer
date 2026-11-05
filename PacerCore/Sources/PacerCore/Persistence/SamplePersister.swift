@@ -686,6 +686,8 @@ public final class SamplePersister {
         sample.sourceCostUSD = entry.storedCostUSD
         sample.speed = entry.speed
         sample.inferenceGeo = entry.inferenceGeo
+        // The finished copy's value replaces the mid-stream one's (rule 7).
+        sample.thinkingTokens = entry.thinkingTokens
 
         let pair = DateModelPair(date: sample.date, model: sample.model)
         dirtyPairs.insert(pair)

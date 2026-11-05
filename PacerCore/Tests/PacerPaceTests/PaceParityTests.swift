@@ -42,6 +42,11 @@ import Testing
 ///   `withoutAddedKeys` drops the key. The gate's GO line says when it runs
 ///   out only where a window projects inside `--max-age`, which no fixture
 ///   here does, so that line is still compared as it was.
+/// - The state file records the account(s) a verdict judged, any explicit
+///   `--account`, the default login it was gated under and whether it
+///   follows that login (#343), so `status` re-gates a verdict once the login
+///   moves; `withoutAddedKeys` drops them. The harness has no login marker,
+///   so nothing here is re-gated for it.
 /// - On a login switch, `wait` resumes only onto a login with
 ///   `--resume-headroom` below the paused window's limit (#313), which the
 ///   state file records for a later `wait`; `withoutAddedKeys` drops it.
@@ -181,7 +186,7 @@ struct PaceParityTests {
 
     /// The keys the script never wrote.
     static let addedKeys = ["eta", "window", "autoModel", "margin", "tripIdentity", "tripAccount", "tripLimit",
-                            "goUntil", "resumeHeadroom"]
+                            "goUntil", "resumeHeadroom", "account", "accountFlag", "login", "followsLogin"]
 
     /// `status`'s `go (until 22:41Z)` as the script's `go`.
     static func withoutGoUntil(_ text: String) -> String {

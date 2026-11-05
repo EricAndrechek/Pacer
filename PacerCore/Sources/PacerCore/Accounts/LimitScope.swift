@@ -64,6 +64,23 @@ public enum LimitScope {
         return d
     }
 
+    /// One window's rows since `since`, newest first: the 5-hour or the
+    /// weekly block alone, for a read that reaches back further on one than
+    /// the other (`RecentBurn.lookbackLimit`).
+    public static func rateLimits(account: String?, window: String, since: Date,
+                                  limit: Int? = nil) -> FetchDescriptor<RateLimitSample> {
+        let predicate: Predicate<RateLimitSample>
+        if let account {
+            predicate = #Predicate { $0.accountId == account && $0.window == window && $0.sampledAt >= since }
+        } else {
+            predicate = #Predicate { $0.window == window && $0.sampledAt >= since }
+        }
+        var d = FetchDescriptor<RateLimitSample>(
+            predicate: predicate, sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
+        d.fetchLimit = limit
+        return d
+    }
+
     public static func usageLimits(account: String?, since: Date? = nil,
                                    limit: Int? = nil) -> FetchDescriptor<UsageLimitSample> {
         var d = FetchDescriptor<UsageLimitSample>(

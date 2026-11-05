@@ -293,6 +293,11 @@ public final class ScanCoordinator {
         /// reader by default, which reads nothing in tests; nil leaves
         /// Desktop's turns unattributed. See `DesktopSessionDirectory`.
         public var desktopSessions: DesktopSessionDirectory?
+        /// Writes the default login down for the `pacer` command line (#343),
+        /// so `pacer status` can tell a verdict gated before a login switch.
+        /// The user's own app only by default; tests and diagnostic runs
+        /// get one that writes nothing. See `DefaultLoginMarker`.
+        public var loginMarker: DefaultLoginMarkerPublisher
 
         public init(
             costMode: CostMode = .auto,
@@ -301,7 +306,8 @@ public final class ScanCoordinator {
             saveBatchSize: Int = 1_000,
             oauthPolling: OAuthPoller.Configuration = OAuthPoller.Configuration(),
             bulkImporter: BulkTranscriptImporter? = nil,
-            desktopSessions: DesktopSessionDirectory? = .shared
+            desktopSessions: DesktopSessionDirectory? = .shared,
+            loginMarker: DefaultLoginMarkerPublisher = DefaultLoginMarkerPublisher()
         ) {
             self.costMode = costMode
             self.watcherMode = watcherMode
@@ -310,6 +316,7 @@ public final class ScanCoordinator {
             self.oauthPolling = oauthPolling
             self.bulkImporter = bulkImporter
             self.desktopSessions = desktopSessions
+            self.loginMarker = loginMarker
         }
     }
 
@@ -1368,6 +1375,9 @@ public final class ScanCoordinator {
         if let transition = loginTransition(observedAccount, recorder: recorder), let oauthPoller {
             await oauthPoller.setActiveAccount(id: transition.id, seed: transition.seed, seenAt: seenAt)
         }
+        // Last: the trail is saved and the poller has moved, so a `pacer`
+        // that reads the new login here and re-gates finds it everywhere.
+        configuration.loginMarker.publish(recorder.trail().currentDefaultLogin)
     }
 
     /// Reject a held config identity without a keychain discovery, when a full
@@ -2415,6 +2425,8 @@ public final class ScanCoordinator {
         if context.hasChanges {
             try context.save()
         }
+        // After the save, so the login the marker names is in the store (#343).
+        configuration.loginMarker.publish(recorder.trail().currentDefaultLogin)
         // Only now: the rebuilt rollups are committed, so the marks are spent.
         // A throw anywhere above leaves them for the next cycle.
         activePersister.clearDirtyPairs()

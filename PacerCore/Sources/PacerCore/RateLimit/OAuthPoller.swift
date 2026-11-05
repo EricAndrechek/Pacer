@@ -913,16 +913,19 @@ public actor OAuthPoller: TokenPoolTesting {
                 _ = await pollLane(idx)
                 await publishStatus()
             case .wait(let fastWait):
-                // A secondary (non-active) account may be due for its slow
-                // sweep even while the fast pool waits. Poll one if so; each
-                // secondary lane is still gated to ≤ 1×/5min.
-                if let sIdx = dueSecondaryLaneIndex(now: now) {
+                // A non-active account may be due for its sweep even while the
+                // fast pool waits. Each of its lanes is still gated to ≤ 1×/5min,
+                // and its lanes take turns rather than going together (#350).
+                let sweep = scheduler.decideSweep(
+                    lanes: lanes.map(\.state), accountKeys: lanes.map(\.accountKey),
+                    interval: configuration.secondarySweepInterval, now: now)
+                if case .poll(let sIdx)? = sweep {
                     _ = await pollLane(sIdx)
                     await publishStatus()
                     continue
                 }
-                let secWait = nextSecondaryWait(now: now)
-                let wait = [fastWait, secWait].compactMap { $0 }.min() ?? fastWait
+                var wait = fastWait
+                if case .wait(let sweepWait)? = sweep { wait = min(wait, sweepWait) }
                 nextPollAt = now.addingTimeInterval(wait)
                 await publishStatus()
                 await nap(wait)
@@ -1206,50 +1209,6 @@ public actor OAuthPoller: TokenPoolTesting {
             guard let newest = (try? context.fetch(d))?.first else { return true }
             return at > newest.sampledAt
         }
-    }
-
-    /// The least-recently-polled secondary lane that's due for its sweep now
-    /// (past its per-lane interval and not cooling), or nil.
-    ///
-    /// **Per lane, deliberately — that is the multi-token design working.**
-    /// The budget Anthropic enforces is per *token*, so an account holding five
-    /// credentials really can be read five times as often without costing any
-    /// other account anything. Spreading load across an account's tokens to
-    /// shorten its refresh interval is the point of the token pool.
-    ///
-    /// This was briefly changed to budget per account, on the theory that five
-    /// Desktop lanes were starving the signed-in account's single lane. That
-    /// theory was wrong: the 429s only ever landed on the signed-in account's
-    /// own token, never on the five that were being polled twelve times as
-    /// often, which is exactly what a per-token budget looks like. The real
-    /// contention was Pacer and `cswap` polling the *same* token — fixed by
-    /// reading cswap's cache instead. Throttling by account fixed nothing and
-    /// gave up a real feature, so it is reverted.
-    ///
-    /// Eligibility itself is `OAuthPollScheduler.readyAt`, the same rule the
-    /// fast pool uses, differing only in the interval. This method had its own
-    /// partial copy of it — cooldown and Pacer's own spacing, plus half of the
-    /// external check — so a secondary lane could keep its distance from
-    /// Pacer's polls while landing squarely on another client's.
-    private func dueSecondaryLaneIndex(now: Date) -> Int? {
-        let interval = configuration.secondarySweepInterval
-        return lanes.indices
-            .filter {
-                lanes[$0].state.account == .secondary
-                    && scheduler.readyAt(lanes[$0].state, interval: interval, now: now) <= now
-            }
-            .min { (lanes[$0].state.lastPolledAt ?? .distantPast) < (lanes[$1].state.lastPolledAt ?? .distantPast) }
-    }
-
-    /// Seconds until the earliest secondary lane becomes due, or nil if
-    /// there are no secondary lanes.
-    private func nextSecondaryWait(now: Date) -> TimeInterval? {
-        let interval = configuration.secondarySweepInterval
-        let readyTimes = lanes.filter { $0.state.account == .secondary }.map {
-            scheduler.readyAt($0.state, interval: interval, now: now)
-        }
-        guard let earliest = readyTimes.min() else { return nil }
-        return max(configuration.scheduler.minWait, earliest.timeIntervalSince(now))
     }
 
     /// Cancellable sleep. `notifyActivity()` / `stop()` cancel the inner
@@ -1574,7 +1533,18 @@ public actor OAuthPoller: TokenPoolTesting {
         // that matters when two clients share one: a run of identical `ok`
         // lines could be one lane every minute or six lanes in rotation, and
         // there was no way to tell them apart from outside.
-        if !Self.sameCategory(previous, outcome) || previousLane != lastPolledLaneId {
+        //
+        // Except a non-active account's sweep, which rotates through its
+        // tokens by design, so every poll is a change of lane. Seven Desktop
+        // tokens wrote the same "tracked as secondary" line 84 times an hour.
+        // It gets one line an hour instead, saying how its polls were spread.
+        if case .secondaryAccount = outcome, idx < lanes.count, let key = lanes[idx].accountKey {
+            if let spread = noteSweepPoll(account: key, at: now, after: previous) {
+                Log.write("OAuthPoller", Self.summarize(
+                    outcome: outcome, laneCount: lanes.count, lane: lanes[idx],
+                    liveKeychainToken: liveKeychainToken) + spread)
+            }
+        } else if !Self.sameCategory(previous, outcome) || previousLane != lastPolledLaneId {
             Log.write("OAuthPoller", Self.summarize(
                 outcome: outcome, laneCount: lanes.count,
                 lane: idx < lanes.count ? lanes[idx] : nil,
@@ -1740,6 +1710,48 @@ public actor OAuthPoller: TokenPoolTesting {
     }
 
     // MARK: - Logging helpers
+
+    /// A non-active account's successful sweep polls since its last log line.
+    private struct SweepLogWindow {
+        var lastLineAt: Date?
+        var polls: [Date] = []
+    }
+    private var sweepLog: [String: SweepLogWindow] = [:]
+    static let sweepLineEvery: TimeInterval = 3_600
+
+    /// Record a successful sweep poll of `key` and say whether it gets a log
+    /// line: the account's first this launch, the first after a failure, and
+    /// then one an hour. Returns the line's suffix, or nil for no line.
+    private func noteSweepPoll(account key: String, at now: Date, after previous: PollOutcome?) -> String? {
+        var window = sweepLog[key] ?? SweepLogWindow()
+        window.polls.append(now)
+        defer { sweepLog[key] = window }
+        let recovering: Bool
+        switch previous {
+        case nil, .success?, .secondaryAccount?: recovering = false
+        default: recovering = true
+        }
+        if let last = window.lastLineAt, now.timeIntervalSince(last) < Self.sweepLineEvery, !recovering {
+            return nil
+        }
+        let spread = Self.sweepSpread(window.polls)
+        window.lastLineAt = now
+        window.polls = [now]
+        return spread
+    }
+
+    /// "; 84 polls in 60 min, gap median 43 s, shortest 42 s" — how one
+    /// account's sweep was spread, from the poll that wrote the last line to
+    /// this one. Evenly staggered, n lanes give gaps of interval/n (#350);
+    /// lanes firing together show as a shortest gap of a few seconds. Empty
+    /// until there are two gaps to describe.
+    static func sweepSpread(_ polls: [Date]) -> String {
+        guard polls.count >= 3, let first = polls.first, let last = polls.last else { return "" }
+        let gaps = zip(polls, polls.dropFirst()).map { $1.timeIntervalSince($0) }.sorted()
+        let minutes = Int((last.timeIntervalSince(first) / 60).rounded())
+        return "; \(polls.count - 1) polls in \(minutes) min, gap median \(Int(gaps[gaps.count / 2].rounded())) s"
+            + ", shortest \(Int(gaps[0].rounded())) s"
+    }
 
     private static func sameCategory(_ a: PollOutcome?, _ b: PollOutcome?) -> Bool {
         switch (a, b) {

@@ -228,12 +228,26 @@ public enum PacerPreferences {
         return NSClassFromString("XCTestCase") != nil
     }()
 
+    nonisolated(unsafe) private static var testDefaultsDirectory = ""
+
     nonisolated(unsafe) public static let store: UserDefaults = {
         if isTestProcess {
             // Per-process, so a parallel run cannot clobber another's writes
             // and nothing survives to the next run.
-            let suite = "pacer.testprocess.\(ProcessInfo.processInfo.processIdentifier)"
-            return UserDefaults(suiteName: suite) ?? .standard
+            // An absolute path as the suite name makes CFPreferences keep the
+            // plist there instead of in ~/Library/Preferences, where every
+            // test process left one behind, ~500 a day (#336). Removing the
+            // domain through cfprefsd does not help: it writes an empty plist
+            // back after the process's own cleanup. The directory is the
+            // system temporary one, which macOS sweeps, and is removed here at
+            // exit as well. Per-process, so a parallel run cannot clobber
+            // another's writes.
+            let dir = FileManager.default.temporaryDirectory
+                .appendingPathComponent("pacer.testprocess.\(ProcessInfo.processInfo.processIdentifier)")
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            testDefaultsDirectory = dir.path
+            atexit { try? FileManager.default.removeItem(atPath: testDefaultsDirectory) }
+            return UserDefaults(suiteName: dir.appendingPathComponent("defaults").path) ?? .standard
         }
         return UserDefaults(suiteName: PacerStore.appGroupIdentifier) ?? .standard
     }()

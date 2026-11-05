@@ -598,9 +598,10 @@ public enum PacerSnapshotBuilder {
     nonisolated static func limits(context: ModelContext, limitAccount: String?,
                                    engineScope scope: EngineScope,
                                    now: Date) -> PacerSnapshotPayload.Limits {
-        // Deep enough to hold a half-hour lookback for both fixed windows even
-        // at the fastest cadence a multi-token account polls at. `first(where:)`
-        // still picks the newest of each.
+        // The newest poll's rows: `first(where:)` picks the newest of each
+        // window, `latestBatch` the windows that poll still reported. The
+        // burns read their own, deeper history (`recentBurn`,
+        // `scopedBurnHistory`).
         let rlRows = (try? context.fetch(
             LimitScope.rateLimits(account: limitAccount, limit: 64))) ?? []
         let outlook = engineSnapshot(context: context, scope: scope)
@@ -611,6 +612,11 @@ public enum PacerSnapshotBuilder {
         let scopedRows = scopedHistory
             .latestBatch()
             .sorted { $0.identity < $1.identity }
+        let scopedBurns = scopedBurnHistory(
+            context: context, account: limitAccount,
+            reach: scopedRows.map { RecentBurn.lookbackLimit(duration: WindowSpec.scopedDuration(group: $0.group)) }
+                .max(),
+            now: now)
         let scopedOutlooks = Dictionary(
             (outlook?.scoped ?? []).map { ($0.identity, $0.outlook) },
             uniquingKeysWith: { first, _ in first })
@@ -632,7 +638,8 @@ public enum PacerSnapshotBuilder {
                              label: WindowSpec.fixed(.fiveHour).displayName,
                              group: fiveHourGroup,
                              outlook: outlook?.fiveHour,
-                             recentBurn: recentBurn(rlRows.filter { $0.window == fiveHourKey },
+                             recentBurn: recentBurn(context: context, account: limitAccount,
+                                                    window: fiveHourKey,
                                                     duration: WindowSpec.fixed(.fiveHour).duration,
                                                     now: now),
                              live: live[fiveHourKey],
@@ -642,7 +649,8 @@ public enum PacerSnapshotBuilder {
                              label: WindowSpec.fixed(.sevenDay).displayName,
                              group: sevenDayGroup,
                              outlook: outlook?.sevenDay,
-                             recentBurn: recentBurn(rlRows.filter { $0.window == sevenDayKey },
+                             recentBurn: recentBurn(context: context, account: limitAccount,
+                                                    window: sevenDayKey,
                                                     duration: WindowSpec.fixed(.sevenDay).duration,
                                                     now: now),
                              live: live[sevenDayKey],
@@ -654,10 +662,7 @@ public enum PacerSnapshotBuilder {
                        isActive: row.isActive, severity: row.severity,
                        outlook: scopedOutlooks[row.identity],
                        recentBurn: RecentBurn.percentPerHour(
-                           readings: scopedHistory
-                               .filter { $0.identity == row.identity }
-                               .map { .init(at: $0.sampledAt, percent: $0.percent,
-                                            resetsAt: $0.resetsAt) },
+                           readings: scopedBurns[row.identity] ?? [],
                            now: now,
                            duration: WindowSpec.scopedDuration(group: row.group)),
                        live: live[row.identity],
@@ -700,14 +705,30 @@ public enum PacerSnapshotBuilder {
         return LiveMeterSource(context: context).values(account: account, windows: windows, now: now)
     }
 
-    /// Measured burn over the last half hour for one fixed window.
-    private static func recentBurn(_ samples: [RateLimitSample],
+    /// Measured burn for one fixed window (`RecentBurn`), from its readings
+    /// back to `RecentBurn.lookbackLimit`: a half hour on the 5-hour window,
+    /// 16.8 hours on the weekly one, whose whole-point readings need that long
+    /// to resolve a slow climb (#358). Bounded by time, not rows: the 64
+    /// newest rows the snapshot reads for its windows held about 13 minutes
+    /// of each on an account polled every 25 s, short of even the half hour,
+    /// while a weekly window's last tick is often hours back. Read through
+    /// `RecentBurnHistory`, which keeps the older part between builds.
+    private static func recentBurn(context: ModelContext, account: String?, window: String,
                                    duration: TimeInterval, now: Date) -> Double? {
         RecentBurn.percentPerHour(
-            readings: samples.map {
-                .init(at: $0.sampledAt, percent: $0.usedPercentage, resetsAt: $0.resetsAt)
-            },
+            readings: RecentBurnHistory.shared.fixed(context: context, account: account, window: window,
+                                                     duration: duration, now: now),
             now: now, duration: duration)
+    }
+
+    /// Every scoped window's readings for its burn, by identity, back to the
+    /// furthest any of them reaches (`reach`; nil when there is no scoped
+    /// window). Same reason as `recentBurn`: the 64 newest scoped rows are a
+    /// few minutes of each window.
+    private static func scopedBurnHistory(context: ModelContext, account: String?,
+                                          reach: TimeInterval?, now: Date) -> [String: [RecentBurn.Reading]] {
+        guard let reach else { return [:] }
+        return RecentBurnHistory.shared.scoped(context: context, account: account, reach: reach, now: now)
     }
 
     /// One fixed window's live usage from the freshest sample, or nil when no

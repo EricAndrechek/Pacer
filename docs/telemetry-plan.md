@@ -444,6 +444,7 @@ person, account, project or path. Account ids are org ids, so never sent; plan t
    rebuild, price repricing and rollup bootstraps, with the phase steps `HistoryRebuildStatus`
    already names, entries and files processed, and the record backfill. Plus SwiftData
    index-repair time. [from-version, to-version, what rebuilt]
+   Plus one `store.prepare` span per launch that migrated off main. [migrated, before, after]
 4. **Forecast accuracy**: once a day per window kind, the model each account picked, its typical
    error (percentage points), the gap to the best model, how many models were ranked, cycles of
    history, and which models were well behind. Per account but labelled only by plan tier and an

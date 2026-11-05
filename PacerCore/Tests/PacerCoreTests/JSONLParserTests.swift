@@ -50,6 +50,40 @@ struct JSONLParserTests {
         #expect(entry.breakdown.cacheCreation1hTokens == 300)
     }
 
+    private func thinkingLine(_ usageExtra: String) -> String {
+        """
+        {"type":"assistant","timestamp":"2026-05-06T20:00:00.123Z","requestId":"r1",\
+        "message":{"id":"m1","model":"claude-opus-4-7",\
+        "usage":{"input_tokens":1,"output_tokens":50\(usageExtra)}}}
+        """
+    }
+
+    @Test func parsesThinkingTokensAsASubsetOfOutput() throws {
+        let entry = try #require(JSONLLineParser.parse(
+            line: thinkingLine(#","output_tokens_details":{"thinking_tokens":32}"#)))
+        #expect(entry.thinkingTokens == 32)
+        // Not added to anything: output is unchanged and already holds it.
+        #expect(entry.breakdown.outputTokens == 50)
+        #expect(entry.breakdown.all == 51)
+    }
+
+    @Test func thinkingTokensAreNilUnlessReported() throws {
+        #expect(try #require(JSONLLineParser.parse(line: thinkingLine(""))).thinkingTokens == nil)
+        #expect(try #require(JSONLLineParser.parse(
+            line: thinkingLine(#","output_tokens_details":{}"#))).thinkingTokens == nil)
+        #expect(try #require(JSONLLineParser.parse(
+            line: thinkingLine(#","output_tokens_details":{"thinking_tokens":0}"#))).thinkingTokens == 0)
+    }
+
+    @Test func aBadThinkingShapeDropsTheFieldNotTheTurn() throws {
+        for extra in [#","output_tokens_details":"x""#, #","output_tokens_details":{"thinking_tokens":"many"}"#,
+                      #","output_tokens_details":null"#] {
+            let entry = try #require(JSONLLineParser.parse(line: thinkingLine(extra)))
+            #expect(entry.thinkingTokens == nil)
+            #expect(entry.breakdown.outputTokens == 50)
+        }
+    }
+
     @Test func backfillsLegacyCacheCreationAs5mTier() throws {
         // Older Claude Code lines emit only the summed
         // `cache_creation_input_tokens` without the 5m/1h split. We

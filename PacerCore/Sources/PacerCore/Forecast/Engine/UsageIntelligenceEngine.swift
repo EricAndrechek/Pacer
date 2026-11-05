@@ -413,6 +413,18 @@ public actor UsageIntelligenceEngine {
         }
         rlRankings = rankings
         rlCurrentRankings = currentRankings
+        // A window this refit no longer forecasts (an Ultra account's 5-hour
+        // one, #366; a scoped limit the server dropped) keeps no accuracy from
+        // an earlier refit of this launch: the compare sheet and the arena
+        // list would otherwise state a record for a window that is gone.
+        if fitsRateLimits {
+            let live = Set(f.windows.map { EngineSelfEval.rlSurface($0.key) })
+            let rlPrefix = EngineSelfEval.rlSurface("")
+            for surface in Array(accuracyBySurface.keys)
+            where surface.hasPrefix(rlPrefix) && !live.contains(surface) {
+                accuracyBySurface[surface] = nil
+            }
+        }
         phase["rlSelect", default: 0] += Int(Date().timeIntervalSince(selectStarted) * 1000)
         // Every window ranks on the current grading: the previous one's rows
         // are read by nothing from here (`retirePreviousGrading`). Only with

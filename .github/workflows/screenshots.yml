@@ -28,7 +28,13 @@ concurrency:
 jobs:
   screenshots:
     # A fork's branch cannot be pushed to with this token.
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    # A PR that is already merged or closed gets nothing: a stale watcher once
+    # marked a merged PR ready, and the push re-created its auto-deleted branch.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+       github.event.pull_request.state == 'open' &&
+       github.event.pull_request.merged != true)
     # Pinned like ci.yml: the SDK decides the app's appearance.
     runs-on: macos-26
     timeout-minutes: 60
@@ -79,9 +85,10 @@ jobs:
       # A render re-encodes every image, so one whose pixels did not change
       # still comes out byte-different. Committing it adds a review item and
       # another copy in history for nothing (#154). Put those back, within
-      # png-pixels-equal's 2 levels. A menu bar shot is compared only inside
-      # Pacer's own windows (its rects.json sidecar): the translucent bar and
-      # menu show the desktop, which is not ours to keep identical (#166).
+      # png-pixels-equal's 2 levels, plus a thin sliver of edge pixels (#291).
+      # A menu bar shot is compared only inside Pacer's own windows (its
+      # rects.json sidecar): the translucent bar and menu show the desktop,
+      # which is not ours to keep identical (#166).
       - name: Keep the committed copy of images whose pixels are unchanged
         run: |
           set -euo pipefail
@@ -99,10 +106,27 @@ jobs:
       - name: Commit the images to the branch
         env:
           BRANCH: ${{ github.event.pull_request.head.ref || github.ref_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           if git diff --quiet -- docs/screenshots && [ -z "$(git ls-files --others --exclude-standard docs/screenshots)" ]; then
             echo "Screenshots unchanged — nothing to commit."
+            exit 0
+          fi
+          # The PR can merge or close while the render runs (it takes a while),
+          # and GitHub then deletes the branch. Look again right before pushing,
+          # and never push to a branch the remote no longer has: that would
+          # re-create it.
+          if [ -n "$PR_NUMBER" ]; then
+            state=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state --jq .state)
+            if [ "$state" != "OPEN" ]; then
+              echo "::notice::PR #$PR_NUMBER is $state — not pushing screenshots."
+              exit 0
+            fi
+          fi
+          if [ "$BRANCH" != "main" ] && ! git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null; then
+            echo "::notice::Branch $BRANCH no longer exists on the remote — not pushing screenshots."
             exit 0
           fi
           git config user.name "github-actions[bot]"

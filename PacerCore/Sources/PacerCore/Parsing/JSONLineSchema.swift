@@ -73,6 +73,13 @@ public struct ParsedUsageEntry: Sendable, Equatable, Hashable {
     /// `usage.inference_geo`: where the request ran when the caller asked
     /// for data residency (`"us"` costs 1.1x on Claude 4.6+), nil otherwise.
     public let inferenceGeo: String?
+    /// `usage.output_tokens_details.thinking_tokens`: the thinking share of
+    /// `output_tokens` (a subset, so cost is unaffected: thinking bills at the
+    /// output rate). Nil when the line does not report it, which is every line
+    /// from a Claude Code that predates the field; 0 only when reported as 0.
+    /// Not part of `TokenBreakdown`, so no total, rollup or price can count it
+    /// a second time.
+    public let thinkingTokens: Int?
     /// One of several model calls split out of a multi-iteration response
     /// (`JSONLLineParser.expand`).
     public let isIterationPart: Bool
@@ -134,8 +141,10 @@ public struct ParsedUsageEntry: Sendable, Equatable, Hashable {
         isComplete: Bool = true,
         speed: String? = nil,
         inferenceGeo: String? = nil,
-        isIterationPart: Bool = false
+        isIterationPart: Bool = false,
+        thinkingTokens: Int? = nil
     ) {
+        self.thinkingTokens = thinkingTokens
         self.isComplete = isComplete
         self.speed = speed
         self.inferenceGeo = inferenceGeo
@@ -287,13 +296,17 @@ struct RawJSONLine: Decodable {
         let cache_creation: RawCacheCreation?
         let speed: String?
         let inference_geo: String?
+        /// `output_tokens_details.thinking_tokens`, decoded leniently: an
+        /// unexpected shape drops this field, never the billable turn.
+        let thinking_tokens: Int?
         /// One entry per model call behind this response — e.g. a `message`
         /// attempt on one model and a `fallback_message` on another (#218).
         let iterations: [RawIteration]?
 
         enum CodingKeys: String, CodingKey {
             case input_tokens, output_tokens, cache_read_input_tokens,
-                 cache_creation_input_tokens, cache_creation, speed, inference_geo, iterations
+                 cache_creation_input_tokens, cache_creation, speed, inference_geo, iterations,
+                 output_tokens_details
         }
 
         /// The token counts decode as before (a bad one fails the line, as it
@@ -308,9 +321,20 @@ struct RawJSONLine: Decodable {
             cache_creation = try? c.decodeIfPresent(RawCacheCreation.self, forKey: .cache_creation)
             speed = try? c.decodeIfPresent(String.self, forKey: .speed)
             inference_geo = try? c.decodeIfPresent(String.self, forKey: .inference_geo)
+            thinking_tokens = (try? c.decodeIfPresent(RawOutputDetails.self, forKey: .output_tokens_details))?
+                .flatMap { $0.thinking_tokens }
             iterations = (try? c.decodeIfPresent(LenientList<RawIteration>.self, forKey: .iterations))?
                 .flatMap(\.items)
         }
+    }
+
+    struct RawOutputDetails: Decodable {
+        let thinking_tokens: Int?
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            thinking_tokens = try? c.decodeIfPresent(Int.self, forKey: .thinking_tokens)
+        }
+        enum CodingKeys: String, CodingKey { case thinking_tokens }
     }
 
     struct RawIteration: Decodable {

@@ -327,3 +327,53 @@ private actor FixtureCostCollector {
     let d2Opus: Double = await collector.cost("2026-03-02", opus)
     #expect(abs(d2Opus - 0.0001315) < 1e-12)
 }
+
+// MARK: - Thinking tokens (#362)
+
+/// Hand-computed: thinking is a subset of output, so adding the field must
+/// leave every token total as it was and keep only the finished copy's value.
+@Test func scannerKeepsTheFinishedCopysThinkingTokens() async throws {
+    let fm = FileManager.default
+    let base = fm.temporaryDirectory.appendingPathComponent("pacer-thinking-fixture-\(UUID().uuidString)")
+    let projects = base.appendingPathComponent("projects")
+    let proj = projects.appendingPathComponent("-tmp-pacer-fixture-proj")
+    try fm.createDirectory(at: proj, withIntermediateDirectories: true)
+    defer { try? fm.removeItem(at: base) }
+
+    func line(_ ts: String, _ id: String, output: Int, stop: String?, thinking: Int?) -> String {
+        let stopJSON = stop.map { "\"\($0)\"" } ?? "null"
+        let details = thinking.map { ",\"output_tokens_details\":{\"thinking_tokens\":\($0)}" } ?? ""
+        return "{\"type\":\"assistant\",\"timestamp\":\"\(ts)\",\"requestId\":\"r-\(id)\",\"message\":{\"id\":\"m-\(id)\",\"model\":\"\(opus)\",\"stop_reason\":\(stopJSON),\"usage\":{\"input_tokens\":10,\"output_tokens\":\(output)\(details)}}}"
+    }
+    let lines = [
+        // Streamed: the mid-stream copy has no field, the finished one 70 of 100.
+        line("2026-03-01T12:00:00.000Z", "a", output: 1, stop: nil, thinking: nil),
+        line("2026-03-01T12:00:02.000Z", "a", output: 100, stop: "end_turn", thinking: 70),
+        // Reported as zero is not the same as not reported.
+        line("2026-03-01T13:00:00.000Z", "b", output: 20, stop: "end_turn", thinking: 0),
+        // A line from before the field existed.
+        line("2026-03-01T14:00:00.000Z", "c", output: 30, stop: "end_turn", thinking: nil),
+    ].joined(separator: "\n") + "\n"
+    try lines.write(to: proj.appendingPathComponent("s.jsonl"), atomically: true, encoding: .utf8)
+    let root = ClaudePathResolver.ResolvedRoot(root: base, projectsDirectory: projects)
+
+    let collector = ThinkingCollector()
+    _ = try await JSONLScanner().scan(roots: [root]) { entry in await collector.add(entry) }
+    let (thinking, output, count) = await collector.totals()
+    #expect(count == 3)
+    #expect(output == 150)                   // 100 + 20 + 30, unchanged by the field
+    #expect(thinking["m-a:r-a"] == .some(70))
+    #expect(thinking["m-b:r-b"] == .some(0))
+    #expect(thinking["m-c:r-c"] == .some(nil))
+    #expect(thinking.values.compactMap { $0 }.reduce(0, +) == 70)
+}
+
+private actor ThinkingCollector {
+    private var thinking: [String: Int?] = [:]
+    private var output: Int64 = 0
+    func add(_ e: ParsedUsageEntry) {
+        thinking[e.dedupKey ?? "-"] = .some(e.thinkingTokens)
+        output += e.breakdown.outputTokens
+    }
+    func totals() -> ([String: Int?], Int64, Int) { (thinking, output, thinking.count) }
+}

@@ -1,4 +1,5 @@
 import Foundation
+import PacerCore
 @testable import PacerPace
 
 /// A scratch directory holding a `metrics` fixture, which `PACER_API=file://…`
@@ -48,12 +49,14 @@ final class PaceCapture: @unchecked Sendable {
 /// `onGet` sees every request (to count reads of Pacer), and `nap` replaces
 /// the short pause a `status` takes while another reader refreshes. `later`
 /// runs the command that many seconds from now, for a verdict's expiry.
+/// `marker` is the default login the app wrote down (#343); none by default.
 func runPace(_ box: PaceSandbox, _ args: [String], api: String? = nil,
              unsetState: Bool = false, extra: [String: String] = [:],
              later: TimeInterval = 0,
              onSleep: ((Int) -> Void)? = nil,
              onGet: ((URLRequest) -> Void)? = nil,
-             nap: ((TimeInterval) -> Void)? = nil) -> PaceResult {
+             nap: ((TimeInterval) -> Void)? = nil,
+             marker: (() -> DefaultLoginMarker?)? = nil) -> PaceResult {
     var env = ["HOME": box.dir.path, "PATH": "/usr/bin:/bin"]
     env["PACER_API"] = api ?? "file://\(box.dir.path)"
     if !unsetState { env["PACE_STATE"] = box.stateURL.path }
@@ -75,7 +78,8 @@ func runPace(_ box: PaceSandbox, _ args: [String], api: String? = nil,
             return PaceHTTP.get(request)
         },
         gitBranch: { _ in nil },
-        nap: nap ?? { Thread.sleep(forTimeInterval: $0) })
+        nap: nap ?? { Thread.sleep(forTimeInterval: $0) },
+        loginMarker: marker ?? { nil })
     let status = Pace.run(args, environment: env, io: io)
     return PaceResult(status: status, out: capture.text)
 }

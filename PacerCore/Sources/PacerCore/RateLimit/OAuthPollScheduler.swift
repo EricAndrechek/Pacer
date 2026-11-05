@@ -27,6 +27,8 @@ import Foundation
 ///   - **Idle**: relax to `idleInterval` — nothing's moving, so be
 ///     polite and bank budget. Poll-on-wake (the poller nudging us when
 ///     usage resumes) makes the idle→active transition feel instant.
+///   - **Non-active accounts** (`decideSweep`): every lane at the
+///     per-token floor, the account's polls kept `interval / lanes` apart.
 public struct OAuthPollScheduler: Sendable {
 
     public struct Tuning: Sendable, Equatable {
@@ -178,8 +180,8 @@ public struct OAuthPollScheduler: Sendable {
         // The *fast pool* the scheduler drives is the active account's lanes
         // (`.primary`) plus not-yet-classified ones (`.unknown`, polled once
         // to learn their org). `.secondary` lanes belong to non-active
-        // accounts and are swept separately by the poller on a slow cadence,
-        // so they never dilute the active account's freshness.
+        // accounts and are swept separately (`decideSweep`), so they never
+        // dilute the active account's freshness.
         let usableIdx = lanes.indices.filter { lanes[$0].account == .primary || lanes[$0].account == .unknown }
         guard !usableIdx.isEmpty else { return .wait(seconds: tuning.idleInterval) }
 
@@ -190,8 +192,12 @@ public struct OAuthPollScheduler: Sendable {
         // ⇒ slower (2 → 2.5 min, 1 → 5 min), never below the floor. Using
         // the lane-count-aware target here (not the raw floor) keeps the
         // cadence evenly spaced instead of bunching quick polls then idling.
+        // Counted over the lanes actually in rotation (`rotationSpacing`), so
+        // a lane in a long cooldown does not set a pace the rest cannot keep.
         let target: TimeInterval = active
-            ? max(tuning.activeInterval, tuning.perTokenMinInterval / Double(max(usableIdx.count, 1)))
+            ? max(tuning.activeInterval,
+                  rotationSpacing(usableIdx.map { lanes[$0] },
+                                  interval: tuning.perTokenMinInterval, now: now))
             : tuning.idleInterval
 
         // The token Claude Code is billing now, never polled: poll it ahead of
@@ -237,6 +243,100 @@ public struct OAuthPollScheduler: Sendable {
         }
         // `eligible` is non-empty because earliestLaneReady ≤ nextPoll ≤ now.
         return .poll(laneIndex: pick ?? usableIdx[0])
+    }
+
+    /// The sweep of non-active accounts' lanes: which one to poll now, or how
+    /// long until one is due. nil when no lane is `.secondary`.
+    ///
+    /// `accountKeys[i]` is the account lane `i` belongs to. Each account is
+    /// spaced on its own; different accounts are different tokens with
+    /// different budgets and may poll in the same second.
+    ///
+    /// **Per lane, deliberately — that is the multi-token design working.**
+    /// Every lane still goes at its own per-token floor (`interval`), so an
+    /// account holding n tokens is read n times per interval. The budget
+    /// Anthropic enforces is per token, and throttling by account was tried
+    /// once and rightly reverted: the 429s it was meant to stop were another
+    /// client polling the *same* token. This does not change how often an
+    /// account is read, only when.
+    ///
+    /// **What it adds is the spacing the fast pool already had**: consecutive
+    /// polls of one account at least `interval / n` apart (`rotationSpacing`).
+    /// Without it nothing spread the lanes (#350). Each came due exactly one
+    /// interval after its own last poll and was polled the moment it did, so
+    /// whatever phases the lanes had were kept forever, and anything that made
+    /// them due together — a launch after more than an interval away, a wake
+    /// from sleep, a switch that moved the account to this sweep, a batch of
+    /// new tokens classified at once — aligned them for good. On a real store
+    /// that was seven Desktop tokens read inside one minute, every five
+    /// minutes: seven identical readings, then nothing, a single token's
+    /// freshness. With the gap, the first round after any of those already
+    /// comes out evenly spaced, and a lane that joins, leaves or backs off is
+    /// absorbed within a round, because the gap is recomputed from the lanes
+    /// in rotation on every decision. No state is kept for it: the gap is
+    /// measured from the account's last poll, which is persisted per lane.
+    public func decideSweep(
+        lanes: [LaneState], accountKeys: [String?], interval: TimeInterval, now: Date
+    ) -> Decision? {
+        var byAccount: [String: [Int]] = [:]
+        for i in lanes.indices where lanes[i].account == .secondary {
+            let key = i < accountKeys.count ? accountKeys[i] : nil
+            byAccount[key ?? "", default: []].append(i)
+        }
+        guard !byAccount.isEmpty else { return nil }
+
+        // Least recently polled first (never-polled sorts oldest), ties by
+        // index, so the order does not depend on dictionary iteration.
+        func polledEarlier(_ a: Int, _ b: Int) -> Bool {
+            let la = lanes[a].lastPolledAt ?? .distantPast
+            let lb = lanes[b].lastPolledAt ?? .distantPast
+            return la != lb ? la < lb : a < b
+        }
+
+        var due: [Int] = []
+        var nextAt = Date.distantFuture
+        for members in byAccount.values {
+            let ready = members.map { readyAt(lanes[$0], interval: interval, now: now) }
+            let spacing = rotationSpacing(members.map { lanes[$0] }, interval: interval, now: now)
+            // Pacer's own polls only. Another client's request on one shared
+            // token already spaces that token (`readyAt`); letting it push the
+            // whole account would delay tokens the other client never touches,
+            // which is the stagger collapse `sharesBudgetWithSwitcher` exists
+            // to prevent.
+            let gate = members.compactMap { lanes[$0].lastPolledAt }.max()?
+                .addingTimeInterval(spacing) ?? .distantPast
+            let accountNext = max(gate, ready.min() ?? .distantFuture)
+            if accountNext <= now {
+                if let pick = zip(members, ready).filter({ $0.1 <= now }).map(\.0)
+                    .min(by: polledEarlier) {
+                    due.append(pick)
+                }
+            } else {
+                nextAt = min(nextAt, accountNext)
+            }
+        }
+        if let pick = due.min(by: polledEarlier) { return .poll(laneIndex: pick) }
+        return .wait(seconds: max(tuning.minWait, nextAt.timeIntervalSince(now)))
+    }
+
+    /// The gap to keep between one account's polls so its lanes stay evenly
+    /// spaced: one interval shared between the lanes in rotation.
+    ///
+    /// "In rotation" is a lane that can be polled within one interval from
+    /// now — every lane polled in the last interval, and any that is due. A
+    /// lane cooling off a second failure, or standing aside for another
+    /// client's announced poll, is out. Counting it would set a pace the other
+    /// lanes cannot keep: they run ahead at the shorter gap, reach their own
+    /// floors together, and the account goes quiet for the missing lane's
+    /// turn — the same bunching, one lane at a time.
+    ///
+    /// The per-token invariant does not depend on this. A lane is never polled
+    /// before its own `readyAt`; the gap only decides *when* among the lanes
+    /// that are ready, so it can make an account slower, never a token faster.
+    func rotationSpacing(_ lanes: [LaneState], interval: TimeInterval, now: Date) -> TimeInterval {
+        let horizon = now.addingTimeInterval(interval)
+        let inRotation = lanes.filter { readyAt($0, interval: interval, now: now) <= horizon }.count
+        return interval / Double(max(inRotation, 1))
     }
 
     /// When one lane may next be polled: the per-token invariant, its own
@@ -317,9 +417,15 @@ public struct OAuthPollScheduler: Sendable {
         // Bounded by `externalYieldMax` in `readyAt`, so a client that is
         // overdue forever cannot park this lane forever.
         let external = max(announced, now)
-        // Room in front of it: taking `earliest` still leaves a full interval
-        // before the other client goes.
-        if external.timeIntervalSince(earliest) >= interval { return .distantPast }
+        // Room in front of it: polling at the soonest Pacer actually could —
+        // `earliest`, but never before now — still leaves a full interval
+        // before the other client goes. Measuring from `earliest` alone was
+        // right only while a lane was polled the moment it became ready; a
+        // lane the account's spacing holds back (`rotationSpacing`, or the
+        // fast pool's cadence gate) goes later than that, and a past
+        // `earliest` then reported room that the actual poll no longer had.
+        let at = max(earliest, now)
+        if external.timeIntervalSince(at) >= interval { return .distantPast }
         return external.addingTimeInterval(interval)
     }
 }
