@@ -24,7 +24,15 @@ public enum UpdateOutcomeLog {
         case noUpdate = "no_update"
         case found = "found"
         case downloadFailed = "download_failed"
+        /// Installing because someone chose to: Sparkle's own dialog, or the
+        /// "Relaunch to Update" item.
         case willInstall = "will_install"
+        /// Downloaded and prepared, waiting for a moment Pacer can relaunch
+        /// unnoticed (`UpdateInstallPolicy`). A Mac that stays here for days is
+        /// one the policy never lets through.
+        case readyToInstall = "ready_to_install"
+        /// Relaunching to install at such a moment, nobody having asked.
+        case idleInstall = "idle_install"
     }
 
     /// "error_sparkle_2001" for a Sparkle error, "error_<domain tail>_<code>"
@@ -48,7 +56,7 @@ public enum UpdateOutcomeLog {
                               now: Date = Date(), store: UserDefaults = PacerPreferences.store) {
         if endOfCycle,
            let previous = store.string(forKey: resultKey),
-           previous == Outcome.downloadFailed.rawValue || previous == Outcome.willInstall.rawValue,
+           [Outcome.downloadFailed, .willInstall, .idleInstall].map(\.rawValue).contains(previous),
            let at = store.object(forKey: atKey) as? Date, now.timeIntervalSince(at) < 120 {
             return
         }
