@@ -67,6 +67,12 @@ public enum Telemetry {
         /// A line on the trail attached to the next crash: what the app was
         /// doing. Our own words only; scrubbed again by the sink.
         func breadcrumb(_ category: String, _ message: String)
+        /// Something that should become an issue: a fixed message of our own
+        /// (never an error's `localizedDescription`, which can carry a path or
+        /// a name) with enumerable attributes, such as an error's domain and
+        /// code. Sentry: an error event under the crash-reports toggle and the
+        /// daily error cap; strings and bools become tags, numbers extra data.
+        func problem(_ message: String, attributes: Attributes)
     }
 
     struct NoSink: Sink {
@@ -75,6 +81,7 @@ public enum Telemetry {
         func gauge(_ key: String, _ value: Double, unit: Unit, attributes: Attributes) {}
         func span(_ span: Span) {}
         func breadcrumb(_ category: String, _ message: String) {}
+        func problem(_ message: String, attributes: Attributes) {}
     }
 
     private static let installed = Mutex<any Sink>(NoSink())
@@ -98,5 +105,8 @@ public enum Telemetry {
     public static func span(_ span: Span) { sink.span(span) }
     public static func breadcrumb(_ category: String, _ message: String) {
         sink.breadcrumb(category, message)
+    }
+    public static func problem(_ message: String, attributes: Attributes = [:]) {
+        sink.problem(message, attributes: attributes)
     }
 }
