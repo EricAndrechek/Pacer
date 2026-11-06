@@ -134,12 +134,14 @@ struct RuntimeWorkersTests {
         let box = Box()
         let done = DispatchSemaphore(value: 0)
         Task.detached {
-            box.rows = await Result {
+            do {
                 let container = try Fixtures.seeded(cycles: 6)
                 let rt = Self.runtime(container, workers: 1)
                 let r = await rt.scorer.pass(accounts: [Fixtures.account], now: Fixtures.now)
                 #expect(r.outcomes > 0)
-                return try Self.rows(container)
+                box.rows = .success(try Self.rows(container))
+            } catch {
+                box.rows = .failure(error)
             }
             done.signal()
         }
