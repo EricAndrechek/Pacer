@@ -76,6 +76,8 @@ still have to wrap every call for the caps, the scrubber, the live toggle and
 per-event timestamps. So: no session recording, no autocapture, no surveys or
 feature flags, no SDK lifecycle events; every event below is ours.
 
+**Person profile on every event.** Every event carries the install's stable profile as `$set` person properties, not only `daily_checkin`: Mac model and name, macOS, version, build config, plan tiers, account count, client counts, install date and age, widget count and kinds:families, settings summaries, menu bar settings and the three toggles. The check-in saves the part it gathers (`PostHog/profile.json` in the App Group container, `AnalyticsProfile.savedKeys`); the cheap part (`AnalyticsProfile.liveKeys`: defaults, bundle, `hw.model`) is read live per event and wins over the saved copy. A first launch before any check-in sends the live part. Everything stays under the Usage data toggle, the caps and `AnalyticsPayload` cleaning. These keys are all already sent by the check-in, so no new kind of data leaves. **Check-in only, never on other events:** per-day tallies and `counter.*`, `refreshes.*`, `cli.*`, forecast accuracy, usage bands, `lifecycle.*` counters and timings (except `lifecycle.login_item`), `energy.*`, `env.*_bucket`, `models.present`, `checkin.*`. Repeating them would double count, and several need store reads that must never run per click.
+
 **Config.** `PacerPostHogToken` / `PacerPostHogHost` in Info.plist from
 `PACER_POSTHOG_TOKEN` / `PACER_POSTHOG_HOST` in `project.yml` (the token is
 public by design, like the DSN; either empty → no PostHog). GeoIP from the
@@ -150,7 +152,7 @@ frame or forecast):
 | `api_request` | daily, tallied per route and client | `endpoint` (allow-listed route), `client` (family from User-Agent: `curl`, `python`, `prometheus`, …; the header is never sent), `count` |
 | `notification_shown` | after a banner is posted | `kind` (`threshold`, `reset`, `burn_rate`, `global_reset`, `daily_cost`, `project_budget`, `custom_rule`, `daily_summary`, `test`), `window` (kind) |
 | `notification_action` | notification response | `action`: `mute`, `open`, `click`, `dismiss`; `window` |
-| `arena_speed_up` | compare sheet's Speed up (`ArenaSpeedUp`), and when a speed-up ends on its own | `action`: `start`, `stop`, `caught_up`, `time_up`; `from` (start only): `in_use`, `battery`, `low_power`, `thermal`, `full`, `unknown`; `minutes` (every end, coarse) |
+| `arena_speed_up` | compare sheet's Speed up (`ArenaSpeedUp`), and when a speed-up ends on its own | `action`: `start`, `stop`, `caught_up`, `time_up`; `from` (start only): `in_use`, `battery`, `low_power`, `thermal`, `low_memory`, `full`, `unknown`; `workers` (start only, this Mac's most, as a band): `1`, `2-4`, `5-8`, `9+`; `minutes` (every end, coarse) |
 | `daily_checkin` | daily check-in | every field the Sentry `checkin.snapshot` carried until 2026-11 (settings, clients, accounts and plans, usage bands, lifecycle, environment, install, widgets, models present, `counter.*`) |
 
 **Doors.** PacerCore code calls `Analytics.capture` (no-op until the app
@@ -163,6 +165,15 @@ the CLI's runs through `CLIRunLog` (start lines carry flag names,
 Status: PLAN, not built. Branch `exp/sentry-telemetry`, rebased on main aa7fbf7a (2026-11-02). Written 2026-10-21 from a code survey of
 this tree, sentry-cocoa 9.30 source, Sentry docs, and live tests against the `ericandrechek/pacer`
 project.
+
+## Memory and slow refits (#389)
+`memory.footprint_mb` gains `pressure`, `thermal`, `low_power`, `load_per_core` (lt1, 1_2, 2_4, 4_8, gt8), `compressor_gb`, `swap_gb`, `ram_gb`, `peak_mb`, `file_mb` (power-of-two bands).
+`memory.pressure_change`: count, at most once per level per 15 min; the first six attributes above with `ram_gb`, plus `from`, `footprint_mb`, `file_mb`.
+`engine.refit_ms` is awake time, not wall. It also carries those Mac attributes, plus `verdict` (asleep, starved, disk, busy, blocked), `cpu_share`, `core_wait_share` (10-point bands), `pagein_mb`, `read_mb`, `window`, `slow`.
+`engine.recompute` span durations are awake time; attributes add the same (no `window` or `slow`) plus `core_wait_ms`.
+`main_thread.stall_ms` gains `pressure`.
+Tallies: `memory.pressure.enter.{warning,critical}`, `memory.pressure.{warning,critical}_minutes`, `engine.refit.deferred_pressure`, `engine.refit.skipped_running`.
+Behaviour under pressure: at `.warning` the refit floor doubles and each refit asks the arena for the pick only; at `.critical` the floor is six times, live requests stop, record backfill waits and engines shed scoreboards. The grader follows the same levels (`ArenaMemoryHold`): `.warning` one worker at the everyday share, `.critical` no back-scoring.
 
 ## Decisions already made (Eric, 2026-10-21)
 
@@ -484,7 +495,7 @@ person, account, project or path. Account ids are org ids, so never sent; plan t
    `usage.five_hour.peak_band` (the latter only where a 5-hour window exists), `install.first_seen`
    (day only; first launch, or backfilled once from the oldest account row), `install.age_days`
    and `build.config` (`debug`/`release`). Scope tags on every crash, hang and MetricKit report:
-   `build.config` and `arena.cpu_mode` (`full` while plugged in and idle, `fifth` otherwise).
+   `build.config` and `arena.cpu_mode` (`full` a whole core, `fifth` the everyday share, `multi` several cores under Speed up, `paused` critical memory pressure). `arena.pass_seconds` is busy worker-seconds.
    `arena.pass_seconds` / `arena.cpu_seconds` are sent only for passes that graded something
    (they were always 0 because no-op incremental passes were reported too).
 9. **Crash-side** (crash toggle): app crashes, hangs and MetricKit as planned, plus forwarded CLI

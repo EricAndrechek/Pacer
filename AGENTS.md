@@ -1167,6 +1167,9 @@ A rebuild reads `TokenSample` through `RawSampleReader` (its own read-only SQLit
   `samplesChanged`) — not @Query, which re-materializes the result
   set on every save.
 
+### Footprint is not the whole memory cost
+The forecast networks are memory maps: 2.6 GB can be resident at a 100 MB footprint, and is re-read once pressure evicts it. Check `file` and page-ins (`RealStoreMemoryProbe`, the `[Memory]` line). A slow refit names its cause (`WorkMeter`); don't infer it from free memory.
+
 ### Indexes — match every sort and predicate
 
 - **Add `#Index` for any column used in a sort or predicate.** All
