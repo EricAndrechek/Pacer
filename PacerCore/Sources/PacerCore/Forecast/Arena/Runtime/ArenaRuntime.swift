@@ -711,10 +711,12 @@ public actor ArenaRecordScorer {
                     unsaved.append((back.account, back.surface, back.news))
                     unsavedCount += back.news.count
                 }
+                // Per handback, not per drain: how many cycles came back
+                // before this actor woke is timing, and what gets saved
+                // together, and handed over in what order, must not be.
+                if unsavedCount >= config.flushOutcomes { await flush() }
             }
-            if unsavedCount >= config.flushOutcomes || SuspendingClock.now - lastFlush >= .seconds(config.flushInterval) {
-                await flush()
-            }
+            if SuspendingClock.now - lastFlush >= .seconds(config.flushInterval) { await flush() }
             if SuspendingClock.now - lastLog >= .seconds(120) {
                 lastLog = SuspendingClock.now
                 log(report, phase: phase, of: planned, since: started)

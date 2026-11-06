@@ -621,7 +621,8 @@ struct RuntimeMemoryHoldTests {
                                     speedUp: speedUp, now: { clock.now }, read: { s.get() }, log: { s.log($0) })
         speedUp.start(now: clock.now)
         #expect(g.evaluate() == .cores(4))
-        #expect(budget.rate == 4)
+        // The budget never grants more than the machine has (CI's runners have 3).
+        #expect(budget.rate == min(4, Double(ProcessInfo.processInfo.activeProcessorCount)))
         #expect(budget.scorerWorkers == 4)
         #expect(budget.scorerQoS == QOS_CLASS_UTILITY)
 
