@@ -678,7 +678,7 @@ final class AppBackgroundService {
             guard relevant else { return }
             Task { @MainActor [weak self] in
                 self?.refreshModelPalette()
-                await self?.recomputeEngineIfDue(rateLimitsChanged: rateLimitsChanged)
+                _ = await self?.recomputeEngineIfDue(rateLimitsChanged: rateLimitsChanged)
             }
         }
     }
