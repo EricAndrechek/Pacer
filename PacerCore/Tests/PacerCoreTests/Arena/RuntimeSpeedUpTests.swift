@@ -230,6 +230,13 @@ struct RuntimeSpeedUpTests {
         let start = AnalyticsEvent.arenaSpeedUp(.start, from: ArenaSpeedUp.telemetryFrom(.share(.inUse)))
         #expect(start.name == "arena_speed_up")
         #expect(start.properties == ["action": .string("start"), "from": .string("in_use")])
+        // The Mac's most workers, as a band: never the exact core count.
+        for (n, band) in [(1, "1"), (2, "2-4"), (4, "2-4"), (5, "5-8"), (8, "5-8"), (9, "9+"), (15, "9+")] {
+            #expect(AnalyticsEvent.arenaSpeedUp(.start, workers: n).properties["workers"] == .string(band))
+        }
+        #expect(ArenaSpeedUp.telemetryFrom(.cores(9)) == .full)
+        #expect(ArenaSpeedUp.telemetryFrom(.paused) == .lowMemory)
+        #expect(ArenaSpeedUp.telemetryFrom(.share(.lowMemory)) == .lowMemory)
         let done = AnalyticsEvent.arenaSpeedUp(ArenaSpeedUp.telemetryAction(.caughtUp), heldSeconds: 1234)
         #expect(done.properties == ["action": .string("caught_up"), "minutes": .int(21)])
         #expect(ArenaSpeedUp.telemetryAction(.timeUp) == .timeUp)

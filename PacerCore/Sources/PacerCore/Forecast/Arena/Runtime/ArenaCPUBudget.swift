@@ -20,11 +20,13 @@ import Foundation
 ///
 /// A token bucket: `rate` CPU-seconds accrue per second of wall time, up to
 /// `burst`; each checkpoint spends what the thread used since its last one.
-/// One budget is shared by every arena lane, so the scorer and the live
-/// forecaster together stay within `rate`. The live forecaster is urgent (the
-/// dashboard waits on it): while it works the scorer waits at its next
-/// checkpoint (up to `maxUrgentYield` at a time), so the live answers get the
-/// budget first.
+/// One budget is shared by every arena lane and every worker of the scorer
+/// (each its own thread, each charged by its own clock), so all of them
+/// together stay within `rate`. The live forecaster is urgent (the dashboard
+/// waits on it): while it works the scorer waits at its next checkpoint (up to
+/// `maxUrgentYield` at a time), so the live answers get the budget first. Not
+/// at a rate above one core: that budget has room for both, and the workers
+/// leave a core free (`ArenaWorkerPolicy`).
 public final class ArenaCPUBudget: @unchecked Sendable {
 
     /// Where time comes from: the system's clocks in the app, a script in tests.
@@ -49,15 +51,17 @@ public final class ArenaCPUBudget: @unchecked Sendable {
             sleep: { s in if s > 0 { usleep(useconds_t(min(s, 1) * 1_000_000)) } })
     }
 
-    /// CPU-seconds per second: 0.25 is a quarter of one core. At most one
-    /// core: the arena's work is one thread at a time per lane, and BLAS is
-    /// held to the calling thread, so the thread clocks it is charged by
-    /// see all of it. Changed while it runs by `ArenaBudgetGovernor`.
+    /// CPU-seconds per second: 0.25 is a quarter of one core, 9 nine cores.
+    /// BLAS is held to the calling thread, so the thread clocks it is charged
+    /// by see all of it. Changed while it runs by `ArenaBudgetGovernor`, which
+    /// is what keeps it to one core unless the user asked for more.
     public var rate: Double {
         get { lock.lock(); defer { lock.unlock() }; return currentRate }
         set { setRate(newValue) }
     }
-    static func clampRate(_ r: Double) -> Double { min(1, max(0.01, r.isFinite ? r : 0.2)) }
+    static func clampRate(_ r: Double) -> Double {
+        min(Double(ProcessInfo.processInfo.activeProcessorCount), max(0.01, r.isFinite ? r : 0.2))
+    }
     /// The most CPU time that may be spent ahead of the rate after a quiet
     /// spell, seconds: a short live forecast after an idle minute runs at once.
     public let burst: Double
@@ -76,6 +80,9 @@ public final class ArenaCPUBudget: @unchecked Sendable {
     // Guarded by `lock`.
     private var currentRate: Double
     private var currentScorerQoS = QOS_CLASS_BACKGROUND
+    private var currentWorkers = 1
+    private var currentLiveLane = ArenaBudgetPolicy.LiveLane.all
+    private var workersChanged: (@Sendable () -> Void)?
     private var tokens: Double
     private var refilledAt: Double
     private var marks: [UInt64: Double] = [:]
@@ -114,6 +121,32 @@ public final class ArenaCPUBudget: @unchecked Sendable {
         set { lock.lock(); currentScorerQoS = newValue; lock.unlock() }
     }
 
+    /// How many of the scorer's workers may run: 1 unless the governor says
+    /// otherwise, 0 while it is paused (`ArenaBudgetPolicy.decide`). A worker
+    /// past the count stops at its next checkpoint.
+    public var scorerWorkers: Int {
+        get { lock.lock(); defer { lock.unlock() }; return currentWorkers }
+        set {
+            lock.lock()
+            let wake = newValue != currentWorkers ? workersChanged : nil
+            currentWorkers = max(0, newValue)
+            lock.unlock()
+            wake?()
+        }
+    }
+
+    /// Called when `scorerWorkers` changes, off any thread: the scorer staffs
+    /// up or parks at once.
+    func onWorkersChange(_ wake: (@Sendable () -> Void)?) {
+        lock.lock(); workersChanged = wake; lock.unlock()
+    }
+
+    /// What the live lane may make right now (`ArenaBudgetPolicy.liveLane`).
+    public var liveLane: ArenaBudgetPolicy.LiveLane {
+        get { lock.lock(); defer { lock.unlock() }; return currentLiveLane }
+        set { lock.lock(); currentLiveLane = newValue; lock.unlock() }
+    }
+
     /// The calling thread's CPU time, seconds, on the budget's clock.
     public func threadCPUSeconds() -> Double { clock.threadCPU() }
 
@@ -139,6 +172,17 @@ public final class ArenaCPUBudget: @unchecked Sendable {
         if marks.count > 64 { marks.removeAll(keepingCapacity: true) }
         marks[id] = cpu
         lock.unlock()
+    }
+
+    /// A worker stops: what it used since its last checkpoint counts as spent
+    /// but is not owed. It was spent at the rate that had the worker running,
+    /// and when the user turns Speed up off, nine workers' last moments are
+    /// not for the one that stays to pay for at a fifth of a core.
+    public func leave() {
+        let id = clock.threadID(), cpu = clock.threadCPU()
+        lock.lock(); defer { lock.unlock() }
+        if let last = marks[id] { spentTotal += max(0, cpu - last) }
+        marks[id] = nil
     }
 
     /// An urgent lane starts or stops working; non-urgent checkpoints wait
@@ -181,7 +225,7 @@ public final class ArenaCPUBudget: @unchecked Sendable {
         let now = clock.wall()
         tokens = min(burst, tokens + max(0, now - refilledAt) * currentRate)
         refilledAt = now
-        if yieldToUrgent, urgent > 0 { return Self.sleepStep }
+        if yieldToUrgent, urgent > 0, currentRate <= 1 { return Self.sleepStep }
         // Under a millisecond owed is paid: a wait the clock can't resolve
         // would never end.
         let wait = -tokens / currentRate

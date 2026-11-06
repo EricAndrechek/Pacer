@@ -13,8 +13,9 @@ import SwiftData
 //   shows (`displayedAtReset`), into the same `EngineEvalOutcome` rows the
 //   engine's own methods are scored into. Cheap models first over the whole
 //   depth, then the heavy ones (`ArenaModelCosts`); newest cycles first,
-//   within a CPU budget (`ArenaCPUBudget`), resumable: it skips every key
-//   already stored.
+//   within a CPU budget (`ArenaCPUBudget`), on one worker thread or, sped up,
+//   several (`ArenaScoringCrew`), resumable: it skips every key already
+//   stored.
 // - `ArenaLiveForecaster` makes the live projections the engine can draw
 //   (the pick, and the few the compare sheet lists), into `ArenaLiveCache`.
 // - `ArenaRuntime` holds both, the shared history, the CPU budget they share
@@ -25,7 +26,8 @@ import SwiftData
 // paced by sleeping the thread, which on a pool thread would take a thread
 // the rest of the app's tasks need. The scorer's and the history's queues are
 // background QoS (the lowest CPU and I/O tier macOS has), the live
-// forecaster's utility.
+// forecaster's utility. The scorer's forecasts run on its worker threads; its
+// queue only reads, plans and saves.
 
 /// What an engine needs from the runtime. A value: the engine reads the
 /// roster and cache synchronously and never awaits the runtime.
@@ -45,10 +47,9 @@ public struct ArenaEngineLink: Sendable {
     public let gradedThrough: @Sendable (String) -> Bool
     /// Where the grader is with an account (`ArenaScoringProgressBoard`).
     public let progress: @Sendable (String) -> ArenaScoringProgress?
-    /// Whether the budget runs at the full core now (plugged in and idle, or
-    /// sped up): which measured pace the board's time left is made from
-    /// (`ArenaScoringProgress.eta`).
-    public let fullCore: @Sendable () -> Bool
+    /// What the budget gives the scorer now: which measured pace the board's
+    /// time left is made from (`ArenaScoringProgress.eta`).
+    public let rate: @Sendable () -> ArenaScoringProgress.Rate
     /// Ask for live projections. Returns at once; they land in `cache`.
     public let requestLive: @Sendable ([ArenaLiveRequest]) -> Void
     /// Make one request's projections now, at the live lane's priority, and
@@ -61,12 +62,12 @@ public struct ArenaEngineLink: Sendable {
                 weightsPresent: @escaping @Sendable (ArenaModelSpec) -> Bool = { _ in true },
                 gradedThrough: @escaping @Sendable (String) -> Bool = { _ in false },
                 progress: @escaping @Sendable (String) -> ArenaScoringProgress? = { _ in nil },
-                fullCore: @escaping @Sendable () -> Bool = { false },
+                rate: @escaping @Sendable () -> ArenaScoringProgress.Rate = { .share },
                 requestLive: @escaping @Sendable ([ArenaLiveRequest]) -> Void,
                 makeLive: (@Sendable (ArenaLiveRequest) async -> Void)? = nil) {
         self.roster = roster; self.cache = cache; self.compareLimit = compareLimit; self.requestLive = requestLive
         self.weightsPresent = weightsPresent; self.gradedThrough = gradedThrough; self.progress = progress
-        self.fullCore = fullCore
+        self.rate = rate
         self.makeLive = makeLive
     }
 }
@@ -113,34 +114,32 @@ final class ArenaLaneUrgency: @unchecked Sendable {
 }
 
 /// Drops what the arena keeps that can be made again when macOS reports
-/// memory pressure: the runners' forecast memos (up to 24 MB an account in a
-/// pass, 16 MB an account live), the calibration layer's network cache and
+/// memory pressure (`MemoryPressure`): the runners' forecast memos (up to 24 MB
+/// in a pass, 16 MB an account live), the calibration layer's network cache and
 /// the networks' kept scratch buffers (`FMScratch`).
 /// On a Mac short of memory those pages were what got compressed and swapped,
 /// and touching them again is a page-in on whatever thread asks.
 final class ArenaMemoryRelief: @unchecked Sendable {
-    private let source: DispatchSourceMemoryPressure
+    private let pressure: MemoryPressure
+    private var listener: UUID?
 
-    /// - Parameter scorerFlag: read by the scorer between windows.
-    init(live: ArenaLiveForecaster, scorerFlag flag: ArenaCancelFlag) {
-        source = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical],
-                                                         queue: .global(qos: .utility))
-        source.setEventHandler { [source] in
-            let level = source.data.contains(.critical) ? "critical" : "warning"
+    init(pressure: MemoryPressure, live: ArenaLiveForecaster, memo: ArenaForecastMemo) {
+        self.pressure = pressure
+        listener = pressure.listen { level in
+            guard level > .normal else { return }
             FMCalCutCache.shared.removeAll()
             FMScratch.release()
             FMSeries.storeSeriesCache.removeAll()
-            flag.set(true)
+            memo.removeAll()
             Task.detached(priority: .utility) {
                 await live.dropRunners()
                 MemoryHygiene.relieve()
-                Log.write("Arena", "memory pressure (\(level)): dropped forecast memos and caches")
+                Log.write("Arena", "memory pressure (\(level.name)): dropped forecast memos and caches")
             }
         }
-        source.activate()
     }
 
-    deinit { source.cancel() }
+    deinit { if let listener { pressure.unlisten(listener) } }
 }
 
 /// Models log through the runner, and during a backfill a model is asked
@@ -185,7 +184,8 @@ public actor ArenaRecordScorer {
         /// to a third of one core while a backfill runs.
         public var dutyCycle: Double = 0.2
         /// The share while the Mac is plugged in, cool and idle
-        /// (`ArenaBudgetGovernor`): one core, never more.
+        /// (`ArenaBudgetGovernor`): one core. More only by the user's
+        /// speed-up (`ArenaWorkerPolicy`).
         public var idleDutyCycle: Double = 1
         /// Whether `ArenaRuntime.start` lets the governor raise the share
         /// to `idleDutyCycle` (the app); off, it stays at `dutyCycle`.
@@ -204,17 +204,20 @@ public actor ArenaRecordScorer {
         public var weeklyCycleCap = EngineSelfEval.rlDepth(weekly: true)
         /// Between passes: one pass scores whatever completed since.
         public var rescanInterval: TimeInterval = 15 * 60
+        /// The longest a full read of an account's history waits out memory
+        /// pressure before going ahead (`holdReading`).
+        public var fullReadWait: TimeInterval = 5 * 60
         /// What an incremental pass reads, as the engine's refit does.
         public var incrementalDays = 32
         public var grading = EngineSelfEval.rlGrading
-        /// What each account's runner keeps (`ArenaRunner.memoLimitValues`,
-        /// in doubles). One runner serves an account for the whole pass, so a
-        /// parent's child backtests, made on a fixed lattice (the calibration
+        /// What the pass's forecast memo keeps (`ArenaForecastMemo`, in
+        /// doubles). One memo serves the whole pass and every worker in it, so
+        /// a parent's child backtests, made on a fixed lattice (the calibration
         /// layer's: 24 origins 2 h apart on five-hour windows, 8 h on weekly
         /// ones), are made once and read at every later cut and cycle: a calib
-        /// forecast costs 12–25 ms on a reused runner against 86–232 ms on a
-        /// fresh one. Only the account being scored keeps one, so this is
-        /// the whole bound: 3 M doubles, 24 MB.
+        /// forecast costs 12–25 ms against a filled memo and 86–232 ms against
+        /// an empty one. This is the whole bound at one or two workers: 3 M
+        /// doubles, 24 MB (`memoLimit` for more).
         public var memoLimitValues = 3_000_000
         /// Cycles a window scores before the next window's turn. A
         /// window's first turn in each phase scores enough for selection
@@ -250,22 +253,29 @@ public actor ArenaRecordScorer {
         public var modelForecasts: [String: Int] = [:]
         /// Cycles visited in each phase (1: the cheap models, 2: the rest).
         public var phaseCycles: [Int: Int] = [:]
+        /// Reading the accounts' histories and planning, before any cycle:
+        /// what a pass costs a Mac with nothing to catch up. Wall seconds
+        /// (budget sleeps included) and the CPU the reading thread used.
+        public var readSeconds = 0.0
+        public var readCPUSeconds = 0.0
         public init() {}
     }
 
     private let container: ModelContainer
-    private let roster: ArenaRoster
+    let roster: ArenaRoster
     private let history: ArenaHistoryCache
-    private let services: ArenaServices
+    let services: ArenaServices
     private let budget: ArenaCPUBudget
     private let costs: ArenaModelCosts
     /// Every registered model's place in the registry (`DoneKey`).
     private let modelIndex: [String: UInt16]
     private let cancel: ArenaCancelFlag
-    /// Set on memory pressure: the pass drops its runners (and their memos)
-    /// at the next window's turn.
-    let relief = ArenaCancelFlag()
-    private let config: Config
+    /// What the pass's workers remember between them; emptied at the end of
+    /// a pass and on memory pressure.
+    nonisolated let memo = ArenaForecastMemo()
+    /// Wakes the pass while it waits on its workers (`ArenaScoringCrew`).
+    private let wake = ArenaWakeup()
+    let config: Config
     private let calendar: Calendar
     private let landed: @Sendable (_ account: String, _ outcomes: [EngineSelfEval.NewOutcome]) async -> Void
     /// Where each account's pass is, for the compare sheet
@@ -286,8 +296,8 @@ public actor ArenaRecordScorer {
     /// The accounts the last full pass covered, with the roster it scored.
     private var coveredFingerprint: [String: String] = [:]
 
-    /// - Parameter services: the scorer's own: its `isCancelled` is the CPU
-    ///   budget's checkpoint (`ArenaRuntime`).
+    /// - Parameter services: the weights and log its models use; each worker
+    ///   adds the CPU budget's checkpoint to `isCancelled` (`ArenaScoringCrew`).
     init(container: ModelContainer, roster: ArenaRoster, history: ArenaHistoryCache, services: ArenaServices,
          budget: ArenaCPUBudget, costs: ArenaModelCosts = ArenaModelCosts(defaults: nil), cancel: ArenaCancelFlag,
          config: Config = Config(), calendar: Calendar = .current,
@@ -299,6 +309,7 @@ public actor ArenaRecordScorer {
         self.modelIndex = Dictionary(roster.registry.enumerated().map { ($0.element.name, UInt16($0.offset)) },
                                      uniquingKeysWith: { a, _ in a })
         self.landed = landed
+        budget.onWorkersChange { [wake] in wake.signal() }
     }
 
     /// The generations grades depend on, now.
@@ -345,6 +356,7 @@ public actor ArenaRecordScorer {
 
     func stop() async {
         cancel.set(true)
+        wake.signal()
         loop?.cancel()
         await loop?.value
         loop = nil
@@ -354,7 +366,7 @@ public actor ArenaRecordScorer {
 
     // MARK: Pass
 
-    private struct Stream {
+    struct Stream {
         let account: String
         let window: WindowSpec
         let binding: ArenaWindowBinding
@@ -388,12 +400,12 @@ public actor ArenaRecordScorer {
     /// window's completed cycles in depth (`periodIndex`).
     struct DoneKey: Hashable { let model: UInt16; let cut: UInt8; let period: UInt16 }
 
-    private func doneKey(_ s: Stream, _ model: String, cut: Int, period: String) -> DoneKey? {
+    nonisolated func doneKey(_ s: Stream, _ model: String, cut: Int, period: String) -> DoneKey? {
         guard let m = modelIndex[model], let p = s.periodIndex[period] else { return nil }
         return DoneKey(model: m, cut: UInt8(cut), period: p)
     }
 
-    private func isDone(_ s: Stream, _ model: String, cut: Int, period: String) -> Bool {
+    nonisolated func isDone(_ s: Stream, _ model: String, cut: Int, period: String) -> Bool {
         doneKey(s, model, cut: cut, period: period).map { s.existing.contains($0) } ?? false
     }
 
@@ -401,19 +413,11 @@ public actor ArenaRecordScorer {
     /// then the rest (`Config.cheapCostMs`, `ArenaModelCosts`).
     public enum Phase: Int, CaseIterable, Sendable { case cheap = 1, heavy = 2 }
 
-    /// One account's runner for the pass, and the models that have run on it
-    /// (a model's first forecast on a runner is not timed: `ArenaModelCosts`).
-    private final class RunnerSlot {
-        let runner: ArenaRunner
-        var warm = Set<String>()
-        init(_ runner: ArenaRunner) { self.runner = runner }
-    }
-
     /// The stream's models this phase scores: in phase 1 the ones whose
     /// forecast costs at most `cheapCostMs` here (re-read every cycle, so a
     /// model timed heavier than its prior moves to phase 2 at once); in
     /// phase 2 every one still missing anything.
-    private func phaseModels(_ s: Stream, _ phase: Phase) -> [ArenaModelSpec] {
+    nonisolated func phaseModels(_ s: Stream, _ phase: Phase) -> [ArenaModelSpec] {
         switch phase {
         case .heavy: return s.models
         case .cheap:
@@ -423,7 +427,7 @@ public actor ArenaRecordScorer {
     }
 
     /// Whether any of `models` is missing at any cut of `cycle`.
-    private func needs(_ s: Stream, _ cycle: BurnTrajectory.Cycle, models: [ArenaModelSpec]) -> Bool {
+    nonisolated private func needs(_ s: Stream, _ cycle: BurnTrajectory.Cycle, models: [ArenaModelSpec]) -> Bool {
         let period = EngineSelfEval.periodKeyRL(cycle.resetsAt)
         for ci in config.grading.cuts.indices {
             for m in models where !isDone(s, m.name, cut: ci, period: period) { return true }
@@ -433,7 +437,7 @@ public actor ArenaRecordScorer {
 
     /// What a phase planned for each account when it started: cycles queued
     /// and the models with anything missing in them (`ArenaScoringProgress`).
-    private struct ProgressPlan {
+    struct ProgressPlan {
         var cycles: [String: Int] = [:]
         var models: [String: Set<String>] = [:]
         /// When the last cycle ended (the phase's start before the first),
@@ -441,36 +445,37 @@ public actor ArenaRecordScorer {
         /// each of the budget's rates, all accounts: the measured paces the
         /// sheet's estimate is made from (`ArenaScoringProgress.Pace`).
         var mark = SuspendingClock.now
-        var spent: [Bool: (seconds: Double, cycles: Int)] = [:]
+        var spent: [ArenaScoringProgress.Rate: (seconds: Double, cycles: Int)] = [:]
 
-        mutating func visited(fullCore: Bool) {
+        mutating func visited(_ rate: ArenaScoringProgress.Rate) {
             let now = SuspendingClock.now
             let d = now - mark
             mark = now
-            var e = spent[fullCore] ?? (0, 0)
+            var e = spent[rate] ?? (0, 0)
             e.seconds += Double(d.components.seconds) + Double(d.components.attoseconds) * 1e-18
             e.cycles += 1
-            spent[fullCore] = e
+            spent[rate] = e
         }
 
+        /// A pause is no part of what the next cycle took.
+        mutating func resumed() { mark = SuspendingClock.now }
+
         var pace: ArenaScoringProgress.Pace {
-            func at(_ full: Bool) -> Double? {
-                spent[full].flatMap { $0.cycles > 0 ? $0.seconds / Double($0.cycles) : nil }
-            }
-            return .init(share: at(false), full: at(true))
+            .init(seconds: spent.compactMapValues { $0.cycles > 0 ? $0.seconds / Double($0.cycles) : nil })
         }
     }
 
-    /// Whether the budget gives the arena more than its everyday share now:
-    /// the governor's full core, plugged in and idle or sped up.
-    private var atFullCore: Bool { budget.rate > ArenaCPUBudget.clampRate(config.dutyCycle) }
+    /// What the budget gives the scorer now.
+    nonisolated var currentRate: ArenaScoringProgress.Rate {
+        budget.rate > ArenaCPUBudget.clampRate(config.dutyCycle) ? .cores(max(1, budget.scorerWorkers)) : .share
+    }
 
     /// The models `phase` has something to score for in `cycles`: phase 2
     /// queues every model, but the cheap ones had every cycle in phase 1, so
     /// what it is scoring is the heavy ones. By the stored record only: a
     /// model's declines this process are not counted, so one that declined
     /// stays listed until the phase moves past it.
-    private func displayModels(_ s: Stream, _ phase: Phase, cycles: [BurnTrajectory.Cycle]) -> Set<String> {
+    nonisolated private func displayModels(_ s: Stream, _ phase: Phase, cycles: [BurnTrajectory.Cycle]) -> Set<String> {
         var models = phaseModels(s, phase)
         if phase == .heavy {
             let cheap = Set(phaseModels(s, .cheap).map(\.name))
@@ -493,7 +498,7 @@ public actor ArenaRecordScorer {
     /// those the phase planned, the planned models, each window's depth and
     /// the measured pace. An account done with phase 1 while others are not
     /// shows what phase 2 has for it, which is what it is waiting for.
-    private func publishProgress(_ streams: [Stream], account: String, phase: Phase, plan: ProgressPlan) {
+    nonisolated func publishProgress(_ streams: [Stream], account: String, phase: Phase, plan: ProgressPlan) {
         let mine = streams.filter { $0.account == account }
         let remaining = mine.reduce(0) { $0 + $1.queue.count }
         let depth = Dictionary(mine.map { ($0.window.key, $0.depth) }, uniquingKeysWith: { a, _ in a })
@@ -525,7 +530,7 @@ public actor ArenaRecordScorer {
     /// empty: windows take turns of `CyclesPerTurn`, so the account is done
     /// after as many rounds as its longest queue needs, and every other
     /// window gets those rounds too.
-    private func cyclesUntilDone(_ streams: [Stream], account: String) -> Int {
+    nonisolated private func cyclesUntilDone(_ streams: [Stream], account: String) -> Int {
         func perTurn(_ s: Stream) -> Int {
             max(1, s.window.isWeeklyScale ? config.weeklyCyclesPerTurn : config.sessionCyclesPerTurn)
         }
@@ -541,12 +546,18 @@ public actor ArenaRecordScorer {
     public func pass(accounts: [String], now: Date = Date()) async -> Report {
         var report = Report()
         guard !roster.isEmpty, !cancel.isSet else { return report }
-        // However the pass ends, it has no more work for these accounts.
-        defer { progress.clear(accounts: accounts) }
+        // However the pass ends, it has no more work for these accounts, and
+        // nothing runs a forecast until the next pass or refit.
+        defer {
+            progress.clear(accounts: accounts)
+            memo.removeAll()
+            FMScratch.keepPerNetwork = 1
+        }
         // Nothing can run yet (every model waits on a download): no history
         // to read.
         guard roster.selectable.contains(where: { Self.weightsPresent($0, roster: roster, services: services) })
         else { return report }
+        memo.limitValues = config.memoLimitValues
         let started = SuspendingClock.now
         var streams: [Stream] = []
         let inputs = currentGradeInputs()
@@ -563,13 +574,22 @@ public actor ArenaRecordScorer {
         for account in accounts where fullPass.contains(account) {
             progress.set(.reading(at: Date()), account: account)
         }
+        let cpuAtStart = budget.totals.spent
         for account in accounts {
+            await holdReading(full: fullPass.contains(account))
             guard !cancel.isSet else { saveUnsaved(); return report }
             let mine = await self.streams(account: account, now: now, full: fullPass.contains(account),
                                           prints: prints)
             if mine.isEmpty, fullPass.contains(account) { progress.set(nil, account: account) }
             streams += mine
             coveredFingerprint[account] = fingerprint
+        }
+        let read = SuspendingClock.now - started
+        report.readSeconds = Double(read.components.seconds) + Double(read.components.attoseconds) * 1e-18
+        report.readCPUSeconds = budget.totals.spent - cpuAtStart
+        if !fullPass.isEmpty {
+            Log.write("Arena", String(format: "read %d account(s) in %.1f s, %.1f CPU s, on %@", fullPass.count,
+                                      report.readSeconds, report.readCPUSeconds, Self.rateText(budget.rate)))
         }
         let depth = streams.reduce(0) { $0 + $1.cycles.count }
         guard depth > 0 else {
@@ -580,11 +600,9 @@ public actor ArenaRecordScorer {
         // Phase 1 scores only the models that are cheap on this Mac, over
         // every cycle in depth; phase 2 the rest. Within a phase each window
         // takes its turn, newest cycles first, so every window's selection
-        // has something to go on early. The account being scored keeps one
-        // runner across its turns: a parent's child backtests over
-        // neighbouring cuts and cycles mostly repeat, and its memo answers
-        // them.
-        var runners: [String: RunnerSlot] = [:]
+        // has something to go on early. One memo serves the whole pass: a
+        // parent's child backtests over neighbouring cuts and cycles mostly
+        // repeat, and it answers them whichever worker asks.
         var lastLog = SuspendingClock.now
         var planned = 0
         for phase in Phase.allCases {
@@ -606,54 +624,15 @@ public actor ArenaRecordScorer {
             Log.write("Arena", "phase \(phase.rawValue): grading \(queued) cycle(s) over "
                       + "\(streams.filter { !$0.queue.isEmpty }.count) window(s), \(names.count) model(s)"
                       + (phase == .cheap ? String(format: " (≤ %.0f ms a forecast)", config.cheapCostMs) : "")
-                      + String(format: ", %.0f%% of a core", budget.rate * 100))
-            while streams.contains(where: { !$0.queue.isEmpty }) {
-                for i in streams.indices where !streams[i].queue.isEmpty {
-                    if relief.take() { runners.removeAll() }
-                    let weekly = streams[i].window.isWeeklyScale
-                    let account = streams[i].account
-                    // One account's runner at a time: each holds a memo of up
-                    // to `memoLimitValues` (24 MB), and four accounts' were a
-                    // hundred megabytes for the hours a first pass lasts. An
-                    // account's windows are consecutive streams, so its memo
-                    // still serves all of them in a round; what a switch costs
-                    // is a model's first forecast on the next turn.
-                    if runners.count > 1 || runners[account] == nil { runners = runners.filter { $0.key == account } }
-                    let slot = runners[account] ?? {
-                        let r = ArenaRunner(registry: roster.registry, services: services)
-                        r.memoLimitValues = config.memoLimitValues
-                        return RunnerSlot(r)
-                    }()
-                    runners[account] = slot
-                    defer { streams[i].turns += 1 }
-                    let perTurn = weekly ? config.weeklyCyclesPerTurn : config.sessionCyclesPerTurn
-                    let turn = streams[i].turns == 0 ? max(perTurn, EngineSelfEval.rlMinPeriods(weekly: weekly)) : perTurn
-                    for _ in 0..<turn {
-                        guard !cancel.isSet else { saveUnsaved(); costs.save(); return report }
-                        guard !streams[i].queue.isEmpty else { break }
-                        let models = phaseModels(streams[i], phase)
-                        guard !models.isEmpty else { streams[i].queue.removeAll(); break }
-                        let cycle = streams[i].queue.removeFirst()
-                        let news = score(cycle, in: &streams[i], models: models, slot: slot, report: &report)
-                        report.cycles += 1
-                        report.phaseCycles[phase.rawValue, default: 0] += 1
-                        plan.visited(fullCore: atFullCore)
-                        publishProgress(streams, account: account, phase: phase, plan: plan)
-                        if !news.isEmpty {
-                            report.outcomes += news.count
-                            unsaved.append((streams[i].account, streams[i].surface, news))
-                            unsavedCount += news.count
-                        }
-                        if unsavedCount >= config.flushOutcomes
-                            || SuspendingClock.now - lastFlush >= .seconds(config.flushInterval) {
-                            await flush()
-                        }
-                        if SuspendingClock.now - lastLog >= .seconds(120) {
-                            lastLog = SuspendingClock.now
-                            log(report, phase: phase, of: planned, since: started)
-                        }
-                    }
-                }
+                      + ", " + Self.rateText(budget.rate))
+            let crew = ArenaScoringCrew(scorer: self, phase: phase, streams: streams, declined: declined, plan: plan,
+                                        wake: wake, budget: budget, cancel: cancel)
+            await run(crew, phase: phase, report: &report, planned: planned, started: started, lastLog: &lastLog)
+            (streams, declined) = crew.finish()
+            guard !cancel.isSet else {
+                saveUnsaved()
+                costs.save()
+                return report
             }
             log(report, phase: phase, of: planned, since: started, done: true)
         }
@@ -664,11 +643,112 @@ public actor ArenaRecordScorer {
         progress.setGradedThrough(accounts: accounts, fingerprint: fingerprint)
         // Nothing runs a network until the next pass or refit: its kept
         // scratch is only memory now (`FMScratch`).
-        runners.removeAll()
+        memo.removeAll()
         FMScratch.release()
         MemoryHygiene.relieve()
         Self.sendPassTelemetry(report)
         return report
+    }
+
+    /// `1 core`, `9 cores`, or `20% of a core`, for the log.
+    static func rateText(_ rate: Double) -> String {
+        rate > 1 ? "\(Int(rate.rounded())) cores" : String(format: "%.0f%% of a core", rate * 100)
+    }
+
+    /// What the pass's memo may hold at this many workers: one lattice's worth
+    /// while there are one or two, more beyond. Workers on neighbouring cycles
+    /// spread over more of it; at eight, four times the limit halved the memo's
+    /// misses and took 13% off the CPU and 14% off the wall time, at no higher a
+    /// peak footprint (the memo's 72 MB more were forecasts not made again).
+    static func memoLimit(_ limit: Int, workers: Int) -> Int { limit * max(1, (workers + 1) / 2) }
+
+    /// Wait, with no thread, before reading an account's history: while the
+    /// governor has back-scoring paused, and for a full read (months of turns,
+    /// about 267 MB of transient heap on a heavy account) while macOS reports
+    /// any pressure, up to `Config.fullReadWait` so a busy Mac still gets one.
+    private func holdReading(full: Bool) async {
+        let began = SuspendingClock.now
+        while !cancel.isSet {
+            if budget.scorerWorkers == 0 {
+                await wake.wait()
+            } else if full, budget.liveLane != .all, SuspendingClock.now - began < .seconds(config.fullReadWait) {
+                try? await Task.sleep(for: .seconds(min(5, config.fullReadWait)))
+            } else {
+                return
+            }
+        }
+    }
+
+    /// One phase, from here on the actor's side of it: keep the crew at the
+    /// count the governor sets, take what comes back, and save.
+    private func run(_ crew: ArenaScoringCrew, phase: Phase, report: inout Report, planned: Int,
+                     started: SuspendingClock.Instant, lastLog: inout SuspendingClock.Instant) async {
+        var workers = 0
+        var parked = false
+        while true {
+            // Each network keeps as many scratch workspaces as workers can
+            // call it at once: a workspace freed after each call has to fault
+            // all its pages in again on the next (`FMScratch`).
+            let target = budget.scorerWorkers
+            if target != workers {
+                if target < workers { FMScratch.keepPerNetwork = max(1, target); FMScratch.release() }
+                else { FMScratch.keepPerNetwork = max(1, target) }
+                memo.limitValues = Self.memoLimit(config.memoLimitValues, workers: target)
+                workers = target
+            }
+            crew.staff()
+            // Asked before the drain: a worker's last handback and its leaving
+            // can both land after a drain, and those rows would go unsaved.
+            let finished = crew.isFinished
+            for back in crew.drain() {
+                merge(back.report, into: &report)
+                if !back.abandoned {
+                    report.cycles += 1
+                    report.phaseCycles[phase.rawValue, default: 0] += 1
+                }
+                if !back.news.isEmpty {
+                    report.outcomes += back.news.count
+                    unsaved.append((back.account, back.surface, back.news))
+                    unsavedCount += back.news.count
+                }
+            }
+            if unsavedCount >= config.flushOutcomes || SuspendingClock.now - lastFlush >= .seconds(config.flushInterval) {
+                await flush()
+            }
+            if SuspendingClock.now - lastLog >= .seconds(120) {
+                lastLog = SuspendingClock.now
+                log(report, phase: phase, of: planned, since: started)
+            }
+            if finished { return }
+            if target == 0, crew.activeWorkers == 0 {
+                // Everything is back. What the workers were holding when the
+                // pressure came has only just been returned to its pools.
+                if !parked {
+                    parked = true
+                    await flush()
+                    memo.removeAll()
+                    FMScratch.release()
+                    MemoryHygiene.relieve()
+                    Log.write("Arena", "back-scoring paused: low memory")
+                }
+            } else if parked {
+                parked = false
+                crew.resumed()
+                Log.write("Arena", "back-scoring resumed")
+            }
+            await wake.wait()
+        }
+    }
+
+    private func merge(_ r: Report, into total: inout Report) {
+        total.outcomes += r.outcomes
+        total.regraded += r.regraded
+        total.forecasts += r.forecasts
+        total.declined += r.declined
+        total.busySeconds += r.busySeconds
+        total.modelSeconds.merge(r.modelSeconds, uniquingKeysWith: +)
+        total.modelCPUSeconds.merge(r.modelCPUSeconds, uniquingKeysWith: +)
+        total.modelForecasts.merge(r.modelForecasts, uniquingKeysWith: +)
     }
 
     /// What one pass reports. A pass that graded nothing sends nothing: every
@@ -830,88 +910,88 @@ public actor ArenaRecordScorer {
         return out
     }
 
-    /// Every cut of one completed cycle, every one of `models` still missing
-    /// at it: cuts outer, models inner, one history cut shared by the models.
-    private func score(_ cycle: BurnTrajectory.Cycle, in s: inout Stream, models: [ArenaModelSpec],
-                       slot: RunnerSlot, report: inout Report)
-        -> [EngineSelfEval.NewOutcome] {
-        let runner = slot.runner
-        let weekly = s.window.isWeeklyScale
-        guard let truth = cycle.samples.map(\.usedPercentage).max(), truth > 0 else { return [] }
+    /// Every cut of one completed cycle, every model still missing at it: cuts
+    /// outer, models inner, one history cut shared by the models. On a worker's
+    /// thread, touching nothing of the pass's: what it found goes back in the
+    /// handback (`ArenaScoringCrew`).
+    ///
+    /// `stopped` is the worker's latch, which `runner`'s checks also set. A
+    /// forecast it turned true during has not earned a row: a model may have
+    /// swallowed the cancellation in a child and answered from less than it
+    /// should, which is the one way a row could differ between worker counts.
+    nonisolated func grade(_ job: ArenaScoringCrew.Job, runner: ArenaRunner, warm: inout Set<String>,
+                           stopped: @Sendable () -> Bool) -> ArenaScoringCrew.Handback {
+        var back = ArenaScoringCrew.Handback(stream: job.stream, account: job.account, surface: job.surface,
+                                             cycle: job.cycle)
+        let cycle = job.cycle
+        guard let truth = cycle.samples.map(\.usedPercentage).max(), truth > 0 else { return back }
         let duration = cycle.resetsAt.timeIntervalSince(cycle.cycleStart)
-        guard duration > 0 else { return [] }
-        let period = EngineSelfEval.periodKeyRL(cycle.resetsAt)
-        let baseSurface = EngineSelfEval.rlSurface(s.window.key)
+        guard duration > 0 else { return back }
+        let period = job.period
         let grading = config.grading
-        var out: [EngineSelfEval.NewOutcome] = []
-        for (ci, cf) in grading.cuts.enumerated() {
-            guard !cancel.isSet else { return out }
-            // Utility while the governor gives the full core (performance
-            // cores), background otherwise (`ArenaQoS`).
+        for (ci, models) in job.cuts {
+            guard !stopped() else { back.abandoned = true; return back }
+            // Utility while the governor gives a full core or more
+            // (performance cores), background otherwise (`ArenaQoS`).
             ArenaQoS.apply(budget.scorerQoS)
-            let cutNow = cycle.cycleStart.addingTimeInterval(duration * cf)
+            let cutNow = cycle.cycleStart.addingTimeInterval(duration * grading.cuts[ci])
             let seen = cycle.samples.filter { $0.at <= cutNow }
             // The engine's own rule (`newOutcomesRL`), so both are graded on
             // the same cuts.
             guard seen.count >= 3 else { continue }
-            let missing = models.filter {
-                !isDone(s, $0.name, cut: ci, period: period)
-                    && !declined.contains(Self.key(s.surface, $0.name, grading.bucket(cf), period))
-            }
-            guard !missing.isEmpty else { continue }
             let partial = BurnTrajectory.PartialCycle(samples: seen, now: cutNow, cycleStart: cycle.cycleStart,
                                                       resetsAt: cycle.resetsAt)
-            let cut = ArenaHistory(store: s.store, now: ArenaCut.millis(cutNow), accounts: [s.account])
+            let cut = ArenaHistory(store: job.store, now: ArenaCut.millis(cutNow), accounts: [job.account])
             let busyStart = SuspendingClock.now
-            for spec in missing {
-                let k = Self.key(s.surface, spec.name, grading.bucket(cf), period)
-                report.forecasts += 1
+            for spec in models {
+                let k = Self.key(job.surface, spec.name, grading.bucket(grading.cuts[ci]), period)
+                back.report.forecasts += 1
                 let modelStart = SuspendingClock.now
                 // CPU, not wall: the wall time is mostly the budget's sleeps.
                 let cpuStart = budget.threadCPUSeconds()
                 var timed = true
                 defer {
                     let d = SuspendingClock.now - modelStart
-                    report.modelSeconds[spec.name, default: 0] += Double(d.components.seconds)
+                    back.report.modelSeconds[spec.name, default: 0] += Double(d.components.seconds)
                         + Double(d.components.attoseconds) * 1e-18
                     let cpu = max(0, budget.threadCPUSeconds() - cpuStart)
-                    report.modelCPUSeconds[spec.name, default: 0] += cpu
-                    report.modelForecasts[spec.name, default: 0] += 1
-                    // A model's first forecast on this runner fills its memo
+                    back.report.modelCPUSeconds[spec.name, default: 0] += cpu
+                    back.report.modelForecasts[spec.name, default: 0] += 1
+                    // A model's first forecast for an account fills the memo
                     // (see `ArenaModelCosts`); a cancelled one is partial.
-                    if timed, !slot.warm.insert(spec.name).inserted {
-                        costs.record(spec.name, weekly: weekly, cpuMs: cpu * 1000)
+                    if timed, !warm.insert("\(job.account)|\(spec.name)").inserted {
+                        costs.record(spec.name, weekly: job.weekly, cpuMs: cpu * 1000)
                     }
                 }
                 // The model's CPU is charged at every check inside it (the
-                // scorer's `isCancelled`) and its tail here.
+                // worker's `isCancelled`) and its tail here.
                 budget.mark()
-                defer { budget.checkpoint(cancelled: { cancel.isSet }) }
+                defer { budget.checkpoint(cancelled: stopped) }
                 do {
-                    let p = try runner.projection(model: spec.name, binding: s.binding, history: cut,
-                                                    resetAt: ArenaTime.millis(cycle.resetsAt))
+                    let p = try runner.projection(model: spec.name, binding: job.binding, history: cut,
+                                                  resetAt: ArenaTime.millis(cycle.resetsAt))
+                    if stopped() { timed = false; back.abandoned = true; return back }
                     let shown = BurnTrajectory.displayedAtReset(p.closure, partial: partial)
-                    guard shown.isFinite else { declined.insert(k); report.declined += 1; continue }
-                    out.append(EngineSelfEval.NewOutcome(
-                        surface: baseSurface, method: spec.name, bucket: grading.bucket(cf),
-                        periodKey: period, predicted: shown, truth: truth, inputs: s.inputs[spec.name],
+                    guard shown.isFinite else { back.declined.append(k); back.report.declined += 1; continue }
+                    back.news.append(EngineSelfEval.NewOutcome(
+                        surface: job.baseSurface, method: spec.name, bucket: grading.bucket(grading.cuts[ci]),
+                        periodKey: period, predicted: shown, truth: truth, inputs: job.inputs[spec.name],
                         reading: partial.usedNow))
-                    if let done = doneKey(s, spec.name, cut: ci, period: period) {
-                        s.existing.insert(done)
-                        if s.stale.remove(done) != nil { report.regraded += 1 }
-                    }
+                    back.graded.append((spec.name, ci))
                 } catch ArenaError.cancelled {
                     timed = false
-                    return out
+                    back.abandoned = true
+                    return back
                 } catch {
-                    declined.insert(k)
-                    report.declined += 1
+                    if stopped() { timed = false; back.abandoned = true; return back }
+                    back.declined.append(k)
+                    back.report.declined += 1
                 }
             }
             let busy = SuspendingClock.now - busyStart
-            report.busySeconds += Double(busy.components.seconds) + Double(busy.components.attoseconds) * 1e-18
+            back.report.busySeconds += Double(busy.components.seconds) + Double(busy.components.attoseconds) * 1e-18
         }
-        return out
+        return back
     }
 
     static func key(_ surface: String, _ model: String, _ bucket: String, _ period: String) -> String {
@@ -1038,6 +1118,10 @@ public actor ArenaLiveForecaster {
         while !pending.isEmpty, !cancel.isSet {
             let batch = Array(pending.values)
             pending.removeAll()
+            // Under memory pressure (`ArenaBudgetPolicy.decide`): nothing, or
+            // only each window's pick. The next refit asks again for the rest.
+            let lane = budget.liveLane
+            guard lane != .none else { break }
             let started = Date()
             var round = Round()
             var cuts: [(account: String, cut: ArenaHistory, asOf: Date, runner: ArenaRunner,
@@ -1048,7 +1132,7 @@ public actor ArenaLiveForecaster {
                 cuts.append((account, ArenaHistory(store: built.store, now: cutMs, accounts: [account]),
                              ArenaTime.date(cutMs), runner(account: account, built: built), requests))
             }
-            for urgent in [true, false] {
+            for urgent in lane == .all ? [true, false] : [true] {
                 if urgent { budget.beginUrgent() }
                 var changed = Set<String>()
                 for c in cuts {
@@ -1062,6 +1146,11 @@ public actor ArenaLiveForecaster {
                 if !changed.isEmpty { await landed(changed) }
             }
             if let line = round.line(wall: Date().timeIntervalSince(started)) { Log.write("Arena", line) }
+            // A filled memo and warm scratch are what the pressure is about.
+            if lane != .all {
+                runners.removeAll()
+                FMScratch.release()
+            }
         }
         draining = false
     }
@@ -1206,8 +1295,8 @@ public final class ArenaRuntime: Sendable {
     public let live: ArenaLiveForecaster
     /// The arena's share of the CPU, scorer and live together.
     public let budget: ArenaCPUBudget
-    /// Raises the share while the Mac is plugged in and idle, or sped up,
-    /// from `start`.
+    /// Sets the share, and the scorer's workers, from `start`: raises it while
+    /// the Mac is plugged in and idle or sped up, pauses it on memory pressure.
     public let governor: ArenaBudgetGovernor?
     /// The user's speed-up the governor honours (`ArenaSpeedUp`).
     public let speedUp: ArenaSpeedUp
@@ -1247,6 +1336,10 @@ public final class ArenaRuntime: Sendable {
     ///     sheet reads `ArenaScoringProgressBoard.shared`.
     ///   - speedUp: the speed-up the governor honours; the app's sheet
     ///     turns on `ArenaSpeedUp.shared`.
+    ///   - maxWorkers: the most scorer threads a speed-up may run
+    ///     (`ArenaWorkerPolicy`).
+    ///   - pressure: the memory level the governor holds back-scoring for, and
+    ///     the caches are dropped on (tests inject one they drive).
     ///   - clock: the time the live lane asks its history to be known at
     ///     (tests pin it).
     public init(container: ModelContainer, roster: ArenaRoster = .standard,
@@ -1256,6 +1349,8 @@ public final class ArenaRuntime: Sendable {
                 costs: ArenaModelCosts = ArenaModelCosts(defaults: nil),
                 progress: ArenaScoringProgressBoard = .shared,
                 speedUp: ArenaSpeedUp = .shared,
+                maxWorkers: Int = ArenaWorkerPolicy.forThisMac,
+                pressure: MemoryPressure = .shared,
                 clock: @escaping @Sendable () -> Date = { Date() },
                 onRecordLanded: @escaping @Sendable (String, [EngineSelfEval.NewOutcome]) async -> Void,
                 onLiveLanded: @escaping @Sendable (Set<String>) async -> Void) {
@@ -1278,6 +1373,7 @@ public final class ArenaRuntime: Sendable {
         // A speed-up holds while any account has catch-up queued.
         self.governor = config.adaptiveBudget
             ? ArenaBudgetGovernor(budget: budget, shareRate: config.dutyCycle, fullRate: config.idleDutyCycle,
+                                  maxWorkers: maxWorkers, pressure: pressure,
                                   speedUp: speedUp, pending: { progress.hasWork })
             : nil
         // The history pays like the rest but never waits for the urgent lane:
@@ -1287,12 +1383,9 @@ public final class ArenaRuntime: Sendable {
         self.history = history
         let gate = ArenaLogGate()
         // Every check a model makes for cancellation is also where it pays
-        // for its CPU: the scorer's waits behind live work, the live
-        // forecaster's does not.
-        let scorerServices = ArenaServices(weights: weights, log: { gate.write($0, $1) }, isCancelled: {
-            budget.checkpoint(cancelled: { cancel.isSet })
-            return cancel.isSet
-        })
+        // for its CPU: the scorer's workers wait behind live work
+        // (`ArenaScoringCrew`), the live forecaster's does not.
+        let scorerServices = ArenaServices(weights: weights, log: { gate.write($0, $1) })
         let urgency = ArenaLaneUrgency()
         let liveServices = ArenaServices(weights: weights, log: { gate.write($0, $1) }, isCancelled: {
             budget.checkpoint(urgent: urgency.isUrgent, cancelled: { cancel.isSet })
@@ -1304,7 +1397,7 @@ public final class ArenaRuntime: Sendable {
         self.live = ArenaLiveForecaster(roster: roster, history: history, cache: cache, services: liveServices,
                                         budget: budget, cancel: cancel, urgency: urgency, clock: clock,
                                         landed: onLiveLanded)
-        self.relief = ArenaMemoryRelief(live: live, scorerFlag: scorer.relief)
+        self.relief = ArenaMemoryRelief(pressure: pressure, live: live, memo: scorer.memo)
         let sweep = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
         sweep.schedule(deadline: .now() + 60, repeating: 60, leeway: .seconds(5))
         sweep.setEventHandler { FMScratch.releaseIdle() }
@@ -1323,7 +1416,7 @@ public final class ArenaRuntime: Sendable {
                                weightsPresent: { presence.present($0) },
                                gradedThrough: { board.isGradedThrough(account: $0) },
                                progress: { board.progress(account: $0) },
-                               fullCore: { governor?.current == .fullCore },
+                               rate: { governor?.current.map(ArenaBudgetPolicy.paceRate) ?? .share },
                                requestLive: { reqs in Task.detached(priority: .utility) { await live.submit(reqs) } },
                                makeLive: { req in await live.makeNow(req) })
     }
@@ -1350,7 +1443,7 @@ public final class ArenaRuntime: Sendable {
         Task.detached(priority: .background) { await scorer.start(accounts: accounts, beforePass: fetchMissing) }
     }
 
-    /// Stop at the next model boundary and wait for it.
+    /// Stop at the next check inside a model, every worker, and wait for it.
     public func stop() async {
         cancel.set(true)
         governor?.stop()

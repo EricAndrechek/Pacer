@@ -436,12 +436,19 @@ public struct ArenaServices: Sendable {
     /// cancellation inside a child answers from less than it should, and the
     /// runner must not remember that answer for anyone else.
     public var isAbandoned: @Sendable () -> Bool
+    /// This run works beside others of its kind on the same process-wide caches
+    /// (the grader's workers): what one of them is making now is waited for
+    /// rather than made again (`ArenaInFlight`). Off, a cache is only read and
+    /// written. The live lane has it off and must: the dashboard waits on it,
+    /// and a worker holding a claim may be paced behind it.
+    public var sharesWork: Bool
 
     public init(weights: @escaping @Sendable (String) -> URL? = { _ in nil },
                 log: @escaping @Sendable (String, String) -> Void = { _, _ in },
                 isCancelled: @escaping @Sendable () -> Bool = { false },
-                isAbandoned: @escaping @Sendable () -> Bool = { false }) {
+                isAbandoned: @escaping @Sendable () -> Bool = { false }, sharesWork: Bool = false) {
         self.weights = weights; self.log = log; self.isCancelled = isCancelled; self.isAbandoned = isAbandoned
+        self.sharesWork = sharesWork
     }
 }
 
@@ -521,6 +528,56 @@ public struct ArenaChildModel {
 
 // MARK: - Runner
 
+/// One thread making a thing at a time, for a cache several threads fill.
+///
+/// Grader workers sit on neighbouring cycles, and each new cycle asks for the
+/// lattice points older than any done so far: a worker `k` cycles behind the
+/// newest needs `k + 1` cycles' worth of new points, all but one of them also
+/// needed by the workers ahead. Without this every one of them makes all of its
+/// points, (N + 1) / 2 times the work: on a real store, eight workers made 2.2
+/// times the network calls of one and used 2.4 times the CPU. With it each takes
+/// the next point nobody has taken and waits only for what is being made, and
+/// because a model asks for its lattice oldest first, workers at different
+/// cycles start on different points: they run side by side rather than in line.
+///
+/// A wait cannot deadlock: what one thread holds and what it waits for are both
+/// below it in the models' children, and at no later a time.
+public final class ArenaInFlight: @unchecked Sendable {
+    private let condition = NSCondition()
+    private var held = Set<AnyHashable>()
+    /// How often a waiter looks up to see whether it should stop.
+    static let checkEvery: TimeInterval = 0.1
+
+    public init() {}
+
+    /// Take `key` if nobody holds it.
+    func tryClaim(_ key: AnyHashable) -> Bool {
+        condition.lock(); defer { condition.unlock() }
+        return held.insert(key).inserted
+    }
+
+    /// Wait until nobody holds `key`, then take it. `check` runs between waits,
+    /// not under the lock, and what it throws ends the wait with nothing taken.
+    func claim(_ key: AnyHashable, check: () throws -> Void) rethrows {
+        condition.lock()
+        while !held.insert(key).inserted {
+            condition.wait(until: Date().addingTimeInterval(Self.checkEvery))
+            guard held.contains(key) else { continue }
+            condition.unlock()
+            try check()
+            condition.lock()
+        }
+        condition.unlock()
+    }
+
+    func release(_ key: AnyHashable) {
+        condition.lock()
+        held.remove(key)
+        condition.broadcast()
+        condition.unlock()
+    }
+}
+
 /// Forecasts a runner has made, held to a number of doubles by evicting the
 /// least recently used: a weekly forecast as paths is ~200 × 340 values, so a
 /// count of entries alone let a long backfill's memo reach gigabytes. A key
@@ -537,6 +594,8 @@ public final class ArenaForecastMemo: @unchecked Sendable {
     private var tick: UInt64 = 0
     private var limit: Int
     private var hitCount = 0, missCount = 0
+    /// The child forecasts being made now, by whichever runner.
+    let inFlight = ArenaInFlight()
 
     public init(limitValues: Int = 8_000_000) { limit = limitValues }
 
@@ -648,10 +707,18 @@ public final class ArenaRunner {
         // score that under the pool's name and keep the record.
         for w in requiredWeights(name) where services.weights(w) == nil { throw ArenaError.weightsUnavailable(w) }
         try checkCancelled()
+        let topLevel = depth == 0
+        // A child another runner is making now is an answer soon: wait for it
+        // rather than make it twice. Top-level answers are not kept, so there
+        // is nothing to wait for (and each is asked once).
+        if !topLevel {
+            try memo.inFlight.claim(key, check: checkCancelled)
+        }
+        defer { if !topLevel { memo.inFlight.release(key) } }
+        if !topLevel, let hit = memo.get(key) { return hit }
         var fitted: ArenaHistory?
         let ctx = ArenaContext(spec: spec, seed: Self.deriveSeed(seed, name, request.now), services: services,
                                runner: self, history: { fitted })
-        let topLevel = depth == 0
         depth += 1
         defer { depth -= 1 }
         let instance = try spec.make(ctx)

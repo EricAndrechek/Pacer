@@ -771,7 +771,8 @@ final class AppBackgroundService {
     /// (`ArenaBudgetGovernor`); the cheap models first over the whole history,
     /// newest cycles first, resuming after whatever an earlier launch saved.
     /// A Mac with nothing to catch up pays for that first reading and nothing
-    /// else, a few CPU-seconds an account.
+    /// else: on a 1.3 GB store with four accounts, 3 CPU-seconds, 1 GB read and
+    /// 270 MB of transient heap, and about a second for each pass after it.
     private func startArena() {
         guard !arenaStarted else { return }
         arenaStarted = true

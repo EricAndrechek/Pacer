@@ -59,9 +59,11 @@ public struct ArenaRoster: Sendable {
     /// `registry` by name (the cost priors walk children through it).
     public let registryByName: [String: ArenaModelSpec]
 
-    public init(registry: [ArenaModelSpec]) {
+    /// - Parameter only: restricts who competes, children still reachable
+    ///   (a probe grading a chosen set); nil, everyone who can.
+    public init(registry: [ArenaModelSpec], only: Set<String>? = nil) {
         self.registry = registry
-        self.selectable = registry.filter(Self.isSelectable)
+        self.selectable = registry.filter { Self.isSelectable($0) && (only?.contains($0.name) ?? true) }
         self.registryByName = Dictionary(registry.map { ($0.name, $0) }, uniquingKeysWith: { a, _ in a })
     }
 

@@ -26,8 +26,12 @@ public enum FMScratch {
     nonisolated(unsafe) public static var keepBytes = 160 << 20
     /// A kept workspace unused this long is freed (`releaseIdle`).
     public static let idleSeconds: Double = 120
-    /// Workspaces kept per network.
-    nonisolated(unsafe) static var keepPerNetwork = 1
+    /// Workspaces kept per network: one, or as many as the grader's workers
+    /// can call a network at once (`ArenaRecordScorer`).
+    static var keepPerNetwork: Int {
+        get { registry.lock.lock(); defer { registry.lock.unlock() }; return registry.keepPerNetwork }
+        set { registry.lock.lock(); registry.keepPerNetwork = newValue; registry.lock.unlock() }
+    }
     /// A workspace over `keepBytes` keeps only its buffers up to this size.
     static let slotBytes = 2 << 20
 
@@ -37,6 +41,7 @@ public enum FMScratch {
         let lock = NSLock()
         var pools: [WeakPool] = []
         var largest = 0
+        var keepPerNetwork = 1
     }
 
     struct WeakPool { weak var pool: (any FMScratchPool)? }
@@ -154,8 +159,14 @@ final class FMWorkspacePool<W: FMWorkspaceBuffers>: FMScratchPool, @unchecked Se
     private let lock = NSLock()
     private var calls = 0, largest = 0, overCap = 0
     private var lastUsed = 0.0
+    private let keep: @Sendable () -> Int
 
-    init() { FMScratch.register(self) }
+    /// - Parameter keep: how many workspaces to keep; `keepPerNetwork` unless a
+    ///   test needs a count no scoring pass elsewhere in the process can change.
+    init(keep: @escaping @Sendable () -> Int = { FMScratch.keepPerNetwork }) {
+        self.keep = keep
+        FMScratch.register(self)
+    }
 
     func with<T>(_ body: (W) throws -> T) rethrows -> T {
         lock.lock()
@@ -175,7 +186,7 @@ final class FMWorkspacePool<W: FMWorkspaceBuffers>: FMScratchPool, @unchecked Se
             if bytes > FMScratch.keepBytes { _ = ws.shrink(above: FMScratch.slotBytes) }
             lock.lock()
             lastUsed = FMScratch.uptime()
-            if free.count < FMScratch.keepPerNetwork, ws.bytes <= FMScratch.keepBytes { free.append(ws) }
+            if free.count < keep(), ws.bytes <= FMScratch.keepBytes { free.append(ws) }
             lock.unlock()
         }
         return try body(ws)

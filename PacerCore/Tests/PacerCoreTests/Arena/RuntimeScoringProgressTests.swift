@@ -193,14 +193,14 @@ struct RuntimeScoringProgressTests {
         let atShare = (try await Self.watchedPass(budgetRate: 0.2, accounts: [account])).seen[account] ?? []
         let timed = atShare.compactMap { $0 }.filter { !$0.readingHistory && $0.pace != .init() }
         #expect(!timed.isEmpty)
-        #expect(timed.allSatisfy { $0.pace.share != nil && $0.pace.full == nil })
+        #expect(timed.allSatisfy { $0.pace.secondsPerCycle(.share) != nil && $0.pace.secondsPerCycle(.cores(1)) == nil })
         #expect(timed.allSatisfy { $0.cyclesAhead > 0 })
-        #expect(timed.allSatisfy { $0.eta(fullCore: false) != nil && $0.eta(fullCore: true) == nil })
+        #expect(timed.allSatisfy { $0.eta(rate: .share) != nil && $0.eta(rate: .cores(1)) == nil })
 
         let atFull = (try await Self.watchedPass(budgetRate: 1, accounts: [account])).seen[account] ?? []
         let fast = atFull.compactMap { $0 }.filter { !$0.readingHistory && $0.pace != .init() }
         #expect(!fast.isEmpty)
-        #expect(fast.allSatisfy { $0.pace.full != nil && $0.pace.share == nil })
+        #expect(fast.allSatisfy { $0.pace.secondsPerCycle(.cores(1)) != nil && $0.pace.secondsPerCycle(.share) == nil })
     }
 
     /// The time left counts down through the cycle under way, by at most
@@ -208,17 +208,17 @@ struct RuntimeScoringProgressTests {
     @Test func theTimeLeftCountsDownWithinACycle() {
         let at = Date(timeIntervalSince1970: 1_800_000_000)
         let p = ArenaScoringProgress(phase: .cheap, cyclesDone: 1, cyclesTotal: 9, models: ["m"], updatedAt: at,
-                                     pace: .init(share: 120, full: 20), cyclesAhead: 8)
-        func eta(_ full: Bool, after s: TimeInterval) -> Double { p.eta(fullCore: full, now: at.addingTimeInterval(s)) ?? -1 }
+                                     pace: .init(seconds: [.share: 120, .cores(1): 20]), cyclesAhead: 8)
+        func eta(_ full: Bool, after s: TimeInterval) -> Double { p.eta(rate: full ? .cores(1) : .share, now: at.addingTimeInterval(s)) ?? -1 }
         #expect(abs(eta(false, after: 0) - 960) < 1e-6)
         #expect(abs(eta(false, after: 60) - 900) < 1e-6)
         #expect(abs(eta(false, after: 3600) - 840) < 1e-6)
         #expect(abs(eta(true, after: 5) - 155) < 1e-6)
         #expect(abs(eta(false, after: -60) - 960) < 1e-6)
         let none = ArenaScoringProgress(phase: .cheap, cyclesDone: 0, cyclesTotal: 9, models: [], updatedAt: at)
-        #expect(none.eta(fullCore: false) == nil && none.eta(fullCore: true) == nil)
+        #expect(none.eta(rate: .share) == nil && none.eta(rate: .cores(1)) == nil)
         #expect(ArenaScoringProgress(phase: .cheap, cyclesDone: 8, cyclesTotal: 9, models: ["m"], updatedAt: at,
-                                     pace: .init(share: 10), cyclesAhead: 0).eta(fullCore: false, now: at) == 0)
+                                     pace: .init(seconds: [.share: 10]), cyclesAhead: 0).eta(rate: .share, now: at) == 0)
     }
 
     @Test func theBoardIsPerAccountAndFractionIsBounded() {

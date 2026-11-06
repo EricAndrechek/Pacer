@@ -125,7 +125,7 @@ struct RuntimeEngineTests {
         // A board of its own: the app's (`.shared`) would carry one test's
         // passes into the next.
         ArenaRuntime(container: container, roster: ArenaRoster(registry: roster), config: config,
-                     progress: ArenaScoringProgressBoard(), clock: clock,
+                     progress: ArenaScoringProgressBoard(), pressure: MemoryPressure(), clock: clock,
                      onRecordLanded: { _, news in
                          landed.add(news)
                          _ = await engine?.ingestArenaOutcomes(news)
@@ -279,6 +279,7 @@ struct RuntimeEngineTests {
         config.rescanInterval = 0.05
         let rt = ArenaRuntime(container: container, roster: ArenaRoster(registry: [pinned]),
                               weights: { _ in nil }, ensureWeights: { asked.add($0) }, config: config,
+                              pressure: MemoryPressure(),
                               onRecordLanded: { _, _ in }, onLiveLanded: { _ in })
         rt.start(accounts: { [Self.account] })
         // Background priority: on a loaded Mac a pass can wait a long while

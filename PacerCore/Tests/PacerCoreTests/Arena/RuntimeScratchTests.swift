@@ -30,8 +30,26 @@ struct RuntimeScratchTests {
         #expect(a == b)
     }
 
+    /// Beside the grader's workers, a pool keeps as many as can be in use at
+    /// once: a workspace freed after each call faults all its pages in again.
+    @Test func aPoolKeepsAsManyAsItIsAsked() {
+        let pool = FMWorkspacePool<Workspace>(keep: { 3 })
+        let size = 1 << 10
+        pool.with { a in
+            _ = a.buf(.small, size)
+            pool.with { b in
+                _ = b.buf(.small, size)
+                pool.with { c in
+                    _ = c.buf(.small, size)
+                    pool.with { d in _ = d.buf(.small, size) }
+                }
+            }
+        }
+        #expect(pool.keptBytes == 3 * size * Self.floats)
+    }
+
     @Test func onePoolKeepsOneWorkspaceUnderTheCap() {
-        let pool = FMWorkspacePool<Workspace>()
+        let pool = FMWorkspacePool<Workspace>(keep: { 1 })
         var first: Workspace?
         pool.with { ws in _ = ws.buf(.small, 1 << 18); first = ws }
         #expect(pool.keptBytes == (1 << 18) * Self.floats)

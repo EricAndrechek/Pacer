@@ -56,7 +56,7 @@ extension UsageIntelligenceEngine {
             cutFraction: Self.liveFraction(f, window: window), canRunArena: binding != nil,
             weightsPresent: weightsPresent, liveFailure: failure, progress: progress,
             gradedThrough: account.map { arena?.gradedThrough($0) ?? false } ?? false,
-            drawLimit: arena?.compareLimit ?? 4, hasGrader: arena != nil, fullCore: arena?.fullCore() ?? false)
+            drawLimit: arena?.compareLimit ?? 4, hasGrader: arena != nil, rate: arena?.rate() ?? .share)
     }
 
     /// What a model with no grade at all says once the grader has been
@@ -90,7 +90,7 @@ extension UsageIntelligenceEngine {
     /// `progress`, the board's one line about the grader, is there only while
     /// some row waits on it (scoring, queued or re-grading): what stage the
     /// grader is at, how far, and the time left at the pace measured at the
-    /// budget's current rate (`fullCore`). Every row being scored would have
+    /// budget's current rate (`rate`). Every row being scored would have
     /// the same time left, so no row repeats it.
     ///
     /// Order: ranked by typical miss (then complexity, then name), scoring
@@ -101,7 +101,7 @@ extension UsageIntelligenceEngine {
         engineIds: [String], specs: [ArenaModelSpec], complexity: [String: Int], selected: String?, shown: String?,
         cutFraction: Double?, canRunArena: Bool, weightsPresent: (ArenaModelSpec) -> Bool,
         liveFailure: (String) -> String?, progress: ArenaScoringProgress?, gradedThrough: Bool, drawLimit: Int,
-        hasGrader: Bool = true, fullCore: Bool = false, now: Date = Date()
+        hasGrader: Bool = true, rate: ArenaScoringProgress.Rate = .share, now: Date = Date()
     ) -> MeterModelBoard {
         let minPeriods = EngineSelfEval.rlMinPeriods(weekly: weekly)
         let current = current ?? ranking
@@ -109,7 +109,7 @@ extension UsageIntelligenceEngine {
             ?? max(current?.depthCycles ?? 0, ranking?.depthCycles ?? 0)
         let bridging = ranking != nil && ranking?.grading != current?.grading
         let scoring = Set(progress?.models ?? [])
-        let eta = progress?.eta(fullCore: fullCore, now: now)
+        let eta = progress?.eta(rate: rate, now: now)
         // The grader will reach a model it is not on now: a pass is running
         // on the account, or none has been through it under these inputs.
         let graderAhead = hasGrader && (progress != nil || !gradedThrough)

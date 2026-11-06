@@ -58,22 +58,20 @@ struct ProjectionCompareModal: View {
     /// showing a different question's answer.
     let limitAccountId: String?
 
-    /// `make render-live PAGES=projectionCatchUp` only: the list's grader
-    /// line and Speed up control as a catch-up would show them, over the
-    /// real board. A render has no arena runtime, so nothing else can show
-    /// them off-screen.
-    let catchUpPreview: Bool
+    /// `make render-live PAGES=projectionCatchUp` and its neighbours only: the
+    /// list's grader line and Speed up control as a catch-up would show them
+    /// at this pace, over the real board. A render has no arena runtime, so
+    /// nothing else can show them off-screen.
+    let catchUpPreview: ArenaPace?
 
-    init(windowKey: String, limitAccountId: String? = nil, catchUpPreview: Bool = false) {
+    init(windowKey: String, limitAccountId: String? = nil, catchUpPreview: ArenaPace? = nil) {
         self.windowKey = windowKey
         self.limitAccountId = limitAccountId
         self.catchUpPreview = catchUpPreview
     }
 
-    /// What the preview draws (`catchUpPreview`): a first catch-up while
-    /// the Mac is in use.
+    /// What the preview draws (`catchUpPreview`): a first catch-up, part way.
     static let previewProgress = MeterModelBoard.Progress(done: 40, total: 100, eta: 2 * 3600, stage: .scoring)
-    static let previewPace = ArenaPace(mode: .share(.inUse))
 
     private var isFixed: Bool {
         windowKey == RateLimitWindowName.fiveHour || windowKey == RateLimitWindowName.sevenDay
@@ -152,7 +150,7 @@ struct ProjectionCompareModal: View {
         // The arena budget's pace, read here by value and passed down: the
         // grader line and its Speed up control follow a click, the Mac
         // going idle or in use, and the speed-up ending, as they happen.
-        let pace = catchUpPreview ? Self.previewPace : ArenaSpeedUp.shared.status.pace
+        let pace = catchUpPreview ?? ArenaSpeedUp.shared.status.pace
         // Read here, by value, so a poll written by any context reloads the
         // actuals (`RateLimitWriteSignal`).
         let writes = RateLimitWriteSignal.shared.generation
@@ -330,7 +328,7 @@ struct ProjectionCompareModal: View {
     /// the on-demand ones follow the lines.
     private func take(_ next: MeterModelBoard) {
         var next = next
-        if catchUpPreview { next.progress = Self.previewProgress }
+        if catchUpPreview != nil { next.progress = Self.previewProgress }
         board = next
         lines.follow(next, key: extrasKey)
         syncExtras()

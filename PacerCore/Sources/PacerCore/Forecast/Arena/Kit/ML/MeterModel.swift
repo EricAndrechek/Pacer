@@ -157,7 +157,8 @@ open class KitMLLearnedMeterModel: ArenaModel {
             let cache = KitMLStateCache.of(history.store, capacity: max(cfg.int("train_cache_buckets", 8), 1))
             let meter = "\(Self.modelName)|\(configSalt)|\(history.accounts.joined(separator: "+"))|"
                 + "\(historyStart.map(String.init) ?? "-")|\(kind)|\(cap ?? "")"
-            let state = try cache.value(meter, bucket: b) {
+            let state = try cache.value(meter, bucket: b, sharesWork: ctx.services.sharesWork,
+                                        check: { try ctx.checkCancelled() }) {
                 // Leak-free by construction: the training sees the history as
                 // known at the bucket's start, never the cut's later rows.
                 let hb = history.asOf(b)
@@ -240,6 +241,7 @@ final class KitMLStateCache: @unchecked Sendable {
     private let lock = NSLock()
     private var entries: [String: [(bucket: Millis, state: KitBox<Any?>, used: Int)]] = [:]
     private var tick = 0
+    private let inFlight = ArenaInFlight()
 
     init(capacity: Int) { self.capacity = capacity }
 
@@ -248,9 +250,17 @@ final class KitMLStateCache: @unchecked Sendable {
     }
 
     /// The meter's state for `bucket`, trained by `make` (outside the lock:
-    /// another meter's training never waits on it) when not held.
-    func value(_ meter: String, bucket: Millis, _ make: () throws -> Any?) rethrows -> Any? {
+    /// another meter's training never waits on it) when not held. Beside other
+    /// workers (`sharesWork`), a training one of them is doing for this bucket
+    /// is waited for rather than done twice; `check` runs during that wait, and
+    /// what it throws ends it.
+    func value(_ meter: String, bucket: Millis, sharesWork: Bool = false, check: () throws -> Void = {},
+               _ make: () throws -> Any?) throws -> Any? {
         if let hit = lookup(meter, bucket) { return hit.value }
+        let claim = "\(meter)|\(bucket)"
+        if sharesWork { try inFlight.claim(claim, check: check) }
+        defer { if sharesWork { inFlight.release(claim) } }
+        if sharesWork, let hit = lookup(meter, bucket) { return hit.value }
         let v = try make()
         lock.lock(); defer { lock.unlock() }
         tick += 1

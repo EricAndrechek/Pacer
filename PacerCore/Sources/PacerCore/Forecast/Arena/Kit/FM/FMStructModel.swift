@@ -133,10 +133,13 @@ public final class FMStructModel: ArenaModel {
         let tf = FMSeries.TurnFrame(history, hours: 7 * 24, accounts: [account])
         var w: [String?: Double] = [:]
         for f in rates.keys { w[f] = tf.hourly([account], family: f).reduce(0, +) }
-        let tot = w.values.reduce(0, +)
-        if tot <= 0 { return rates.values.reduce(0, +) / Double(rates.count) }
-        // The Python sums in the dict's (fit) order; the families' order here.
-        return Self.ordered(rates.keys).reduce(0.0) { $0 + rates[$1]! * w[$1]! } / tot
+        // The Python sums in the dict's (fit) order; the families' order here,
+        // every sum: a Dictionary's order changes with each launch's hash seed,
+        // and with it the last bit of the rate, and of every grade made from it.
+        let fams = Self.ordered(rates.keys)
+        let tot = fams.reduce(0.0) { $0 + w[$1]! }
+        if tot <= 0 { return fams.reduce(0.0) { $0 + rates[$1]! } / Double(fams.count) }
+        return fams.reduce(0.0) { $0 + rates[$1]! * w[$1]! } / tot
     }
 
     struct NeedKey: Hashable { let account: String; let family: String? }

@@ -249,12 +249,13 @@ public enum FMCal {
         /// latest value (`FMCal.relativeContext`, the default in the app) or
         /// raw, as the Python does.
         public func refresh(_ fc: TimestralForecaster, weightsID: String, series s: FMSeries.MeterSeries, now: Millis,
-                            cache: FMCalCutCache = .shared, relative: Bool = true,
+                            cache: FMCalCutCache = .shared, relative: Bool = true, sharesWork: Bool = false,
                             checkCancelled: () throws -> Void = {}) throws {
             let cand = candidates(s, now: now)
             let k30 = max(1, Int((30.0 * Double(FMSeries.minMs) / Double(step)).rounded(.toNearestOrEven)))
-            var pending: [(slot: Int, c: Millis, ctx: [Double], key: FMCalCutCache.Key,
-                           meta: (cLast: Double, used: Double, reset: Millis, phase: Double, act: Double))] = []
+            typealias Pending = (slot: Int, c: Millis, ctx: [Double], key: FMCalCutCache.Key,
+                                 meta: (cLast: Double, used: Double, reset: Millis, phase: Double, act: Double))
+            var pending: [Pending] = []
             cuts = []
             cuts.reserveCapacity(cand.count)
             let tag = "\(weightsID)|\(wk)|\(step)|\(ctxN)|\(H)|\(relative ? "rel" : "raw")|"
@@ -284,25 +285,54 @@ public enum FMCal {
                     pending.append((cuts.count - 1, c, rel, key, meta))
                 }
             }
-            // The missing cuts in batches of 32, as the Python's. A series'
-            // answer does not depend on its batch-mates (checked bit for bit:
-            // CombinedTimingTests.batchedRowsAreBitIdentical), which the memo
-            // relies on.
-            var b = 0
-            while b < pending.count {
-                try checkCancelled()
-                let batch = pending[b..<min(b + 32, pending.count)]
+            func fill(_ p: Pending, entry: FMCalCutCache.Entry) {
+                let (lv, bq) = table(entry.rows, levels: entry.lv, cLast: p.meta.cLast, relative: relative)
+                cuts[p.slot] = (p.c, Cut(c: p.c, cLast: p.meta.cLast, usedC: p.meta.used, resetC: p.meta.reset,
+                                         phase: p.meta.phase, act: p.meta.act, lv: lv, bq: bq))
+            }
+            func make(_ batch: [Pending]) throws {
                 let out = try FMBackends.quantiles(fc, context: batch.map { [$0.ctx] }, horizon: H)
                 for (k, p) in batch.enumerated() {
                     // Network values are float32, so Float keeps them exactly.
                     let B = FMCal.runningSorted(out.curve(k))
-                    let kept = netRows.map { r in B[r].map(Float.init) }
-                    cache.put(p.key, FMCalCutCache.Entry(lv: out.levels, rows: kept))
-                    let (lv, bq) = table(kept, levels: out.levels, cLast: p.meta.cLast, relative: relative)
-                    cuts[p.slot] = (p.c, Cut(c: p.c, cLast: p.meta.cLast, usedC: p.meta.used, resetC: p.meta.reset,
-                                             phase: p.meta.phase, act: p.meta.act, lv: lv, bq: bq))
+                    let entry = FMCalCutCache.Entry(lv: out.levels, rows: netRows.map { r in B[r].map(Float.init) })
+                    cache.put(p.key, entry)
+                    fill(p, entry: entry)
                 }
-                b += 32
+            }
+            // The missing cuts in batches of 32, as the Python's. A series'
+            // answer does not depend on its batch-mates (checked bit for bit:
+            // CombinedTimingTests.batchedRowsAreBitIdentical), which the memo
+            // relies on, and what lets another thread's batch answer a cut here.
+            guard sharesWork else {
+                var b = 0
+                while b < pending.count {
+                    try checkCancelled()
+                    try make(Array(pending[b..<min(b + 32, pending.count)]))
+                    b += 32
+                }
+                return
+            }
+            // Beside other workers: the cuts nobody is making first, a batch at
+            // a time and claimed only while it runs (a check may sleep), then
+            // the ones they were, by then mostly in the cache (`ArenaInFlight`).
+            var theirs: [Pending] = []
+            var next = pending[...]
+            while !next.isEmpty {
+                try checkCancelled()
+                var batch: [Pending] = []
+                while batch.count < 32, let p = next.popFirst() {
+                    if let hit = cache.get(p.key) { fill(p, entry: hit) }
+                    else if cache.inFlight.tryClaim(p.key) { batch.append(p) }
+                    else { theirs.append(p) }
+                }
+                defer { for p in batch { cache.inFlight.release(p.key) } }
+                if !batch.isEmpty { try make(batch) }
+            }
+            for p in theirs {
+                try cache.inFlight.claim(p.key, check: checkCancelled)
+                defer { cache.inFlight.release(p.key) }
+                if let hit = cache.get(p.key) { fill(p, entry: hit) } else { try make([p]) }
             }
         }
 
@@ -503,6 +533,10 @@ public final class FMCalCutCache: @unchecked Sendable {
     public let capacity: Int
     public private(set) var hits = 0
     public private(set) var misses = 0
+    /// Answers stored: the network calls made, each a context (probes).
+    public private(set) var puts = 0
+    /// The contexts being forecast now, by whichever thread.
+    let inFlight = ArenaInFlight()
 
     public init(capacity: Int) { self.capacity = max(capacity, 16) }
 
@@ -518,6 +552,7 @@ public final class FMCalCutCache: @unchecked Sendable {
     public func put(_ key: Key, _ entry: Entry) {
         lock.lock(); defer { lock.unlock() }
         tick &+= 1
+        puts += 1
         map[key] = (entry, tick)
         if map.count > capacity {
             // Drop the least recently used half (amortized O(1) per insert).

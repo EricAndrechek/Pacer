@@ -125,7 +125,7 @@ public final class MeterFM {
                 let b = FMCal.SelfBacktest(wk: wk, step: step, ctxN: ctxN, stale: stale, every: every,
                                            maxCuts: maxCuts, duration: s.duration)
                 try b.refresh(fc, weightsID: weightsID, series: s, now: now, cache: cutCache, relative: relativeNetwork,
-                              checkCancelled: ctx.checkCancelled)
+                              sharesWork: ctx.services.sharesWork, checkCancelled: ctx.checkCancelled)
                 bt = b
             }
             return Base(used: used, ctxV: ctxV, step: step, ctxN: ctxN, stale: stale, lv: lv, mq: mq, series: s,
