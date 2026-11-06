@@ -113,6 +113,73 @@ enum RawSampleReader {
         }
     }
 
+    /// What a dedup rebuild needs of one sample.
+    struct DedupRow: Equatable {
+        var dedupKey: String?
+        var date: String
+        var model: String
+        var projectPath: String?
+        var sessionId: String?
+        var sampledAt: Date
+        var outputTokens: Int64
+        var localHour: Int
+    }
+
+    /// Hand every sample's dedup columns to `body`, in table order. Returns
+    /// false if the read stopped early: `body` has then seen some of the rows,
+    /// never a wrong one.
+    ///
+    /// One pass over the table. `ModelWalk` pages with `fetchOffset`, so SQLite
+    /// steps over every earlier row again for each page: on a Mac whose file
+    /// cache is gone (swap full, load 100+), a 1.4 GB store read 11 GB in 44
+    /// minutes of a dedup rebuild, with transcript ingestion waiting behind it.
+    @discardableResult
+    static func forEachDedupRow(storeURL: URL, _ body: (DedupRow) -> Void) -> Bool {
+        var db: OpaquePointer?
+        guard sqlite3_open_v2(storeURL.path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK,
+              let db
+        else {
+            if db != nil { sqlite3_close(db) }
+            return false
+        }
+        defer { sqlite3_close(db) }
+        sqlite3_busy_timeout(db, 1_000)
+
+        let sql = """
+            SELECT ZDEDUPKEY, ZDATE, ZMODEL, ZPROJECTPATH, ZSESSIONID, ZSAMPLEDAT, ZOUTPUTTOKENS, ZLOCALHOUR
+            FROM ZTOKENSAMPLE ORDER BY Z_PK
+            """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let stmt else { return false }
+        defer { sqlite3_finalize(stmt) }
+
+        // The key is different on every row, so it gets no column cache.
+        var columns = (0..<4).map { _ in TextColumn() }
+        var strings = StringInterner()
+        while true {
+            let step = sqlite3_step(stmt)
+            if step == SQLITE_DONE { return true }
+            guard step == SQLITE_ROW,
+                  let date = columns[0].read(stmt, 1, &strings),
+                  let model = columns[1].read(stmt, 2, &strings),
+                  sqlite3_column_type(stmt, 5) != SQLITE_NULL
+            else { return false }
+            let sampledAt = Date(timeIntervalSinceReferenceDate: sqlite3_column_double(stmt, 5))
+            let storedHour = Int(sqlite3_column_int64(stmt, 7))
+            body(DedupRow(
+                dedupKey: text(stmt, 0),
+                date: date,
+                model: model,
+                projectPath: columns[2].read(stmt, 3, &strings),
+                sessionId: columns[3].read(stmt, 4, &strings),
+                sampledAt: sampledAt,
+                outputTokens: sqlite3_column_int64(stmt, 6),
+                localHour: storedHour >= 0
+                    ? storedHour
+                    : Calendar.current.component(.hour, from: sampledAt)))
+        }
+    }
+
     private static func text(_ stmt: OpaquePointer, _ index: Int32) -> String? {
         guard let c = sqlite3_column_text(stmt, index) else { return nil }
         return String(cString: c)

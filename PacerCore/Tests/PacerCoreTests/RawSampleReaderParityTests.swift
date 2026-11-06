@@ -150,4 +150,30 @@ struct RawSampleReaderParityTests {
             for: TokenSample.self, configurations: ModelConfiguration(isStoredInMemoryOnly: true))
         #expect(RawSampleReader.storeURL(of: inMemory) == nil)
     }
+
+    /// A dedup rebuild's columns, the same way: the map and the bucket sets it
+    /// builds are only right if these are the rows the walk would have seen.
+    @Test func dedupRowsMatchTheWalk() throws {
+        let (container, url) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: url) }
+        try seed(container)
+        var raw: [RawSampleReader.DedupRow] = []
+        #expect(RawSampleReader.forEachDedupRow(storeURL: url) { raw.append($0) })
+        let walked = try ModelContext(container).fetch(FetchDescriptor<TokenSample>()).map { s in
+            RawSampleReader.DedupRow(
+                dedupKey: s.dedupKey, date: s.date, model: s.model, projectPath: s.projectPath,
+                sessionId: s.sessionId, sampledAt: s.sampledAt, outputTokens: s.outputTokens,
+                localHour: s.localHour >= 0 ? s.localHour : Calendar.current.component(.hour, from: s.sampledAt))
+        }
+        #expect(!raw.isEmpty)
+        #expect(raw == walked)
+    }
+
+    /// A store this reader can't make sense of says so, and the caller walks.
+    @Test func dedupRowsRefuseAFileThatIsNotAStore() throws {
+        let url = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("\(UUID().uuidString).sqlite")
+        try Data("not a database".utf8).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        #expect(!RawSampleReader.forEachDedupRow(storeURL: url) { _ in Issue.record("no rows expected") })
+    }
 }
