@@ -111,16 +111,15 @@ struct RuntimeBudgetGovernorTests {
         #expect(back == QOS_CLASS_BACKGROUND)
     }
 
-    /// Never more than one core, whatever is asked.
-    @Test func neverMoreThanOneCore() {
+    /// Never more than one core from the everyday rule, whatever is asked.
+    @Test func theEverydayRuleNeverGivesMoreThanOneCore() {
         let script = RuntimeBudgetTests.Script()
-        let budget = ArenaCPUBudget(rate: 4, burst: 0, clock: script.clock)
-        #expect(budget.rate == 1)
-        budget.rate = 8
-        #expect(budget.rate == 1)
-        let g = ArenaBudgetGovernor(budget: budget, shareRate: 0.2, fullRate: 3, read: { Self.signals() }, log: { _ in })
+        let budget = ArenaCPUBudget(rate: 0.2, burst: 0, clock: script.clock)
+        let g = ArenaBudgetGovernor(budget: budget, shareRate: 0.2, fullRate: 3, maxWorkers: 9,
+                                    read: { Self.signals() }, log: { _ in })
         g.evaluate()
         #expect(budget.rate == 1)
+        #expect(budget.scorerWorkers == 1)
     }
 
     /// Up to a full core while idle, and the cut back to a fifth holds from

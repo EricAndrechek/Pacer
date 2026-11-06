@@ -260,8 +260,10 @@ public enum ModelBoardList {
     /// it is doing, how far, the time left at the measured pace, and what is
     /// holding it back: "Scoring your history: 62% · about 15 min left";
     /// "Scoring the slower models: 8% · about 3 hr left · slowed while in
-    /// use"; "Reading your history · sped up"; "Waiting to score your
-    /// history". `pace` is the budget's (`ArenaPaceStatus`); nil, none said.
+    /// use"; "Reading your history · sped up · 9 cores"; "Scoring your
+    /// history: 62% · paused: low memory" (no time left: nothing is moving);
+    /// "Waiting to score your history". `pace` is the budget's
+    /// (`ArenaPaceStatus`); nil, none said.
     public static func progressText(_ p: MeterModelBoard.Progress, pace: ArenaPace? = nil) -> String {
         var parts: [String]
         switch p.stage {
@@ -270,19 +272,23 @@ public enum ModelBoardList {
         case .scoring: parts = ["Scoring your history: \(percent(done: p.done, total: p.total))%"]
         case .slower: parts = ["Scoring the slower models: \(percent(done: p.done, total: p.total))%"]
         }
-        if let eta = p.eta { parts.append("about \(remaining(eta))") }
+        if let eta = p.eta, pace?.mode != .paused { parts.append("about \(remaining(eta))") }
         if let why = paceNote(pace) { parts.append(why) }
         return parts.joined(separator: " · ")
     }
 
-    /// Why the grader runs at a fifth of a core, or that the user sped it
-    /// up; nil at the full core it takes on its own (plugged in and idle).
+    /// Why the grader runs at a fifth of a core or not at all, or that the
+    /// user sped it up; nil at the full core it takes on its own (plugged in
+    /// and idle).
     public static func paceNote(_ pace: ArenaPace?) -> String? {
         guard let pace else { return nil }
         switch pace.mode {
         case .fullCore: return pace.isSpedUp ? "sped up" : nil
+        case .cores(let n): return "sped up · \(n) cores"
+        case .paused: return "paused: low memory"
         case .share(.inUse): return "slowed while in use"
         case .share(.battery): return "slowed on battery"
+        case .share(.lowMemory): return "slowed: low memory"
         case .share(.lowPower): return "slowed in Low Power Mode"
         case .share(.thermal): return "slowed while the Mac is hot"
         }
@@ -295,16 +301,16 @@ public enum ModelBoardList {
     /// Mac in use or on battery; or already plugged in and idle, so it stays
     /// fast when the user is back), on while it holds. Absent before the
     /// grader has started (nothing to speed up yet; it would end at once),
-    /// without a governor (`pace` nil), and when only heat or Low Power Mode
-    /// hold it back, which a speed-up leaves alone.
+    /// without a governor (`pace` nil), and when only heat, Low Power Mode or
+    /// low memory hold it back, which a speed-up leaves alone.
     public enum SpeedUp: Equatable, Sendable { case offered, on }
 
     public static func speedUp(_ p: MeterModelBoard.Progress?, pace: ArenaPace?) -> SpeedUp? {
         guard let p, p.stage != .waiting, let pace else { return nil }
         if pace.isSpedUp { return .on }
         switch pace.mode {
-        case .fullCore, .share(.inUse), .share(.battery): return .offered
-        case .share(.lowPower), .share(.thermal): return nil
+        case .fullCore, .cores, .share(.inUse), .share(.battery): return .offered
+        case .share(.lowPower), .share(.thermal), .share(.lowMemory), .paused: return nil
         }
     }
 
@@ -312,7 +318,7 @@ public enum ModelBoardList {
 
     public static func speedUpHelp(_ state: SpeedUp) -> String {
         switch state {
-        case .offered: return "Use a full core until this is done, for up to an hour"
+        case .offered: return "Use several cores until this is done, for up to an hour. One on battery."
         case .on: return "Back to the usual pace"
         }
     }

@@ -46,7 +46,8 @@ final class MainThreadStallWatchdog {
                 let busy = stall.wall > 0 ? stall.cpu / stall.wall : 0
                 let cpuBucket = busy >= 0.66 ? "busy" : busy >= 0.33 ? "mixed" : "waiting"
                 Telemetry.distribution("main_thread.stall_ms", stall.wall * 1000, unit: .millisecond,
-                                       attributes: ["cpu": .string(cpuBucket)])
+                                       attributes: ["cpu": .string(cpuBucket),
+                                                    "pressure": .string(MemoryPressure.shared.level.name)])
                 Telemetry.breadcrumb("stall", "\(Int(stall.wall * 1000)) ms")
             } else {
                 TelemetryCounters.add("main_thread.stall_100ms")

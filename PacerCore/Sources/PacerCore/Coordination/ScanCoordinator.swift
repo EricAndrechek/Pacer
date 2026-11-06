@@ -298,6 +298,10 @@ public final class ScanCoordinator {
         /// The user's own app only by default; tests and diagnostic runs
         /// get one that writes nothing. See `DefaultLoginMarker`.
         public var loginMarker: DefaultLoginMarkerPublisher
+        /// Called once, when the loop's first cycle has ended, however it
+        /// ended, any rebuild in it included: what launch work that should not
+        /// compete with the first cycle waits for (`ArenaStartGate`).
+        public var onFirstCycleEnded: (@Sendable () -> Void)?
 
         public init(
             costMode: CostMode = .auto,
@@ -307,7 +311,8 @@ public final class ScanCoordinator {
             oauthPolling: OAuthPoller.Configuration = OAuthPoller.Configuration(),
             bulkImporter: BulkTranscriptImporter? = nil,
             desktopSessions: DesktopSessionDirectory? = .shared,
-            loginMarker: DefaultLoginMarkerPublisher = DefaultLoginMarkerPublisher()
+            loginMarker: DefaultLoginMarkerPublisher = DefaultLoginMarkerPublisher(),
+            onFirstCycleEnded: (@Sendable () -> Void)? = nil
         ) {
             self.costMode = costMode
             self.watcherMode = watcherMode
@@ -317,6 +322,7 @@ public final class ScanCoordinator {
             self.bulkImporter = bulkImporter
             self.desktopSessions = desktopSessions
             self.loginMarker = loginMarker
+            self.onFirstCycleEnded = onFirstCycleEnded
         }
     }
 
@@ -1119,6 +1125,7 @@ public final class ScanCoordinator {
             log("startup scan failed: \(error)")
             sessionRollupCache.forgetAll()
         }
+        configuration.onFirstCycleEnded?()
 
         for await _ in stream {
             // A finished stream still hands over the trigger it buffered

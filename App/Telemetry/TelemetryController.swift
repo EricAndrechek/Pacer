@@ -90,7 +90,7 @@ final class TelemetryController {
 
     /// Scope tags every crash, hang and MetricKit report carries.
     /// `arena.cpu_mode` follows the arena's governor (full core when plugged
-    /// in and idle, a fifth otherwise), so a CPU report says which was on.
+    /// in and idle, a fifth otherwise, `multi` under Speed up, `paused` at critical memory pressure), so a CPU report says which was on.
     /// PacerCore only calls the closure on a change; here it is a tag write.
     private func tagScope() {
         SentrySDK.configureScope { $0.setTag(value: Self.buildConfig, key: "build.config") }

@@ -23,12 +23,21 @@ public struct ProcessMemory: Sendable, Equatable {
     /// heap costs the machine, live or not. Pages malloc has already marked
     /// reusable are not counted, matching `footprint`.
     public var mallocDirty: UInt64
+    /// Everything in RAM, file-backed pages included. Not what the system
+    /// charges Pacer, but what it displaces: the forecast networks are memory
+    /// maps, so 2.6 GB of them can sit here at a 100 MB footprint (#389).
+    public var resident: UInt64
+    /// The file-backed share of `resident`: droppable, and re-read on next use.
+    public var fileBacked: UInt64
 
-    public init(footprint: UInt64, peakFootprint: UInt64, mallocLive: UInt64, mallocDirty: UInt64) {
+    public init(footprint: UInt64, peakFootprint: UInt64, mallocLive: UInt64, mallocDirty: UInt64,
+                resident: UInt64 = 0, fileBacked: UInt64 = 0) {
         self.footprint = footprint
         self.peakFootprint = peakFootprint
         self.mallocLive = mallocLive
         self.mallocDirty = mallocDirty
+        self.resident = resident
+        self.fileBacked = fileBacked
     }
 
     /// Dirty heap pages that hold no live allocation.
@@ -53,10 +62,11 @@ public struct ProcessMemory: Sendable, Equatable {
         malloc_zone_statistics(nil, &stats)
         return ProcessMemory(footprint: vm.footprint, peakFootprint: vm.peak,
                              mallocLive: UInt64(stats.size_in_use),
-                             mallocDirty: mallocRegionDirtyBytes())
+                             mallocDirty: mallocRegionDirtyBytes(),
+                             resident: vm.resident, fileBacked: vm.fileBacked)
     }
 
-    private static func taskVMInfo() -> (footprint: UInt64, peak: UInt64) {
+    private static func taskVMInfo() -> (footprint: UInt64, peak: UInt64, resident: UInt64, fileBacked: UInt64) {
         var info = task_vm_info_data_t()
         var count = mach_msg_type_number_t(
             MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
@@ -65,8 +75,9 @@ public struct ProcessMemory: Sendable, Equatable {
                 task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
             }
         }
-        guard result == KERN_SUCCESS else { return (0, 0) }
-        return (info.phys_footprint, UInt64(max(0, info.ledger_phys_footprint_peak)))
+        guard result == KERN_SUCCESS else { return (0, 0, 0, 0) }
+        return (info.phys_footprint, UInt64(max(0, info.ledger_phys_footprint_peak)),
+                info.resident_size, info.external)
     }
 
     /// The VM tags malloc's zones put on their regions (`mach/vm_statistics.h`).

@@ -301,12 +301,12 @@ struct RuntimeUnifiedRankingTests {
         let at = Date(timeIntervalSince1970: 1_800_000_000)
         let progress = ArenaScoringProgress(phase: .cheap, cyclesDone: 3, cyclesTotal: 17, models: ["a-new"],
                                             updatedAt: at, windowDepth: ["five_hour": 17],
-                                            pace: .init(share: 10, full: 2), cyclesAhead: 37)
+                                            pace: .init(seconds: [.share: 10, .cores(1): 2]), cyclesAhead: 37)
         let board = UsageIntelligenceEngine.board(
             windowKey: "five_hour", weekly: false, ranking: ranking, current: ranking, engineIds: engineIds,
             specs: specs, complexity: [:], selected: "a-best", shown: "a-best", cutFraction: 0.4, canRunArena: true,
             weightsPresent: { $0.name != "a-net" }, liveFailure: { $0 == "a-broken" ? "no forecast this cycle" : nil },
-            progress: progress, gradedThrough: false, drawLimit: 4, fullCore: true, now: at)
+            progress: progress, gradedThrough: false, drawLimit: 4, rate: .cores(1), now: at)
         func status(_ id: String) -> MeterModelBoard.Status? { board.rows.first { $0.id == id }?.status }
 
         #expect(board.rows.count == engineIds.count + specs.count)
@@ -364,13 +364,13 @@ struct RuntimeUnifiedRankingTests {
         let specs = ["a-quick", "a-slow"].map { Self.spec($0) }
         let ranking = Self.rank(Self.records("linear-recent", 0..<17) { _, _ in 3 }, at: 0.4)
         let at = Date(timeIntervalSince1970: 1_800_000_000)
-        func board(_ p: ArenaScoringProgress?, fullCore: Bool = false, now: Date? = nil,
+        func board(_ p: ArenaScoringProgress?, rate: ArenaScoringProgress.Rate = .share, now: Date? = nil,
                    hasGrader: Bool = true) -> MeterModelBoard {
             UsageIntelligenceEngine.board(
                 windowKey: "five_hour", weekly: false, ranking: ranking, current: ranking, engineIds: engineIds,
                 specs: specs, complexity: [:], selected: "linear-recent", shown: "linear-recent", cutFraction: 0.4,
                 canRunArena: true, weightsPresent: { _ in true }, liveFailure: { _ in nil }, progress: p,
-                gradedThrough: false, drawLimit: 4, hasGrader: hasGrader, fullCore: fullCore, now: now ?? at)
+                gradedThrough: false, drawLimit: 4, hasGrader: hasGrader, rate: rate, now: now ?? at)
         }
         func status(_ b: MeterModelBoard, _ id: String) -> MeterModelBoard.Status? {
             b.rows.first { $0.id == id }?.status
@@ -395,7 +395,7 @@ struct RuntimeUnifiedRankingTests {
         // cycle has been timed at the everyday share only.
         let p1 = ArenaScoringProgress(phase: .cheap, cyclesDone: 6, cyclesTotal: 17, models: ["a-quick"],
                                       updatedAt: at, windowDepth: ["five_hour": 17],
-                                      pace: .init(share: 60, full: nil), cyclesAhead: 11)
+                                      pace: .init(seconds: [.share: 60]), cyclesAhead: 11)
         let share = board(p1)
         #expect(status(share, "a-quick") == .scoring(done: 0, total: 17))
         #expect(status(share, "a-slow") == .queued(done: 0, total: 17))
@@ -407,13 +407,13 @@ struct RuntimeUnifiedRankingTests {
         #expect(abs(eta(after: 600) - 10 * 60) < 1e-6)
         // Sped up, with nothing timed at the full core yet: no time left
         // rather than the slow one.
-        #expect(board(p1, fullCore: true).progress == .init(done: 6, total: 17, eta: nil, stage: .scoring))
+        #expect(board(p1, rate: .cores(1)).progress == .init(done: 6, total: 17, eta: nil, stage: .scoring))
 
         // Phase 2: the slow models.
         let p2 = ArenaScoringProgress(phase: .heavy, cyclesDone: 2, cyclesTotal: 17, models: ["a-slow"],
                                       updatedAt: at, windowDepth: ["five_hour": 17],
-                                      pace: .init(share: 300, full: 40), cyclesAhead: 15)
-        let slower = board(p2, fullCore: true)
+                                      pace: .init(seconds: [.share: 300, .cores(1): 40]), cyclesAhead: 15)
+        let slower = board(p2, rate: .cores(1))
         #expect(status(slower, "a-slow") == .scoring(done: 0, total: 17))
         #expect(slower.progress == .init(done: 2, total: 17, eta: 600, stage: .slower))
 

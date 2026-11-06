@@ -125,7 +125,7 @@ struct RuntimeEngineTests {
         // A board of its own: the app's (`.shared`) would carry one test's
         // passes into the next.
         ArenaRuntime(container: container, roster: ArenaRoster(registry: roster), config: config,
-                     progress: ArenaScoringProgressBoard(), clock: clock,
+                     progress: ArenaScoringProgressBoard(), pressure: MemoryPressure(), clock: clock,
                      onRecordLanded: { _, news in
                          landed.add(news)
                          _ = await engine?.ingestArenaOutcomes(news)
@@ -244,6 +244,69 @@ struct RuntimeEngineTests {
         #expect(try Self.arenaRows(container, method: "test-peeker").count == report.outcomes)
     }
 
+    /// How many cycles came back before the scorer's actor woke is timing, so
+    /// it must not change what is saved together. The first handover holds the
+    /// actor until the model has been through every cycle and gone quiet, so
+    /// the rest are all waiting when it wakes, the way a loaded CI runner did
+    /// by chance.
+    @Test func batchesDoNotDependOnWhenTheScorerWakes() async throws {
+        final class Watch: @unchecked Sendable {
+            let lock = NSLock()
+            var cycles = Set<Millis>()
+            var last = Date.distantPast
+            var held = false
+            func saw(_ request: ArenaRequest) {
+                lock.lock(); defer { lock.unlock() }
+                for t in request.targets { if let r = t.resetAt { cycles.insert(r) } }
+                last = Date()
+            }
+            func allDone(_ count: Int) -> Bool {
+                lock.lock(); defer { lock.unlock() }
+                return cycles.count >= count && Date().timeIntervalSince(last) > 1
+            }
+            func holdOnce() -> Bool {
+                lock.lock(); defer { lock.unlock() }
+                if held { return false }
+                held = true
+                return true
+            }
+        }
+        final class Watched: ArenaModel {
+            let inner: Peeker
+            let watch: Watch
+            init(context: ArenaContext, watch: Watch) { inner = Peeker(context: context); self.watch = watch }
+            convenience init(context: ArenaContext) { self.init(context: context, watch: Watch()) }
+            func fit(_ history: ArenaHistory) { inner.fit(history) }
+            func forecast(_ request: ArenaRequest) throws -> ArenaForecast {
+                watch.saw(request)
+                return try inner.forecast(request)
+            }
+        }
+        let watch = Watch()
+        let spec = ArenaModelSpec(name: "test-peeker", targets: Self.meters, complexity: 2) {
+            Watched(context: $0, watch: watch)
+        }
+        let container = try Self.seeded()
+        var config = Self.noSleep()
+        config.sessionCycleCap = 3
+        config.flushOutcomes = 1
+        let landed = Landed()
+        let rt = ArenaRuntime(container: container, roster: ArenaRoster(registry: [spec]), config: config,
+                              progress: ArenaScoringProgressBoard(), pressure: MemoryPressure(), clock: { Date() },
+                              onRecordLanded: { _, news in
+                                  landed.add(news)
+                                  guard watch.holdOnce() else { return }
+                                  for _ in 0..<600 where !watch.allDone(3) {
+                                      try? await Task.sleep(for: .milliseconds(100))
+                                  }
+                              },
+                              onLiveLanded: { _ in })
+        let report = await rt.scorer.pass(accounts: [Self.account], now: Self.now)
+        #expect(landed.batches.count == 3)
+        #expect(landed.all.count == report.outcomes)
+        #expect(try Self.arenaRows(container, method: "test-peeker").count == report.outcomes)
+    }
+
     static func completedResets(_ container: ModelContainer) throws -> [String] {
         let rows = try ModelContext(container).fetch(FetchDescriptor<RateLimitSample>())
         let samples = rows.map { (at: $0.sampledAt, usedPercentage: $0.usedPercentage, resetsAt: $0.resetsAt!) }
@@ -279,6 +342,7 @@ struct RuntimeEngineTests {
         config.rescanInterval = 0.05
         let rt = ArenaRuntime(container: container, roster: ArenaRoster(registry: [pinned]),
                               weights: { _ in nil }, ensureWeights: { asked.add($0) }, config: config,
+                              pressure: MemoryPressure(),
                               onRecordLanded: { _, _ in }, onLiveLanded: { _ in })
         rt.start(accounts: { [Self.account] })
         // Background priority: on a loaded Mac a pass can wait a long while

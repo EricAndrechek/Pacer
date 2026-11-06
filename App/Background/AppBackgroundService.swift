@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import SwiftData
 import PacerCore
@@ -79,14 +80,24 @@ final class AppBackgroundService {
     private var engineRefitCount = 0
     private var engineRefitTotalMs = 0
     private var lastEngineRecomputeAt: Date?
+    /// A refit is running. A Mac in dark wake polls, passes the floor and starts
+    /// another while the last is still parked on the engines, and one production
+    /// Mac woke to six stacked refits finishing together (#389).
+    private var engineRefitRunning = false
+    /// A forced refit arrived while one was running: run it right after.
+    private var engineRefitQueued = false
     /// The once-per-launch full-history record pass; see `startRecordBackfill`.
     private var recordBackfillTask: Task<Void, Never>?
     /// The ported arena forecasters (`ArenaRuntime`): scored over every
     /// account's history in the background and competing for each window's
     /// forecast through the engine's own record. Made on the first refit,
-    /// scoring from two minutes after it, stopped at quit. See `startArena`.
+    /// scoring once launch's own work has ended (`arenaGate`), stopped at
+    /// quit. See `startArena`.
     private var arena: ArenaRuntime?
     private var arenaStarted = false
+    /// What the grader waits for on a launch. Made in `start`, which runs once
+    /// the store is ready (`StoreLoader`).
+    private var arenaGate: ArenaStartGate?
     /// Bridges `pacerScanCycleDidComplete` notifications to per-kind
     /// `WidgetCenter.reloadTimelines` calls so the WidgetKit extension
     /// — which can't observe SwiftData — refreshes when new data
@@ -130,6 +141,12 @@ final class AppBackgroundService {
 
     func start() {
         guard coordinator == nil else { return }
+        let gate = ArenaStartGate(start: { [weak self] in
+            Task { @MainActor [weak self] in self?.startArena() }
+        })
+        arenaGate = gate
+        gate.armSafetyNet()
+        gate.mark(.store)
         RateLimitWriteSignal.shared.seed(from: container.mainContext)
         // The live meter every surface reads (#318), rebuilt on each reading
         // and each scan cycle that wrote turns.
@@ -164,7 +181,8 @@ final class AppBackgroundService {
                 // Injected rather than imported by PacerCore so the widget
                 // extension never links the engine. Incremental cycles are
                 // untouched. See `BulkTranscriptImporter`.
-                bulkImporter: ArchiveImporter()),
+                bulkImporter: ArchiveImporter(),
+                onFirstCycleEnded: { gate.mark(.firstScan) }),
             oauthClient: oauthClient,
             oauthPoolStore: KeychainTokenPoolStore()
         )
@@ -181,6 +199,7 @@ final class AppBackgroundService {
                 Log.write("AppBackground", "scan loop exited")
             } catch {
                 Log.write("AppBackground", "scan loop failed: \(error)")
+                gate.mark(.firstScan)
                 await MainActor.run { self?.coordinator = nil }
                 throw error
             }
@@ -204,7 +223,8 @@ final class AppBackgroundService {
     func stop() async {
         guard coordinator != nil else { return }
         Log.write("AppBackground", "stopping")
-        // The arena scorer stops at its next model boundary; its outcomes so
+        arenaGate?.cancel()
+        // The arena scorer's workers stop at their next check; the outcomes so
         // far are saved, and the next launch resumes after them.
         await arena?.stop()
         if let coord = coordinator {
@@ -658,7 +678,7 @@ final class AppBackgroundService {
             guard relevant else { return }
             Task { @MainActor [weak self] in
                 self?.refreshModelPalette()
-                await self?.recomputeEngineIfDue(rateLimitsChanged: rateLimitsChanged)
+                _ = await self?.recomputeEngineIfDue(rateLimitsChanged: rateLimitsChanged)
             }
         }
     }
@@ -696,10 +716,13 @@ final class AppBackgroundService {
     /// puts them to use (bands, cycle facts, selection) without waiting for
     /// the next poll.
     private func startRecordBackfill(_ engines: [UsageIntelligenceEngine]) {
-        guard recordBackfillTask == nil else { return }
+        guard recordBackfillTask == nil,
+              EngineRefitPolicy.recordBackfillAllowed(pressure: MemoryPressure.shared.level) else { return }
+        let gate = arenaGate
         recordBackfillTask = Task.detached(priority: .background) { [weak self] in
             var added = 0
             for engine in engines { added += await engine.backfillRateLimitRecordIfNeeded() }
+            gate?.mark(.recordBackfill)
             if added > 0 { _ = await self?.recomputeEngineIfDue(force: true) }
         }
     }
@@ -740,36 +763,51 @@ final class AppBackgroundService {
     }
 
     /// Start back-computing the arena models over every account's history,
-    /// once per launch, two minutes after the first refit: the first pass
-    /// reads months of limits and turns, and launch has enough to do. At
+    /// once per launch, when `arenaGate` opens: the first pass reads months of
+    /// limits and turns, and launch has its own work to finish first. At
     /// background priority and a fifth of one core in CPU time, live
     /// projections included (`ArenaCPUBudget`), one full core while the Mac
-    /// is plugged in and idle (`ArenaBudgetGovernor`); the cheap models first
-    /// over the whole history, newest cycles first, resuming after whatever
-    /// an earlier launch saved.
+    /// is plugged in and idle, more if the user speeds it up
+    /// (`ArenaBudgetGovernor`); the cheap models first over the whole history,
+    /// newest cycles first, resuming after whatever an earlier launch saved.
+    /// A Mac with nothing to catch up pays for that first reading and nothing
+    /// else: on a 1.3 GB store with four accounts, 3 CPU-seconds, 1 GB read and
+    /// 270 MB of transient heap, and about a second for each pass after it.
     private func startArena() {
         guard !arenaStarted else { return }
         arenaStarted = true
-        let runtime = arenaRuntime()
         let container = self.container
-        Task.detached(priority: .background) {
-            try? await Task.sleep(for: .seconds(120))
-            // The active login first: its windows are the ones on screen.
-            runtime.start(accounts: {
-                ((try? ModelContext(container).fetch(FetchDescriptor<Account>())) ?? [])
-                    .sorted { $0.isActive && !$1.isActive }.map(\.id)
-            })
-        }
+        // The active login first: its windows are the ones on screen.
+        arenaRuntime().start(accounts: {
+            ((try? ModelContext(container).fetch(FetchDescriptor<Account>())) ?? [])
+                .sorted { $0.isActive && !$1.isActive }.map(\.id)
+        })
     }
 
     private func recomputeEngineIfDue(force: Bool = false,
                                       rateLimitsChanged: Bool = true) async -> Bool {
         let now = Date()
-        let floor = rateLimitsChanged
+        let base = rateLimitsChanged
             ? Self.engineRecomputeMinInterval
             : Self.engineRecomputeIdleInterval
-        if !force, let last = lastEngineRecomputeAt,
-           now.timeIntervalSince(last) < floor { return false }
+        let floor = EngineRefitPolicy.floor(base: base, pressure: MemoryPressure.shared.level)
+        if !force, let last = lastEngineRecomputeAt, now.timeIntervalSince(last) < floor {
+            if now.timeIntervalSince(last) >= base { TelemetryCounters.add("engine.refit.deferred_pressure") }
+            return false
+        }
+        guard !engineRefitRunning else {
+            TelemetryCounters.add("engine.refit.skipped_running")
+            if force { engineRefitQueued = true }
+            return false
+        }
+        engineRefitRunning = true
+        defer {
+            engineRefitRunning = false
+            if engineRefitQueued {
+                engineRefitQueued = false
+                Task { @MainActor [weak self] in await self?.recomputeEngineIfDue(force: true) }
+            }
+        }
         lastEngineRecomputeAt = now
         // Recompute OFF the main actor. `recomputeEngineIfDue` runs on
         // `@MainActor`, so `await engine.recompute(...)` would resume the
@@ -795,7 +833,7 @@ final class AppBackgroundService {
         // thread for as long.
         let arenaLink = arenaRuntime().link
         let adopting = engines.all.map(\.engine)
-        let started = Date()
+        let meter = WorkMeter()
         //
         // Still concurrent, and deliberately so after trying the alternative.
         // Serialising them looked right — 83% of the pace card's multi-second
@@ -820,11 +858,14 @@ final class AppBackgroundService {
                 }
             }
         }.value
-        let refitMs = Int(Date().timeIntervalSince(started) * 1000)
+        let reading = meter.finish()
+        // Awake time: a refit the Mac slept through took no time at all. Wall
+        // time made this metric's p95 39 minutes on one production Mac (#389).
+        let refitMs = reading.awakeMilliseconds
         await exportEngineSnapshots(live)
         NotificationCenter.default.post(name: .pacerEngineDidRecompute, object: nil)
+        arenaGate?.mark(.firstRefit)
         startRecordBackfill(live.map { $0.engine })
-        startArena()
 
         // The refit is the most expensive recurring thing Pacer does and it
         // had never been timed — which is how it went unnoticed that it runs
@@ -836,12 +877,15 @@ final class AppBackgroundService {
         if refitMs >= 1_000 || engineRefitCount % 20 == 0 {
             // Sampled on the same gate as the log (slow ones and every 20th),
             // not every refit: a refit can run every 20 s.
+            var attributes = reading.attributes()
+            attributes["slow"] = .bool(refitMs >= 1_000)
+            attributes["window"] = .string(NSApp?.activationPolicy() == .regular ? "open" : "closed")
             Telemetry.distribution("engine.refit_ms", Double(refitMs), unit: .millisecond,
-                                   attributes: ["slow": .bool(refitMs >= 1_000)])
+                                   attributes: attributes)
             let duty = Double(engineRefitTotalMs) / max(1, Double(engineRefitCount))
                 / floor / 10.0
             Log.write("Engine",
-                      "refit \(engineRefitCount): \(refitMs) ms "
+                      "refit \(engineRefitCount): \(refitMs) ms \(reading.summary) "
                       + String(format: "(avg %d ms, ~%.0f%% duty at %.0fs interval)",
                                engineRefitTotalMs / max(1, engineRefitCount),
                                duty, floor))

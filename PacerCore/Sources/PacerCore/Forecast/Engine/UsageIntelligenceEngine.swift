@@ -173,6 +173,15 @@ public actor UsageIntelligenceEngine {
     /// started, chained, so tests can wait for them (`settleRecordCleanup`).
     private var recordCleanup: Task<Void, Never>?
 
+    /// Let go of what the next refit can read again. The scoreboard is the one
+    /// thing an engine holds that grows with history: on a four-account store it
+    /// was 51 of the engines' 77 MB, about 280 bytes a row. The fit stays, so
+    /// every ask still answers; the next refit reads the rows back (about a
+    /// second per engine), which is why only `.critical` asks for this.
+    public func shedRebuildableCaches() {
+        evalRowsCache = nil
+    }
+
     /// Wait for the store deletes the refits have started (tests).
     public func settleRecordCleanup() async { await recordCleanup?.value }
 
@@ -261,20 +270,26 @@ public actor UsageIntelligenceEngine {
         // does — measured at ~13 s for a single scope — and until now the only
         // number anyone had was the total, which says nothing about where it
         // goes. Five `Date()` reads against thirteen seconds is free.
+        //
+        // On the awake clock. A phase the Mac slept through is not a slow phase:
+        // one production Mac's p95 refit read 17 minutes for 4 s of awake time.
         var phase: [String: Int] = [:]
+        func milliseconds(since start: SuspendingClock.Instant) -> Int {
+            let d = start.duration(to: .now)
+            return Int(d.components.seconds * 1000 + d.components.attoseconds / 1_000_000_000_000_000)
+        }
         func timed<T>(_ label: String, _ body: () -> T) -> T {
-            let t = Date()
+            let t = SuspendingClock.now
             let out = body()
-            phase[label, default: 0] += Int(Date().timeIntervalSince(t) * 1000)
+            phase[label, default: 0] += milliseconds(since: t)
             return out
         }
-        let recomputeStarted = Date()
         // Wall time alone can't tell a slow refit from one the process slept or
         // starved through: the 321–396 s refits in the scan log overlapped a
-        // 172 s main-thread stall that used 343 ms of CPU (#308). Awake time
-        // (stops while the machine sleeps) and process CPU go beside it.
-        let awakeStarted = SuspendingClock.now
-        let cpuStarted = clock_gettime_nsec_np(CLOCK_PROCESS_CPUTIME_ID)
+        // 172 s main-thread stall that used 343 ms of CPU (#308), and a 68 s
+        // refit on a production Mac used 3 s (#389). The meter's three clocks
+        // say which it was.
+        let meter = WorkMeter()
 
         let daily = timed("daily") { fetchDaily() }
         let hourly = timed("hourly") { fetchHourly() }
@@ -383,7 +398,7 @@ public actor UsageIntelligenceEngine {
         let disagreement = params.rlDisagreementPoints > 0 ? params.rlDisagreementPoints : nil
         // Timed: with the arena models in the record this is a few times the
         // engine's own rows, and the phase log should say what it costs.
-        let selectStarted = Date()
+        let selectStarted = SuspendingClock.now
         for window in f.windows where fitsRateLimits {
             let surface = EngineSelfEval.rlSurface(window.key)
             let weekly = window.isWeeklyScale
@@ -425,7 +440,7 @@ public actor UsageIntelligenceEngine {
                 accuracyBySurface[surface] = nil
             }
         }
-        phase["rlSelect", default: 0] += Int(Date().timeIntervalSince(selectStarted) * 1000)
+        phase["rlSelect", default: 0] += milliseconds(since: selectStarted)
         // Every window ranks on the current grading: the previous one's rows
         // are read by nothing from here (`retirePreviousGrading`). Only with
         // the runtime attached: without it (the first refit of a launch, the
@@ -475,10 +490,11 @@ public actor UsageIntelligenceEngine {
         timed("snapshots") { recordPredictionSnapshots(f, now: now) }
         lastRefitAt = Date()
 
-        let total = Int(Date().timeIntervalSince(recomputeStarted) * 1000)
+        let reading = meter.finish()
         // Only when it is worth reading about. A warm refit on a small store
-        // is milliseconds and does not need a line each time.
-        if total >= 1000 {
+        // is milliseconds and does not need a line each time, and one the Mac
+        // merely slept across was not slow.
+        if reading.awakeMilliseconds >= 1000 {
             let detail = phase.sorted { $0.value > $1.value }
                 .filter { $0.value > 0 }
                 .map { "\($0.key):\($0.value)" }
@@ -487,22 +503,28 @@ public actor UsageIntelligenceEngine {
             // the active login's, so this is how you see two engines doing the
             // same expensive work in one cycle.
             let acct = "limitAcct:" + (limitAccountId.map { String($0.suffix(4)) } ?? "nil")
-            let awake = awakeStarted.duration(to: .now)
-            let awakeMs = Int(awake.components.seconds * 1000 + awake.components.attoseconds / 1_000_000_000_000_000)
-            // Process-wide: concurrent scope refits share it, so it bounds this
-            // refit's CPU from above.
-            let cpuMs = Int((clock_gettime_nsec_np(CLOCK_PROCESS_CPUTIME_ID) - cpuStarted) / 1_000_000)
+            let awakeMs = reading.awakeMilliseconds
+            let total = Int(reading.wall * 1000)
+            // Process-wide: concurrent scope refits share these, so they bound
+            // this refit's own from above.
+            let cpuMs = Int(reading.activity.cpu * 1000)
+            let coreWaitMs = Int(reading.activity.coreWait * 1000)
             Log.write("Engine", "recompute \(scopeLabel) \(total)ms awake:\(awakeMs)ms cpuProc:\(cpuMs)ms "
-                      + "{\(detail)} \(acct)")
+                      + "coreWait:\(coreWaitMs)ms \(reading.verdict.rawValue) {\(detail)} \(acct)")
             // Same gate as the log line: a refit is the app's most expensive
             // recurring work, but only a slow one is worth a trace.
             // The scope is "account"/"all", never the account id.
-            let started = Date().addingTimeInterval(-Double(total) / 1000)
+            var attributes = reading.attributes()
+            attributes["scope"] = .string(scope == .allAccounts ? "all" : "account")
+            attributes["awake_ms"] = .int(awakeMs)
+            attributes["cpu_ms"] = .int(cpuMs)
+            attributes["core_wait_ms"] = .int(coreWaitMs)
+            attributes["total_ms"] = .int(total)
             Telemetry.span(.sequential(
-                op: "engine.recompute", name: scope == .allAccounts ? "all" : "account", start: started,
+                op: "engine.recompute", name: scope == .allAccounts ? "all" : "account",
+                start: Date().addingTimeInterval(-reading.awake),
                 phases: phase.sorted { $0.key < $1.key }.map { ($0.key, Double($0.value) / 1000) },
-                attributes: ["scope": .string(scope == .allAccounts ? "all" : "account"),
-                             "awake_ms": .int(awakeMs), "cpu_ms": .int(cpuMs), "total_ms": .int(total)]))
+                attributes: attributes))
         }
     }
 
@@ -521,6 +543,7 @@ public actor UsageIntelligenceEngine {
     // MARK: - Diagnostics (see `EngineScopeProbe`)
 
     public func windowSpecsForProbe() -> [WindowSpec] { features?.windows ?? [] }
+    public func evalRowCountForProbe() -> Int { evalRowsCache?.count ?? 0 }
     public func rateLimitHistoryCountForProbe(_ key: String) -> Int {
         features?.rateLimit[key]?.count ?? 0
     }
@@ -2346,13 +2369,16 @@ extension UsageIntelligenceEngine {
 
     /// Ask the runtime for this fit's arena projections. Returns at once.
     func requestArenaLive(_ f: EngineFeatures, arena: ArenaEngineLink) {
+        let pressure = MemoryPressure.shared.level
         var requests: [ArenaLiveRequest] = []
         for (key, rf) in fit.rl {
             guard let binding = rf.arenaBinding, !rf.arenaIds.isEmpty, let samples = f.rateLimit[key] else { continue }
             let (current, _) = BurnTrajectory.segment(samples: samples, duration: rf.duration, now: f.now)
             guard let current, current.resetsAt > f.now, let last = current.samples.last else { continue }
+            let models = EngineRefitPolicy.liveModels(rf.arenaIds, pressure: pressure)
+            guard !models.isEmpty else { continue }
             requests.append(ArenaLiveRequest(binding: binding, resetsAt: current.resetsAt,
-                                             latestReadingAt: last.at, models: rf.arenaIds))
+                                             latestReadingAt: last.at, models: models))
         }
         if !requests.isEmpty { arena.requestLive(requests) }
     }

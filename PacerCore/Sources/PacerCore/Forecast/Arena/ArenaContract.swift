@@ -431,11 +431,24 @@ public struct ArenaServices: Sendable {
     /// Checked between expensive steps; a model throws `ArenaError.cancelled`
     /// when it turns true.
     public var isCancelled: @Sendable () -> Bool
+    /// Whether what is being made now will be thrown away (a read with no
+    /// side effects, unlike `isCancelled`): a forecast that swallowed the
+    /// cancellation inside a child answers from less than it should, and the
+    /// runner must not remember that answer for anyone else.
+    public var isAbandoned: @Sendable () -> Bool
+    /// This run works beside others of its kind on the same process-wide caches
+    /// (the grader's workers): what one of them is making now is waited for
+    /// rather than made again (`ArenaInFlight`). Off, a cache is only read and
+    /// written. The live lane has it off and must: the dashboard waits on it,
+    /// and a worker holding a claim may be paced behind it.
+    public var sharesWork: Bool
 
     public init(weights: @escaping @Sendable (String) -> URL? = { _ in nil },
                 log: @escaping @Sendable (String, String) -> Void = { _, _ in },
-                isCancelled: @escaping @Sendable () -> Bool = { false }) {
-        self.weights = weights; self.log = log; self.isCancelled = isCancelled
+                isCancelled: @escaping @Sendable () -> Bool = { false },
+                isAbandoned: @escaping @Sendable () -> Bool = { false }, sharesWork: Bool = false) {
+        self.weights = weights; self.log = log; self.isCancelled = isCancelled; self.isAbandoned = isAbandoned
+        self.sharesWork = sharesWork
     }
 }
 
@@ -515,11 +528,135 @@ public struct ArenaChildModel {
 
 // MARK: - Runner
 
+/// One thread making a thing at a time, for a cache several threads fill.
+///
+/// Grader workers sit on neighbouring cycles, and each new cycle asks for the
+/// lattice points older than any done so far: a worker `k` cycles behind the
+/// newest needs `k + 1` cycles' worth of new points, all but one of them also
+/// needed by the workers ahead. Without this every one of them makes all of its
+/// points, (N + 1) / 2 times the work: on a real store, eight workers made 2.2
+/// times the network calls of one and used 2.4 times the CPU. With it each takes
+/// the next point nobody has taken and waits only for what is being made, and
+/// because a model asks for its lattice oldest first, workers at different
+/// cycles start on different points: they run side by side rather than in line.
+///
+/// A wait cannot deadlock: what one thread holds and what it waits for are both
+/// below it in the models' children, and at no later a time.
+public final class ArenaInFlight: @unchecked Sendable {
+    private let condition = NSCondition()
+    private var held = Set<AnyHashable>()
+    /// How often a waiter looks up to see whether it should stop.
+    static let checkEvery: TimeInterval = 0.1
+
+    public init() {}
+
+    /// Take `key` if nobody holds it.
+    func tryClaim(_ key: AnyHashable) -> Bool {
+        condition.lock(); defer { condition.unlock() }
+        return held.insert(key).inserted
+    }
+
+    /// Wait until nobody holds `key`, then take it. `check` runs between waits,
+    /// not under the lock, and what it throws ends the wait with nothing taken.
+    func claim(_ key: AnyHashable, check: () throws -> Void) rethrows {
+        condition.lock()
+        while !held.insert(key).inserted {
+            condition.wait(until: Date().addingTimeInterval(Self.checkEvery))
+            guard held.contains(key) else { continue }
+            condition.unlock()
+            try check()
+            condition.lock()
+        }
+        condition.unlock()
+    }
+
+    func release(_ key: AnyHashable) {
+        condition.lock()
+        held.remove(key)
+        condition.broadcast()
+        condition.unlock()
+    }
+}
+
+/// Forecasts a runner has made, held to a number of doubles by evicting the
+/// least recently used: a weekly forecast as paths is ~200 × 340 values, so a
+/// count of entries alone let a long backfill's memo reach gigabytes. A key
+/// fixes the model, the cut and the request, and a forecast is a function of
+/// those alone (its random draws are seeded from them, `deriveSeed`), so one
+/// memo can serve every runner working on the same stores: the grader's
+/// workers share one, and a child's backtest one worker made is an answer for
+/// the others.
+public final class ArenaForecastMemo: @unchecked Sendable {
+    private struct Entry { let forecast: ArenaForecast; let size: Int; var used: UInt64 }
+    private let lock = NSLock()
+    private var entries: [String: Entry] = [:]
+    private var values = 0
+    private var tick: UInt64 = 0
+    private var limit: Int
+    private var hitCount = 0, missCount = 0
+    /// The child forecasts being made now, by whichever runner.
+    let inFlight = ArenaInFlight()
+
+    public init(limitValues: Int = 8_000_000) { limit = limitValues }
+
+    public var limitValues: Int {
+        get { lock.lock(); defer { lock.unlock() }; return limit }
+        set { lock.lock(); limit = newValue; lock.unlock() }
+    }
+    /// Doubles and entries held (tests, probes).
+    public var valueCount: Int { lock.lock(); defer { lock.unlock() }; return values }
+    public var count: Int { lock.lock(); defer { lock.unlock() }; return entries.count }
+    /// Lookups answered and not (probes).
+    public var hits: Int { lock.lock(); defer { lock.unlock() }; return hitCount }
+    public var misses: Int { lock.lock(); defer { lock.unlock() }; return missCount }
+
+    func get(_ key: String) -> ArenaForecast? {
+        lock.lock(); defer { lock.unlock() }
+        guard var hit = entries[key] else { missCount += 1; return nil }
+        hitCount += 1
+        tick &+= 1
+        hit.used = tick
+        entries[key] = hit
+        return hit.forecast
+    }
+
+    /// Keep `fc` under `key`, then evict the least recently used entries down
+    /// to three quarters of the limit if it is over (in a batch, so a full
+    /// memo is not sorted at every insert).
+    func put(_ key: String, _ fc: ArenaForecast) {
+        let size = fc.byKey.values.reduce(0) { $0 + $1.valueCount }
+        lock.lock(); defer { lock.unlock() }
+        guard size <= limit else { return }
+        if ArenaRunner.legacyMemoForMeasurement, values + size > limit {
+            entries.removeAll(keepingCapacity: false); values = 0
+        }
+        if let old = entries[key] { values -= old.size }
+        tick &+= 1
+        entries[key] = Entry(forecast: fc, size: size, used: tick)
+        values += size
+        guard values > limit else { return }
+        let target = limit * 3 / 4
+        for (k, e) in entries.sorted(by: { $0.value.used < $1.value.used }) {
+            guard values > target else { break }
+            entries[k] = nil
+            values -= e.size
+        }
+    }
+
+    /// Everything here can be made again (memory pressure, the end of a pass).
+    public func removeAll() {
+        lock.lock(); defer { lock.unlock() }
+        entries.removeAll(keepingCapacity: false)
+        values = 0
+    }
+}
+
 /// Runs models in process, children included, the way the arena's runner
 /// does (`arena/runner.py`): a model is built, fitted on the history known at
 /// the request's `now`, and asked; a child is run by the runner with its
 /// parent's view, and its forecasts are memoized for the runner's lifetime
-/// (the arena's child cache). Not thread-safe: one runner per task.
+/// (the arena's child cache). Not thread-safe: one runner per thread. Runners
+/// on several threads may share a memo (`ArenaForecastMemo`).
 ///
 /// **What the memo keeps.** Only what a model asks from inside itself: its
 /// children's forecasts and backtests. A forecast the runner's caller asks
@@ -527,8 +664,8 @@ public struct ArenaChildModel {
 /// the memo when it is there but never stored: the scorer asks each one once,
 /// and two dozen models' paths at every cut filled the memo with answers no
 /// one would ask for again, pushing out the child lattices that are asked at
-/// every cut. Past `memoLimitValues` the least recently used entries go, not
-/// the whole memo: clearing it whole, a weekly cycle (two dozen models × 8
+/// every cut. Past its limit the least recently used entries go, not the
+/// whole memo: clearing it whole, a weekly cycle (two dozen models × 8
 /// cuts × ~68k doubles) emptied it several times, and every calibration
 /// layer and ensemble rebuilt its nested child backtests from nothing.
 public final class ArenaRunner {
@@ -537,29 +674,25 @@ public final class ArenaRunner {
     public let seed: UInt64
     public var maxBacktestPoints: Int
     public var nPaths: Int
-    /// Memoized forecasts, keyed by model, history cut and request, held to
-    /// `memoLimitValues` doubles (64 MB by default) by evicting the least
-    /// recently used: a weekly forecast as paths is ~200 × 340 values, so a
-    /// count of entries alone let a long backfill's memo reach gigabytes.
-    private struct MemoEntry { let forecast: ArenaForecast; let size: Int; var used: UInt64 }
-    private var memo: [String: MemoEntry] = [:]
-    private var memoValues = 0
-    private var memoTick: UInt64 = 0
+    public let memo: ArenaForecastMemo
     /// How many forecasts are running on this runner's stack: 0 outside.
     private var depth = 0
-    public var memoLimitValues = 8_000_000
+    public var memoLimitValues: Int {
+        get { memo.limitValues }
+        set { memo.limitValues = newValue }
+    }
     /// Doubles and entries the memo holds (tests, probes).
-    public var memoValueCount: Int { memoValues }
+    public var memoValueCount: Int { memo.valueCount }
     public var memoCount: Int { memo.count }
     /// The memo as it was before (top-level answers kept, the whole memo
     /// cleared when full), for the probes that measure the difference only.
     nonisolated(unsafe) static var legacyMemoForMeasurement = false
 
     public init(registry: [ArenaModelSpec], services: ArenaServices = ArenaServices(), seed: UInt64 = 42,
-                maxBacktestPoints: Int = 48, nPaths: Int = 200) {
+                maxBacktestPoints: Int = 48, nPaths: Int = 200, memo: ArenaForecastMemo = ArenaForecastMemo()) {
         self.registry = Dictionary(registry.map { ($0.name, $0) }, uniquingKeysWith: { a, _ in a })
         self.services = services; self.seed = seed
-        self.maxBacktestPoints = maxBacktestPoints; self.nPaths = nPaths
+        self.maxBacktestPoints = maxBacktestPoints; self.nPaths = nPaths; self.memo = memo
     }
 
     /// Fit `model` on `history` (which must be as of `request.now`) and ask it.
@@ -567,52 +700,33 @@ public final class ArenaRunner {
         guard let spec = registry[name] else { throw ArenaError.unknownModel(name) }
         precondition(history.now == request.now, "a model is asked at the moment it was fitted")
         let key = Self.memoKey(name, history: history, request: request)
-        if var hit = memo[key] {
-            memoTick &+= 1
-            hit.used = memoTick
-            memo[key] = hit
-            return hit.forecast
-        }
+        if let hit = memo.get(key) { return hit }
         // Every weights file the model's whole family of children needs, not
         // just its own: a pool whose network child is still downloading would
         // otherwise answer as its other child alone, and the engine would
         // score that under the pool's name and keep the record.
         for w in requiredWeights(name) where services.weights(w) == nil { throw ArenaError.weightsUnavailable(w) }
         try checkCancelled()
+        let topLevel = depth == 0
+        // A child another runner is making now is an answer soon: wait for it
+        // rather than make it twice. Top-level answers are not kept, so there
+        // is nothing to wait for (and each is asked once).
+        if !topLevel {
+            try memo.inFlight.claim(key, check: checkCancelled)
+        }
+        defer { if !topLevel { memo.inFlight.release(key) } }
+        if !topLevel, let hit = memo.get(key) { return hit }
         var fitted: ArenaHistory?
         let ctx = ArenaContext(spec: spec, seed: Self.deriveSeed(seed, name, request.now), services: services,
                                runner: self, history: { fitted })
-        let topLevel = depth == 0
         depth += 1
         defer { depth -= 1 }
         let instance = try spec.make(ctx)
         try instance.fit(history)
         fitted = history
         let fc = try instance.forecast(request)
-        if !topLevel || Self.legacyMemoForMeasurement { remember(key, fc) }
+        if !topLevel || Self.legacyMemoForMeasurement, !services.isAbandoned() { memo.put(key, fc) }
         return fc
-    }
-
-    /// Keep `fc` under `key`, then evict the least recently used entries down
-    /// to three quarters of the limit if it is over (in a batch, so a full
-    /// memo is not sorted at every insert).
-    private func remember(_ key: String, _ fc: ArenaForecast) {
-        let size = fc.byKey.values.reduce(0) { $0 + $1.valueCount }
-        guard size <= memoLimitValues else { return }
-        if Self.legacyMemoForMeasurement, memoValues + size > memoLimitValues {
-            memo.removeAll(keepingCapacity: false); memoValues = 0
-        }
-        if let old = memo[key] { memoValues -= old.size }
-        memoTick &+= 1
-        memo[key] = MemoEntry(forecast: fc, size: size, used: memoTick)
-        memoValues += size
-        guard memoValues > memoLimitValues else { return }
-        let target = memoLimitValues * 3 / 4
-        for (k, e) in memo.sorted(by: { $0.value.used < $1.value.used }) {
-            guard memoValues > target else { break }
-            memo[k] = nil
-            memoValues -= e.size
-        }
     }
 
     /// The weights `name` and its children (transitively) are pinned to.

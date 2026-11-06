@@ -55,6 +55,10 @@ enum LiveRenderMode {
         /// weekly window because every plan has one; an Ultra account has no
         /// 5-hour window, so a 5-hour sheet renders empty there.
         case projectionCatchUp
+        /// The same sheet sped up on several cores, slowed by memory pressure,
+        /// and paused by critical pressure: what only a click on a real
+        /// catch-up or real pressure shows otherwise.
+        case projectionSpedUp, projectionSlowed, projectionPaused
         /// Every model's info popover, for both windows.
         case modelInfo
         /// The menu bar's dropdown: the SwiftUI content of the status menu
@@ -70,7 +74,9 @@ enum LiveRenderMode {
             case .settings: return 820
             case .pace: return 1100
             case .now, .badges: return 900
-            case .projection, .projectionWeekly, .projectionCatchUp: return 760
+            case .projection, .projectionWeekly, .projectionCatchUp, .projectionSpedUp, .projectionSlowed,
+                 .projectionPaused:
+                return 760
             case .modelInfo: return 1040
             case .menu: return MenuStatusContent.popoverWidth
             }
@@ -97,7 +103,21 @@ enum LiveRenderMode {
                                        limitAccountId: UsageScope.shared.limitAccountId)
             case .projectionCatchUp:
                 ProjectionCompareModal(windowKey: RateLimitWindowName.sevenDay,
-                                       limitAccountId: UsageScope.shared.limitAccountId, catchUpPreview: true)
+                                       limitAccountId: UsageScope.shared.limitAccountId,
+                                       catchUpPreview: ArenaPace(mode: .share(.inUse)))
+            case .projectionSpedUp:
+                ProjectionCompareModal(windowKey: RateLimitWindowName.sevenDay,
+                                       limitAccountId: UsageScope.shared.limitAccountId,
+                                       catchUpPreview: ArenaPace(mode: .cores(ArenaWorkerPolicy.forThisMac),
+                                                                 speedUpUntil: .distantFuture))
+            case .projectionSlowed:
+                ProjectionCompareModal(windowKey: RateLimitWindowName.sevenDay,
+                                       limitAccountId: UsageScope.shared.limitAccountId,
+                                       catchUpPreview: ArenaPace(mode: .share(.lowMemory)))
+            case .projectionPaused:
+                ProjectionCompareModal(windowKey: RateLimitWindowName.sevenDay,
+                                       limitAccountId: UsageScope.shared.limitAccountId,
+                                       catchUpPreview: ArenaPace(mode: .paused))
             case .menu:
                 // On a menu's own surface, as it drops: the page canvas
                 // behind every other render is not what a menu sits on.

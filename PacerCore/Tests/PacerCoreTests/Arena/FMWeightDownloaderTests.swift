@@ -143,7 +143,9 @@ struct FMWeightDownloaderTests {
         let dl = Self.downloader(stub, clock: clock, root: root,
                                  present: { stub.lock.withLock { stub.calls.count >= 5 } })
         await dl.run([Self.id])
-        for _ in 0..<12_000 where !(await dl.pendingRetries().isEmpty) { try await Task.sleep(for: .milliseconds(5)) }
+        // The clock is virtual, so this only waits for the scheduler. A generous
+        // bound, not a measure of anything: 60 s timed out on a loaded Mac.
+        for _ in 0..<120_000 where !(await dl.pendingRetries().isEmpty) { try await Task.sleep(for: .milliseconds(5)) }
         #expect(clock.lock.withLock { clock.sleeps } == [60, 300, 1800, 3600, 3600])
         #expect(await dl.pendingRetries().isEmpty)
         await dl.stop()

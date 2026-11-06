@@ -48,6 +48,8 @@ final class AnalyticsController {
         let queueURL = try? PacerStore.sharedContainerURL()
             .appendingPathComponent("PostHog", isDirectory: true)
             .appendingPathComponent("queue.json")
+        AnalyticsProfile.shared.use(fileURL: queueURL?.deletingLastPathComponent()
+            .appendingPathComponent("profile.json"))
         let client = PostHogClient(config: .init(
             token: token, batchURL: host.appendingPathComponent("batch/"),
             queueURL: queueURL, context: context,
@@ -96,13 +98,13 @@ final class AnalyticsController {
 }
 
 /// Where `Analytics.capture` goes in the app: toggle, then caps, then the
-/// queue (which scrubs through `AnalyticsPayload`).
+/// install's profile as `$set`, then the queue (which scrubs through `AnalyticsPayload`).
 struct PostHogAnalyticsSink: Analytics.Sink {
     let client: PostHogClient
 
     func capture(_ event: AnalyticsEvent) {
         guard TelemetryController.analyticsAllowed,
               TelemetryBudget.shared.takeAnalytics(event: event.name) else { return }
-        client.enqueue(event)
+        client.enqueue(AnalyticsProfile.shared.stamped(event, live: AnalyticsUsage.personProperties()))
     }
 }

@@ -14,17 +14,25 @@ import Foundation
 public struct ArenaScoringProgress: Sendable, Equatable {
     public typealias Phase = ArenaRecordScorer.Phase
 
+    /// What the budget gives the scorer: the everyday share, or a number of
+    /// cores (one: the full core; more: a speed-up's workers).
+    public enum Rate: Sendable, Hashable {
+        case share
+        case cores(Int)
+    }
+
     /// Wall seconds per cycle graded since the phase began, every account's
     /// cycles counted (the CPU budget's sleeps included), at each of the
-    /// budget's two rates apart: a cycle at a fifth of a core takes several
-    /// times one at the full core, so one average over both would be wrong
-    /// at either, and most wrong just after the user sped it up. A cycle
-    /// counts at the rate in force when it ended. Nil until one is timed.
+    /// budget's rates apart: a cycle at a fifth of a core takes several times
+    /// one at the full core, and that again several times one at nine, so one
+    /// average over them would be wrong at any, and most wrong just after the
+    /// user sped it up. With several workers this is what they finish between
+    /// them, so it holds at whatever scaling they really get. A cycle counts
+    /// at the rate in force when it ended. Nil until one is timed.
     public struct Pace: Sendable, Equatable {
-        public var share: Double?
-        public var full: Double?
-        public init(share: Double? = nil, full: Double? = nil) { self.share = share; self.full = full }
-        public func secondsPerCycle(fullCore: Bool) -> Double? { fullCore ? full : share }
+        public var seconds: [Rate: Double]
+        public init(seconds: [Rate: Double] = [:]) { self.seconds = seconds }
+        public func secondsPerCycle(_ rate: Rate) -> Double? { seconds[rate] }
     }
 
     public let phase: Phase
@@ -66,12 +74,12 @@ public struct ArenaScoringProgress: Sendable, Equatable {
     public var fraction: Double { cyclesTotal > 0 ? min(1, Double(cyclesDone) / Double(cyclesTotal)) : 1 }
 
     /// How long until the phase is done with this account, at the pace
-    /// measured at the rate the budget runs at now (`fullCore`); nil before a
-    /// cycle has been timed at it. The cycle under way since `updatedAt` is
-    /// counted as part done, up to one cycle's time, so the estimate moves
-    /// between publishes.
-    public func eta(fullCore: Bool, now: Date = Date()) -> TimeInterval? {
-        guard let perCycle = pace.secondsPerCycle(fullCore: fullCore), perCycle.isFinite, perCycle >= 0
+    /// measured at the rate the budget runs at now; nil before a cycle has
+    /// been timed at it. The cycle under way since `updatedAt` is counted as
+    /// part done, up to one cycle's time, so the estimate moves between
+    /// publishes.
+    public func eta(rate: Rate, now: Date = Date()) -> TimeInterval? {
+        guard let perCycle = pace.secondsPerCycle(rate), perCycle.isFinite, perCycle >= 0
         else { return nil }
         let into = min(max(0, now.timeIntervalSince(updatedAt)), perCycle)
         return max(0, perCycle * Double(cyclesAhead) - into)

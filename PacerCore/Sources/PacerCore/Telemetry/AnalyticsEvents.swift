@@ -192,16 +192,28 @@ extension AnalyticsEvent {
     /// What the arena's budget was held to when the speed-up started
     /// (`ArenaBudgetPolicy`): in use, on battery, or already the full core.
     public enum SpeedUpFrom: String, Sendable, CaseIterable {
-        case inUse = "in_use", battery, lowPower = "low_power", thermal, full, unknown
+        case inUse = "in_use", battery, lowPower = "low_power", thermal, full, lowMemory = "low_memory", unknown
     }
 
-    /// `from` on a start; `heldSeconds`, sent as coarse minutes, on every end.
-    public static func arenaSpeedUp(_ action: SpeedUpAction, from: SpeedUpFrom? = nil,
+    /// `from` and the most workers this Mac can run (`workers`, as a band:
+    /// `1`, `2-4`, `5-8`, `9+`) on a start; `heldSeconds`, sent as coarse
+    /// minutes, on every end.
+    public static func arenaSpeedUp(_ action: SpeedUpAction, from: SpeedUpFrom? = nil, workers: Int? = nil,
                                     heldSeconds: TimeInterval? = nil) -> AnalyticsEvent {
         var p: Analytics.Properties = ["action": .string(action.rawValue)]
         if let from { p["from"] = .string(from.rawValue) }
+        if let workers { p["workers"] = .string(workerBand(workers)) }
         if let heldSeconds { p["minutes"] = .int(coarseMinutes(heldSeconds)) }
         return AnalyticsEvent(.arenaSpeedUp, properties: p)
+    }
+
+    static func workerBand(_ n: Int) -> String {
+        switch n {
+        case ...1: return "1"
+        case 2...4: return "2-4"
+        case 5...8: return "5-8"
+        default: return "9+"
+        }
     }
 
     // MARK: - Coarse numbers

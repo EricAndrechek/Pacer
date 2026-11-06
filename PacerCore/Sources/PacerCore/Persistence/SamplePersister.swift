@@ -1398,23 +1398,39 @@ public final class SamplePersister {
         // materialization; the loop below is only 853 ms of it and the
         // aggregate-gap queries 128 ms. Each page is released before the next
         // is pulled, so the whole table never exists as objects at once.
-        try ModelWalk.forEach(sampleDescriptor, in: context.container, pageSize: walkPageSize) { sample in
+        func note(dedupKey: String?, date: String, model: String, projectPath: String?,
+                  sessionId: String?, sampledAt: Date, outputTokens: Int64, hour: Int) {
             rowCount += 1
-            if sample.sampledAt > maxSampledAt { maxSampledAt = sample.sampledAt }
-            if let key = sample.dedupKey {
+            if sampledAt > maxSampledAt { maxSampledAt = sampledAt }
+            if let dedupKey {
                 // Seed with what's stored so a finished copy arriving in a
                 // later session can still recognise a partial row and
                 // upgrade it, not just skip it as a duplicate.
-                bestOutputByKey[DedupIndex.Key(key)] = sample.outputTokens
+                bestOutputByKey[DedupIndex.Key(dedupKey)] = outputTokens
             }
-            samplePairs.insert(DateModelPair(date: sample.date, model: sample.model))
-            let path = sample.projectPath ?? ProjectDailyAggregate.unknownProjectPath
-            sampleProjectPairs.insert(ProjectDatePair(projectPath: path, date: sample.date))
-            let hour = Self.localHour(of: sample)
-            sampleHourBuckets.insert(DateHourModelTriple(
-                date: sample.date, hour: hour, model: sample.model))
-            if let sid = sample.sessionId, !sid.isEmpty {
-                sampleSessionIds.insert(sid)
+            samplePairs.insert(DateModelPair(date: date, model: model))
+            let path = projectPath ?? ProjectDailyAggregate.unknownProjectPath
+            sampleProjectPairs.insert(ProjectDatePair(projectPath: path, date: date))
+            sampleHourBuckets.insert(DateHourModelTriple(date: date, hour: hour, model: model))
+            if let sessionId, !sessionId.isEmpty { sampleSessionIds.insert(sessionId) }
+        }
+        // Straight from SQLite when the store is a file: one pass over the
+        // table, against the paged walk's offset scans. Any surprise in the
+        // file and it walks instead; what a read that stopped early noted is
+        // real, and the walk notes it again to the same values.
+        let readRaw = RawSampleReader.storeURL(of: context.container).map { url in
+            RawSampleReader.forEachDedupRow(storeURL: url) { row in
+                note(dedupKey: row.dedupKey, date: row.date, model: row.model, projectPath: row.projectPath,
+                     sessionId: row.sessionId, sampledAt: row.sampledAt, outputTokens: row.outputTokens,
+                     hour: row.localHour)
+            }
+        } ?? false
+        if !readRaw {
+            rowCount = 0
+            try ModelWalk.forEach(sampleDescriptor, in: context.container, pageSize: walkPageSize) { sample in
+                note(dedupKey: sample.dedupKey, date: sample.date, model: sample.model,
+                     projectPath: sample.projectPath, sessionId: sample.sessionId, sampledAt: sample.sampledAt,
+                     outputTokens: sample.outputTokens, hour: Self.localHour(of: sample))
             }
         }
         // Computed for this and then never stored, so an index written after

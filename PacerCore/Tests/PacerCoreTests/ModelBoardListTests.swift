@@ -281,6 +281,18 @@ struct ModelBoardListTests {
         #expect(ModelBoardList.paceNote(ArenaPace(mode: .share(.thermal), speedUpUntil: Date()))
                 == "slowed while the Mac is hot")
         #expect(ModelBoardList.paceNote(nil) == nil)
+        // Several cores says so; a pause has no time left, nothing is moving.
+        #expect(text(P(done: 40, total: 100, eta: 90, stage: .scoring), ArenaPace(mode: .cores(9), speedUpUntil: Date()))
+                == "Scoring your history: 40% · about 2 min left · sped up · 9 cores")
+        #expect(text(P(done: 40, total: 100, eta: 90, stage: .scoring), ArenaPace(mode: .paused))
+                == "Scoring your history: 40% · paused: low memory")
+        #expect(text(P(done: 40, total: 100, eta: 90, stage: .slower), ArenaPace(mode: .paused, speedUpUntil: Date()))
+                == "Scoring the slower models: 40% · paused: low memory")
+        // Slowed still moves, so it still has a time left, sped up or not.
+        #expect(text(P(done: 40, total: 100, eta: 90, stage: .scoring), ArenaPace(mode: .share(.lowMemory)))
+                == "Scoring your history: 40% · about 2 min left · slowed: low memory")
+        #expect(text(P(done: 40, total: 100, eta: 90, stage: .scoring), ArenaPace(mode: .share(.lowMemory), speedUpUntil: Date()))
+                == "Scoring your history: 40% · about 2 min left · slowed: low memory")
     }
 
     /// Offered while the grader works and something it lifts holds it back;
@@ -297,13 +309,18 @@ struct ModelBoardListTests {
         #expect(control(P(done: 0, total: 9, eta: nil, stage: .slower), ArenaPace(mode: .share(.inUse))) == .offered)
         #expect(control(scoring, ArenaPace(mode: .fullCore, speedUpUntil: Date())) == .on)
         #expect(control(scoring, ArenaPace(mode: .share(.thermal), speedUpUntil: Date())) == .on)
+        #expect(control(scoring, ArenaPace(mode: .cores(9), speedUpUntil: Date())) == .on)
+        #expect(control(scoring, ArenaPace(mode: .paused, speedUpUntil: Date())) == .on)
+        #expect(control(scoring, ArenaPace(mode: .paused)) == nil)
+        #expect(control(scoring, ArenaPace(mode: .share(.lowMemory))) == nil)
+        #expect(control(scoring, ArenaPace(mode: .share(.lowMemory), speedUpUntil: Date())) == .on)
         #expect(control(scoring, ArenaPace(mode: .share(.thermal))) == nil)
         #expect(control(scoring, ArenaPace(mode: .share(.lowPower))) == nil)
         #expect(control(scoring, nil) == nil)
         #expect(control(nil, ArenaPace(mode: .share(.inUse))) == nil)
         #expect(control(P(done: 0, total: 0, eta: nil, stage: .waiting), ArenaPace(mode: .share(.inUse))) == nil)
         #expect(ModelBoardList.speedUpTitle == "Speed up")
-        #expect(ModelBoardList.speedUpHelp(.offered) == "Use a full core until this is done, for up to an hour")
+        #expect(ModelBoardList.speedUpHelp(.offered) == "Use several cores until this is done, for up to an hour. One on battery.")
         #expect(ModelBoardList.speedUpHelp(.on) == "Back to the usual pace")
     }
 

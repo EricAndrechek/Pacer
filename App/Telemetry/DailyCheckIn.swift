@@ -263,9 +263,11 @@ final class DailyCheckIn {
                                       refreshes: [String: Int], cliRuns: [CLIRunLog.Run],
                                       counters: [String: Int]) {
         var person = AnalyticsUsage.personProperties()
-        for key in ["accounts.count", "accounts.plans", "install.age_days", "env.model", "env.model_name"] {
+        for key in AnalyticsProfile.keys {
             if let v = attributes[key] { person[key] = v.analyticsValue }
         }
+        // Every later event carries this profile too (AnalyticsProfile).
+        if TelemetryController.analyticsAllowed { AnalyticsProfile.shared.save(person) }
         var setOnce: Analytics.Properties = [:]
         if let first = attributes["install.first_seen"] { setOnce["install.first_seen"] = first.analyticsValue }
         Analytics.capture(.dailyCheckin(attributes: attributes, person: person, setOnce: setOnce))
@@ -564,7 +566,7 @@ final class DailyCheckIn {
                 "install.age_days": .int(CheckInFields.installAgeDays(firstSeen: r.day, now: now))]
     }
 
-    nonisolated private static func sysctlString(_ name: String) -> String {
+    nonisolated static func sysctlString(_ name: String) -> String {
         var size = 0
         guard sysctlbyname(name, nil, &size, nil, 0) == 0, size > 0 else { return "unknown" }
         var buffer = [CChar](repeating: 0, count: size)

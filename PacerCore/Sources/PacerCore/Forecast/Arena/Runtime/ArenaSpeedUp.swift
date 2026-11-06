@@ -6,12 +6,15 @@ import Observation
 // it may use waits for the Mac to be plugged in and left alone for two minutes
 // (`ArenaBudgetGovernor`). Someone looking at a board still being scored is,
 // by definition, using the Mac, so it runs at a fifth of a core while they
-// look. They can ask for the full core now: the speed-up lifts the idle and
-// battery gates, never the thermal or Low Power Mode ones (the Mac's own
-// state, which a click on a forecast sheet should not overrule), until the
-// catch-up is done or an hour has passed, whichever comes first. Then the
-// budget is back to its everyday rule. Nothing persists: a relaunch starts at
-// the default, so a speed-up can never outlive the work it was asked for.
+// look. They can ask for more now: the speed-up lifts the idle and battery
+// gates, and while the Mac is plugged in runs several workers at once
+// (`ArenaWorkerPolicy`), one core on battery. It never lifts the thermal, Low
+// Power Mode or memory gates (the Mac's own state, which a click on a forecast
+// sheet should not overrule; `ArenaMemoryHold`).
+// It holds until the catch-up is done or an hour has passed, whichever comes
+// first. Then the budget is back to its everyday rule. Nothing persists: a
+// relaunch starts at the default, so a speed-up can never outlive the work it
+// was asked for.
 
 /// How the arena's budget stands, for the sheet: the governor's mode, and
 /// until when the user's speed-up holds (nil: it does not).
@@ -64,8 +67,9 @@ public final class ArenaSpeedUp: @unchecked Sendable {
         let from = Self.telemetryFrom(pace?.mode)
         let wake = Array(listeners.values)
         lock.unlock()
-        Log.write("Arena", "speed-up on (from \(from.rawValue)), up to \(Int(Self.limit / 60)) min")
-        Analytics.capture(.arenaSpeedUp(.start, from: from))
+        Log.write("Arena", "speed-up on (from \(from.rawValue)), up to \(Int(Self.limit / 60)) min, "
+                  + "\(ArenaWorkerPolicy.forThisMac) worker(s) when plugged in")
+        Analytics.capture(.arenaSpeedUp(.start, from: from, workers: ArenaWorkerPolicy.forThisMac))
         wake.forEach { $0() }
     }
 
@@ -125,10 +129,12 @@ public final class ArenaSpeedUp: @unchecked Sendable {
     static func telemetryFrom(_ mode: ArenaBudgetPolicy.Mode?) -> AnalyticsEvent.SpeedUpFrom {
         switch mode {
         case nil: return .unknown
-        case .fullCore?: return .full
+        case .fullCore?, .cores?: return .full
+        case .paused?: return .lowMemory
         case .share(.inUse)?: return .inUse
         case .share(.battery)?: return .battery
         case .share(.lowPower)?: return .lowPower
+        case .share(.lowMemory)?: return .lowMemory
         case .share(.thermal)?: return .thermal
         }
     }
