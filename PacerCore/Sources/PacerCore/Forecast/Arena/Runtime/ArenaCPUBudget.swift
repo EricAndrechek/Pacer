@@ -113,9 +113,9 @@ public final class ArenaCPUBudget: @unchecked Sendable {
     }
 
     /// The QoS the scorer runs its work at (`ArenaQoS.apply`, at every cut):
-    /// background, the efficiency cores only, at the everyday share; utility,
-    /// which may use the performance cores, while the governor gives it the
-    /// full core (`ArenaBudgetPolicy.scorerQoS`).
+    /// background, the efficiency cores only, at the everyday share; utility
+    /// while the governor gives it the full core; user-initiated while the
+    /// user has sped it up (`ArenaBudgetPolicy.scorerQoS`).
     public var scorerQoS: qos_class_t {
         get { lock.lock(); defer { lock.unlock() }; return currentScorerQoS }
         set { lock.lock(); currentScorerQoS = newValue; lock.unlock() }

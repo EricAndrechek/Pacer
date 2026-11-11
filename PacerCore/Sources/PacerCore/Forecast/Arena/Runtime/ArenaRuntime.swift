@@ -933,8 +933,8 @@ public actor ArenaRecordScorer {
         let grading = config.grading
         for (ci, models) in job.cuts {
             guard !stopped() else { back.abandoned = true; return back }
-            // Utility while the governor gives a full core or more
-            // (performance cores), background otherwise (`ArenaQoS`).
+            // The governor's QoS, read at every cut so a speed-up starting or
+            // ending mid-pass takes hold within one (`ArenaBudgetPolicy.scorerQoS`).
             ArenaQoS.apply(budget.scorerQoS)
             let cutNow = cycle.cycleStart.addingTimeInterval(duration * grading.cuts[ci])
             let seen = cycle.samples.filter { $0.at <= cutNow }

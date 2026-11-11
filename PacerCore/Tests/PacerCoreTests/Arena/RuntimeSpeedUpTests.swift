@@ -87,8 +87,8 @@ struct RuntimeSpeedUpTests {
         #expect(Policy.mode(Self.signals(true, false, .serious, 600), spedUp: true) == .share(.thermal))
         #expect(Policy.mode(Self.signals(false, false, .critical, 0), spedUp: true) == .share(.thermal))
         #expect(Policy.describe(.fullCore, shareRate: 0.2, spedUp: true) == "full core (sped up)")
-        #expect(Policy.scorerQoS(Policy.mode(Self.signals(true, false, .nominal, 0), spedUp: true))
-                == QOS_CLASS_UTILITY)
+        #expect(Policy.scorerQoS(Policy.mode(Self.signals(true, false, .nominal, 0), spedUp: true), spedUp: true)
+                == QOS_CLASS_USER_INITIATED)
     }
 
     /// On: the full core while the Mac is in use. The catch-up finishes: off,
@@ -100,7 +100,7 @@ struct RuntimeSpeedUpTests {
         #expect(r.speedUp.until == r.clock.now.addingTimeInterval(ArenaSpeedUp.limit))
         #expect(r.governor.evaluate() == .fullCore)
         #expect(r.budget.rate == 1)
-        #expect(r.budget.scorerQoS == QOS_CLASS_UTILITY)
+        #expect(r.budget.scorerQoS == QOS_CLASS_USER_INITIATED)
         r.clock.advance(20 * 60)
         #expect(r.governor.evaluate() == .fullCore)
         // On battery now: still the full core, as asked.

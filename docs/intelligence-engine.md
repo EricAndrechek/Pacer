@@ -186,7 +186,7 @@ Three layers close the loop end-to-end (2026-07):
   shows each model's old standing with how far its re-grading has come. The compare sheet reads one value,
   `MeterModelBoard`, built from the same ranking.
 
-- **What the grader may use.** One core plugged in and idle two minutes, a fifth otherwise. It starts when launch work ends (`ArenaStartGate`). Speed up runs up to performance cores − 1 workers plugged in, one core on battery, for up to an hour; the rows are the same at any count (`RuntimeWorkersProbe`). Memory pressure: `.warning` one worker at the fifth, `.critical` no back-scoring, then two quiet minutes and a worker per 30 s (`ArenaMemoryHold`).
+- **What the grader may use.** One core plugged in and idle two minutes, a fifth otherwise. It starts when launch work ends (`ArenaStartGate`). Speed up runs up to performance cores − 1 workers plugged in, one core on battery, for up to an hour; the rows are the same at any count (`RuntimeWorkersProbe`). Speed up runs the scorer at user-initiated QoS (an unrequested full core stays at utility, the everyday share at background), and Low Power Mode or heat hide it, even while its hour is still running. Memory pressure: `.warning` holds the grader to one worker at the fifth, or a speed-up to half its workers (at least one) at the full rate; `.critical` stops back-scoring, sped up or not; then two quiet minutes and a worker per 30 s, a speed-up's ramp starting from its half (`ArenaMemoryHold`).
 
 The tuning loop itself lives out-of-app in `research/harness` (Python/uv):
 a walk-forward replay of this whole pipeline over the real store (~1s for
