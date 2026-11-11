@@ -198,8 +198,6 @@ public actor UsageIntelligenceEngine {
     /// In-memory only: a relaunch writes one fresh row per surface, which
     /// doubles as a restart marker in the trail.
     private var lastSnapshotSig: [String: (at: Date, sig: String)] = [:]
-    /// Local-day key of the last retention prune (prune once per day).
-    private var lastSnapshotPruneDay: String?
 
     /// Per-user fitted state cached between scans. Holds the shapes that are
     /// expensive to derive (calibrators, the diurnal rate table); the cheap,
@@ -1963,18 +1961,6 @@ public actor UsageIntelligenceEngine {
                 spendSoFar: d.spendSoFar, pricingVersion: isCost ? pricing : nil,
                 replacedMethod: d.replacedMethod, hitClaimed: d.hitClaimed))
             lastSnapshotSig[d.surface] = (now, sig)
-            dirty = true
-        }
-
-        // Retention: once per local day, drop rows past the horizon. The
-        // eval table keeps the accuracy record forever; this is the
-        // high-resolution trail and 180 days of it is plenty for replay.
-        let dayKey = TokenSample.formatDate(now, timeZone: f.calendar.timeZone)
-        if lastSnapshotPruneDay != dayKey {
-            lastSnapshotPruneDay = dayKey
-            let cutoff = now.addingTimeInterval(-Double(PredictionSnapshot.retentionDays) * 86400)
-            try? modelContext.delete(model: PredictionSnapshot.self,
-                                     where: #Predicate { $0.recordedAt < cutoff })
             dirty = true
         }
         if dirty { try? modelContext.save() }

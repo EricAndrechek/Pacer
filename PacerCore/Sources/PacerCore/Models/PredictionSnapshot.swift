@@ -11,7 +11,17 @@ import SwiftData
 /// debugging loop the eval table can't: "at 14:03 the badge said limit in
 /// 5 min–32 hr — which inputs did that, and what actually happened?" Rows are
 /// written by the engine on recompute behind a change/heartbeat policy (not
-/// per tick), and pruned after `PredictionSnapshot.retentionDays`.
+/// per tick), and kept forever.
+///
+/// Never pruned, because this is the only point-in-time record of what the
+/// app showed: the eval table keeps accuracy, not the inputs or the claim, and
+/// a deleted row cannot be re-derived (#352). It is also cheap. Measured on a
+/// heavy real store (four accounts, so five engine scopes) over 30 days:
+/// ~1,630 rows a day at ~290 bytes each with indexes, about 0.5 MB a day and
+/// ~5% of what `TokenSample` added to the same store in the same days. A
+/// one-account install runs two scopes and writes well under half that. If
+/// the store ever sheds history into the DuckDB archive, this table goes with
+/// it; growth is not a reason to delete.
 ///
 /// `periodKey` matches the eval table's key for the same period (`yyyy-MM-dd`
 /// for cost surfaces, the rounded reset ISO-stamp for rate-limit cycles), so
@@ -90,11 +100,6 @@ public final class PredictionSnapshot {
     /// claimed; this is what the chip, the menu bar and the alerts said.
     /// Nil on cost surfaces.
     public var hitClaimed: Bool?
-
-    /// Snapshots older than this are pruned (the eval table keeps the
-    /// predicted-vs-truth accuracy record forever; this table is the
-    /// high-resolution debugging trail).
-    public static let retentionDays = 180
 
     public init(
         recordedAt: Date,

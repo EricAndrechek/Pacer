@@ -137,7 +137,7 @@ Three layers close the loop end-to-end (2026-07):
 - **Prediction trail** (`PredictionSnapshot`): every displayed answer is
   recorded with its band, conformal stratum + residual count, anchor shift,
   live state, and version tags — change-at-display-precision writes with a
-  30-min heartbeat, 180-day retention, exported at
+  30-min heartbeat, kept forever (never pruned, #352), exported at
   `GET /v1/predictions/history`. The eval table says how methods did; the
   trail says what the user was actually shown, and why.
 - **Versioned knobs** (`EngineParams`): all tuning constants live in one
