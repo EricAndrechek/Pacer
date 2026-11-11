@@ -247,6 +247,7 @@ public enum PacerStore {
         SpendMeterFit.self,
         LiveMeterOutcome.self,
         PriceCatalogSnapshot.self,
+        AccountPlanEvent.self,
     ]
 
     public static func makeModelContainer() throws -> ModelContainer {

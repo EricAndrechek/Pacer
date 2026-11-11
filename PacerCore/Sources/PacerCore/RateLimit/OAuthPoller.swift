@@ -2092,8 +2092,8 @@ public actor OAuthPoller: TokenPoolTesting {
             }
             account.lastSeenAt = captured.sampledAt
             if account.organizationId == nil, let organizationId { account.organizationId = organizationId }
-            if let subscriptionType { account.subscriptionType = subscriptionType }
-            if let rateLimitTier { account.rateLimitTier = rateLimitTier }
+            account.observePlan(subscriptionType: subscriptionType, rateLimitTier: rateLimitTier,
+                                at: captured.sampledAt, reportedBy: laneSource.rawValue, in: context)
             if isActive { account.isActive = true }
             if let w = captured.fiveHour {
                 account.latestFiveHourPct = w.usedPercentage
