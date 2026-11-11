@@ -33,6 +33,10 @@ import SwiftData
 public final class EngineHost {
     private let container: ModelContainer
     private var engines: [EngineScope: UsageIntelligenceEngine] = [:]
+    /// The warm-up fit `engine(for:)` starts for each engine it creates, kept
+    /// so a caller that must not race one can wait for it (`settleForRender`).
+    /// Finished tasks stay: one per scope, and scopes are few.
+    private var warmUps: [EngineScope: Task<Void, Never>] = [:]
     /// When each scope was last asked for. Keeps a scope outside
     /// `keptAccounts` live for a while after its last ask — see `live`.
     private var lastAsked: [EngineScope: Date] = [:]
@@ -174,7 +178,7 @@ public final class EngineHost {
         // Measured: a 10.2 second main-thread stall the first time a scope was
         // asked for. `AppBackgroundService` carries the same warning on its own
         // recompute; I walked straight into it anyway.
-        Task.detached(priority: .userInitiated) {
+        warmUps[scope] = Task.detached(priority: .userInitiated) {
             await engine.adopt(scope: scope)
             await engine.recompute()
             await MainActor.run {
@@ -182,6 +186,53 @@ public final class EngineHost {
             }
         }
         return engine
+    }
+
+    /// Wait for every warm-up fit `engine(for:)` has started, including one a
+    /// view starts while this waits.
+    func warmUpsFinished() async {
+        var waited = Set<EngineScope>()
+        while let (scope, task) = warmUps.first(where: { !waited.contains($0.key) }) {
+            waited.insert(scope)
+            await task.value
+        }
+    }
+
+    /// Bring every engine a headless render reads to the state the running
+    /// app reaches on the same data, and return with nothing left in flight.
+    /// For `ScreenshotMode` (#396); the app's own refits never call this.
+    ///
+    /// What it fixes: the README run fitted each account's engine with one
+    /// direct `recompute` straight after `engine(for:)` had created it, and
+    /// that call raced the warm-up `engine(for:)` starts on a detached task.
+    /// When the warm-up's `adopt(scope:)` landed first, both fits were the
+    /// account's, the weekly hit claim held on two refits and was confirmed:
+    /// "limit in 3 days". When the direct call overtook the adopt, it fitted
+    /// the engine as all-accounts, which fits no rate limits while an account
+    /// is active (`fitsRateLimits`), so only the warm-up's fit counted, the
+    /// claim streak stood at one, and the chip hedged: "may hit limit in 3
+    /// days". Six README images flipped between those from run to run.
+    ///
+    /// So, in order: every account gets an engine, scoped before anything fits
+    /// it (`keepFitted`); every warm-up already started finishes; every engine
+    /// re-adopts its own scope, so none is left in the scope an overtaking fit
+    /// gave it; then `UsageIntelligenceEngine.claimConfirmRefits` refits of
+    /// every engine, one at a time in scope order. A claim the data supports is
+    /// then confirmed, as it is in the app two refits after the data arrived,
+    /// whichever way anything before this interleaved.
+    public func settleForRender(accounts ids: [String], active: String?, now: Date = Date()) async {
+        await keepFitted(accounts: ids, active: active)
+        await warmUpsFinished()
+        let engines = live.sorted { $0.scope.key < $1.scope.key }
+        // Detached, as everywhere else an engine is fitted: an `await` from
+        // the main actor runs the fit inline on the main thread.
+        await Task.detached(priority: .userInitiated) {
+            for (scope, engine) in engines { await engine.adopt(scope: scope) }
+            for _ in 0..<UsageIntelligenceEngine.claimConfirmRefits {
+                for (_, engine) in engines { await engine.recompute(now: now) }
+            }
+        }.value
+        await warmUpsFinished()
     }
 
     /// Keep every one of these accounts' forecasts current, asked for or not.

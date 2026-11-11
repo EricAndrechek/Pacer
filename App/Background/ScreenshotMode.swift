@@ -197,16 +197,24 @@ enum ScreenshotMode {
         for window in NSApp.windows { window.orderOut(nil) }
         log(sceneWindow == nil ? "⚠️ no scene window — window scenes will fail"
                                : "scene window: \(sceneWindow!.identifier?.rawValue ?? "-")")
-        // The real window's forecasts come from the app's own engine, the one
-        // `PacerApp` injects — warm it the way `screenshotEngine` is warmed.
-        // And each account's: on "all accounts" the pace card asks every
-        // account's own fit, so an unwarmed one draws no forecast at all.
+        // The real window's forecasts come from the app's own engines, the
+        // ones `PacerApp` injects: all-accounts, and each account's, because
+        // on "all accounts" the pace card asks every account's own fit and an
+        // unwarmed one draws no forecast at all.
+        //
+        // Settled, not just fitted once (#396). One direct refit per account
+        // raced the warm-up `engine(for:)` starts, and which reached the
+        // engine first decided whether the weekly hit claim had held on one
+        // refit or two: "may hit limit in 3 days" or "limit in 3 days", from
+        // run to run, in six README images. `settleForRender` scopes every
+        // engine before anything fits it, waits out the warm-ups, and refits
+        // each as many times as a claim needs to be confirmed, so the run
+        // shows what the app shows on this data once it has been running.
         if let sceneEngines {
-            await sceneEngines.global.recompute(now: Date())
             let accounts = (try? ModelContext(container).fetch(FetchDescriptor<Account>())) ?? []
-            for account in accounts {
-                await sceneEngines.engine(forAccount: account.id).recompute(now: Date())
-            }
+            await sceneEngines.settleForRender(accounts: accounts.map(\.id),
+                                               active: accounts.first(where: \.isActive)?.id,
+                                               now: Date())
             // What the app posts after a refit. The real window's cards were
             // built at launch, asked a cold engine once, and got "not enough
             // data" — the Today tile's end-of-day bar and outlook chip and the
@@ -2224,9 +2232,11 @@ extension ScreenshotMode {
             duration: 7 * 86_400,
             // The last few keyframes are deliberately steep. The forecast is
             // fitted from the recent slope, and this window is the one that
-            // demonstrates the *escalated* caption — "limit in 2 days" with a
+            // demonstrates the *escalated* caption — "limit in 3 days" with a
             // red projection crossing 100% — which is the single most useful
-            // thing the pace card says and the reason anyone opens it.
+            // thing the pace card says and the reason anyone opens it. The
+            // claim needs two refits to agree (#304), which is why the README
+            // run settles its engines (`EngineHost.settleForRender`, #396).
             //
             // It used to land there by luck: the projection came out at ~101%
             // and tipped over, until a re-render put it at 97% and the whole

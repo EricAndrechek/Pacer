@@ -127,6 +127,15 @@ When that flag is set, `PacerAppDelegate` takes a separate path:
     screenshot deadlines use `ContinuousClock` and the script has a 15-minute
     watchdog; and an animated data change is captured on its first frame, which
     is how the scoped Projects first-frame bug surfaced.
+  - **Forecast engines settle before the first capture.** A frozen clock does
+    not make engine state deterministic: a hit claim ("limit in 3 days") is
+    said only once it has held on two refits (#304), and the run used to fit
+    each account's engine once while the warm-up `EngineHost.engine(for:)`
+    starts raced it, so the weekly chip read "limit" or "may hit limit" by
+    which call reached the engine first (#396). `captureAll` calls
+    `EngineHost.settleForRender`, which scopes every engine, waits out the
+    warm-ups and refits each one as many times as a claim needs. A scene that
+    builds its own engine must not race a warm-up either.
   - **Widgets:** fixture builds pin `PacerClock`, `NSTimeZone.default` and
     SwiftUI's `\.timeZone`.
   - **Menu bar:** only Pacer's item is in the bar. On macOS 26 Control Center
