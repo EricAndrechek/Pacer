@@ -489,10 +489,12 @@ public actor OAuthPoller: TokenPoolTesting {
             let isActive = classifyIsActive(org: org)
             if isActive {
                 let key = activeAccountKey ?? Account.key(forOrg: org)
+                // Not a lane of the pool, but the same fingerprint it would
+                // have as one, so the reading names the token that took it.
                 await recordPoll(snap, accountKey: key, organizationId: org,
                                  subscriptionType: cred.subscriptionType,
                                  rateLimitTier: cred.rateLimitTier, isActive: true,
-                                 laneSource: .override)
+                                 laneSource: .override, laneId: Self.laneId(trimmed))
                 return .success(fiveHour: snap.fiveHour?.usedPercentage, sevenDay: snap.sevenDay?.usedPercentage)
             }
             return .otherAccount(org: org)
@@ -1056,6 +1058,7 @@ public actor OAuthPoller: TokenPoolTesting {
                              subscriptionType: nil,
                              isActive: activeAccountKey == key,
                              laneSource: .parked,
+                             laneId: nil,
                              source: RateLimitSource.cswap)
         }
         return tally
@@ -1644,11 +1647,14 @@ public actor OAuthPoller: TokenPoolTesting {
             let accountKey = isActive ? (activeAccountKey ?? Account.key(forOrg: org)) : Account.key(forOrg: org)
             let sub = lanes[idx].credential.subscriptionType
             let tier = lanes[idx].credential.rateLimitTier
+            // The lane that took this reading, by the fingerprint
+            // `TokenLaneMeta` and the Tokens table use (#352).
+            let laneId = Self.laneId(lanes[idx].credential.accessToken)
             if isActive {
                 lanes[idx].state.account = .primary
                 await recordPoll(snapshot, accountKey: accountKey, organizationId: org,
                                  subscriptionType: sub, rateLimitTier: tier, isActive: true,
-                                 laneSource: lanes[idx].source)
+                                 laneSource: lanes[idx].source, laneId: laneId)
                 return .success(
                     fiveHourPct: snapshot.fiveHour?.usedPercentage,
                     sevenDayPct: snapshot.sevenDay?.usedPercentage
@@ -1660,7 +1666,7 @@ public actor OAuthPoller: TokenPoolTesting {
                 lanes[idx].state.account = .secondary
                 await recordPoll(snapshot, accountKey: accountKey, organizationId: org,
                                  subscriptionType: sub, rateLimitTier: tier, isActive: false,
-                                 laneSource: lanes[idx].source)
+                                 laneSource: lanes[idx].source, laneId: laneId)
                 return .secondaryAccount(org: org)
             }
 
@@ -2033,6 +2039,11 @@ public actor OAuthPoller: TokenPoolTesting {
         rateLimitTier: String? = nil,
         isActive: Bool,
         laneSource: CredentialCandidate.Source,
+        /// The fingerprint (`laneId`) of the token that took the reading,
+        /// stamped on every sample row it writes (#352), so per-lane
+        /// freshness and the stagger in #350 can be checked after the log has
+        /// rotated. Nil when no token of Pacer's took it: the switcher cache.
+        laneId: String?,
         /// Which mechanism produced this observation. Defaults to a live poll;
         /// the switcher-cache path passes its own so the rows say where they
         /// came from and the dashboard's source chip stays honest.
@@ -2130,7 +2141,8 @@ public actor OAuthPoller: TokenPoolTesting {
                     usedPercentage: window.usedPercentage,
                     resetsAt: window.resetsAt,
                     source: source,
-                    accountId: key
+                    accountId: key,
+                    laneId: laneId
                 ))
                 wroteRows = true
             }
@@ -2148,7 +2160,8 @@ public actor OAuthPoller: TokenPoolTesting {
                     usedPercentage: window.usedPercentage,
                     resetsAt: window.resetsAt,
                     source: source,
-                    accountId: key
+                    accountId: key,
+                    laneId: laneId
                 ))
                 wroteRows = true
             }
@@ -2178,7 +2191,8 @@ public actor OAuthPoller: TokenPoolTesting {
                     from: limit,
                     sampledAt: captured.sampledAt,
                     source: source,
-                    accountId: key
+                    accountId: key,
+                    laneId: laneId
                 ))
                 wroteRows = true
             }
@@ -2283,7 +2297,7 @@ public actor OAuthPoller: TokenPoolTesting {
                 kind: AccountUsageArchive.kindRateLimit,
                 sampledAt: r.sampledAt, window: r.window,
                 usedPercentage: r.usedPercentage, resetsAt: r.resetsAt,
-                source: r.source))
+                source: r.source, laneId: r.laneId))
             context.delete(r)
             moved += 1
         }
@@ -2311,7 +2325,7 @@ public actor OAuthPoller: TokenPoolTesting {
                 identity: l.identity, limitKind: l.kind, group: l.group,
                 label: l.label, severity: l.severity, isActive: l.isActive,
                 modelId: l.modelId, modelDisplayName: l.modelDisplayName,
-                surface: l.surface))
+                surface: l.surface, laneId: l.laneId))
             context.delete(l)
             moved += 1
         }
@@ -2472,7 +2486,8 @@ public actor OAuthPoller: TokenPoolTesting {
                     usedPercentage: row.usedPercentage ?? 0,
                     resetsAt: row.resetsAt,
                     source: row.source,
-                    accountId: row.accountId))
+                    accountId: row.accountId,
+                    laneId: row.laneId))
             case AccountUsageArchive.kindUsageLimit:
                 context.insert(UsageLimitSample(
                     sampledAt: row.sampledAt,
@@ -2488,7 +2503,8 @@ public actor OAuthPoller: TokenPoolTesting {
                     modelDisplayName: row.modelDisplayName,
                     surface: row.surface,
                     source: row.source,
-                    accountId: row.accountId))
+                    accountId: row.accountId,
+                    laneId: row.laneId))
             default:   // kindExtraUsage
                 context.insert(ExtraUsageSample(
                     sampledAt: row.sampledAt,

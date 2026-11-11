@@ -56,6 +56,10 @@ public final class AccountUsageArchive {
     public var modelId: String?
     public var modelDisplayName: String?
     public var surface: String?
+    /// rate-limit + usage-limit: the live row's `laneId`, carried through so
+    /// eviction past the live window does not drop which lane took the
+    /// reading (#352). Optional/additive like the columns above.
+    public var laneId: String?
 
     #Index<AccountUsageArchive>([\.accountId])
 
@@ -76,8 +80,10 @@ public final class AccountUsageArchive {
         isActive: Bool? = nil,
         modelId: String? = nil,
         modelDisplayName: String? = nil,
-        surface: String? = nil
+        surface: String? = nil,
+        laneId: String? = nil
     ) {
+        self.laneId = laneId
         self.accountId = accountId
         self.kind = kind
         self.sampledAt = sampledAt
