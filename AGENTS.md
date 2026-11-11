@@ -25,7 +25,7 @@ See `docs/design.md` for the full v1 design.
   test-ingest-parity` (the line parser and the DuckDB importer must leave
   identical rows), the DuckDB differential gate (`docs/duckdb-archive.md`),
   `make verify-data` (every rollup against the raw samples of a real
-  store), and `PACER_COLD_START_PROBE` on a frozen real `~/.claude`
+  store), and `make ingest-harness` on a frozen real `~/.claude`
   (correctness rule 8). `ccusage` is a reference: the opt-in
   `CCusageGroundTruthTests` compare the token counts both tools count the
   same way (input, cache read, flat cache creation) against
@@ -198,10 +198,16 @@ These are subtle, easy to miss, and break user-visible numbers:
 8. **Verify ingest changes against a REAL store, not a synthetic one.**
    Both performance bugs and the dedup bug above were invisible on a
    fresh in-memory store — an empty store has nothing to upgrade and no
-   cursors to rewrite. Freeze a copy of a real `~/.claude`, point at it
-   with `CLAUDE_CONFIG_DIR`, and run `PACER_COLD_START_PROBE=1` (see
-   `App/Background/ColdStartProbe.swift`), which reports phase timings
-   AND all six per-field token totals. Row count alone proves nothing
+   cursors to rewrite. Freeze a copy of a real `~/.claude`
+   (`cp -c -R ~/.claude/projects <dir>/`) and, for branch work, run
+   `make ingest-harness CLAUDE=<dir> [STORE=<store copy>]`
+   (`IngestHarness`, #323): the real coordinator in a test process, no
+   app launch, no window, any worktree. It reports phase timings, the
+   bytes each launch phase writes (#387), the cold-start probe's TOTALS
+   line (all six per-field token totals) and the rollup's cost.
+   `PACER_COLD_START_PROBE=1` (`App/Background/ColdStartProbe.swift`)
+   stays the tool for measuring the INSTALLED app; it launches the
+   binary, so never run it from a branch. Row count alone proves nothing
    about field mapping — a swapped cache tier leaves every count
    identical while changing everyone's cost.
 9. **Never match a rate-limit cycle with `resetsAt ==`.** The server
