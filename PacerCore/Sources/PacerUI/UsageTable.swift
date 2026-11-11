@@ -653,9 +653,12 @@ where Leading.TableRowValue == PacerUsageRow<Extra>,
     let labelAccessory: (Row) -> Accessory
     let rowMenu: (Row) -> RowMenu
 
-    /// Visibility, order and widths, per table, across launches. SwiftUI
-    /// stores `TableColumnCustomization` in `AppStorage` itself.
-    @AppStorage private var columns: TableColumnCustomization<Row>
+    /// Visibility, order and widths, per table, across launches. Decoded
+    /// once by the box (#400); `columnsRevision` is what the body reads so a
+    /// change redraws it.
+    private let store: UserDefaults
+    @State private var columnsBox = UsageColumnLayoutBox<Row>()
+    @State private var columnsRevision = 0
     @State private var selection: Row.ID?
     /// Bumped by "Reset Columns" to build the table afresh at its starting
     /// widths: SwiftUI applies an emptied layout's visibility and order to
@@ -687,12 +690,7 @@ where Leading.TableRowValue == PacerUsageRow<Extra>,
         self.extraColumns = extraColumns
         self.labelAccessory = labelAccessory
         self.rowMenu = rowMenu
-        PacerUsageTableMetrics.applyLayoutDefaults(tableId: tableId, store: store)
-        PacerUsageTableMetrics.migrateLayout(tableId: tableId, store: store)
-        _columns = AppStorage(
-            wrappedValue: TableColumnCustomization<Row>(),
-            PacerUsageTableMetrics.columnsKey(tableId: tableId),
-            store: store)
+        self.store = store
     }
 
     /// This table opening on `columns` rather than every table's defaults:
@@ -709,13 +707,21 @@ where Leading.TableRowValue == PacerUsageRow<Extra>,
         let parts: [UsageColumn] = UsageColumn.partColumns
         let current = sort
         let onSort = self.onSort
+        let _ = columnsRevision
+        let tableId = self.tableId, store = self.store, box = columnsBox
+        let columns = Binding<TableColumnCustomization<Row>>(
+            get: { box.value(tableId: tableId, store: store) },
+            set: { new in
+                box.set(new, tableId: tableId, store: store)
+                columnsRevision += 1
+            })
         let sortOrder = Binding<[Comparator]>(
             get: { [Comparator(current)] },
             // `Table` puts the clicked column's comparator first: a new
             // column in the direction its comparator was declared with, the
             // current one flipped.
             set: { new in if let first = new.first { onSort(first.sort) } })
-        Table(sorted, selection: $selection, sortOrder: sortOrder, columnCustomization: $columns) {
+        Table(sorted, selection: $selection, sortOrder: sortOrder, columnCustomization: columns) {
             labelColumn(twoLine: twoLine)
             leadingColumns()
             // The token parts in the parts' own order (`partColumns`, read
@@ -780,7 +786,7 @@ where Leading.TableRowValue == PacerUsageRow<Extra>,
         }
         .onReceive(NotificationCenter.default.publisher(for: .pacerResetTableColumns)) { note in
             guard note.object as? String == tableId else { return }
-            columns = TableColumnCustomization()
+            columns.wrappedValue = TableColumnCustomization()
             layoutGeneration += 1
         }
         .onAppear { PacerTableInput.watch() }

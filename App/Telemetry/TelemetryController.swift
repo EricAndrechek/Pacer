@@ -183,6 +183,7 @@ final class TelemetryController {
             if let kind = TelemetryController.budgetKind(event), !TelemetryBudget.shared.take(kind) {
                 return nil
             }
+            TelemetryController.demoteGraderCPUReport(event)
             TelemetryController.scrub(event)
             return event
         }
@@ -210,6 +211,21 @@ final class TelemetryController {
         return TelemetryBudget.kind(eventType: event.type, mechanism: mechanism?.type,
                                     fatal: event.level == .fatal,
                                     handled: mechanism?.handled?.boolValue)
+    }
+
+    /// A CPU report the forecast grader plausibly caused (PACER-Z, PACER-C)
+    /// is recorded at `info` under one fingerprint, so it neither emails nor
+    /// reopens an issue each time. It still spends the MetricKit budget above.
+    /// The evidence is the mode tag and the CPU rate: frames carry no names
+    /// here (`MetricKitCPUClassifier`).
+    nonisolated private static func demoteGraderCPUReport(_ event: Event) {
+        let exception = event.exceptions?.first
+        let decision = MetricKitCPUClassifier.decide(
+            mechanism: exception?.mechanism?.type, mode: event.tags?["arena.cpu_mode"],
+            exceptionValue: exception?.value, cores: ProcessInfo.processInfo.activeProcessorCount)
+        guard decision == .demoteAsArena else { return }
+        event.level = .info
+        event.fingerprint = MetricKitCPUClassifier.fingerprint
     }
 
     nonisolated private static func scrub(_ event: Event) {
