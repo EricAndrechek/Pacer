@@ -283,8 +283,8 @@ public enum ModelBoardList {
     public static func paceNote(_ pace: ArenaPace?) -> String? {
         guard let pace else { return nil }
         switch pace.mode {
-        case .fullCore: return pace.isSpedUp ? "sped up" : nil
-        case .cores(let n): return "sped up · \(n) cores"
+        case .fullCore: return pace.isSpedUp ? "sped up" + (pace.lowMemory ? " · low memory" : "") : nil
+        case .cores(let n): return "sped up · \(n) cores" + (pace.lowMemory ? " · low memory" : "")
         case .paused: return "paused: low memory"
         case .share(.inUse): return "slowed while in use"
         case .share(.battery): return "slowed on battery"
@@ -301,12 +301,14 @@ public enum ModelBoardList {
     /// Mac in use or on battery; or already plugged in and idle, so it stays
     /// fast when the user is back), on while it holds. Absent before the
     /// grader has started (nothing to speed up yet; it would end at once),
-    /// without a governor (`pace` nil), and when only heat, Low Power Mode or
-    /// low memory hold it back, which a speed-up leaves alone.
+    /// without a governor (`pace` nil), in Low Power Mode even when on (the
+    /// speed-up's hour keeps running and returns with the mode), and when only
+    /// heat or a pause hold it back, which a speed-up leaves alone.
     public enum SpeedUp: Equatable, Sendable { case offered, on }
 
     public static func speedUp(_ p: MeterModelBoard.Progress?, pace: ArenaPace?) -> SpeedUp? {
         guard let p, p.stage != .waiting, let pace else { return nil }
+        if pace.mode == .share(.lowPower) { return nil }
         if pace.isSpedUp { return .on }
         switch pace.mode {
         case .fullCore, .cores, .share(.inUse), .share(.battery): return .offered

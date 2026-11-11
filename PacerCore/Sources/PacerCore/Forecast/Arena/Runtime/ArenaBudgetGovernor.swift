@@ -9,9 +9,10 @@ import Synchronization
 // minutes; a fifth of one core otherwise (`ArenaCPUBudget`). The user can
 // waive the plugged-in and idle conditions for the catch-up, for up to an
 // hour, and while the Mac is plugged in can have several cores
-// (`ArenaSpeedUp`, `ArenaWorkerPolicy`); never against heat, Low Power Mode or
-// memory pressure, which holds it to one worker at the everyday share at
-// `.warning` and pauses back-scoring at `.critical` (`ArenaMemoryHold`).
+// (`ArenaSpeedUp`, `ArenaWorkerPolicy`); never against heat or Low Power Mode.
+// Memory pressure holds the everyday rate to one worker at the everyday share
+// at `.warning`, and a speed-up to half its workers; `.critical` pauses
+// back-scoring either way (`ArenaMemoryHold`).
 //
 // The first launch's back-scoring is hours of CPU at a fifth of a core. Most
 // Macs that run Pacer sit plugged in and idle for long stretches (overnight,
@@ -79,8 +80,9 @@ public struct ArenaBudgetSignals: Sendable, Equatable {
 }
 
 /// What memory pressure does to back-scoring. `.warning`: one worker at the
-/// everyday share, sped up or not. `.critical`: nothing at all. Going back up
-/// takes a calm first, then one more worker per step. Pure, so the transitions
+/// everyday share, or half a speed-up's workers (`ArenaBudgetPolicy.decide`).
+/// `.critical`: nothing at all, sped up or not. Going back up takes a calm
+/// first, then one more worker per step, from where `.warning` left it. Pure, so the transitions
 /// can be tested with a scripted level and clock (`ArenaBudgetGovernor` feeds
 /// it).
 ///
@@ -129,15 +131,17 @@ public struct ArenaMemoryHold: Sendable, Equatable {
         level == .critical || (lastCritical.map { now - $0 < Self.calmSeconds } ?? false)
     }
 
-    /// One unless memory has been quiet: normal now, for the calm, then one
-    /// more per step, up to `maxWorkers`.
-    public func workers(now: Double, maxWorkers: Int) -> Int {
+    /// `floor` (one, or the half a speed-up is allowed at `.warning`) unless
+    /// memory has been quiet: normal now, for the calm, then one more per
+    /// step, up to `maxWorkers`.
+    public func workers(now: Double, maxWorkers: Int, floor: Int = 1) -> Int {
         let most = max(1, maxWorkers)
-        guard level == .normal else { return 1 }
+        let base = min(most, max(1, floor))
+        guard level == .normal else { return base }
         guard let lastPressure else { return most }
         let quiet = now - lastPressure - Self.calmSeconds
-        guard quiet >= 0 else { return 1 }
-        return min(most, 1 + Int(quiet / Self.rampStepSeconds))
+        guard quiet >= 0 else { return base }
+        return min(most, base + Int(quiet / Self.rampStepSeconds))
     }
 }
 
@@ -173,28 +177,44 @@ public enum ArenaBudgetPolicy {
         /// CPU-seconds per second for the whole arena.
         public var rate: Double
         public var liveLane: LiveLane
+        /// The user's speed-up is what sets `mode` (not held back by heat or
+        /// Low Power Mode, not paused).
+        public var spedUp = false
+        /// Sped up, and held to fewer workers by memory at `.warning`.
+        public var lowMemory = false
+        /// The QoS the scorer works at (`scorerQoS`).
+        public var qos: qos_class_t = QOS_CLASS_BACKGROUND
     }
 
     /// `spedUp`: the user asked for more (`ArenaSpeedUp`), which lifts the
     /// battery and idle gates, and while plugged in gives `workers` cores. Not
-    /// the thermal, Low Power Mode or memory ones: those are the Mac's own
-    /// state, and a forecast sheet is no place to overrule them. `lowMemory`:
-    /// macOS reports memory pressure.
+    /// the thermal or Low Power Mode ones: those are the Mac's own state, and a
+    /// forecast sheet is no place to overrule them. `lowMemory`: macOS reports
+    /// memory pressure, which holds an unrequested rate to the share; a
+    /// speed-up is held by it through `workers` (`decide`) instead.
     public static func mode(_ s: ArenaBudgetSignals, spedUp: Bool = false, workers: Int = 1,
                             lowMemory: Bool = false) -> Mode {
         // The first reason that holds, the machine's own state before the
         // user's: a hot Mac is held back however long it has been idle.
         if s.thermal == .serious || s.thermal == .critical { return .share(.thermal) }
         if s.lowPowerMode { return .share(.lowPower) }
-        if lowMemory { return .share(.lowMemory) }
+        if lowMemory && !spedUp { return .share(.lowMemory) }
         if spedUp { return s.onACPower && workers > 1 ? .cores(workers) : .fullCore }
         if !s.onACPower { return .share(.battery) }
         if !(s.idleSeconds >= idleSeconds) { return .share(.inUse) }
         return .fullCore
     }
 
-    /// The whole decision, the one place it is made. Memory comes first: a
-    /// speed-up never overrides it, and neither does a Mac left idle.
+    /// The whole decision, the one place it is made. Heat and Low Power Mode
+    /// come first (in `mode`), then memory.
+    ///
+    /// **Memory.** `.critical` pauses, sped up or not. At `.warning` an
+    /// unrequested rate drops to one worker at the share. A speed-up is the
+    /// user's own ask, for at most an hour, and a `.warning` is common on a Mac
+    /// with room to spare, so it goes on at half its workers (at least one,
+    /// still at the full rate); on battery it is one core already. When
+    /// pressure eases the crew starts from that half and ramps to the full
+    /// count; without a speed-up the ramp starts from one.
     ///
     /// **The live lane under pressure.** It keeps the dashboard's numbers from
     /// going stale, so it does not stop with the scorer: at `.warning` it makes
@@ -206,24 +226,41 @@ public enum ArenaBudgetPolicy {
                               now: Double = 0, maxWorkers: Int = 1, shareRate: Double, fullRate: Double = 1)
         -> Decision {
         let lane: LiveLane = hold.level == .critical ? .none : hold.level == .warning ? .picksOnly : .all
-        if hold.isPaused(now: now) { return Decision(mode: .paused, workers: 0, rate: shareRate, liveLane: lane) }
-        let mode = mode(s, spedUp: spedUp, workers: hold.workers(now: now, maxWorkers: maxWorkers),
-                        lowMemory: hold.level > .normal)
+        if hold.isPaused(now: now) {
+            return Decision(mode: .paused, workers: 0, rate: shareRate, liveLane: lane,
+                            qos: scorerQoS(.paused, spedUp: false))
+        }
+        let warned = hold.level > .normal
+        let workers = hold.workers(now: now, maxWorkers: maxWorkers, floor: spedUp ? max(1, maxWorkers / 2) : 1)
+        let mode = mode(s, spedUp: spedUp, workers: workers, lowMemory: warned)
         switch mode {
-        case .cores(let n): return Decision(mode: mode, workers: n, rate: Double(n) * fullRate, liveLane: lane)
-        case .fullCore: return Decision(mode: mode, workers: 1, rate: fullRate, liveLane: lane)
-        case .share, .paused: return Decision(mode: mode, workers: 1, rate: shareRate, liveLane: lane)
+        case .cores(let n):
+            return Decision(mode: mode, workers: n, rate: Double(n) * fullRate, liveLane: lane, spedUp: true,
+                            lowMemory: warned, qos: scorerQoS(mode, spedUp: true))
+        case .fullCore:
+            return Decision(mode: mode, workers: 1, rate: fullRate, liveLane: lane, spedUp: spedUp,
+                            lowMemory: warned && spedUp, qos: scorerQoS(mode, spedUp: spedUp))
+        case .share, .paused:
+            return Decision(mode: mode, workers: 1, rate: shareRate, liveLane: lane,
+                            qos: scorerQoS(mode, spedUp: false))
         }
     }
 
-    /// The QoS the scorer works at in `mode`: utility at a full core or more,
-    /// so it may run on a performance core (background QoS keeps a thread on
-    /// the efficiency cores, where a forecast costs several times the CPU),
-    /// and never higher, so the user's own work comes first; background at the
-    /// everyday share, behind everything the user runs.
-    public static func scorerQoS(_ mode: Mode) -> qos_class_t {
+    /// The QoS the scorer works at in `mode`. At the everyday share:
+    /// background, behind everything the user runs. At a full core the Mac
+    /// gave itself (plugged in and idle): utility, so it may run on a
+    /// performance core (background QoS keeps a thread on the efficiency
+    /// cores, where a forecast costs several times the CPU). While `spedUp`,
+    /// at a full core or several: user-initiated. On a busy Mac (load 50 to
+    /// 200) utility gained nothing from more workers (462 s at one against
+    /// 472 s at eight), and user-initiated was about four times faster at
+    /// eight (69 s against 272 s). The user asked for it, for at most an hour,
+    /// and heat, Low Power Mode and memory pressure still hold it back
+    /// (`decide`), so the user's own work is not starved for long.
+    public static func scorerQoS(_ mode: Mode, spedUp: Bool) -> qos_class_t {
         switch mode {
-        case .fullCore, .cores: return QOS_CLASS_UTILITY
+        case .cores: return QOS_CLASS_USER_INITIATED
+        case .fullCore: return spedUp ? QOS_CLASS_USER_INITIATED : QOS_CLASS_UTILITY
         case .share, .paused: return QOS_CLASS_BACKGROUND
         }
     }
@@ -250,13 +287,15 @@ public enum ArenaBudgetPolicy {
     }
 
     /// What the log says: `full core (plugged in, idle)`, `full core (sped
-    /// up)`, `9 cores (sped up)`, `20% of a core (on battery)`, `paused (low
-    /// memory)`.
-    public static func describe(_ mode: Mode, shareRate: Double, spedUp: Bool = false) -> String {
+    /// up)`, `9 cores (sped up)`, `4 cores (sped up, low memory)`, `20% of a
+    /// core (on battery)`, `paused (low memory)`.
+    public static func describe(_ mode: Mode, shareRate: Double, spedUp: Bool = false,
+                                lowMemory: Bool = false) -> String {
+        let why = lowMemory ? ", low memory" : ""
         switch mode {
-        case .fullCore: return spedUp ? "full core (sped up)" : "full core (plugged in, idle)"
+        case .fullCore: return spedUp ? "full core (sped up\(why))" : "full core (plugged in, idle)"
         case .share(let reason): return String(format: "%.0f%% of a core (%@)", shareRate * 100, reason.rawValue)
-        case .cores(let n): return "\(n) cores (sped up)"
+        case .cores(let n): return "\(n) cores (sped up\(why))"
         case .paused: return "paused (low memory)"
         }
     }
@@ -358,15 +397,18 @@ public final class ArenaBudgetGovernor: @unchecked Sendable {
                                             shareRate: shareRate, fullRate: fullRate)
         decision = next
         lock.unlock()
-        speedUp?.publish(ArenaPace(mode: next.mode, speedUpUntil: spedUp ? speedUp?.until : nil))
+        speedUp?.publish(ArenaPace(mode: next.mode, speedUpUntil: spedUp ? speedUp?.until : nil,
+                                   lowMemory: next.lowMemory))
         budget.liveLane = next.liveLane
-        if previous == nil || previous?.rate != next.rate || previous?.workers != next.workers {
+        if previous == nil || previous?.rate != next.rate || previous?.workers != next.workers
+            || previous?.qos != next.qos {
             // The rate first: a worker let go must find the lower rate, and a
             // worker added must find the higher one.
             budget.rate = next.rate
-            budget.scorerQoS = ArenaBudgetPolicy.scorerQoS(next.mode)
+            budget.scorerQoS = next.qos
             budget.scorerWorkers = next.workers
-            log("budget: " + ArenaBudgetPolicy.describe(next.mode, shareRate: shareRate, spedUp: spedUp))
+            log("budget: " + ArenaBudgetPolicy.describe(next.mode, shareRate: shareRate, spedUp: spedUp,
+                                                       lowMemory: next.lowMemory))
             let name = ArenaBudgetPolicy.telemetryName(next.mode)
             Self.lastMode.withLock { $0 = name }
             Self.onModeChange(name)
