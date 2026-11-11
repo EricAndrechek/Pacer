@@ -132,4 +132,115 @@ import Testing
         #expect(written.rowCount == 12)
         #expect(written.watermark == base.addingTimeInterval(11 * 3_600))
     }
+
+    // MARK: - Written while a cycle is part-way (#395)
+
+    private func entry(_ i: Int, output: Int64 = 1, complete: Bool = false) -> ParsedUsageEntry {
+        ParsedUsageEntry(
+            timestamp: Date(timeIntervalSince1970: 1_800_000_000 + Double(i) * 60),
+            model: "claude-opus-5",
+            breakdown: TokenBreakdown(inputTokens: 10, outputTokens: output, cacheReadTokens: 0,
+                                      cacheCreation5mTokens: 0, cacheCreation1hTokens: 0),
+            storedCostUSD: nil,
+            dedupKey: "msg_\(i):req_\(i)",
+            sessionId: "s",
+            projectPath: "/Users/dev/code/p",
+            isComplete: complete)
+    }
+
+    private func storeAndIndex() throws -> (ModelContainer, URL) {
+        let container = try ModelContainer(for: Schema(PacerStore.allModelTypes),
+                                           configurations: ModelConfiguration(isStoredInMemoryOnly: true))
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("dedup-\(UUID().uuidString).bin")
+        return (container, url)
+    }
+
+    /// A quit that catches a cycle part-way writes the index from `stop()`
+    /// while that cycle's turns are inserted and unsaved, and they never will
+    /// be: the app exits, and the next launch reads them again from the
+    /// cursor the store kept. Written from the persister's map, the index
+    /// claimed them anyway and the next launch threw it out — "dedup index
+    /// covers 896242 rows, store has 895856 — rebuilding". It describes the
+    /// store now, so it is used, and the four turns come back.
+    @ScanActor
+    @Test func anIndexWrittenMidCycleLeavesOutTurnsNotYetSaved() throws {
+        let (container, url) = try storeAndIndex()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let firstLaunch = ModelContext(container)
+        let first = try SamplePersister(context: firstLaunch, indexURL: url)
+        for i in 0..<10 { try first.insert(entry(i)) }
+        try first.flush()
+        try firstLaunch.save()
+        for i in 10..<14 { try first.insert(entry(i)) }   // the cycle the quit catches
+        try first.flush()
+        first.writeDedupIndexIfNeeded(force: true)         // `stop()`
+
+        let written = try #require(DedupIndex.load(from: url))
+        #expect(written.rowCount == 10)
+        #expect(written.entries.count == 10)
+        #expect(written.entries[DedupIndex.Key("msg_12:req_12")] == nil)
+
+        let second = try SamplePersister(context: ModelContext(container), indexURL: url)
+        try second.ensurePreloaded()
+        #expect(second.loadedDedupIndex, "no rebuild")
+        for i in 10..<14 { #expect(try second.insert(entry(i))) }
+        for i in 0..<10 { #expect(try !second.insert(entry(i))) }
+    }
+
+    /// The case the row count cannot catch. A streamed turn's partial copy is
+    /// saved; the next cycle reads the finished copy and upgrades the row in
+    /// its context; the quit comes before the save. Nothing new was inserted,
+    /// so the count matched and the index was trusted — carrying the finished
+    /// output while the store held the partial. The finished copy, read again
+    /// next launch, then compared equal to "the best stored" and was dropped
+    /// as a duplicate: the turn stayed partial for good (rule 7).
+    @ScanActor
+    @Test(arguments: [true, false])
+    func anUnsavedUpgradeIsNotInTheIndex(applied: Bool) throws {
+        let (container, url) = try storeAndIndex()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let firstLaunch = ModelContext(container)
+        let first = try SamplePersister(context: firstLaunch, indexURL: url)
+        try first.insert(entry(1, output: 5))
+        try first.flush()
+        try firstLaunch.save()
+        try first.insert(entry(1, output: 50, complete: true))
+        // Applied to the row (after `flush()`) or only decided (before it).
+        if applied { try first.flush() }
+        first.writeDedupIndexIfNeeded(force: true)
+
+        let written = try #require(DedupIndex.load(from: url))
+        #expect(written.rowCount == 1)
+        #expect(written.entries[DedupIndex.Key("msg_1:req_1")] == 5)
+
+        let secondLaunch = ModelContext(container)
+        let second = try SamplePersister(context: secondLaunch, indexURL: url)
+        try second.insert(entry(1, output: 50, complete: true))
+        #expect(second.stats.upgradedFromPartial == 1)
+        try second.flush()
+        try secondLaunch.save()
+        let stored = try ModelContext(container).fetch(FetchDescriptor<TokenSample>())
+        #expect(stored.map(\.outputTokens) == [50])
+    }
+
+    /// Once the cycle has saved, the index takes everything again: what the
+    /// mid-cycle write left out is still owed a write.
+    @ScanActor
+    @Test func whatAMidCycleWriteLeftOutIsWrittenAfterTheSave() throws {
+        let (container, url) = try storeAndIndex()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let context = ModelContext(container)
+        let persister = try SamplePersister(context: context, indexURL: url)
+        for i in 0..<3 { try persister.insert(entry(i)) }
+        try persister.flush()
+        persister.writeDedupIndexIfNeeded(force: true)
+        #expect(try #require(DedupIndex.load(from: url)).rowCount == 0)
+        try context.save()
+        persister.writeDedupIndexIfNeeded(force: true)
+        let written = try #require(DedupIndex.load(from: url))
+        #expect(written.rowCount == 3)
+        #expect(written.entries.count == 3)
+        #expect(written.watermark == Date(timeIntervalSince1970: 1_800_000_000 + 2 * 60))
+    }
 }

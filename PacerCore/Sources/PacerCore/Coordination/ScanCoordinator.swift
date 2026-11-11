@@ -1163,6 +1163,9 @@ public final class ScanCoordinator {
         // Flush the dedup index unconditionally on the way out: writes are
         // throttled during normal operation, so without this a clean quit
         // could still leave several minutes of rows to re-walk next launch.
+        // A quit often lands while a cycle is suspended part-way, its turns
+        // inserted and not yet saved, and they never will be; what is written
+        // is what the store holds, not those (#395).
         persister?.writeDedupIndexIfNeeded(force: true)
         await stopRunningParts()
     }
@@ -2157,13 +2160,6 @@ public final class ScanCoordinator {
             try await reconcilePriceLedger(persister: activePersister)
         }
         try saveCursors(result.updatedCursors)
-        // After the cycle's rows are in, so the index never claims coverage
-        // the store doesn't have. Throttled inside, and failure-tolerant —
-        // it's a cache. NOTE its cost lands in the `curs=` phase of the scan
-        // log rather than a field of its own; unthrottled that read as
-        // "cursor saving got 90x slower", which is how the regression was
-        // spotted at all.
-        activePersister.writeDedupIndexIfNeeded()
         phase.saveCursorsMs = tickMs()
 
         // Per-account lifetime totals. Throttled hard inside the store (a
@@ -2437,6 +2433,13 @@ public final class ScanCoordinator {
         // Only now: the rebuilt rollups are committed, so the marks are spent.
         // A throw anywhere above leaves them for the next cycle.
         activePersister.clearDirtyPairs()
+        // After the save, so the index describes rows the store has (#395).
+        // It used to be written before the rollups, from rows still pending,
+        // and a quit while those rollups ran (minutes, on a loaded Mac) left
+        // it claiming turns the store never got. Throttled inside, and
+        // failure-tolerant — it's a cache. Its cost lands in `save=`;
+        // unthrottled it once read as "cursor saving got 90x slower".
+        activePersister.writeDedupIndexIfNeeded()
         // saveMs covers the (up to five) `writeMeta` upserts plus the
         // terminal `context.save()`. The save is what fans @Query
         // refreshes out to every visible view — when this number is

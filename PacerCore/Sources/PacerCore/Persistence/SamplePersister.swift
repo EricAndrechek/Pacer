@@ -353,6 +353,7 @@ public final class SamplePersister {
         }
 
         bestOutputByKey = index.entries
+        loadedDedupIndex = true
         // Rows written after the index was saved are still unaccounted for;
         // pick them up so a merely-behind index is usable rather than binned.
         let since = index.watermark        // predicates can't traverse `index.`
@@ -379,6 +380,9 @@ public final class SamplePersister {
 
     /// Newest `sampledAt` the in-memory map accounts for.
     private var indexWatermark = Date(timeIntervalSince1970: 0)
+    /// Whether the dedup map came from the on-disk index rather than a walk
+    /// of the store.
+    private(set) var loadedDedupIndex = false
 
     /// Which account each incoming sample should be attributed to, resolved
     /// by timestamp. Refreshed by `ScanCoordinator` at the top of every
@@ -412,8 +416,22 @@ public final class SamplePersister {
     private var lastIndexWriteAt: Date?
 
     /// Persist the dedup map so the next launch skips the walk. Called after a
-    /// cycle's writes have landed; failures are logged and ignored, since the
-    /// index is only ever an optimisation.
+    /// cycle's terminal save, and on shutdown; failures are logged and
+    /// ignored, since the index is only ever an optimisation.
+    ///
+    /// What is written is the map as the STORE has it (`committedIndex`), not
+    /// as this persister does. The two differ between an insert and the save
+    /// that commits it, and the shutdown write lands in that gap whenever a
+    /// quit catches a cycle part-way — on a loaded Mac, where a cycle's
+    /// rollups can take minutes, that is most quits. Written from the map, the
+    /// index then claimed rows the store never got: "dedup index covers
+    /// 896242 rows, store has 895856 — rebuilding", and again five days later
+    /// with 1016535 against 1016280 (#395). The count check caught those and
+    /// paid a rebuild for each. It could not catch an upgrade decided but not
+    /// saved: the row count still matched, the index carried the finished
+    /// copy's output, the store the partial's, and the finished copy — read
+    /// again from the cursor the quit left behind — was then a "duplicate" of
+    /// itself. That turn stayed partial for good (rule 7).
     ///
     /// `force` bypasses the throttle — used on shutdown, where the next write
     /// opportunity may be a long time away.
@@ -422,17 +440,85 @@ public final class SamplePersister {
         if !force, let last = lastIndexWriteAt,
            Date().timeIntervalSince(last) < Self.indexWriteInterval { return }
         do {
-            let keyed = FetchDescriptor<TokenSample>(
-                predicate: #Predicate<TokenSample> { $0.dedupKey != nil })
-            let index = DedupIndex(entries: bestOutputByKey,
-                                   rowCount: try context.fetchCount(keyed),
-                                   watermark: indexWatermark)
-            try index.write(to: indexURL)
-            indexNeedsWrite = false
-            lastIndexWriteAt = Date()
+            switch try committedIndex() {
+            case .tooManyToLookUp(let count):
+                Log.write("SamplePersister", "dedup index not written: \(count) unsaved row(s) to look up, "
+                          + "over \(Self.committedLookupLimit) — the next launch rebuilds it")
+            case .ready(let index, let leftOutUnsaved):
+                try index.write(to: indexURL)
+                // What it left out is written once it is saved.
+                indexNeedsWrite = leftOutUnsaved
+                lastIndexWriteAt = Date()
+            }
         } catch {
             Log.write("SamplePersister", "dedup index write failed (harmless): \(error)")
         }
+    }
+
+    /// Most stored rows `committedIndex` looks up one at a time. Live cycles
+    /// leave a handful unsaved; a quit in the middle of a full re-read can
+    /// leave thousands, and then it writes nothing — the next launch rebuilds,
+    /// as it would have anyway.
+    static let committedLookupLimit = 2_000
+
+    /// `leftOutUnsaved`: it left something out, which is still owed a write
+    /// once saved.
+    enum CommittedIndex {
+        case ready(DedupIndex, leftOutUnsaved: Bool)
+        case tooManyToLookUp(Int)
+    }
+
+    /// The dedup map as the store has it committed: what a walk of the store
+    /// would build right now (#395).
+    ///
+    /// The map is ahead of the store by exactly what this persister has done
+    /// since the last save: turns inserted (in the context, unsaved), upgrades
+    /// applied (changed in the context) or decided (`pendingUpgrades`, not yet
+    /// in the context at all), and duplicates deleted. Inserted keys have no
+    /// stored row, so they are dropped. Every other key is read back from the
+    /// store through a fresh context, which sees only what is saved — the
+    /// last row under the key in row-id order, as a walk would leave it. The
+    /// count and the watermark come from the store too.
+    func committedIndex() throws -> CommittedIndex {
+        var inserted: Set<String> = []
+        var changed = Set(pendingUpgrades.keys)
+        for case let s as TokenSample in context.insertedModelsArray {
+            if let key = s.dedupKey { inserted.insert(key) }
+        }
+        for case let s as TokenSample in context.changedModelsArray {
+            if let key = s.dedupKey { changed.insert(key) }
+        }
+        for case let s as TokenSample in context.deletedModelsArray {
+            if let key = s.dedupKey { changed.insert(key) }
+        }
+        changed.subtract(inserted)
+
+        let store = ModelContext(context.container)
+        let keyed = FetchDescriptor<TokenSample>(
+            predicate: #Predicate<TokenSample> { $0.dedupKey != nil })
+        let rowCount = try store.fetchCount(keyed)
+        guard !inserted.isEmpty || !changed.isEmpty else {
+            return .ready(DedupIndex(entries: bestOutputByKey, rowCount: rowCount,
+                                     watermark: indexWatermark), leftOutUnsaved: false)
+        }
+        guard changed.count <= Self.committedLookupLimit else { return .tooManyToLookUp(changed.count) }
+
+        var entries = bestOutputByKey
+        for key in inserted { entries[DedupIndex.Key(key)] = nil }
+        for key in changed {
+            let k = key
+            var d = FetchDescriptor<TokenSample>(
+                predicate: #Predicate<TokenSample> { $0.dedupKey == k },
+                sortBy: [SortDescriptor(\.persistentModelID, order: .reverse)])
+            d.fetchLimit = 1
+            entries[DedupIndex.Key(key)] = try store.fetch(d).first?.outputTokens
+        }
+        var newest = FetchDescriptor<TokenSample>(
+            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
+        newest.fetchLimit = 1
+        let watermark = try store.fetch(newest).first?.sampledAt ?? Date(timeIntervalSince1970: 0)
+        return .ready(DedupIndex(entries: entries, rowCount: rowCount, watermark: watermark),
+                      leftOutUnsaved: true)
     }
 
     /// Set for a full re-read of history (a `currentScanVersion` bump): a
