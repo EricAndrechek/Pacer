@@ -283,6 +283,149 @@ struct PriceLedgerTests {
         let withUsed = PriceLedger.catalogTemplates(catalog, alsoInclude: [CanonicalModelID.parse("gpt-9")])
         #expect(withUsed.contains { $0.key.model == "gpt-9" })
     }
+
+    // MARK: First seen and catalog snapshots (#352)
+
+    static func rows(_ model: String, in context: ModelContext) throws -> [PriceRecord] {
+        try context.fetch(FetchDescriptor<PriceRecord>(
+            predicate: #Predicate { $0.model == model && !$0.curated },
+            sortBy: [SortDescriptor(\.effectiveFrom)]))
+    }
+
+    static func snapshots(in context: ModelContext) throws -> [PriceCatalogSnapshot] {
+        try context.fetch(FetchDescriptor<PriceCatalogSnapshot>(sortBy: [SortDescriptor(\.capturedAt)]))
+    }
+
+    @Test func aFirstSightingSetsFirstSeenEvenWhenTheWindowIsBackdated() throws {
+        let context = ModelContext(try Self.container())
+        let launch = Self.t0.addingTimeInterval(-40 * Self.day)
+        let curated = CuratedPriceHistory(asOf: Self.t0, records: [
+            Self.record("claude-x", Self.rates(2), from: launch, to: launch.addingTimeInterval(Self.day),
+                        source: .curated, reviewedAt: Self.t0),
+        ])
+        _ = try PriceLedgerStore.sync(context: context, catalog: Self.catalog(["claude-x": (2, 0.2)]),
+                                      curated: curated, now: Self.t0)
+        let row = try #require(try Self.rows("claude-x", in: context).first)
+        // In effect from launch, but Pacer first saw it now.
+        #expect(row.effectiveFrom == launch)
+        #expect(row.firstSeenAt == Self.t0)
+    }
+
+    @Test func aRefreshWithTheSamePriceDoesNotMoveFirstSeen() throws {
+        let context = ModelContext(try Self.container())
+        let catalog = Self.catalog(["claude-x": (2, 0.2)])
+        _ = try PriceLedgerStore.sync(context: context, catalog: catalog, curated: .empty, now: Self.t0)
+        for d in 1...3 {
+            _ = try PriceLedgerStore.sync(context: context, catalog: catalog, curated: .empty,
+                                          now: Self.t0.addingTimeInterval(Double(d) * Self.day))
+        }
+        let rows = try Self.rows("claude-x", in: context)
+        #expect(rows.count == 1)
+        #expect(rows.first?.firstSeenAt == Self.t0)
+    }
+
+    @Test func aChangedPriceGetsItsOwnFirstSeen() throws {
+        let context = ModelContext(try Self.container())
+        _ = try PriceLedgerStore.sync(context: context, catalog: Self.catalog(["claude-x": (2, 0.2)]),
+                                      curated: .empty, now: Self.t0)
+        let change = Self.t0.addingTimeInterval(3 * Self.day)
+        _ = try PriceLedgerStore.sync(context: context, catalog: Self.catalog(["claude-x": (2, 0.1)]),
+                                      curated: .empty, now: change)
+        let rows = try Self.rows("claude-x", in: context)
+        #expect(rows.count == 2)
+        #expect(rows[0].firstSeenAt == Self.t0)
+        #expect(rows[1].firstSeenAt == change)
+    }
+
+    @Test func aCuratedEditMovesFirstSeenOnlyWhenTheRatesChange() throws {
+        let context = ModelContext(try Self.container())
+        var record = Self.record("claude-x", Self.rates(2), from: Self.t0, source: .curated, reviewedAt: Self.t0)
+        _ = try PriceLedgerStore.sync(context: context, catalog: [:],
+                                      curated: CuratedPriceHistory(asOf: Self.t0, records: [record]),
+                                      now: Self.t0)
+        func curatedRow() throws -> PriceRecord {
+            try #require(try context.fetch(FetchDescriptor<PriceRecord>(predicate: #Predicate { $0.curated })).first)
+        }
+        #expect(try curatedRow().firstSeenAt == Self.t0)
+
+        // Same id, same rates, a new note: not a new price.
+        record.note = "reviewed again"
+        let noteEdit = Self.t0.addingTimeInterval(Self.day)
+        _ = try PriceLedgerStore.sync(context: context, catalog: [:],
+                                      curated: CuratedPriceHistory(asOf: noteEdit, records: [record]),
+                                      now: noteEdit)
+        #expect(try curatedRow().note == "reviewed again")
+        #expect(try curatedRow().firstSeenAt == Self.t0)
+
+        // Same id, corrected cache-read rate: a price first seen now.
+        record.rates = Self.rates(2, read: 0.05)
+        let rateEdit = Self.t0.addingTimeInterval(2 * Self.day)
+        _ = try PriceLedgerStore.sync(context: context, catalog: [:],
+                                      curated: CuratedPriceHistory(asOf: rateEdit, records: [record]),
+                                      now: rateEdit)
+        #expect(try curatedRow().firstSeenAt == rateEdit)
+    }
+
+    @Test func aSnapshotIsKeptOnlyWhenTheCatalogChanges() throws {
+        let context = ModelContext(try Self.container())
+        let a = Self.catalog(["claude-x": (2, 0.2)])
+        let b = Self.catalog(["claude-x": (2, 0.1)])
+        let first = try PriceLedgerStore.sync(context: context, catalog: a, curated: .empty, now: Self.t0)
+        #expect(first.snapshotTaken)
+        let same = try PriceLedgerStore.sync(context: context, catalog: a, curated: .empty,
+                                             now: Self.t0.addingTimeInterval(Self.day))
+        #expect(!same.snapshotTaken)
+        #expect(try Self.snapshots(in: context).count == 1)
+
+        // A change, then back again: two more, because each is a change.
+        let toB = Self.t0.addingTimeInterval(2 * Self.day)
+        #expect(try PriceLedgerStore.sync(context: context, catalog: b, curated: .empty, now: toB).snapshotTaken)
+        let backToA = Self.t0.addingTimeInterval(3 * Self.day)
+        #expect(try PriceLedgerStore.sync(context: context, catalog: a, curated: .empty, now: backToA).snapshotTaken)
+
+        let kept = try Self.snapshots(in: context)
+        #expect(kept.map(\.capturedAt) == [Self.t0, toB, backToA])
+        #expect(kept[0].fingerprint == kept[2].fingerprint)
+        #expect(kept[0].fingerprint != kept[1].fingerprint)
+    }
+
+    @Test func aSnapshotHoldsWhatTheSyncWasGiven() throws {
+        let context = ModelContext(try Self.container())
+        let catalog = Self.catalog(["claude-x": (2, 0.2)])
+        let curated = CuratedPriceHistory(asOf: Self.t0, records: [
+            Self.record("claude-x", Self.rates(2, read: 0.1), from: Self.t0, source: .curated,
+                        reviewedAt: Self.t0),
+        ])
+        _ = try PriceLedgerStore.sync(context: context, catalog: catalog, curated: curated, now: Self.t0)
+        let snapshot = try #require(try Self.snapshots(in: context).first)
+        let contents = try snapshot.contents()
+        #expect(contents.catalog == PriceLedger.catalogTemplates(catalog))
+        #expect(contents.curated == curated.records)
+        #expect(contents.curatedAsOf == curated.asOf)
+        #expect(snapshot.catalogPriceCount == contents.catalog.count)
+        #expect(snapshot.curatedPriceCount == 1)
+        #expect(snapshot.format == PriceCatalogSnapshot.currentFormat)
+
+        // A curated-only change is a change too.
+        let edited = CuratedPriceHistory(asOf: Self.t0 + Self.day, records: [
+            Self.record("claude-x", Self.rates(2, read: 0.05), from: Self.t0, source: .curated,
+                        reviewedAt: Self.t0 + Self.day),
+        ])
+        #expect(try PriceLedgerStore.sync(context: context, catalog: catalog, curated: edited,
+                                          now: Self.t0 + Self.day).snapshotTaken)
+    }
+
+    /// The real catalog Pacer ships, to keep "a few KB per change" honest.
+    @Test func aSnapshotOfTheBundledCatalogIsSmall() throws {
+        let url = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .appendingPathComponent("../../Sources/PacerCore/Resources/litellm-pricing.json")
+        let json = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        let templates = PriceLedger.catalogTemplates(PricingTable.decode(json: json))
+        let snapshot = try PriceCatalogSnapshot(
+            capturedAt: Self.t0, contents: .init(catalog: templates, curated: .empty))
+        #expect(snapshot.catalogPriceCount > 50)
+        #expect(snapshot.payload.count < 64 * 1024, "\(snapshot.payload.count) bytes")
+    }
 }
 
 /// The invariant the component columns exist for, on every rollup a real

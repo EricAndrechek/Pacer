@@ -14,6 +14,10 @@ import SwiftData
 ///
 /// A catalog that stops listing a model writes nothing either: dropping an
 /// entry is not a price change, and the last known price stays in effect.
+///
+/// Every sync also keeps a dated `PriceCatalogSnapshot` of its inputs when
+/// they differ from the newest one (#352), so what Pacer knew at any moment
+/// survives curated rewrites and dropped catalog entries.
 public enum PriceLedgerStore {
 
     public struct SyncResult: Sendable {
@@ -23,6 +27,9 @@ public enum PriceLedgerStore {
         public let opened: [PriceRecordValue]
         public let closed: [PriceRecordValue]
         public let curatedChanged: Int
+        /// A new `PriceCatalogSnapshot` was written. Not part of `changed`,
+        /// which is about prices: a snapshot reprices nothing.
+        public let snapshotTaken: Bool
         public var changed: Bool { !opened.isEmpty || !closed.isEmpty || curatedChanged > 0 }
     }
 
@@ -64,7 +71,7 @@ public enum PriceLedgerStore {
         let wanted = Dictionary(uniqueKeysWithValues: curated.records.map { ($0.id, $0) })
         for (id, value) in wanted {
             if let row = byId[id] {
-                if row.value != value { row.update(from: value); curatedChanged += 1 }
+                if row.value != value { row.update(from: value, seenAt: now); curatedChanged += 1 }
             } else {
                 let row = PriceRecord(value, recordedAt: now)
                 context.insert(row)
@@ -89,9 +96,10 @@ public enum PriceLedgerStore {
             catalogBySlot[Slot(row.value), default: []].append(row)
         }
         let used = Set(usedModels.map(CanonicalModelID.parse))
+        let templates = PriceLedger.catalogTemplates(catalog, alsoInclude: used)
         var opened: [PriceRecordValue] = []
         var closed: [PriceRecordValue] = []
-        for template in PriceLedger.catalogTemplates(catalog, alsoInclude: used) {
+        for template in templates {
             let slot = Slot(template)
             let history = catalogBySlot[slot] ?? []
             let open = history.filter { $0.effectiveTo == nil }
@@ -104,7 +112,7 @@ public enum PriceLedgerStore {
                     var v = template
                     v.id = open.recordId
                     v.effectiveFrom = open.effectiveFrom
-                    open.update(from: v)
+                    open.update(from: v, seenAt: now)
                     opened.append(v)
                     continue
                 }
@@ -122,7 +130,7 @@ public enum PriceLedgerStore {
                 curated: false, key: value.key, speed: value.speed,
                 tier: value.tierAbovePromptTokens, from: start)
             if let clash = byId[value.id] {
-                clash.update(from: value)
+                clash.update(from: value, seenAt: now)
             } else {
                 let row = PriceRecord(value, recordedAt: now)
                 context.insert(row)
@@ -131,12 +139,40 @@ public enum PriceLedgerStore {
             opened.append(value)
         }
 
+        let snapshotTaken = snapshotIfChanged(
+            context: context,
+            contents: PriceCatalogSnapshot.Contents(catalog: templates, curated: curated), now: now)
         let result = SyncResult(
             previous: previous,
             ledger: PriceLedger(records: byId.values.map(\.value)),
-            opened: opened, closed: closed, curatedChanged: curatedChanged)
-        if result.changed { try context.save() }
+            opened: opened, closed: closed, curatedChanged: curatedChanged,
+            snapshotTaken: snapshotTaken)
+        if result.changed || snapshotTaken { try context.save() }
         return result
+    }
+
+    /// Insert a `PriceCatalogSnapshot` when `contents` differs from the
+    /// newest one. One indexed single-row fetch, and the sync it runs in
+    /// happens only after a catalog or curated refresh.
+    ///
+    /// Never throws: the snapshot is a record for later study, and failing to
+    /// write one must not stop prices from being installed. The next sync
+    /// with the same content retries, because nothing newer matches it.
+    private static func snapshotIfChanged(
+        context: ModelContext, contents: PriceCatalogSnapshot.Contents, now: Date
+    ) -> Bool {
+        do {
+            let fingerprint = try PriceCatalogSnapshot.fingerprint(of: contents)
+            if try PriceCatalogSnapshot.latest(in: context)?.fingerprint == fingerprint { return false }
+            let snapshot = try PriceCatalogSnapshot(capturedAt: now, contents: contents)
+            context.insert(snapshot)
+            Log.write("Pricing", "catalog snapshot \(fingerprint): \(snapshot.catalogPriceCount) catalog + "
+                      + "\(snapshot.curatedPriceCount) curated price(s), \(snapshot.payload.count) bytes")
+            return true
+        } catch {
+            Log.write("Pricing", "catalog snapshot skipped (\(error))")
+            return false
+        }
     }
 }
 
