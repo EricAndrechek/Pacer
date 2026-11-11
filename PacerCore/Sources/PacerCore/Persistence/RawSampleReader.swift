@@ -129,10 +129,12 @@ enum RawSampleReader {
     /// false if the read stopped early: `body` has then seen some of the rows,
     /// never a wrong one.
     ///
-    /// One pass over the table. `ModelWalk` pages with `fetchOffset`, so SQLite
-    /// steps over every earlier row again for each page: on a Mac whose file
-    /// cache is gone (swap full, load 100+), a 1.4 GB store read 11 GB in 44
-    /// minutes of a dedup rebuild, with transcript ingestion waiting behind it.
+    /// One pass over the table. `ModelWalk` used to page with `fetchOffset`,
+    /// stepping over every earlier row again for each page: on a Mac whose
+    /// file cache was gone (swap full, load 100+), a 1.4 GB store read 11 GB in
+    /// 44 minutes of a dedup rebuild, with transcript ingestion waiting behind
+    /// it. It pages by row id now (#394), but each page is still a SwiftData
+    /// fetch materialising model objects, which this skips.
     @discardableResult
     static func forEachDedupRow(storeURL: URL, _ body: (DedupRow) -> Void) -> Bool {
         var db: OpaquePointer?

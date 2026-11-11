@@ -106,8 +106,8 @@ struct LiveMeterProbe {
         var priced: [CostMode: [String: Double]] = [:]
         var turns = 0
         try ModelWalk.forEach(FetchDescriptor<TokenSample>(
-            predicate: #Predicate { $0.accountId == account && $0.sampledAt >= from && $0.sampledAt < until },
-            sortBy: [SortDescriptor(\.sampledAt)]), in: container) { s in
+            predicate: #Predicate { $0.accountId == account && $0.sampledAt >= from && $0.sampledAt < until }),
+            orderedBy: \.sampledAt, in: container) { s in
             turns += 1
             let key = "\(s.date)|\(calendar.component(.hour, from: s.sampledAt))|\(s.model)"
             for mode in [CostMode.auto, .calculate] {
@@ -222,8 +222,8 @@ struct LiveMeterProbe {
         var spend: [LiveSpend] = []
         let spendFrom = since.addingTimeInterval(-86_400)
         try ModelWalk.forEach(FetchDescriptor<TokenSample>(
-            predicate: #Predicate { $0.accountId == account && $0.sampledAt >= spendFrom },
-            sortBy: [SortDescriptor(\.sampledAt)]), in: container) { s in
+            predicate: #Predicate { $0.accountId == account && $0.sampledAt >= spendFrom }),
+            orderedBy: \.sampledAt, in: container) { s in
             spend.append(LiveSpend(at: s.sampledAt, model: s.model,
                                    costUSD: CostCalculator.cost(s, mode: mode, snapshot: pricing)))
         }

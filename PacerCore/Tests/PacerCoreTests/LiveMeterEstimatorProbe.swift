@@ -146,8 +146,8 @@ struct LiveMeterEstimatorProbe {
         var spend: [LiveSpend] = []
         let spendFrom = since.addingTimeInterval(-86_400)
         try ModelWalk.forEach(FetchDescriptor<TokenSample>(
-            predicate: #Predicate { $0.accountId == account && $0.sampledAt >= spendFrom },
-            sortBy: [SortDescriptor(\.sampledAt)]), in: container) { s in
+            predicate: #Predicate { $0.accountId == account && $0.sampledAt >= spendFrom }),
+            orderedBy: \.sampledAt, in: container) { s in
             spend.append(LiveSpend(at: s.sampledAt, model: s.model,
                                    costUSD: CostCalculator.cost(s, mode: .auto, snapshot: pricing)))
         }
@@ -434,8 +434,8 @@ struct LiveMeterWeakFitProbe {
         var spend: [LiveSpend] = []
         let spendFrom = since.addingTimeInterval(-86_400)
         try ModelWalk.forEach(FetchDescriptor<TokenSample>(
-            predicate: #Predicate { $0.accountId == account && $0.sampledAt >= spendFrom },
-            sortBy: [SortDescriptor(\.sampledAt)]), in: container) { s in
+            predicate: #Predicate { $0.accountId == account && $0.sampledAt >= spendFrom }),
+            orderedBy: \.sampledAt, in: container) { s in
             spend.append(LiveSpend(at: s.sampledAt, model: s.model,
                                    costUSD: CostCalculator.cost(s, mode: .auto, snapshot: pricing)))
         }

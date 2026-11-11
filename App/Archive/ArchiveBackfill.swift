@@ -82,16 +82,16 @@ enum ArchiveBackfill {
         container: ModelContainer, archive: RawArchive, after watermark: Date?,
         summing store: inout RawArchive.Totals
     ) throws -> Int {
-        var descriptor = FetchDescriptor<TokenSample>(
-            sortBy: [SortDescriptor(\.sampledAt, order: .forward)])
+        var descriptor = FetchDescriptor<TokenSample>()
         if let watermark {
             descriptor.predicate = #Predicate<TokenSample> { $0.sampledAt > watermark }
         }
         var batch: [ArchiveRow] = []
         var total = 0
         // Paged, not `enumerate`d (#337): on a first backfill this is the
-        // whole table, which `enumerate` held all of.
-        try ModelWalk.forEach(descriptor, in: container) { sample in
+        // whole table, which `enumerate` held all of. In `sampledAt` order,
+        // each page seeking the index to where the last one ended (#394).
+        try ModelWalk.forEach(descriptor, orderedBy: \.sampledAt, in: container) { sample in
             store.rows += 1
             store.input += sample.inputTokens
             store.output += sample.outputTokens

@@ -1146,12 +1146,13 @@ public final class SamplePersister {
         // Paged and saved a page at a time (#338): on a store older than the
         // field that is every row, and `enumerate` here kept every one of
         // them pending in this context until the cycle's save (7.3 GB on a
-        // 757,909-row copy; 239 MB paged). Draining, because stamping takes a
-        // row out of the predicate. Saved first, as `update` requires. The
-        // stamp is the value `localHour(of:)` already derives for a -1 row,
-        // so committing it ahead of the rebuild changes no bucket.
+        // 757,909-row copy; 239 MB paged). Stamping takes a row out of the
+        // predicate, which the walk's row-id paging doesn't mind (#394).
+        // Saved first, as `update` requires. The stamp is the value
+        // `localHour(of:)` already derives for a -1 row, so committing it
+        // ahead of the rebuild changes no bucket.
         if context.hasChanges { try context.save() }
-        try ModelWalk.update(unstamped, in: context.container, owner: context, paging: .drain,
+        try ModelWalk.update(unstamped, in: context.container, owner: context,
                              pageSize: walkPageSize) { sample in
             sample.localHour = Self.localHour(of: sample.sampledAt)
         }
@@ -1209,8 +1210,7 @@ public final class SamplePersister {
         // Paged and saved a page at a time (#338): the first run backfills
         // `originalProjectPath` on every row, and `enumerate` here kept every
         // changed row pending in this context until the cycle's save — the
-        // whole table, 7.6 GB on a 757,909-row copy. Offset paging is safe: no
-        // predicate, no sort, and an update doesn't move a row in row-id order.
+        // whole table, 7.6 GB on a 757,909-row copy.
         //
         // Saved first, as `update` requires: a page sees only saved rows, and
         // a row this context held pending would be written under it. The
@@ -1220,7 +1220,7 @@ public final class SamplePersister {
         var changedCount = 0
         // `continue` becomes `return` — the body is a per-row closure now.
         try ModelWalk.update(FetchDescriptor<TokenSample>(), in: context.container,
-                             owner: context, paging: .offset, pageSize: walkPageSize) { sample in
+                             owner: context, pageSize: walkPageSize) { sample in
             guard let pre = sample.projectPath else { return }
             // Backfill `originalProjectPath` whenever it's nil. The
             // pre-migration `projectPath` is the best historical
@@ -1415,9 +1415,10 @@ public final class SamplePersister {
             if let sessionId, !sessionId.isEmpty { sampleSessionIds.insert(sessionId) }
         }
         // Straight from SQLite when the store is a file: one pass over the
-        // table, against the paged walk's offset scans. Any surprise in the
-        // file and it walks instead; what a read that stopped early noted is
-        // real, and the walk notes it again to the same values.
+        // table on a connection of its own, with no model object per row and
+        // no fetch on the coordinator the main thread's reads share. Any
+        // surprise in the file and it walks instead; what a read that stopped
+        // early noted is real, and the walk notes it again to the same values.
         let readRaw = RawSampleReader.storeURL(of: context.container).map { url in
             RawSampleReader.forEachDedupRow(storeURL: url) { row in
                 note(dedupKey: row.dedupKey, date: row.date, model: row.model, projectPath: row.projectPath,

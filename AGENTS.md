@@ -1091,6 +1091,16 @@ A new large transient allocation also needs a `MemoryHygiene.relieve` afterwards
 The hourly `[Memory]` log line is how a regression shows up.
 A rebuild reads `TokenSample` through `RawSampleReader` (its own read-only SQLite connection, `Z_PK` order); the SwiftData walk is the fallback (#335).
 
+**Never page with `fetchOffset`.** SQLite steps over every earlier row again for
+each page: walking a 1,022,036-row copy in 41 offset pages read its 369 MB table
+22 times over (8.6 GB, 505 s on a loaded Mac), against once (0.39 GB, 55 s)
+paged by key (#394). `ModelWalk` pages by key: each page asks for the rows after
+the last one it handed out (`persistentModelID > last`, which is `Z_PK > ?`).
+Give it a descriptor with no `sortBy` for row-id order — what an unsorted fetch
+returns — or use `forEach(_:orderedBy:)` for an indexed column's order (ties by
+row id); a descriptor that brings its own sort is refused. Write any paged fetch
+of your own the same way.
+
 ### Default to scoped fetches; nothing should fetch then filter
 
 - **Always predicate-scope `@Query` and `FetchDescriptor`** to the rows
