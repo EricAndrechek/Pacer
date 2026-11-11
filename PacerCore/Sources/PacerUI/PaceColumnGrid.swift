@@ -27,16 +27,46 @@ public struct PaceColumnGrid: Layout {
         self.minItemWidth = minItemWidth
     }
 
+    /// Measured heights, by subview index, at the one item width they were
+    /// measured for. Each subview is a deep tree (AnyLayout, a ScrollView,
+    /// nested stacks) and measuring one compounds through every nested layout,
+    /// so `sizeThatFits` and `placeSubviews` measuring all of them again each
+    /// was a production 2 s+ hang (Sentry PACER-10). A pass measures each
+    /// subview at most once per width; `updateCache` clears it whenever
+    /// SwiftUI says the subviews changed.
+    public struct Cache {
+        var heights: [Double: [Int: Double]] = [:]
+        private(set) var measurements = 0
+
+        mutating func height(at index: Int, itemWidth width: Double,
+                             measure: () -> Double) -> Double {
+            if let known = heights[width]?[index] { return known }
+            // The parent probes a handful of proposals per pass; a runaway
+            // sequence of widths (a live resize) must not grow this forever.
+            if heights[width] == nil, heights.count >= 8 { heights = [:] }
+            let measured = measure()
+            measurements += 1
+            heights[width, default: [:]][index] = measured
+            return measured
+        }
+    }
+
+    public func makeCache(subviews: Subviews) -> Cache { Cache() }
+
+    public func updateCache(_ cache: inout Cache, subviews: Subviews) { cache = Cache() }
+
     public func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews,
-                             cache: inout ()) -> CGSize {
+                             cache: inout Cache) -> CGSize {
         guard !subviews.isEmpty else { return .zero }
         let width = Double(proposal.width ?? CGFloat(minItemWidth))
         let plan = plan(width: width, count: subviews.count)
         var height: Double = 0
         for row in plan.rows {
             let tallest = row.reduce(0.0) { best, index in
-                max(best, Double(subviews[index].sizeThatFits(
-                    .init(width: CGFloat(plan.itemWidth), height: nil)).height))
+                max(best, cache.height(at: index, itemWidth: plan.itemWidth) {
+                    Double(subviews[index].sizeThatFits(
+                        .init(width: CGFloat(plan.itemWidth), height: nil)).height)
+                })
             }
             height += tallest + rowSpacing
         }
@@ -44,7 +74,7 @@ public struct PaceColumnGrid: Layout {
     }
 
     public func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize,
-                              subviews: Subviews, cache: inout ()) {
+                              subviews: Subviews, cache: inout Cache) {
         guard !subviews.isEmpty else { return }
         let plan = plan(width: Double(bounds.width), count: subviews.count)
         var y = Double(bounds.minY)
@@ -52,12 +82,14 @@ public struct PaceColumnGrid: Layout {
             var x = Double(bounds.minX)
             var tallest: Double = 0
             for index in row {
-                let size = subviews[index].sizeThatFits(
-                    .init(width: CGFloat(plan.itemWidth), height: nil))
+                let height = cache.height(at: index, itemWidth: plan.itemWidth) {
+                    Double(subviews[index].sizeThatFits(
+                        .init(width: CGFloat(plan.itemWidth), height: nil)).height)
+                }
                 subviews[index].place(
                     at: CGPoint(x: x, y: y), anchor: .topLeading,
                     proposal: .init(width: CGFloat(plan.itemWidth), height: nil))
-                tallest = max(tallest, Double(size.height))
+                tallest = max(tallest, height)
                 x += plan.itemWidth + itemSpacing
             }
             y += tallest + rowSpacing
