@@ -524,25 +524,46 @@ struct RuntimeMemoryHoldTests {
         #expect(again.workers(now: 50 + Self.calm + 3 * Self.step, maxWorkers: 9) == 1)
     }
 
-    /// Memory before everything: a speed-up does not override it, nor does an
-    /// idle Mac. Warning: one worker, the share, each window's pick. Critical:
-    /// no worker, no live lane.
-    @Test func aSpeedUpNeverOverridesTheHold() {
+    /// A sped-up crew starts from the half it was allowed at warning, and the
+    /// ramp goes on from there to the full count.
+    @Test func theRampStartsFromTheFloorAfterAWarning() {
+        let warned = Self.hold([(.warning, 0)])
+        #expect(warned.workers(now: 10_000, maxWorkers: 8, floor: 4) == 4)
+        let eased = Self.hold([(.warning, 0), (.normal, 50)])
+        #expect(eased.workers(now: 50, maxWorkers: 8, floor: 4) == 4)
+        #expect(eased.workers(now: 50 + Self.calm + Self.step - 1, maxWorkers: 8, floor: 4) == 4)
+        #expect(eased.workers(now: 50 + Self.calm + Self.step, maxWorkers: 8, floor: 4) == 5)
+        #expect(eased.workers(now: 50 + Self.calm + 100 * Self.step, maxWorkers: 8, floor: 4) == 8)
+        // Never above the Mac's count, never below one.
+        #expect(warned.workers(now: 1, maxWorkers: 2, floor: 9) == 2)
+        #expect(warned.workers(now: 1, maxWorkers: 2, floor: 0) == 1)
+        #expect(Self.hold([]).workers(now: 0, maxWorkers: 8, floor: 4) == 8)
+    }
+
+    /// `.critical` pauses, sped up or not, idle or not. `.warning` holds an
+    /// unrequested rate to one worker at the share, each window's pick for the
+    /// live lane; a speed-up goes through it at half its workers.
+    @Test func criticalAlwaysPausesAndWarningOnlyHoldsTheEverydayRate() {
         let warned = Self.hold([(.warning, 0)])
         let critical = Self.hold([(.critical, 0)])
         for spedUp in [true, false] {
             for s in [Self.idle, Self.inUse] {
-                let w = Policy.decide(s, spedUp: spedUp, hold: warned, now: 1, maxWorkers: 9, shareRate: 0.2)
-                #expect(w.mode == .share(.lowMemory))
-                #expect(w.workers == 1)
-                #expect(w.rate == 0.2)
-                #expect(w.liveLane == .picksOnly)
                 let c = Policy.decide(s, spedUp: spedUp, hold: critical, now: 1, maxWorkers: 9, shareRate: 0.2)
                 #expect(c.mode == .paused)
                 #expect(c.workers == 0)
                 #expect(c.rate == 0.2)
                 #expect(c.liveLane == .none)
+                #expect(c.qos == QOS_CLASS_BACKGROUND)
             }
+        }
+        for s in [Self.idle, Self.inUse] {
+            let w = Policy.decide(s, hold: warned, now: 1, maxWorkers: 9, shareRate: 0.2)
+            #expect(w.mode == .share(.lowMemory))
+            #expect(w.workers == 1)
+            #expect(w.rate == 0.2)
+            #expect(w.liveLane == .picksOnly)
+            #expect(w.qos == QOS_CLASS_BACKGROUND)
+            #expect(!w.spedUp && !w.lowMemory)
         }
         // The calm after critical: still paused, and the live lane follows the
         // level as it is now.
@@ -553,6 +574,92 @@ struct RuntimeMemoryHoldTests {
         // Hotter or in Low Power Mode, the Mac's first reason is the one said.
         #expect(Policy.decide(RuntimeBudgetGovernorTests.signals(thermal: .serious), hold: warned, now: 1,
                               shareRate: 0.2).mode == .share(.thermal))
+    }
+
+    /// Sped up at `.warning`, plugged in: half the workers (rounded down, at
+    /// least one) at the full rate, user-initiated, the live lane on picks.
+    /// Battery: one core. Heat and Low Power Mode first.
+    @Test func aSpeedUpGoesOnAtHalfUnderAWarning() {
+        let sig = RuntimeBudgetGovernorTests.signals
+        let warned = Self.hold([(.warning, 0)])
+        func d(_ s: ArenaBudgetSignals, max: Int = 8) -> Policy.Decision {
+            Policy.decide(s, spedUp: true, hold: warned, now: 1, maxWorkers: max, shareRate: 0.2)
+        }
+        for inUseOrIdle in [0.0, 600] {
+            let w = d(sig(true, false, .nominal, inUseOrIdle))
+            #expect(w.mode == .cores(4))
+            #expect(w.workers == 4)
+            #expect(w.rate == 4)
+            #expect(w.liveLane == .picksOnly)
+            #expect(w.qos == QOS_CLASS_USER_INITIATED)
+            #expect(w.spedUp && w.lowMemory)
+        }
+        #expect(d(sig(true, false, .nominal, 0), max: 9).mode == .cores(4))
+        #expect(d(sig(true, false, .nominal, 0), max: 3).mode == .fullCore)
+        #expect(d(sig(true, false, .nominal, 0), max: 2).mode == .fullCore)
+        #expect(d(sig(true, false, .nominal, 0), max: 1).mode == .fullCore)
+        let battery = d(sig(false, false, .nominal, 0))
+        #expect(battery.mode == .fullCore)
+        #expect(battery.workers == 1)
+        #expect(battery.rate == 1)
+        #expect(battery.qos == QOS_CLASS_USER_INITIATED)
+        #expect(battery.lowMemory)
+        let hot = d(sig(true, false, .serious, 0))
+        #expect(hot.mode == .share(.thermal))
+        #expect(hot.workers == 1 && hot.rate == 0.2 && hot.qos == QOS_CLASS_BACKGROUND)
+        #expect(!hot.spedUp && !hot.lowMemory)
+        #expect(d(sig(true, true, .nominal, 0)).mode == .share(.lowPower))
+        // Eased: the half it had, then up a step at a time.
+        let eased = Self.hold([(.warning, 0), (.normal, 10)])
+        let after = { (t: Double) in
+            Policy.decide(sig(true, false, .nominal, 0), spedUp: true, hold: eased, now: t, maxWorkers: 8,
+                          shareRate: 0.2)
+        }
+        #expect(after(10).mode == .cores(4))
+        #expect(!after(10).lowMemory)
+        #expect(after(10 + Self.calm + Self.step).mode == .cores(5))
+        #expect(after(10 + Self.calm + 10 * Self.step).mode == .cores(8))
+        // Not sped up: the ramp from one, as before.
+        let plain = Policy.decide(Self.idle, hold: eased, now: 10 + Self.calm + Self.step, maxWorkers: 8,
+                                  shareRate: 0.2)
+        #expect(plain.mode == .fullCore)
+        #expect(plain.workers == 1)
+        #expect(plain.qos == QOS_CLASS_UTILITY)
+    }
+
+    /// Every combination of the inputs, checked against the rule written out.
+    @Test func theDecisionTable() {
+        for level in [MemoryPressure.Level.normal, .warning, .critical] {
+            for spedUp in [true, false] {
+                for ac in [true, false] {
+                    for idle in [0.0, 600] {
+                        for thermal in [ProcessInfo.ThermalState.nominal, .serious] {
+                            for low in [true, false] {
+                                let s = RuntimeBudgetGovernorTests.signals(ac: ac, lowPower: low, thermal: thermal,
+                                                                           idle: idle)
+                                let d = Policy.decide(s, spedUp: spedUp, hold: Self.hold([(level, 0)]), now: 1,
+                                                      maxWorkers: 8, shareRate: 0.2)
+                                let lane: Policy.LiveLane = level == .critical ? .none : level == .warning ? .picksOnly : .all
+                                #expect(d.liveLane == lane)
+                                if level == .critical { #expect(d.mode == .paused && d.workers == 0); continue }
+                                if thermal == .serious { #expect(d.mode == .share(.thermal)); continue }
+                                if low { #expect(d.mode == .share(.lowPower)); continue }
+                                if spedUp {
+                                    #expect(d.mode == (ac ? .cores(level == .warning ? 4 : 8) : .fullCore))
+                                    #expect(d.qos == QOS_CLASS_USER_INITIATED)
+                                    #expect(d.lowMemory == (level == .warning))
+                                } else if level == .warning {
+                                    #expect(d.mode == .share(.lowMemory))
+                                } else {
+                                    #expect(d.mode == (ac && idle >= 120 ? .fullCore : .share(ac ? .inUse : .battery)))
+                                    #expect(d.qos == (d.mode == .fullCore ? QOS_CLASS_UTILITY : QOS_CLASS_BACKGROUND))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// The default does not change when Speed up is not on, whatever the Mac.
@@ -589,13 +696,18 @@ struct RuntimeMemoryHoldTests {
         #expect(d(sig(true, false, .serious, 0)).mode == .share(.thermal))
         #expect(d(sig(true, false, .serious, 0)).workers == 1)
         #expect(d(sig(true, true, .nominal, 0)).mode == .share(.lowPower))
-        #expect(Policy.scorerQoS(.cores(9)) == QOS_CLASS_UTILITY)
-        #expect(Policy.scorerQoS(.paused) == QOS_CLASS_BACKGROUND)
-        #expect(Policy.scorerQoS(.share(.lowMemory)) == QOS_CLASS_BACKGROUND)
+        #expect(Policy.scorerQoS(.cores(9), spedUp: true) == QOS_CLASS_USER_INITIATED)
+        #expect(Policy.scorerQoS(.paused, spedUp: false) == QOS_CLASS_BACKGROUND)
+        #expect(Policy.scorerQoS(.share(.lowMemory), spedUp: false) == QOS_CLASS_BACKGROUND)
+        #expect(Policy.scorerQoS(.share(.thermal), spedUp: true) == QOS_CLASS_BACKGROUND)
         #expect(Policy.telemetryName(.cores(9)) == "multi")
         #expect(Policy.telemetryName(.paused) == "paused")
         #expect(Policy.telemetryName(.share(.lowMemory)) == "fifth")
         #expect(Policy.describe(.cores(9), shareRate: 0.2, spedUp: true) == "9 cores (sped up)")
+        #expect(Policy.describe(.cores(4), shareRate: 0.2, spedUp: true, lowMemory: true)
+                == "4 cores (sped up, low memory)")
+        #expect(Policy.describe(.fullCore, shareRate: 0.2, spedUp: true, lowMemory: true)
+                == "full core (sped up, low memory)")
         #expect(Policy.describe(.paused, shareRate: 0.2) == "paused (low memory)")
         #expect(Policy.describe(.share(.lowMemory), shareRate: 0.2) == "20% of a core (low memory)")
     }
@@ -624,17 +736,17 @@ struct RuntimeMemoryHoldTests {
         // The budget never grants more than the machine has (CI's runners have 3).
         #expect(budget.rate == min(4, Double(ProcessInfo.processInfo.activeProcessorCount)))
         #expect(budget.scorerWorkers == 4)
-        #expect(budget.scorerQoS == QOS_CLASS_UTILITY)
+        #expect(budget.scorerQoS == QOS_CLASS_USER_INITIATED)
 
-        // A warning: one worker at the share, whatever was asked.
+        // A warning: half the workers, still sped up and at the full rate.
         pressure.set(.warning)
-        #expect(g.evaluate() == .share(.lowMemory))
-        #expect(budget.scorerWorkers == 1)
-        #expect(budget.rate == 0.2)
-        #expect(budget.scorerQoS == QOS_CLASS_BACKGROUND)
+        #expect(g.evaluate() == .cores(2))
+        #expect(budget.scorerWorkers == 2)
+        #expect(budget.rate == min(2, Double(ProcessInfo.processInfo.activeProcessorCount)))
+        #expect(budget.scorerQoS == QOS_CLASS_USER_INITIATED)
         #expect(budget.liveLane == .picksOnly)
-        #expect(speedUp.currentPace?.mode == .share(.lowMemory))
-        #expect(speedUp.currentPace?.isSpedUp == true)
+        #expect(speedUp.currentPace == ArenaPace(mode: .cores(2), speedUpUntil: speedUp.until, lowMemory: true))
+        #expect(s.logged.last == "budget: 2 cores (sped up, low memory)")
 
         // Critical: nothing.
         pressure.set(.critical)
@@ -651,30 +763,27 @@ struct RuntimeMemoryHoldTests {
         clock.advance(ArenaMemoryHold.calmSeconds - 1)
         #expect(g.evaluate() == .paused)
         clock.advance(1)
-        // One worker first, a sped-up one, then a step at a time.
-        #expect(g.evaluate() == .fullCore)
-        #expect(budget.scorerWorkers == 1)
-        #expect(budget.rate == 1)
-        clock.advance(ArenaMemoryHold.rampStepSeconds)
+        // After a critical the crew starts from the half it had at a warning
+        // (the pause itself left the pressure history at critical), then a
+        // step at a time.
         #expect(g.evaluate() == .cores(2))
         #expect(budget.scorerWorkers == 2)
-        #expect(budget.rate == 2)
         clock.advance(ArenaMemoryHold.rampStepSeconds)
         #expect(g.evaluate() == .cores(3))
+        #expect(budget.scorerWorkers == 3)
         clock.advance(10 * ArenaMemoryHold.rampStepSeconds)
         #expect(g.evaluate() == .cores(4))
         #expect(s.logged.contains("budget: paused (low memory)"))
-        #expect(s.logged.contains("budget: 20% of a core (low memory)"))
         #expect(s.logged.contains("budget: 3 cores (sped up)"))
 
-        // A warning mid-speed-up and it eases: the calm again, at one worker.
+        // A warning mid-speed-up and it eases: it keeps its half, then ramps.
         pressure.set(.warning)
-        #expect(g.evaluate() == .share(.lowMemory))
-        pressure.set(.normal)
-        #expect(g.evaluate() == .fullCore)
-        #expect(budget.scorerWorkers == 1)
-        clock.advance(ArenaMemoryHold.calmSeconds + ArenaMemoryHold.rampStepSeconds)
         #expect(g.evaluate() == .cores(2))
+        pressure.set(.normal)
+        #expect(g.evaluate() == .cores(2))
+        #expect(speedUp.currentPace?.lowMemory == false)
+        clock.advance(ArenaMemoryHold.calmSeconds + ArenaMemoryHold.rampStepSeconds)
+        #expect(g.evaluate() == .cores(3))
 
         // Click to stop: back to the everyday rule, at one worker, at once.
         speedUp.stop(now: clock.now)
@@ -684,7 +793,8 @@ struct RuntimeMemoryHoldTests {
     }
 
     /// With no speed-up, a warning only lowers an idle Mac's full core to the
-    /// share, and the everyday rule comes straight back when it eases.
+    /// share (at background QoS), and the everyday rule comes straight back
+    /// when it eases.
     @Test func aWarningWithoutASpeedUpIsOnlyTheEverydayShare() {
         let script = RuntimeBudgetTests.Script()
         let budget = ArenaCPUBudget(rate: 0.2, burst: 0, clock: script.clock)
@@ -693,10 +803,12 @@ struct RuntimeMemoryHoldTests {
         let g = ArenaBudgetGovernor(budget: budget, shareRate: 0.2, fullRate: 1, maxWorkers: 4, pressure: pressure,
                                     now: { clock.now }, read: { Self.idle }, log: { _ in })
         #expect(g.evaluate() == .fullCore)
+        #expect(budget.scorerQoS == QOS_CLASS_UTILITY)
         pressure.set(.warning)
         #expect(g.evaluate() == .share(.lowMemory))
         #expect(budget.scorerWorkers == 1)
         #expect(budget.rate == 0.2)
+        #expect(budget.scorerQoS == QOS_CLASS_BACKGROUND)
         pressure.set(.normal)
         #expect(g.evaluate() == .fullCore)
         #expect(budget.scorerWorkers == 1)

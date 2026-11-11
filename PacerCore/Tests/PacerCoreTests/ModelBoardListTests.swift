@@ -284,6 +284,11 @@ struct ModelBoardListTests {
         // Several cores says so; a pause has no time left, nothing is moving.
         #expect(text(P(done: 40, total: 100, eta: 90, stage: .scoring), ArenaPace(mode: .cores(9), speedUpUntil: Date()))
                 == "Scoring your history: 40% · about 2 min left · sped up · 9 cores")
+        #expect(text(P(done: 40, total: 100, eta: 90, stage: .scoring),
+                     ArenaPace(mode: .cores(4), speedUpUntil: Date(), lowMemory: true))
+                == "Scoring your history: 40% · about 2 min left · sped up · 4 cores · low memory")
+        #expect(ModelBoardList.paceNote(ArenaPace(mode: .fullCore, speedUpUntil: Date(), lowMemory: true))
+                == "sped up · low memory")
         #expect(text(P(done: 40, total: 100, eta: 90, stage: .scoring), ArenaPace(mode: .paused))
                 == "Scoring your history: 40% · paused: low memory")
         #expect(text(P(done: 40, total: 100, eta: 90, stage: .slower), ArenaPace(mode: .paused, speedUpUntil: Date()))
@@ -316,6 +321,9 @@ struct ModelBoardListTests {
         #expect(control(scoring, ArenaPace(mode: .share(.lowMemory), speedUpUntil: Date())) == .on)
         #expect(control(scoring, ArenaPace(mode: .share(.thermal))) == nil)
         #expect(control(scoring, ArenaPace(mode: .share(.lowPower))) == nil)
+        // Hidden in Low Power Mode even with a speed-up on; its hour runs on.
+        #expect(control(scoring, ArenaPace(mode: .share(.lowPower), speedUpUntil: Date())) == nil)
+        #expect(control(scoring, ArenaPace(mode: .cores(4), speedUpUntil: Date(), lowMemory: true)) == .on)
         #expect(control(scoring, nil) == nil)
         #expect(control(nil, ArenaPace(mode: .share(.inUse))) == nil)
         #expect(control(P(done: 0, total: 0, eta: nil, stage: .waiting), ArenaPace(mode: .share(.inUse))) == nil)

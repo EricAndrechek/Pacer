@@ -167,7 +167,11 @@ final class ArenaScoringCrew: @unchecked Sendable {
         // 512 KB has been enough, and a thread's stack is only reserved until
         // it is used.
         thread.stackSize = 1 << 20
-        thread.qualityOfService = budget.scorerQoS == QOS_CLASS_UTILITY ? .utility : .background
+        switch budget.scorerQoS {
+        case QOS_CLASS_USER_INITIATED: thread.qualityOfService = .userInitiated
+        case QOS_CLASS_UTILITY: thread.qualityOfService = .utility
+        default: thread.qualityOfService = .background
+        }
         thread.start()
     }
 

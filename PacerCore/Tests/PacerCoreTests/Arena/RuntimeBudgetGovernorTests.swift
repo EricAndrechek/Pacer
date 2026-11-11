@@ -71,9 +71,10 @@ struct RuntimeBudgetGovernorTests {
     /// The scorer's QoS follows the mode: utility (performance cores) at the
     /// full core, background at the everyday share.
     @Test func theScorersQoSFollowsTheMode() {
-        #expect(ArenaBudgetPolicy.scorerQoS(.fullCore) == QOS_CLASS_UTILITY)
+        #expect(ArenaBudgetPolicy.scorerQoS(.fullCore, spedUp: false) == QOS_CLASS_UTILITY)
+        #expect(ArenaBudgetPolicy.scorerQoS(.fullCore, spedUp: true) == QOS_CLASS_USER_INITIATED)
         for r in [ArenaBudgetPolicy.Reason.inUse, .battery, .lowPower, .thermal] {
-            #expect(ArenaBudgetPolicy.scorerQoS(.share(r)) == QOS_CLASS_BACKGROUND)
+            #expect(ArenaBudgetPolicy.scorerQoS(.share(r), spedUp: false) == QOS_CLASS_BACKGROUND)
         }
         let script = RuntimeBudgetTests.Script()
         let budget = ArenaCPUBudget(rate: 0.2, burst: 0, clock: script.clock)

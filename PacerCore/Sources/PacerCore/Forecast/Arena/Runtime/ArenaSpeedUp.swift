@@ -8,9 +8,10 @@ import Observation
 // by definition, using the Mac, so it runs at a fifth of a core while they
 // look. They can ask for more now: the speed-up lifts the idle and battery
 // gates, and while the Mac is plugged in runs several workers at once
-// (`ArenaWorkerPolicy`), one core on battery. It never lifts the thermal, Low
-// Power Mode or memory gates (the Mac's own state, which a click on a forecast
-// sheet should not overrule; `ArenaMemoryHold`).
+// (`ArenaWorkerPolicy`), one core on battery, at user-initiated QoS. It never
+// lifts the thermal or Low Power Mode gates (the Mac's own state, which a
+// click on a forecast sheet should not overrule). At memory `.warning` it goes
+// on at half its workers; `.critical` pauses it (`ArenaMemoryHold`).
 // It holds until the catch-up is done or an hour has passed, whichever comes
 // first. Then the budget is back to its everyday rule. Nothing persists: a
 // relaunch starts at the default, so a speed-up can never outlive the work it
@@ -21,9 +22,11 @@ import Observation
 public struct ArenaPace: Sendable, Equatable {
     public var mode: ArenaBudgetPolicy.Mode
     public var speedUpUntil: Date?
+    /// Sped up, and held to fewer workers by memory at `.warning`.
+    public var lowMemory: Bool
 
-    public init(mode: ArenaBudgetPolicy.Mode, speedUpUntil: Date? = nil) {
-        self.mode = mode; self.speedUpUntil = speedUpUntil
+    public init(mode: ArenaBudgetPolicy.Mode, speedUpUntil: Date? = nil, lowMemory: Bool = false) {
+        self.mode = mode; self.speedUpUntil = speedUpUntil; self.lowMemory = lowMemory
     }
 
     public var isSpedUp: Bool { speedUpUntil != nil }
