@@ -1871,21 +1871,35 @@ public final class ScanCoordinator {
         } else if let reassignURL {
             finishReassignRequest(at: reassignURL, outcome: "applied: nothing matched")
         }
-        // Integrity recovery: on the first cycle of a persister's
-        // lifetime, fold any (date, model) pairs that have TokenSamples
-        // but no DailyAggregate into the dirty set. Without this the
-        // dedup-skip path during a re-scan would never mark these pairs
-        // dirty (every entry hits seenDedupKeys), so missing aggregates
-        // would stay missing forever. Subsequent cycles get an empty
-        // set back.
-        // The persister's store walk is lazy — a cycle that ingests nothing
-        // shouldn't pay 9-16 s for it. But the integrity checks below read
-        // what that walk produces and are NOT insert-driven: they look for
-        // pre-existing damage (missing aggregates, hourly rows whose samples
-        // moved). So force it on a schedule, which is the compromise between
-        // paying every launch and never checking at all.
-        if try integrityWalkIsDue() {
+        // Integrity recovery: fold any bucket whose rollup row is out of step
+        // with its samples into the dirty set — (date, model) pairs with
+        // samples and no DailyAggregate, and so on below. Insert-driven marks
+        // never find these: a re-scan hits dedup on every entry and marks
+        // nothing, so a missing aggregate would stay missing forever, and a
+        // bucket with no samples left is never marked at all. Real cases: a
+        // quit that caught a cycle part-way, its turns committed by a batch
+        // save and their rollups by nothing (4 hourly buckets on one real
+        // launch), and 34 hourly rows an hour shift stranded.
+        //
+        // Checked once a day (#388). A dedup map rebuilt from the store checks
+        // on the way, for free; one loaded from the index checks nothing,
+        // which is how, on a Mac that kept a good index, the daily check never
+        // ran at all. Then the samples are read in the background — one pass
+        // on a SQLite connection of its own, off this actor, so no cycle waits
+        // for it — and compared with the rollups at the top of a later cycle.
+        if let stored = integrityReadResult {
+            integrityReadResult = nil
+            try activePersister.checkIntegrity(against: stored)
+            log("integrity: checked \(stored.rows) sample(s) against the rollups")
+        } else if integrityRead == nil,
+                  integrityReadRetryAt.map({ Date() >= $0 }) ?? true,
+                  try integrityWalkIsDue() {
             try activePersister.ensurePreloaded()
+            if !activePersister.integrityCheckUnreported {
+                startIntegrityRead(pageSize: activePersister.walkPageSize)
+            }
+        }
+        if activePersister.consumeIntegrityCheck() {
             try writeMeta(ClaudeCodeMetaKey.lastIntegrityWalkAt,
                           value: String(Date().timeIntervalSince1970))
         }
@@ -1923,11 +1937,18 @@ public final class ScanCoordinator {
         // cleans those up, because the recomputer only deletes buckets that
         // are in its dirty set and an empty bucket is never dirtied by an
         // insert. Left alone they make every hourly total read high.
+        //
+        // Rebuilt from samples rather than deleted here: the recomputer
+        // deletes a bucket it finds empty, and its per-account rows with it,
+        // which a direct delete left behind; and a bucket that gained a sample
+        // after it was found — the samples are read in the background — is
+        // rebuilt instead of lost. The counter keeps its name; it counts the
+        // buckets sent to that rebuild.
         let stranded = activePersister.consumeStrandedHourBuckets()
         if !stranded.isEmpty {
-            let deleted = try activePersister.deleteHourAggregates(stranded)
-            TelemetryCounters.add("data.stranded_hourly_deleted", deleted)
-            log("integrity: deleted \(deleted) stranded hourly aggregate(s) with no samples")
+            activePersister.addDirtyHourBuckets(stranded)
+            TelemetryCounters.add("data.stranded_hourly_deleted", stranded.count)
+            log("integrity: \(stranded.count) hourly aggregate(s) with no samples - rebuilding")
         }
 
         // Same recovery path for SessionInfo. Bootstraps the rollup
@@ -2707,11 +2728,52 @@ public final class ScanCoordinator {
                                    indexURL: indexURL)
     }
 
-    /// How often the store walk is forced for integrity's sake. Daily: the
-    /// damage it looks for is rare (one real instance found in months — 34
-    /// stranded hourly rows) and never urgent, so a day's latency costs
-    /// nothing while a walk per launch costs 9-16 s every time.
+    /// How often the samples are read for the integrity check. Daily: the
+    /// damage it looks for is rare (34 stranded hourly rows once; 4 hourly
+    /// buckets missing their rows after a quit mid-cycle) and never urgent,
+    /// so a day's latency costs nothing, while the read is a pass over the
+    /// whole sample table.
     private static let integrityWalkInterval: TimeInterval = 24 * 60 * 60
+
+    /// The integrity check's read of the samples, while it runs off this
+    /// actor (#388).
+    private var integrityRead: Task<Void, Never>?
+    /// What it read, for the next cycle to compare with the rollups.
+    private var integrityReadResult: StoredBuckets?
+    /// After a read that failed, not before this: a store that can't be read
+    /// once a day is not one to read once a cycle.
+    private var integrityReadRetryAt: Date?
+
+    /// Read every sample's buckets in the background. A pass over the whole
+    /// table, so it runs detached, at utility priority, on its own SQLite
+    /// connection (SwiftData pages only if that fails), and hands back plain
+    /// values.
+    private func startIntegrityRead(pageSize: Int) {
+        let container = container
+        integrityRead = Task.detached(priority: .utility) { [weak self] in
+            let started = Date()
+            let stored = try? StoredBuckets.read(from: container, pageSize: pageSize)
+            // The pass allocates and frees a row at a time; hand the pages back.
+            MemoryHygiene.relieve()
+            await self?.integrityReadFinished(stored, ms: Date().timeIntervalSince(started) * 1000)
+        }
+    }
+
+    private func integrityReadFinished(_ stored: StoredBuckets?, ms: Double) {
+        integrityRead = nil
+        guard let stored else {
+            integrityReadRetryAt = Date().addingTimeInterval(60 * 60)
+            log(String(format: "integrity: reading the samples failed after %.0f ms — trying again in an hour", ms))
+            return
+        }
+        integrityReadResult = stored
+        log(String(format: "integrity: read %d sample(s) in %.0f ms, off the scan", stored.rows, ms))
+    }
+
+    /// Tests: wait for an integrity read in flight to hand its result over.
+    func awaitIntegrityRead() async {
+        await integrityRead?.value
+    }
 
     /// The `SampleCostCache.catalogGeneration` the ledger was last synced
     /// from, in this process. nil until the first sync, which therefore runs
