@@ -1458,5 +1458,49 @@ colour, which had quietly flattened every stacked view.</p>]]></description>
             type="application/octet-stream"
             sparkle:edSignature="LmHpeCVcwX1CAjt/UJr2arIPzxsIlCzN8sOPyMfuvZAfkdspDfWSZad7mFHhaCNC/fPeyN1WrcHJl8VxXzZlAA==" />
     </item>
+            <item>
+        <title>Version 0.8.3</title>
+        <description><![CDATA[<p>Fewer freezes, updates that install on their own, and a forecast view that shows its progress.</p>
+<p><strong>If Pacer only runs in your menu bar:</strong> quit it and reopen it once so this update installs. After that, updates install by themselves while you're not using Pacer.</p>
+<h2>Updates</h2>
+<ul>
+<li>A downloaded update now installs at a quiet moment instead of waiting for you to quit Pacer, which a menu-bar app never does. While one is waiting, Check for Updates reads "Relaunch to Update".</li>
+<li>Checking for updates offers the newest version, not an older one that was downloaded earlier.</li>
+</ul>
+<h2>Smoother</h2>
+<ul>
+<li>The first launch after an update no longer freezes while your data is upgraded. If the dashboard is open, it shows "Updating your data…" until it's ready.</li>
+<li>The dashboard's pace chart no longer stalls Pacer while it redraws.</li>
+<li>Tables on Models, History, Projects and the detail sheets no longer freeze while loading their saved columns.</li>
+<li>Pacer no longer freezes while its forecaster is busy, and backs off when your Mac is short of memory.</li>
+<li>The rebuild after an update is about five times faster.</li>
+</ul>
+<h2>Forecasts</h2>
+<ul>
+<li>The forecast models view says what it's doing (reading your history, scoring, about how long is left, and what's slowing it), with a <strong>Speed up</strong> button that uses more of your Mac's cores while it's plugged in, for up to an hour. Speed up is hidden in Low Power Mode.</li>
+<li>Scoring starts as soon as Pacer has finished starting up, rather than on a timer.</li>
+<li>On Ultra plans, which have no 5-hour window, Pacer no longer forecasts one.</li>
+<li>The weekly burn rate no longer reads 0 %/h between whole-percent readings, and never goes negative after a reset.</li>
+</ul>
+<h2>Multiple accounts and the <code class="notranslate">pacer</code> command</h2>
+<ul>
+<li><code class="notranslate">pacer report</code> says when your other logins have room left.</li>
+<li><code class="notranslate">pacer status</code> checks again after you switch logins, instead of reusing a verdict made for the old account.</li>
+<li>After a <code class="notranslate">/login</code> inside a session, sessions that started earlier are judged against every account they might still be billing.</li>
+<li>Accounts with several tokens get fresher readings: their polls are spread out instead of arriving together.</li>
+</ul>
+<h2>Privacy</h2>
+<p>Freezes are reported more reliably, and a check-in is sent when Pacer updates. No new kinds of data are sent. Pacer never sends prompts, projects, files, accounts or costs.</p>
+<p><strong>Your data is untouched.</strong></p>]]></description>
+        <pubDate>Wed, 11 Nov 2026 16:18:58 +0000</pubDate>
+        <sparkle:version>1794413280</sparkle:version>
+        <sparkle:shortVersionString>0.8.3</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.8.3/Pacer-0.8.3.dmg"
+            length="158198699"
+            type="application/octet-stream"
+            sparkle:edSignature="ooKFptSEiDz1EKo60yF62kUaCyumWLsKsbx9zIMCuCaZE1GpcZMSttEh8B9BkRjYLHVDSLVcuBKSYUYK66T2Dw==" />
+    </item>
         </channel>
 </rss>
