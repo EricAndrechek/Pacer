@@ -472,7 +472,11 @@ final class WriteMeter: @unchecked Sendable {
 
     /// Runs `work` as one named phase and appends its record. On the caller's
     /// actor, so the work runs exactly where it would without the meter.
-    func phase<T>(_ name: String, into records: inout [PhaseRecord],
+    /// `T: Sendable` because the Swift 6.0 compiler (Xcode 16, the macOS 15
+    /// CI job) treats `work` as nonisolated and refuses to send a
+    /// non-Sendable result back to the caller's actor; newer compilers accept
+    /// it, so only CI catches a regression here.
+    func phase<T: Sendable>(_ name: String, into records: inout [PhaseRecord],
                   isolation: isolated (any Actor)? = #isolation,
                   _ work: () async throws -> T) async rethrows -> T {
         let a = sample(); record(a)
