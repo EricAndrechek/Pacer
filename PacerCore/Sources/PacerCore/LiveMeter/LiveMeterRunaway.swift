@@ -22,8 +22,10 @@ import SwiftData
 /// answer yet, so it neither counts nor clears the count; past
 /// `LiveMeter.maxServerLag` it is believed and counts like any other.
 ///
-/// **Where it lives.** The count is in memory, judged once per reading by the
-/// drift log in the app (`LiveMeterDrift.log`). The suspension is one
+/// **Where it lives.** The count is in memory, judged once per reading in the
+/// app as the poll measures the live meter before saving the reading
+/// (`LiveMeterDrift.measure`); each verdict is kept on that reading's
+/// `LiveMeterOutcome`. The suspension is one
 /// `ClaudeCodeMeta` row per window, `liveMeter.suspended|<account>|<window>`
 /// holding the fit's day, so every process that builds a live value from the
 /// store (the app, the widgets, `pacer` reading Pacer's data directly) sees
@@ -51,6 +53,17 @@ public final class LiveMeterRunaway: @unchecked Sendable {
         case suspended
         /// A stale reading: not judged.
         case skipped
+
+        /// As `LiveMeterOutcome.runaway` stores it.
+        public var raw: String {
+            switch self {
+            case .fine: return "fine"
+            case .high(let n): return "high-\(n)"
+            case .suspendedNow: return "suspended-now"
+            case .suspended: return "suspended"
+            case .skipped: return "skipped"
+            }
+        }
     }
 
     private let lock = NSLock()

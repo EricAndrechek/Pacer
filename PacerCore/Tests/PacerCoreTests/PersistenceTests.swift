@@ -17,6 +17,7 @@ private func makeInMemoryContainer() throws -> ModelContainer {
         JSONLFileCursor.self,
         ProjectPathAlias.self,
         SpendMeterFit.self,
+        LiveMeterOutcome.self,
         configurations: config
     )
 }

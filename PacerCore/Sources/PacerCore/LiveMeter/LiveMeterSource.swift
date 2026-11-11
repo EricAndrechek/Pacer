@@ -60,7 +60,7 @@ public struct LiveMeterSource {
     /// under-read, so there is no value rather than a low one.
     public static let sampleFetchLimit = 20_000
 
-    private let context: ModelContext
+    let context: ModelContext
     private let mode: CostMode
     private let pricingOverride: PricingTable.Snapshot?
     /// Build a value even for a suspended window: the drift log, which keeps
@@ -158,8 +158,18 @@ public struct LiveMeterSource {
     /// one (`LiveMeter.heldTick`): the tick it held at and the points the
     /// spend since implied. Nil without a strong fit or when it is believed.
     public func held(account: String, window key: String, through: Date) -> (tick: MeterReading, implied: Double)? {
-        guard hasTables, let latest = latestReading(account: account, window: key, before: through.addingTimeInterval(0.001)),
-              let rates = latestRates(account: account, window: key), rates.isStrong else { return nil }
+        guard hasTables, let latest = latestReading(account: account, window: key, before: through.addingTimeInterval(0.001))
+        else { return nil }
+        return held(account: account, latest: latest)
+    }
+
+    /// The same for `latest`, which need not be in the store yet: a poll asks
+    /// about its new reading before the save that writes it
+    /// (`LiveMeterDrift.measure`). The history is read up to its instant and
+    /// ends with it either way.
+    func held(account: String, latest: Window) -> (tick: MeterReading, implied: Double)? {
+        let key = latest.key
+        guard hasTables, let rates = latestRates(account: account, window: key), rates.isStrong else { return nil }
         let history = Self.carryHistory(readings(account: account, window: key, through: latest.reading.at),
                                         ending: latest.reading)
         guard history.count >= 2, let first = history.first,
@@ -182,7 +192,7 @@ public struct LiveMeterSource {
     /// (a test's container of a few types) has no live value: fetching a type
     /// the schema lacks is not documented to throw rather than trap, so it is
     /// never asked.
-    private var hasTables: Bool {
+    var hasTables: Bool {
         let names = Set(context.container.schema.entities.map(\.name))
         return names.contains(Schema.entityName(for: SpendMeterFit.self))
             && names.contains(Schema.entityName(for: TokenSample.self))

@@ -1,60 +1,122 @@
 import Foundation
 import SwiftData
 
-/// One `[LiveMeter]` log line per window at each new reading: what the live
-/// meter showed the moment before the reading landed, against the reading
-/// (#318). So drift between the estimate and the server shows in
-/// `make logs` without anything stored: the live value is never a reading.
+/// The live meter at each new reading (#318): what it showed for each window
+/// the moment before the reading landed, against the reading. The poll
+/// measures it before its save (`measure`), keeps it beside the reading in
+/// that same save (`LiveMeterOutcome`, #352), and after the save writes a
+/// `[LiveMeter]` line per window with something to say (`log`), so drift
+/// between the estimate and the server shows in `make logs` too.
 ///
 /// Built from the previous reading and the turns between it and the new
 /// one, exactly as the snapshot built it then (`LiveMeterSource`). Windows
-/// with no fit say nothing, and neither does a window where the meter did
-/// not move and the live value agreed with it.
+/// with no fit keep nothing and say nothing; the log also skips a window
+/// where the meter did not move and the live value agreed with it.
 public enum LiveMeterDrift {
 
-    /// `readings` are the new poll's: window key and percent. Reads only, on
-    /// its own context, so call it off the main actor after the poll's save
-    /// (the runaway guard's suspension, rare, is its one write).
+    /// One window's live meter at the instant a new reading of it lands.
+    public struct Measurement: Sendable, Equatable {
+        public let window: String
+        /// The reading that is landing.
+        public let reading: MeterReading
+        /// The live value at `reading.at`, built on the reading before it:
+        /// what a surface showed the moment before. Nil when there was none
+        /// (no fit, a weak one, no reading before it within the hour).
+        public let value: LiveMeterValue?
+        /// Whether `reading` is in the cycle of the reading `value` was built
+        /// on (`LiveMeter.sameCycle`, never `resetsAt ==`); nil without a
+        /// value.
+        public let sameCycle: Bool?
+        /// The lag guard on `reading`: the points the spend implied while it
+        /// held still (`LiveMeter.heldTick`). Nil when it is believed.
+        public let readingHeldImplied: Double?
+        /// The runaway guard's verdict on `reading`; nil without a value.
+        public let runaway: LiveMeterRunaway.Verdict?
+    }
+
+    /// Measure a poll's new readings, all taken at `at`, before the save that
+    /// writes them. Reads only, on a context of its own, so call it off the
+    /// main actor; the runaway guard's suspension, rare, is its one write.
     ///
-    /// Per window it also says when the new reading is stale (the lag
-    /// guard, `LiveMeter.heldTick`), and judges the estimate against it for
-    /// the runaway guard (`LiveMeterRunaway`), which keeps judging a
-    /// suspended window so the drift lines go on saying how it would have
-    /// done.
-    public static func log(container: ModelContainer, account: String, at: Date,
-                           readings: [(key: String, percent: Double)],
-                           runaway: LiveMeterRunaway = .shared) {
-        let context = ModelContext(container)
-        var source = LiveMeterSource(context: context)
+    /// These are the reads the drift log used to make after the save, moved
+    /// in front of it so the record lands with the reading rather than in a
+    /// second save. Nothing here needs the new reading in the store: the
+    /// value is built on the reading before it, and the lag guard is handed
+    /// the new one (`LiveMeterSource.held(account:latest:)`).
+    ///
+    /// Per window it also judges the new reading stale or not (the lag guard)
+    /// and the estimate against it (the runaway guard, `LiveMeterRunaway`),
+    /// which keeps judging a suspended window so the record and the drift
+    /// lines go on saying how it would have done.
+    public static func measure(container: ModelContainer, account: String, at: Date,
+                               readings: [(key: String, reading: MeterReading)],
+                               runaway: LiveMeterRunaway = .shared) -> [Measurement] {
+        measure(source: LiveMeterSource(context: ModelContext(container)), account: account, at: at,
+                readings: readings, runaway: runaway)
+    }
+
+    /// `measure` on a given source: a test pins its cost mode and prices.
+    static func measure(source: LiveMeterSource, account: String, at: Date,
+                        readings: [(key: String, reading: MeterReading)],
+                        runaway: LiveMeterRunaway) -> [Measurement] {
+        var source = source
         source.ignoresRunaway = true
-        let windows = readings.compactMap { source.latestReading(account: account, window: $0.key, before: at) }
-        guard !windows.isEmpty else { return }
-        let values = source.values(account: account, windows: windows, now: at)
-        let acct = String(account.suffix(4))
-        for (key, percent) in readings {
-            let held = source.held(account: account, window: key, through: at)
-            if let held {
-                Log.write("LiveMeter", String(format: "%@ %@: reading held at %@%% while spend implied +%.1f",
-                                              acct, key, fmt(percent), held.implied))
+        guard source.hasTables, !readings.isEmpty else { return [] }
+        let previous = readings.compactMap { source.latestReading(account: account, window: $0.key, before: at) }
+        let values = previous.isEmpty ? [:] : source.values(account: account, windows: previous, now: at)
+        let byKey = Dictionary(previous.map { ($0.key, $0) }, uniquingKeysWith: { a, _ in a })
+        return readings.map { key, reading in
+            let prev = byKey[key]
+            // The new reading as the store is about to hold it. Its duration
+            // and the model a cap names are the previous reading's: the same
+            // window key is the same window.
+            let held = prev.flatMap {
+                source.held(account: account, latest: LiveMeterSource.Window(
+                    key: key, duration: $0.duration, reading: reading,
+                    capModelId: $0.capModelId, capModelName: $0.capModelName))
             }
-            guard let v = values[key] else { continue }
-            let fittedDay = source.latestRates(account: account, window: key)?.fittedDay ?? ""
-            let verdict = runaway.judge(context: context, account: account, window: key, fittedDay: fittedDay,
-                                        shown: v.percent, reading: percent, readingIsStale: held != nil)
+            guard let prev, let v = values[key] else {
+                return Measurement(window: key, reading: reading, value: nil, sameCycle: nil,
+                                   readingHeldImplied: held?.implied, runaway: nil)
+            }
+            let verdict = runaway.judge(context: source.context, account: account, window: key,
+                                        fittedDay: v.fittedDay, shown: v.percent, reading: reading.percent,
+                                        readingIsStale: held != nil)
             if verdict == .suspendedNow {
+                // The suspension is written before the poll's save, so the
+                // board's rebuild on that write already leaves this window
+                // out. This one covers a save that fails, which writes
+                // nothing to rebuild on.
+                Task { @MainActor in LiveMeterBoard.shared.refresh() }
+            }
+            return Measurement(window: key, reading: reading, value: v,
+                               sameCycle: LiveMeter.sameCycle(prev.reading, reading, duration: prev.duration),
+                               readingHeldImplied: held?.implied, runaway: verdict)
+        }
+    }
+
+    /// The `[LiveMeter]` lines for one poll's measurements, written after its
+    /// save. Reads nothing.
+    public static func log(account: String, measurements: [Measurement]) {
+        let acct = String(account.suffix(4))
+        for m in measurements {
+            let key = m.window, percent = m.reading.percent
+            if let implied = m.readingHeldImplied {
+                Log.write("LiveMeter", String(format: "%@ %@: reading held at %@%% while spend implied +%.1f",
+                                              acct, key, fmt(percent), implied))
+            }
+            guard let v = m.value else { continue }
+            if m.runaway == .suspendedNow {
                 Log.write("LiveMeter", "\(acct) \(key): live value \(Int(LiveMeterRunaway.highBy))+ points over "
                           + "\(LiveMeterRunaway.consecutive) readings in a row; showing readings until the next daily fit")
-                // The board rebuilt on this poll's write, before the
-                // suspension existed: drop the value now, not at the next
-                // scan cycle.
-                Task { @MainActor in LiveMeterBoard.shared.refresh() }
             }
             // Only when there is something to compare: the meter moved, or
             // the live value disagreed with it. A busy account is read every
             // ~30 s, and a line for every poll that merely saw some spend was
-            // hundreds an hour that each said "they agree".
+            // hundreds an hour that each said "they agree". The record keeps
+            // every one (`LiveMeterOutcome`).
             if !v.restarted, v.reading.percent == percent, v.percent == percent { continue }
-            let suspended = verdict == .suspended || verdict == .suspendedNow ? " · suspended" : ""
+            let suspended = m.runaway == .suspended || m.runaway == .suspendedNow ? " · suspended" : ""
             Log.write("LiveMeter", line(account: account, window: key, read: percent, live: v) + suspended)
         }
     }

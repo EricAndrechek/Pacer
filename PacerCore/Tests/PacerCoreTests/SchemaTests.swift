@@ -25,6 +25,7 @@ private func makeInMemoryContainer() throws -> ModelContainer {
         ProjectCollection.self,
         ProjectMeta.self,
         SpendMeterFit.self,
+        LiveMeterOutcome.self,
         configurations: config
     )
 }

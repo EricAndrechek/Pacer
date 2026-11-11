@@ -2040,6 +2040,21 @@ public actor OAuthPoller: TokenPoolTesting {
     ) async {
         let container = self.container
         let captured = snapshot
+        // What the live meter showed for each window just before these
+        // readings land (#318), measured before the save so its record
+        // (`LiveMeterOutcome`, #352) lands in the same save as the readings.
+        // Here on the poller, not the main actor: a few bounded reads of its
+        // own, the ones the drift log made after the save until now.
+        let meterReadings: [(key: String, reading: MeterReading)] =
+            [(RateLimitWindowName.fiveHour, captured.fiveHour), (RateLimitWindowName.sevenDay, captured.sevenDay)]
+            .compactMap { key, w in
+                w.map { (key, MeterReading(at: captured.sampledAt, percent: $0.usedPercentage, resetsAt: $0.resetsAt)) }
+            }
+            + captured.limits.map {
+                ($0.identity, MeterReading(at: captured.sampledAt, percent: $0.percent, resetsAt: $0.resetsAt))
+            }
+        let measured = LiveMeterDrift.measure(container: container, account: accountKey,
+                                              at: captured.sampledAt, readings: meterReadings)
         await MainActor.run {
             let context = ModelContext(container)
 
@@ -2167,6 +2182,12 @@ public actor OAuthPoller: TokenPoolTesting {
                 ))
                 wroteRows = true
             }
+            // One row per window the live meter had a value for, beside its
+            // reading. An insert each and nothing read: `measured` was built
+            // before this block.
+            if !measured.isEmpty, LiveMeterOutcome.isRegistered(in: context) {
+                for row in LiveMeterOutcome.rows(account: key, measurements: measured) { context.insert(row) }
+            }
             if Self.evictionIsDue(now: captured.sampledAt) {
                 let moved = Self.evictStaleLiveRows(context: context, accountId: key)
                 if moved > 0 {
@@ -2188,16 +2209,10 @@ public actor OAuthPoller: TokenPoolTesting {
                 if wroteRows {
                     postScanCycleSummary(ScanCycleSummary(
                         rateLimitsChanged: true, rateLimitAccountId: key))
-                    // What the live meter showed just before this reading,
-                    // beside it, so drift shows in the log (#318). Off the
-                    // main actor: a few bounded reads of its own.
-                    let readings: [(key: String, percent: Double)] =
-                        [(RateLimitWindowName.fiveHour, captured.fiveHour?.usedPercentage),
-                         (RateLimitWindowName.sevenDay, captured.sevenDay?.usedPercentage)]
-                        .compactMap { key, pct in pct.map { (key, $0) } }
-                        + captured.limits.map { ($0.identity, $0.percent) }
-                    Task.detached(priority: .utility) {
-                        LiveMeterDrift.log(container: container, account: key, at: written, readings: readings)
+                    // The drift lines for what was measured above (#318):
+                    // log writes only, off the main actor.
+                    if !measured.isEmpty {
+                        Task.detached(priority: .utility) { LiveMeterDrift.log(account: key, measurements: measured) }
                     }
                 }
             } catch {

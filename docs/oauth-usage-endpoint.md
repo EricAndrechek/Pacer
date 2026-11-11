@@ -81,6 +81,22 @@ the lever the poller pulls.
 With one token this degrades cleanly to single-lane activity-gating. Tuning
 constants live in `OAuthPoller.Configuration` / `OAuthPollScheduler.Tuning`.
 
+## What each reading stores
+
+A poll writes one `RateLimitSample` per fixed window and one
+`UsageLimitSample` per `limits[]` item, stamped with the account and one
+`sampledAt`, in one save (`OAuthPoller.recordPoll`). They are kept forever:
+past `liveWindowDays` they move to `AccountUsageArchive`, never deleted.
+
+In that same save goes one `LiveMeterOutcome` per window the live meter had a
+value for (#352): what it showed the moment before the reading landed (built
+on the previous reading, as the snapshot built it then), the fit that built it
+(`fitDay`), the spend it counted, and what the lag and runaway guards made of
+the moment. It is a record for measuring the meter, and nothing in the app
+reads it. The poll measures it before the save, on the poller, with the
+bounded reads the `[LiveMeter]` drift line used to make after it, so a reading
+still costs one save and no read on the main actor.
+
 ## Sharing a token with another client
 
 Pacer is not necessarily the only thing on this machine polling these
