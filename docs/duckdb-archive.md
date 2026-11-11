@@ -236,6 +236,20 @@ The gate is now per row, not per total:
   run are reported apart, as drift, so it can read a live `~/.claude` without
   copying it.
 
+### Update 2026-11-11 — `turn` carries account, speed and geo (#352)
+
+`turn` gained `account_id`, `speed` and `inference_geo`, the store fields it
+lacked that change what a turn costs or whose it was. `RawArchive.migrate()`
+appends them to the end of the table on open (`addedColumns`), checking the
+catalog first, so a fresh archive and an old one have the same column order
+and an up-to-date one issues no DDL. They are filled from `TokenSample` on new
+writes; rows archived before read NULL ("not recorded"), not backfilled, since
+the store still holds their values. `account_id` is the attribution at archive
+time: a later `reassign-account` in the store is not mirrored. The ingest
+paths are untouched (the archive is fed from the store, and
+`IngestParityTests` already compares both paths' `accountId`, `speed` and
+`inferenceGeo` per row); `RawArchiveMigrationTests` runs with the parity tests.
+
 ## The bug the gate found (this one DID ship)
 
 Claude Code appends the same assistant message to the transcript several times

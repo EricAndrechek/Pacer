@@ -66,7 +66,7 @@ enum ArchiveRoundTrip {
                 \.sampledAt, \.date, \.localHour, \.model, \.inputTokens, \.outputTokens,
                 \.cacheReadTokens, \.cacheCreation5mTokens, \.cacheCreation1hTokens,
                 \.sourceCostUSD, \.dedupKey, \.sessionId, \.originalProjectPath,
-                \.projectPath, \.ccVersion]
+                \.projectPath, \.ccVersion, \.accountId, \.speed, \.inferenceGeo]
             let stored = (try? context.fetch(descriptor)) ?? []
 
             // Keyed on dedupKey — the identity the whole app already agrees on.
@@ -103,6 +103,13 @@ enum ArchiveRoundTrip {
                 check("projectPath",
                       row.originalProjectPath == (sample.originalProjectPath ?? sample.projectPath))
                 if sample.localHour >= 0 { check("localHour", row.localHour == sample.localHour) }
+                // Added in #352 and never backfilled: NULL on a row archived
+                // before then is "not recorded", not a mismatch. Where the
+                // archive has an account and the store another, the store's
+                // attribution was corrected after archiving.
+                if let a = row.accountId { check("accountId", a == sample.accountId) }
+                if let s = row.speed { check("speed", s == sample.speed) }
+                if let g = row.inferenceGeo { check("inferenceGeo", g == sample.inferenceGeo) }
             }
             for (key, _) in byKey where !seen.contains(key) { totalMissing += 1 }
         }

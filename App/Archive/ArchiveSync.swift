@@ -313,7 +313,10 @@ final class ArchiveSync {
             // The RAW cwd — canonicalization is a view over the alias graph,
             // and the graph changes. Never bake it in here.
             originalProjectPath: sample.originalProjectPath ?? sample.projectPath,
-            ccVersion: sample.ccVersion)
+            ccVersion: sample.ccVersion,
+            accountId: sample.accountId,
+            speed: sample.speed,
+            inferenceGeo: sample.inferenceGeo)
     }
 
     private func openIfNeeded() throws -> RawArchive {

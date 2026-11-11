@@ -110,7 +110,10 @@ enum ArchiveBackfill {
                 dedupKey: sample.dedupKey,
                 sessionId: sample.sessionId,
                 originalProjectPath: sample.originalProjectPath ?? sample.projectPath,
-                ccVersion: sample.ccVersion))
+                ccVersion: sample.ccVersion,
+                accountId: sample.accountId,
+                speed: sample.speed,
+                inferenceGeo: sample.inferenceGeo))
             if batch.count >= 5_000 {
                 try? archive.append(batch)
                 total += batch.count

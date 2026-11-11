@@ -109,6 +109,48 @@ final class RawArchive {
                 original_project_path VARCHAR,
                 cc_version VARCHAR)
             """)
+        try migrate()
+    }
+
+    /// Columns added after `turn` first shipped, oldest first (#352).
+    ///
+    /// Each is appended to the END of the table, on a fresh archive and an
+    /// old one alike, so both end with the same column order, which the
+    /// appender writes by position. Nullable with no default: rows archived
+    /// before a column existed read NULL, which means "not recorded", never
+    /// "standard" or "no account".
+    ///
+    /// - `account_id`: the account the store attributed the turn to when it
+    ///   was archived (`TokenSample.accountId`). Attribution is a decision,
+    ///   and the store can correct it later (`make reassign-account`); the
+    ///   archive keeps what it was given, so a later correction is not
+    ///   reflected here. Kept anyway: it is the only copy that survives if
+    ///   the store ever sheds history.
+    /// - `speed`, `inference_geo`: `usage.speed` and `usage.inference_geo` as
+    ///   parsed. Both change what a turn costs (fast mode, US residency), and
+    ///   transcripts are pruned after about 30 days.
+    ///
+    /// Not backfilled: the store still holds every older row's values, and a
+    /// columnar UPDATE joined against a million-row walk of the store is not
+    /// a step to run on the scan actor for data that is not at risk yet.
+    static let addedColumns: [(name: String, type: String)] = [
+        ("account_id", "VARCHAR"),
+        ("speed", "VARCHAR"),
+        ("inference_geo", "VARCHAR"),
+    ]
+
+    /// Bring `turn` up to `addedColumns`. Checks the catalog first, so an
+    /// archive that already has them issues no DDL at all.
+    private func migrate() throws {
+        for column in Self.addedColumns {
+            let present = try scalar("""
+                SELECT COUNT(*) FROM information_schema.columns
+                WHERE table_name = 'turn' AND column_name = '\(column.name)'
+                """)
+            guard present == 0 else { continue }
+            try exec("ALTER TABLE turn ADD COLUMN \(column.name) \(column.type)")
+            Log.write("RawArchive", "added column turn.\(column.name)")
+        }
     }
 
     deinit {
@@ -146,6 +188,10 @@ final class RawArchive {
             appendText(appender, row.sessionId)
             appendText(appender, row.originalProjectPath)
             appendText(appender, row.ccVersion)
+            // `addedColumns`, in order.
+            appendText(appender, row.accountId)
+            appendText(appender, row.speed)
+            appendText(appender, row.inferenceGeo)
             duckdb_appender_end_row(appender)
         }
         guard duckdb_appender_close(appender) == DuckDBSuccess else {
@@ -351,7 +397,8 @@ final class RawArchive {
             SELECT sampled_at, date, local_hour, model,
                    input_tokens, output_tokens, cache_read,
                    cache_creation_5m, cache_creation_1h, source_cost,
-                   dedup_key, session_id, original_project_path, cc_version
+                   dedup_key, session_id, original_project_path, cc_version,
+                   account_id, speed, inference_geo
             FROM turn WHERE date = '\(safe)' ORDER BY sampled_at
             """
         let ok = sql.withCString { duckdb_query(con, $0, &result) } == DuckDBSuccess
@@ -367,7 +414,7 @@ final class RawArchive {
             let count = Int(duckdb_data_chunk_get_size(chunk))
             guard count > 0 else { continue }
 
-            let vectors = (0..<14).map { duckdb_data_chunk_get_vector(chunk, UInt64($0)) }
+            let vectors = (0..<17).map { duckdb_data_chunk_get_vector(chunk, UInt64($0)) }
             let data = vectors.map { duckdb_vector_get_data($0) }
             let validity = vectors.map { duckdb_vector_get_validity($0) }
             func isNull(_ col: Int, _ row: Int) -> Bool {
@@ -411,7 +458,10 @@ final class RawArchive {
                     dedupKey: text(10, row),
                     sessionId: text(11, row),
                     originalProjectPath: text(12, row),
-                    ccVersion: text(13, row)))
+                    ccVersion: text(13, row),
+                    accountId: text(14, row),
+                    speed: text(15, row),
+                    inferenceGeo: text(16, row)))
             }
         }
         return rows
@@ -459,4 +509,8 @@ struct ArchiveRow: Sendable {
     let sessionId: String?
     let originalProjectPath: String?
     let ccVersion: String?
+    /// `RawArchive.addedColumns`. Nil on rows archived before they existed.
+    let accountId: String?
+    let speed: String?
+    let inferenceGeo: String?
 }
