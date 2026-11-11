@@ -22,8 +22,8 @@ import SwiftData
 /// several logins can hear two answers after a real change, until the older
 /// login is replaced; `reportedBy` says which kind of login said what.
 @Model
-public final class AccountPlanEvent {
-    #Index<AccountPlanEvent>([\.accountId, \.observedAt])
+public final class Z002AccountPlanEvent {
+    #Index<Z002AccountPlanEvent>([\.accountId, \.observedAt])
 
     /// `Account.id`.
     public var accountId: String
@@ -74,6 +74,10 @@ public final class AccountPlanEvent {
     /// logins disagreeing, not a new change (`Account.observePlan`).
     public static let flapWindow: TimeInterval = 24 * 3600
 }
+
+// Entity numbering: a new model is named Z<NNN><Name> so it sorts after every shipped
+// entity (AGENTS.md, "A new @Model sorts after every shipped one"); call sites keep the plain name.
+public typealias AccountPlanEvent = Z002AccountPlanEvent
 
 public extension Account {
 

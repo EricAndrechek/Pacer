@@ -20,7 +20,15 @@ import SQLite3
 /// So: create them directly. Indexes are invisible to Core Data — they are not
 /// part of the model hash it validates, nothing in the schema description
 /// mentions them, and SQLite maintains them on write regardless of who asked.
-/// This only ever runs `CREATE INDEX`; it never drops or alters anything, and
+///
+/// And retire them once SwiftData builds its own. The migration that adds a
+/// column also issues `CREATE INDEX IF NOT EXISTS` for every `#Index` the model
+/// declares (Core Data's SQL log, a 0.8.2 store opened by 0.8.3, #387), so an
+/// upgraded store ends up with SwiftData's index AND this one on the same
+/// columns. A real store had all seven doubled: about 110 MB, and a second
+/// B-tree written on every insert into the store's busiest tables. So a
+/// `pacer_ix_` index that another index now covers is dropped. That is the
+/// only thing this ever drops: its own indexes, never SwiftData's, never data;
 /// every failure is logged and swallowed.
 public enum StoreIndexRepair {
 
@@ -70,6 +78,26 @@ public enum StoreIndexRepair {
         // cycle is mid-write.
         sqlite3_busy_timeout(db, 10_000)
 
+        // Retire before creating, so a duplicate dropped here is not then
+        // judged missing: the index that made it redundant covers it.
+        var retired: [String] = []
+        for want in desired {
+            guard tableExists(db, want.table),
+                  indexNames(db, table: want.table).contains(want.name),
+                  isCovered(db, table: want.table, columns: want.columns, excluding: want.name)
+            else { continue }
+            if exec(db, "DROP INDEX IF EXISTS \(quoted(want.name))") {
+                retired.append(want.name)
+            } else {
+                Log.write("StoreIndexRepair",
+                          "could not drop \(want.name): \(String(cString: sqlite3_errmsg(db)))")
+            }
+        }
+        if !retired.isEmpty {
+            Log.write("StoreIndexRepair", "dropped \(retired.count) index(es) SwiftData now builds itself: "
+                        + retired.joined(separator: ", "))
+        }
+
         var created: [String] = []
         for want in desired {
             guard tableExists(db, want.table) else { continue }
@@ -91,11 +119,12 @@ public enum StoreIndexRepair {
         return created
     }
 
-    /// Whether some existing index already leads with exactly these columns.
-    /// A fresh install has SwiftData's own, and adding a duplicate would cost
-    /// write throughput for nothing.
-    private static func isCovered(_ db: OpaquePointer, table: String, columns: [String]) -> Bool {
-        for index in indexNames(db, table: table) {
+    /// Whether some existing index (other than `excluding`) already leads with
+    /// exactly these columns. A fresh install has SwiftData's own, and adding a
+    /// duplicate would cost write throughput for nothing.
+    private static func isCovered(_ db: OpaquePointer, table: String, columns: [String],
+                                  excluding: String? = nil) -> Bool {
+        for index in indexNames(db, table: table) where index != excluding {
             let cols = indexColumns(db, index: index)
             if cols.count >= columns.count,
                Array(cols.prefix(columns.count)) == columns { return true }

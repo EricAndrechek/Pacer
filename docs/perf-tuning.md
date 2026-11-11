@@ -352,6 +352,95 @@ Fixed by awaiting pricing before any recompute, plus rebuilding still-open
 buckets on a 10-minute throttle so drift can't freeze at the hour
 boundary. `costRecomputeVersion` 5 → 6 clears zeros already written.
 
+## Disk writes at the first launch of a version (2026-11-11, #387)
+
+Sentry PACER-B (MetricKit `MXDiskWriteException`) came from seven production
+Macs on 0.8.0–0.8.2, each at the 2 GiB-a-day limit the kernel counts
+(`totalWritesCaused` 2,147.5–2,148.4 MB is the threshold, 2^31 bytes, not the
+amount). **Two writers of about 2 GB each met at those launches.**
+
+- **The forecast-weights download.** Every one of the seven Macs logged four
+  `model.download` spans in the same release, starting a minute or three
+  after launch: Chronos-2 478 MB, TimesFM 2.5 925 MB, Timestral-123M 490 MB,
+  Timestral-209M 837 MB, 2.73 GB in all. A download writes 1.00× its size
+  (measured: 20,877,312 logical bytes for the 20,843,960-byte Timestral-5M
+  file) and the move into place is a rename. Once per Mac, at the first
+  launch of the first version with the arena. It is the stack PACER-B shows,
+  `_dispatch_disk_perform → __write_nocancel`: dispatch I/O, which in this
+  process only CFNetwork writes with (SQLite writes through
+  `guarded_pwrite_np`, as the development-build reports PACER-K and PACER-P
+  show). MetricKit reports only the heaviest stack.
+- **Entity renumbering.** Core Data numbers entities (`Z_ENT`) in name order
+  and stores the number in every row and every persistent-history change;
+  SwiftData's entity name is the class name. A new model whose name sorts
+  among the shipped ones renumbers everything after it. On a copy of a real
+  1.42 GB store, opening it with one extra model named to sort first wrote
+  **2,107 MB** (1,562 MB to disk, the WAL peaking at 690 MB); the same model
+  named to sort last wrote **0.7 MB**. 0.8.0 added `PriceRecord` (entity 18
+  of 30) and `SpendMeterFit` (27), renumbering 12 entities including
+  `TokenSample`, and the six PACER-B Macs PostHog can date
+  (`install.first_seen`) were installed between late July and mid-October,
+  before 0.8.0 shipped: they were upgrading from a pre-0.8 build, so their
+  first 0.8.x launch paid both. The fix is a naming rule (AGENTS.md, "A new
+  `@Model` sorts after every shipped one") that `EntityNumberingTests`
+  enforces.
+
+The store's side is small except on a first install. Measured with
+`make ingest-harness` on a copy of a real 1.42 GB store (1.02M turns) and a
+frozen copy of its transcripts, bytes this process wrote
+(`ri_logical_writes`):
+
+- **A relaunch on the same schema: 27 MB.** The open 0.1 MB, the history
+  prune 1.8 MB, the first cycle 25.4 MB, of which about 24 MB is
+  `dedup-index.bin`, rewritten whole because its row count trails the store's.
+- **0.8.2 → 0.8.3 (adds `TokenSample.thinkingTokens`): the open writes
+  0.8 MB.** The rest is the relaunch's.
+- **A new model: 2,107 MB in the open if its name sorts first, 0.7 MB if it
+  sorts last** (above).
+- **A `costRecomputeVersion` bump (every rollup rebuilt): the first cycle
+  writes 67.8 MB**, 42 MB more than a relaunch's.
+- **A `scanVersion` bump (every transcript re-read, DuckDB importer): the
+  first cycle writes 130 MB**, and `ArchiveSync` after it 3.6 MB.
+- **A first install is the big one: 1.71 GB written for a 447 MB store**
+  (656,757 turns from 6,361 files). The DuckDB import itself wrote 57 MB;
+  inserting the turns wrote 1.58 GB, in saves of 1,000 rows
+  (`Configuration.saveBatchSize`) that each rewrite the same index pages. On
+  a 96k-turn subset, saves of 10,000 wrote 221 MB instead of 262 MB (−16%),
+  with the WAL peaking at 8.4 MB instead of 5.4 MB. Not changed: a modest
+  win against more uncommitted rows held per save.
+
+An additive change is cheap because Core Data does it in place: its SQL log
+for the 0.8.2 → 0.8.3 open is one
+`ALTER TABLE ZTOKENSAMPLE ADD COLUMN ZTHINKINGTOKENS INTEGER`, then
+`CREATE INDEX IF NOT EXISTS` for all 155 declared indexes (no-ops when they
+exist), then the metadata. **Removing or renaming an attribute is not:**
+opening the same store with 0.8.2's schema (which drops `thinkingTokens`)
+copied the whole `ZTOKENSAMPLE` table (its column order changed), took 570 s
+on a loaded machine, grew the file from 1.42 to 1.81 GB with 454 MB free, and
+the free pages then cost another 760 MB of writes as Core Data reclaimed them
+(below). Any release that removes, renames or retypes a `TokenSample` field
+pays that on every Mac.
+
+Two Core Data behaviours behind the numbers, visible with
+`defaults write <process> com.apple.CoreData.SQLDebug 1`:
+
+- **Post-save maintenance.** When the WAL passes a size threshold Core Data
+  runs `wal_checkpoint(TRUNCATE)`, and when the free list is large
+  (4% of the file was, 1.5% was not) `incremental_vacuum` of a fifth of it
+  first
+  (`PostSaveMaintenance: incremental_vacuum with freelist_count - 33579 and
+  pages_to_free 6715`). Moving pages to shrink the file wrote about 4× the
+  bytes it freed. It is SQLite-level work, so persistent history never sees
+  it: a lead for #174's bursts.
+- **Index fan-out.** A commit that adds one row to each of `ZTOKENSAMPLE`,
+  `ZUSAGELIMITSAMPLE` and `ZRATELIMITSAMPLE` writes 102 KB to the WAL: every
+  index on those tables dirties a page. Seven `StoreIndexRepair` indexes had
+  become exact duplicates of SwiftData's own (the migration above builds
+  every declared index), 108 MB on a real store, and dropping them took that
+  commit from 131.5 KB to 102.1 KB (2,000 commits on a copy). The drop is
+  once per store that has them, and costs about 11 MB plus the
+  post-save vacuum of the freed pages (114 MB in the first launch measured).
+
 ## Known correctness items
 
 - `sessionRecomputerRollsUpPerSession` once asserted `b.totalTokens == 3`

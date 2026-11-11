@@ -34,12 +34,12 @@ import SwiftData
 ///
 /// A new table of plain and optional columns: a lightweight migration.
 @Model
-public final class LiveMeterOutcome {
+public final class Z001LiveMeterOutcome {
     // "One account's window over time" is the read a study makes. Nothing in
     // the app reads the table, and an export reads all of it, so there is no
     // time-only index: each index entry repeats the account id, and on a busy
     // install this table grows by a couple of thousand rows a day.
-    #Index<LiveMeterOutcome>([\.accountId, \.window, \.readingAt])
+    #Index<Z001LiveMeterOutcome>([\.accountId, \.window, \.readingAt])
 
     /// `Account.id`.
     public var accountId: String
@@ -158,3 +158,7 @@ public final class LiveMeterOutcome {
         return context.container.schema.entities.contains { $0.name == name }
     }
 }
+
+// Entity numbering: a new model is named Z<NNN><Name> so it sorts after every shipped
+// entity (AGENTS.md, "A new @Model sorts after every shipped one"); call sites keep the plain name.
+public typealias LiveMeterOutcome = Z001LiveMeterOutcome

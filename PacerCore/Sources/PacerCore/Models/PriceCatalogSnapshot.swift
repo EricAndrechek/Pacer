@@ -18,8 +18,8 @@ import SwiftData
 /// ledger as it stood after any sync. Compressed JSON, a few KB per change,
 /// and changes land a few times a week, so the table stays small forever.
 @Model
-public final class PriceCatalogSnapshot {
-    #Index<PriceCatalogSnapshot>([\.capturedAt])
+public final class Z003PriceCatalogSnapshot {
+    #Index<Z003PriceCatalogSnapshot>([\.capturedAt])
 
     /// When the sync that saw this content ran.
     public var capturedAt: Date
@@ -100,3 +100,7 @@ public final class PriceCatalogSnapshot {
         return try context.fetch(d).first
     }
 }
+
+// Entity numbering: a new model is named Z<NNN><Name> so it sorts after every shipped
+// entity (AGENTS.md, "A new @Model sorts after every shipped one"); call sites keep the plain name.
+public typealias PriceCatalogSnapshot = Z003PriceCatalogSnapshot

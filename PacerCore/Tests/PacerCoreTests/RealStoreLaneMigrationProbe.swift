@@ -44,7 +44,7 @@ struct RealStoreLaneMigrationProbe {
         try #require(!url.path.contains("Group Containers"), "point the probe at a copy")
 
         let before = try Self.rowCounts(url)
-        try #require(before["ZLIVEMETEROUTCOME"] == nil, "the copy is already migrated: clone a fresh one")
+        try #require(before["ZZ001LIVEMETEROUTCOME"] == nil, "the copy is already migrated: clone a fresh one")
         let sizesBefore = Self.sizes(url)
         print("[probe] before: \(PacerStore.schemaState(at: url).rawValue), \(Self.describe(sizesBefore))")
         print("[probe] persistent history: ACHANGE \(before["ACHANGE"] ?? 0) rows, "
@@ -55,7 +55,7 @@ struct RealStoreLaneMigrationProbe {
         // this change sits on, and the numbers below are not this change's.
         let changed = try Self.changedEntities(url)
         print("[probe] entities that differ from the copy: \(changed.sorted().joined(separator: ", "))")
-        #expect(changed == ["RateLimitSample", "UsageLimitSample", "AccountUsageArchive", "LiveMeterOutcome"])
+        #expect(changed == ["RateLimitSample", "UsageLimitSample", "AccountUsageArchive", "Z001LiveMeterOutcome"])
 
         let io0 = Self.diskWrites()
         let (seconds, migrated, after) = try await Task.detached {
@@ -103,12 +103,12 @@ struct RealStoreLaneMigrationProbe {
         // The new table, empty, with the index it declares: a table created
         // new gets its `#Index` (`StoreIndexRepair` exists for the ones that
         // do not).
-        #expect(afterCounts["ZLIVEMETEROUTCOME"] == 0)
+        #expect(afterCounts["ZZ001LIVEMETEROUTCOME"] == 0)
         let indexes = try Self.scalar(url, """
-            SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND tbl_name = 'ZLIVEMETEROUTCOME'
+            SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND tbl_name = 'ZZ001LIVEMETEROUTCOME'
               AND sql IS NOT NULL
             """)
-        print("[probe] ZLIVEMETEROUTCOME indexes: \(indexes)")
+        print("[probe] ZZ001LIVEMETEROUTCOME indexes: \(indexes)")
         #expect(indexes >= 1)
         #expect(try Self.text(url, "PRAGMA quick_check") == "ok")
     }

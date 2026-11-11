@@ -59,6 +59,8 @@ import Testing
 /// stored `scanVersion` / `costRecomputeVersion` first: a release that bumps
 /// one), `PACER_INGEST_STEADY_CYCLES=<n>` (incremental cycles after the
 /// first), `PACER_INGEST_OUT=<dir>` (phases.tsv and a 50 ms writes timeline),
+/// `PACER_INGEST_EXTRA_ENTITY=early|late` (open with one more `@Model`, named
+/// to sort first or last: what a release adding a model costs),
 /// `PACER_INGEST_SAVE_BATCH=<n>` (inserts per save, to compare against the
 /// default), `PACER_INGEST_PRIORITY=userInitiated` (the cycle runs at the scan loop's
 /// `.utility` otherwise, which a machine busy with builds starves for minutes;
@@ -144,8 +146,10 @@ struct IngestHarness {
         var phases: [PhaseRecord] = []
 
         // What the app does at launch, in its order, one phase at a time.
+        let types = PacerStore.allModelTypes + Self.extraEntity(env["PACER_INGEST_EXTRA_ENTITY"])
+        if types.count > PacerStore.allModelTypes.count { log("schema: + \(types.last!) (a release adding a @Model)") }
         let prepared = try await meter.phase("open", into: &phases) {
-            try await Task.detached { try PacerStore.prepareStore(at: storeURL) }.value
+            try await Task.detached { try PacerStore.prepareStore(at: storeURL, types: types) }.value
         }
         let container = prepared.container
         log("open: schema \(prepared.before.rawValue) → \(prepared.after.rawValue)"
@@ -240,6 +244,18 @@ struct IngestHarness {
                                        atomically: true, encoding: .utf8)
             try "\(totals.line)\nthinking=\(totals.thinking)\n".write(
                 to: outDir.appendingPathComponent("totals.txt"), atomically: true, encoding: .utf8)
+        }
+    }
+
+    /// A stand-in for a release that adds one `@Model`, named to sort first
+    /// or last among the entities: Core Data numbers entities (`Z_ENT`) in
+    /// name order, so where a new name sorts decides how much of the store
+    /// its first launch rewrites (`EntityNumberingTests`, #387).
+    static func extraEntity(_ which: String?) -> [any PersistentModel.Type] {
+        switch which {
+        case "early": return [AAIngestProbeEntity.self]
+        case "late": return [Z999IngestProbeEntity.self]
+        default: return []
         }
     }
 
@@ -354,6 +370,18 @@ struct IngestHarness {
     }
 
     static func mb(_ bytes: UInt64) -> String { String(format: "%.1f", Double(bytes) / 1_048_576) }
+}
+
+/// The harness's stand-ins for a new model (`PACER_INGEST_EXTRA_ENTITY`): one
+/// that sorts before every shipped entity, one after.
+@Model final class AAIngestProbeEntity {
+    var note: String = ""
+    init() {}
+}
+
+@Model final class Z999IngestProbeEntity {
+    var note: String = ""
+    init() {}
 }
 
 /// Outside the suite: a `@Suite` trait can't read its own type's members.
