@@ -1,8 +1,40 @@
 {
   "schema": 1,
-  "asOf": "2026-10-21",
+  "asOf": "2026-11-11",
   "source": "https://platform.claude.com/docs/en/about-claude/pricing",
   "records": [
+    {
+      "model": "claude-fable-5-2",
+      "effectiveFrom": "2026-11-09",
+      "effectiveTo": null,
+      "perMTok": {
+        "input": 8,
+        "output": 40,
+        "cacheWrite5m": 10.0,
+        "cacheWrite1h": 16,
+        "cacheRead": 0.2
+      },
+      "sourceURL": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "note": "Launched 2026-11-09 (release notes) at $8/$40, down from Fable 5.1's $10/$50; cache reads 0.025x input ($0.20). Fast mode $16/$80 (2x).",
+      "fastMultiplier": 2.0,
+      "regionalMultiplier": 1.1
+    },
+    {
+      "model": "claude-mythos-5-2",
+      "effectiveFrom": "2026-11-09",
+      "effectiveTo": null,
+      "perMTok": {
+        "input": 8,
+        "output": 40,
+        "cacheWrite5m": 10.0,
+        "cacheWrite1h": 16,
+        "cacheRead": 0.2
+      },
+      "sourceURL": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "note": "Limited availability, launched with Fable 5.2 on 2026-11-09 (release notes). Same rates as Fable 5.2; fast mode is offered too (2x, as Fable 5.2's $16/$80).",
+      "fastMultiplier": 2.0,
+      "regionalMultiplier": 1.1
+    },
     {
       "model": "claude-fable-5-1",
       "effectiveFrom": "2026-09-01",

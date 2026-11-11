@@ -24,7 +24,7 @@ import json
 import pathlib
 import sys
 
-AS_OF = "2026-10-21"
+AS_OF = "2026-11-11"
 PAGE = "https://platform.claude.com/docs/en/about-claude/pricing"
 OUT = pathlib.Path(__file__).resolve().parents[2] / "PacerCore/Sources/PacerCore/Resources/price-history.json"
 
@@ -70,6 +70,12 @@ def add(model, start, perMTok, note, end=None, tier=0, fast=None, regional=None,
 R = 1.1
 
 # --- Claude 5 generation ------------------------------------------------------
+add("claude-fable-5-2", "2026-11-09", std(8, 40, 0.025), fast=2.0, regional=R,
+    note="Launched 2026-11-09 (release notes) at $8/$40, down from Fable 5.1's $10/$50; "
+         "cache reads 0.025x input ($0.20). Fast mode $16/$80 (2x).")
+add("claude-mythos-5-2", "2026-11-09", std(8, 40, 0.025), fast=2.0, regional=R,
+    note="Limited availability, launched with Fable 5.2 on 2026-11-09 (release notes). "
+         "Same rates as Fable 5.2; fast mode is offered too (2x, as Fable 5.2's $16/$80).")
 add("claude-fable-5-1", "2026-09-01", std(10, 50, 0.025), regional=R,
     note="Cache reads at 0.025x input ($0.25) from launch.")
 add("claude-mythos-5-1", "2026-09-01", std(10, 50, 0.025), regional=R,
