@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import PacerCore
 
@@ -28,16 +29,47 @@ final class MainThreadStallWatchdog {
 
     private var observer: RunLoopStallObserver?
 
+    /// Whether every display is asleep, so a stall line says whether anyone
+    /// could have felt it.
+    ///
+    /// The rate of these lines depends far more on this than on any build.
+    /// Over 141 hours of one Mac's log before #403, hours with the displays
+    /// asleep ran about 1,460 stalls an hour and hours with them awake about
+    /// 300. Asleep, the whole process ran slower, not just the main thread:
+    /// on #403 the same forecast refit took a median 15 s of CPU against 6 s
+    /// awake, and the stalls were 80-95% waiting rather than working.
+    /// Comparing two builds across a change of display state read as a 4x
+    /// regression (#403) that was not one.
+    private var displaysAsleep = false
+    private var sleepObservers: [NSObjectProtocol] = []
+
     private init() {}
 
     func start() {
         guard observer == nil else { return }
+        // Seeded from the main display: a launch while the displays sleep (an
+        // install over a locked screen) gets no `screensDidSleep` of its own.
+        displaysAsleep = CGDisplayIsAsleep(CGMainDisplayID()) != 0
+        let workspace = NSWorkspace.shared.notificationCenter
+        sleepObservers = [
+            workspace.addObserver(forName: NSWorkspace.screensDidSleepNotification,
+                                  object: nil, queue: .main) { _ in
+                MainActor.assumeIsolated { MainThreadStallWatchdog.shared.displaysAsleep = true }
+            },
+            workspace.addObserver(forName: NSWorkspace.screensDidWakeNotification,
+                                  object: nil, queue: .main) { _ in
+                MainActor.assumeIsolated { MainThreadStallWatchdog.shared.displaysAsleep = false }
+            },
+        ]
         // `cpu` is the main thread's own CPU time in the stretch. Close to the
         // wall time means it was working; far below means it was waiting (a
         // lock, a fetch blocked on another context's write) or throttled.
         observer = RunLoopStallObserver(runLoop: CFRunLoopGetMain(), threshold: 0.1) { stall in
+            // The observer fires on the main run loop, so this is the main actor.
+            let asleep = MainActor.assumeIsolated { MainThreadStallWatchdog.shared.displaysAsleep }
             Log.write("MainThread",
-                      "stalled \(Int(stall.wall * 1000))ms (cpu \(Int(stall.cpu * 1000))ms)")
+                      "stalled \(Int(stall.wall * 1000))ms (cpu \(Int(stall.cpu * 1000))ms)"
+                        + (asleep ? " · displays asleep" : ""))
             // The log keeps every stall over 100 ms; telemetry sends only the
             // ones a person would feel (250 ms and up). The rest are one
             // in-memory tally, drained into the daily check-in.
