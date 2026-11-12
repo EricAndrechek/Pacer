@@ -40,7 +40,12 @@ final class MainThreadStallWatchdog {
     /// awake, and the stalls were 80-95% waiting rather than working.
     /// Comparing two builds across a change of display state read as a 4x
     /// regression (#403) that was not one.
-    private var displaysAsleep = false
+    ///
+    /// Mirrored into `DisplaySleepState`, which `HangReporter` reads from
+    /// another queue to hold back hang events nobody could feel.
+    private var displaysAsleep = false {
+        didSet { DisplaySleepState.set(asleep: displaysAsleep) }
+    }
     private var sleepObservers: [NSObjectProtocol] = []
 
     private init() {}
