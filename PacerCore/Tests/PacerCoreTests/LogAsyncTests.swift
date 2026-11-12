@@ -11,10 +11,18 @@ struct LogAsyncTests {
         let gate = DispatchSemaphore(value: 0)
         let blocked: Bool
         init(blocked: Bool) { self.blocked = blocked }
+        /// A one-shot gate, not a per-line semaphore: the sink is process-wide,
+        /// so while it is swapped in, lines from suites running in parallel
+        /// pass through it too. Counting one signal per expected line let
+        /// those strangers use up the signals, the writer waited forever, and
+        /// `Log.flush()` hung the whole `swift test` run. Each line that gets
+        /// through re-signals for the next, so one `open()` lets everything
+        /// through, however many lines arrive.
         func sink(_ data: Data) {
-            if blocked { gate.wait() }
+            if blocked { gate.wait(); gate.signal() }
             lines.withLock { $0.append(String(decoding: data, as: UTF8.self)) }
         }
+        func open() { gate.signal() }
     }
 
     private func withSink<T>(_ c: Collector, _ body: () -> T) -> T {
@@ -32,8 +40,9 @@ struct LogAsyncTests {
             let start = Date()
             for i in 0..<n { Log.write("T", "line \(i)") }
             let took = Date().timeIntervalSince(start)
-            // Release the stuck writer; one signal per line it will take.
-            for _ in 0..<(n + 1) { c.gate.signal() }
+            // Open the gate once; every queued line, ours or another suite's,
+            // then drains.
+            c.open()
             Log.flush()
             return took
         }
