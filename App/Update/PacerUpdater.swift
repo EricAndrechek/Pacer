@@ -99,7 +99,13 @@ private class PacerUpdaterDelegate: NSObject, SPUUpdaterDelegate {
     }
 
     func updater(_ updater: SPUUpdater, failedToDownloadUpdate item: SUAppcastItem, error: any Error) {
-        UpdateOutcomeLog.record(.downloadFailed, version: item.displayVersionString)
+        // Domain and code only (and the underlying error's): never the description.
+        let ns = error as NSError
+        let underlying = ns.userInfo[NSUnderlyingErrorKey] as? NSError
+        UpdateOutcomeLog.record(.downloadFailed, version: item.displayVersionString,
+                                error: UpdateOutcomeLog.errorDetail(domain: ns.domain, code: ns.code,
+                                                                    underlyingDomain: underlying?.domain,
+                                                                    underlyingCode: underlying?.code))
     }
 
     func updater(_ updater: SPUUpdater, willInstallUpdate item: SUAppcastItem) {

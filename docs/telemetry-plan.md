@@ -546,7 +546,7 @@ if they rarely do, download them only when cheaper models leave room to improve.
     counts, archive size, transcript file count, both config dirs present, `CLAUDE_CONFIG_DIR`
     set, time-zone offset (day-boundary bugs).
 14. **Lifecycle**: launched at login or by hand, uptime, restarts per day, unclean exits, Sparkle
-    check/install failures, time from a release to each Mac running it. `lifecycle.update_result` is one of `no_update`, `found`, `download_failed`, `will_install`, `ready_to_install` (downloaded, waiting for a quiet moment), `idle_install` (relaunched to install at one), `error_<domain>_<code>`.
+    check/install failures, time from a release to each Mac running it. `lifecycle.update_result` is one of `no_update`, `found`, `download_failed`, `will_install`, `ready_to_install` (downloaded, waiting for a quiet moment), `idle_install` (relaunched to install at one), `error_<domain>_<code>`. `lifecycle.update_error` (only with `download_failed`) is why it failed: `error_<domain tail>_<code>`, then `/` and the same for the underlying error when there is one (e.g. `error_nsurlerrordomain_-1009/error_kcfstreamerrordomain_-2`). Domain tail and code only, never a description; cleared by any later result without an error (#406).
 15. **Energy**: process CPU seconds per hour and while idle (the 0 % idle invariant, fleet-wide).
 16. **Feature errors**: notification permission state, API server port in use, skill install
     failures, widget timeline failures.
