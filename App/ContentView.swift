@@ -457,11 +457,12 @@ struct ContentView: View {
 /// Rebuilds `content` whenever the local day rolls over or the account scope
 /// changes.
 ///
-/// The menu bar's views build their `@Query` predicates in `init()`: today's
-/// date, and the scoped account. The hosts that own them — the status item's
-/// label and the dropdown's retained `NSHostingController` — are built once
-/// and kept, so those predicates stayed on the day and the scope the menu bar
-/// was built with. After midnight today's rows stopped matching. After a
+/// The menu bar's dropdown builds its `@Query` predicates in `init()`: today's
+/// date, and the scoped account. Its host, a retained `NSHostingController`,
+/// is built once and kept, so those predicates stayed on the day and the
+/// scope the menu bar was built with. (The status item's label no longer
+/// needs this: it has no `@Query`s and keys its reads on both in `body`,
+/// PACER-19.) After midnight today's rows stopped matching. After a
 /// scope switch the Today, Tokens and model figures kept reading the old
 /// account, or read $0 when launched on "All accounts", until midnight.
 ///

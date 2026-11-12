@@ -43,7 +43,9 @@ enum HangReporter {
         case .began(let hang):
             guard !isBeingTraced else { return }
             writeMarker(for: hang)
-            if TelemetryController.crashAllowed { capture(hang) }
+            // Displays asleep: counted, not sent (`HangReportPolicy`). The marker
+            // and log line stay, so a real force-quit is still reported.
+            if TelemetryController.crashAllowed, HangReportPolicy.admit() { capture(hang) }
             Log.write("Hang", "main thread stuck \(Int(hang.duration * 1000)) ms and counting (\(phase(hang)))")
         case .continuing:
             guard let url = HangMarker.defaultURL(), var marker = HangMarker.read(at: url) else { return }

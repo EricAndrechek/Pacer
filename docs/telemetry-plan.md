@@ -53,6 +53,7 @@ counters (`data.*`, `oauth.*`, `cred.*`, `telemetry.*`, `main_thread.*`,
 ## Hangs (since 2026-11-05)
 `HangWatch` watches the main run loop. A stretch runs from waking to sleeping or polling. A `.strict` one-shot timer is armed only while a stretch is open, so an idle app has no wakeups. Launch counts as busy from `PacerAppDelegate.init` until the loop first sleeps.
 - Stuck 2 s and still stuck: an `App Hanging` event (mechanism AppHang, all thread stacks, tag `hang.phase` launch/running), under the `.hang` cap and the crash toggle.
+- Not sent while every display is asleep (`DisplaySleepState`, set by `MainThreadStallWatchdog`): macOS slows the process then and nobody is looking, and those events spent the daily hang cap. Counted as `main_thread.hang_displays_asleep`, drained by the daily check-in (non-usage counter, Sentry metric). The marker, log line and `main_thread.hang_ms` are unchanged.
 - Every 5 s while stuck: `hang-in-progress.json` is updated.
 - When it ends: `main_thread.hang_ms` with `ended=recovered`.
 - Next launch, if the file is still there: `main_thread.hang_ms` with `ended=terminated` and `version` (a lower bound).
@@ -545,7 +546,7 @@ if they rarely do, download them only when cheaper models leave room to improve.
     counts, archive size, transcript file count, both config dirs present, `CLAUDE_CONFIG_DIR`
     set, time-zone offset (day-boundary bugs).
 14. **Lifecycle**: launched at login or by hand, uptime, restarts per day, unclean exits, Sparkle
-    check/install failures, time from a release to each Mac running it. `lifecycle.update_result` is one of `no_update`, `found`, `download_failed`, `will_install`, `ready_to_install` (downloaded, waiting for a quiet moment), `idle_install` (relaunched to install at one), `error_<domain>_<code>`.
+    check/install failures, time from a release to each Mac running it. `lifecycle.update_result` is one of `no_update`, `found`, `download_failed`, `will_install`, `ready_to_install` (downloaded, waiting for a quiet moment), `idle_install` (relaunched to install at one), `error_<domain>_<code>`. `lifecycle.update_error` (only with `download_failed`) is why it failed: `error_<domain tail>_<code>`, then `/` and the same for the underlying error when there is one (e.g. `error_nsurlerrordomain_-1009/error_kcfstreamerrordomain_-2`). Domain tail and code only, never a description; cleared by any later result without an error (#406).
 15. **Energy**: process CPU seconds per hour and while idle (the 0 % idle invariant, fleet-wide).
 16. **Feature errors**: notification permission state, API server port in use, skill install
     failures, widget timeline failures.

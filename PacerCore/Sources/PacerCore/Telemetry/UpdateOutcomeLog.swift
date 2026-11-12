@@ -14,6 +14,10 @@ public enum UpdateOutcomeLog {
     public static let resultKey = "pacer.telemetry.update.result"
     public static let versionKey = "pacer.telemetry.update.version"
     public static let atKey = "pacer.telemetry.update.at"
+    /// Why a download failed: the error's `error_<domain>_<code>` form, plus
+    /// `/` and the same for its underlying error when it has one. Never a
+    /// description.
+    public static let errorKey = "pacer.telemetry.update.error"
 
     /// Sparkle's `SUNoUpdateError`: not a failure, the "you're up to date"
     /// answer, which Sparkle delivers through the error channel.
@@ -52,8 +56,8 @@ public enum UpdateOutcomeLog {
     /// callback, which repeats what an earlier callback already said (a failed
     /// download is followed by a cycle that "ends with an error"). It must not
     /// replace a more specific result recorded in the last two minutes.
-    public static func record(_ result: String, version: String? = nil, endOfCycle: Bool = false,
-                              now: Date = Date(), store: UserDefaults = PacerPreferences.store) {
+    public static func record(_ result: String, version: String? = nil, error: String? = nil,
+                              endOfCycle: Bool = false, now: Date = Date(), store: UserDefaults = PacerPreferences.store) {
         if endOfCycle,
            let previous = store.string(forKey: resultKey),
            [Outcome.downloadFailed, .willInstall, .idleInstall].map(\.rawValue).contains(previous),
@@ -62,6 +66,9 @@ public enum UpdateOutcomeLog {
         }
         store.set(result, forKey: resultKey)
         store.set(now, forKey: atKey)
+        // Cleared like the version: a later result without an error must not
+        // keep an older failure's reason beside it.
+        if let error { store.set(error, forKey: errorKey) } else { store.removeObject(forKey: errorKey) }
         // A result without a version (no update, an error before an appcast
         // item) clears the old one so the pair never disagrees.
         if let version, FormatDrift.isReportable(version) {
@@ -71,14 +78,24 @@ public enum UpdateOutcomeLog {
         }
     }
 
-    public static func record(_ outcome: Outcome, version: String? = nil, endOfCycle: Bool = false,
+    public static func record(_ outcome: Outcome, version: String? = nil, error: String? = nil,
+                              endOfCycle: Bool = false,
                               now: Date = Date(), store: UserDefaults = PacerPreferences.store) {
-        record(outcome.rawValue, version: version, endOfCycle: endOfCycle, now: now, store: store)
+        record(outcome.rawValue, version: version, error: error, endOfCycle: endOfCycle, now: now, store: store)
+    }
+
+    /// The reason for a failed download: the error's domain tail and code,
+    /// then its `NSUnderlyingErrorKey` error's, joined by `/`. No description.
+    public static func errorDetail(domain: String, code: Int,
+                                   underlyingDomain: String? = nil, underlyingCode: Int? = nil) -> String {
+        let top = result(forErrorDomain: domain, code: code)
+        guard let underlyingDomain, let underlyingCode else { return top }
+        return top + "/" + result(forErrorDomain: underlyingDomain, code: underlyingCode)
     }
 
     /// What the check-in reports: nil until Sparkle has said anything.
-    public static func last(store: UserDefaults = PacerPreferences.store) -> (result: String, version: String?)? {
+    public static func last(store: UserDefaults = PacerPreferences.store) -> (result: String, version: String?, error: String?)? {
         guard let result = store.string(forKey: resultKey) else { return nil }
-        return (result, store.string(forKey: versionKey))
+        return (result, store.string(forKey: versionKey), store.string(forKey: errorKey))
     }
 }

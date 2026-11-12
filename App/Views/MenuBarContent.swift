@@ -66,20 +66,11 @@ enum MenuBarWindowSource {
         return MenuBarWindows.ordered(items)
     }
 
-    /// Bounded newest-first fetch for the scoped `limits[]` history — enough to
-    /// resolve the latest poll's batch without scanning the append-only table.
-    /// One poll writes a handful of scoped rows; 64 covers far more scoped
-    /// windows than an account realistically has.
-    /// A function rather than a `static let` because the bound and the scope
-    /// have to be applied together. With every account writing this table, an
-    /// unscoped "newest 64" can be entirely the other login's rows, and the
-    /// caller would render its windows as this account's.
-    static func recentScoped(account: String?) -> FetchDescriptor<UsageLimitSample> {
-        LimitScope.modelScopedLimits(account: account, limit: 64)
-    }
-
     /// The menu bar's window inputs, fetched once per change rather than once
-    /// per body evaluation.
+    /// per body evaluation, on `context` (`MenuBarWindowReadings.read` says
+    /// what is fetched and why it is bounded). The dropdown and Settings read
+    /// them on the main context; the always-mounted label reads the same
+    /// fetches off the main thread (`MenuBarLabelFeed`, PACER-19).
     ///
     /// These were `@Query`s. A `@Query` re-executes whenever the model context
     /// changes, and Pacer's context changes every scan cycle — so the menu bar
@@ -97,15 +88,8 @@ enum MenuBarWindowSource {
     @MainActor
     static func load(_ context: ModelContext, account: String?)
         -> (fixed: [LimitSamplePoint], scoped: [ScopedWindowRow]) {
-        // Latest batch only: a window the last poll no longer reported (the
-        // 5-hour one on a verified Ultra account) must not keep its last
-        // value as if it were current.
-        let fixed = ((try? context.fetch(LimitScope.rateLimits(account: account, limit: 8))) ?? [])
-            .map(\.limitPoint)
-            .latestBatch()
-        let scoped = ((try? context.fetch(recentScoped(account: account))) ?? [])
-            .map(\.scopedWindowRow)
-        return (fixed, scoped)
+        let read = MenuBarWindowReadings.read(context, account: account)
+        return (read.fixed, read.scoped)
     }
 }
 
@@ -128,75 +112,60 @@ enum MenuBarWindowSource {
 /// Empty chip list = host tears the NSStatusItem down (handled in
 /// `PacerAppDelegate.rebuildMenuBarForCurrentChips`).
 struct MenuBarLabel: View {
-    /// Cap the fetch — we only ever look at the most-recent sample per
-    /// window. Without the cap, every SwiftData save materialized the
-    /// full ~4k-row history just to fire the menu-bar label re-render.
-    @State private var rateSamples: [LimitSamplePoint] = []
-
-    /// Today's aggregates for cost / tokens chips. Filtered by date so
-    /// the daemon's per-scan re-fire stays bounded (~5 model rows max).
-    @Query private var globalToday: [DailyAggregate]
-    @Query private var scopedToday: [AccountDailyAggregate]
+    /// What the label draws from the store: today's spend, tokens and newest
+    /// model, and the windows. Read off the main thread, and only when one of
+    /// the keys below moves (PACER-19).
+    ///
+    /// These were four `@Query`s plus a main-thread window load. The label is
+    /// hosted in the `NSStatusItem` and never unmounts, and a `@Query`
+    /// re-fetches on every save of the store on the main thread, so it paid
+    /// a fetch for each its chips read on every save, all day. On a Mac under
+    /// memory pressure one of them, a one-row indexed fetch of the newest
+    /// turn, held the main thread for over two seconds.
+    ///
+    /// Kept across scope switches and midnight: the label is not rebuilt for
+    /// either (nothing in it is captured at `init` any more), so it shows the
+    /// last value until the new key's read lands, a few milliseconds later,
+    /// rather than an empty "$0.00" or "—" in between.
+    @State private var feed = MenuBarLabelFeed()
     private let menuScope: UsageScope
 
-    /// Follows the window's account scope. The menu bar is ambient, so an
-    /// argument exists for it always showing every account — but two numbers
-    /// on screen at once disagreeing about "today's cost" is worse than
-    /// either answer, and the scope is a deliberate choice the user made.
-    private var todayAggregates: [DailyRow] {
-        menuScope.isAll ? globalToday.map(\.dailyRow) : scopedToday.map(\.dailyRow)
-    }
-
-    /// Single most recent TokenSample, for the active-model chip. Cap
-    /// to 1 — we never need any other field besides `model`.
-    ///
-    /// Two of them, chosen at read time, the same shape as the today
-    /// aggregates above: unscoped this named whichever account wrote last, so
-    /// a menu bar scoped to one account showed the other's model.
-    @Query(MenuBarLabel.recentTokenSampleDescriptor)
-    private var recentSamples: [TokenSample]
-    @Query private var scopedRecentSamples: [TokenSample]
-
-    /// Recent scoped `limits[]` rows — the source of the per-model windows the
-    /// icon driver can point at. Bounded so this always-visible label never
-    /// scans the append-only scoped history.
-    @State private var scopedSamples: [ScopedWindowRow] = []
-
-    /// "Something was written" — see `RateLimitWriteSignal`. The scoped fetch
-    /// it gates is the expensive part, and runs once per write rather than once
-    /// per body evaluation.
+    /// Only its container is used: every read makes its own context off the
+    /// main thread.
     @Environment(\.modelContext) private var menuModelContext
 
-    /// What `reloadWindows` reads, as one key. Each part is read here so that
-    /// its change re-runs the load: the write signal, whose account's limits
-    /// (through the observable scope, so a scope or login switch counts; the
-    /// store lookup is only the cold-start fallback), and the accounts chips
-    /// are pinned to, so a chip added in Settings shows at once rather than
-    /// after the next poll.
-    var reloadKey: String {
-        let account = menuScope.limitAccountId ?? UsageScope.limitAccountId(in: menuModelContext)
-        let pinned = Set(chipItems.compactMap(\.pinnedAccountId)).sorted().joined(separator: ",")
-        return "\(RateLimitWriteSignal.shared.generation):\(account ?? "none"):\(pinned)"
+    /// What the usage read depends on, nil when no chip shows spend, tokens or
+    /// the model (the default chips show none, and read nothing). Each part is
+    /// read here, in `body`, so its change re-runs the read:
+    ///
+    /// - the local day, so midnight moves today's totals on an idle machine;
+    /// - the scope, so a switch with Claude Code quiet still follows it. The
+    ///   menu bar is ambient, so an argument exists for it always showing
+    ///   every account, but two numbers on screen at once disagreeing about
+    ///   "today's cost" is worse than either answer, and the scope is a
+    ///   deliberate choice the user made;
+    /// - `SampleWriteSignal`, which moves on each scan cycle that wrote turns
+    ///   and on nothing else.
+    private var usageKey: MenuBarLabelFeed.UsageKey? {
+        let items = chipItems
+        let today = items.contains(.fixed(.todayCost)) || items.contains(.fixed(.todayTokens))
+        let model = items.contains(.fixed(.activeModel))
+        guard today || model else { return nil }
+        return MenuBarLabelFeed.UsageKey(
+            day: PacerToday.shared.key, account: menuScope.accountId,
+            writes: SampleWriteSignal.shared.generation, today: today, model: model)
     }
 
-    @MainActor
-    func reloadWindows() {
-        let account = UsageScope.limitAccountId(in: menuModelContext)
-        let loaded = MenuBarWindowSource.load(menuModelContext, account: account)
-        rateSamples = loaded.fixed
-        scopedSamples = loaded.scoped
-        loadedAccount = account
-
-        // Chips pinned to a named account need that account's own windows, not
-        // the scoped one's. Loaded only for accounts a chip actually names, so
-        // a user who pins nothing pays nothing — the ordinary case.
-        var pinned: [String: (fixed: [LimitSamplePoint], scoped: [ScopedWindowRow])] = [:]
-        for id in Set(chipItems.compactMap(\.pinnedAccountId)) {
-            pinned[id] = MenuBarWindowSource.load(menuModelContext, account: id)
-        }
-        pinnedLoaded = pinned
-        let all = (try? menuModelContext.fetch(FetchDescriptor<Account>())) ?? []
-        accountLabels = Dictionary(uniqueKeysWithValues: all.map { ($0.id, $0.shortLabel) })
+    /// What the windows read depends on: the write signal, whose limits
+    /// (through the observable scope, so a scope or login switch counts; the
+    /// store's active row is only the cold-start fallback, resolved in the
+    /// read), and the accounts chips are pinned to, so a chip added in Settings
+    /// shows at once rather than after the next poll.
+    private var limitsKey: MenuBarLabelFeed.LimitsKey {
+        MenuBarLabelFeed.LimitsKey(
+            writes: RateLimitWriteSignal.shared.generation,
+            scope: menuScope.accountId, active: menuScope.activeAccountId,
+            pinned: Set(chipItems.compactMap(\.pinnedAccountId)).sorted())
     }
 
     /// Called with the tooltip text whenever it changes, and once on appear.
@@ -210,38 +179,15 @@ struct MenuBarLabel: View {
     private let onTooltipChange: ((String) -> Void)?
 
     /// `scope` defaults to the shared observable, which is what the AppKit-built
-    /// status item has: no parent view can pass it down. Its host is built once
-    /// and kept, so a scope change reaches the `@Query` predicates below only
-    /// because `MenuBarKeyedContent` rebuilds the view when the scope moves.
-    /// Same shape as `MenuStatusContent.init(scope:)` (#324, #391); a render
-    /// passes the scope it wants instead of reading the persisted one.
+    /// status item has: no parent view can pass it down. Its values are read
+    /// in `body` (`usageKey`, `limitsKey`), so a scope switch reaches the label
+    /// without rebuilding it. Same shape as `MenuStatusContent.init(scope:)`
+    /// (#324, #391); a render passes the scope it wants instead of reading the
+    /// persisted one.
     init(scope: UsageScope = .shared, onTooltipChange: ((String) -> Void)? = nil) {
         self.onTooltipChange = onTooltipChange
         menuScope = scope
-        let today = TokenSample.formatDate(Date())
-        let acct = scope.accountId ?? UsageScope.noAccountSentinel
-        _globalToday = Query(
-            filter: #Predicate<DailyAggregate> { $0.date == today }
-        )
-        _scopedToday = Query(
-            filter: #Predicate<AccountDailyAggregate> {
-                $0.date == today && $0.accountId == acct
-            }
-        )
-        var scopedRecent = FetchDescriptor<TokenSample>(
-            predicate: #Predicate<TokenSample> { $0.accountId == acct },
-            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
-        scopedRecent.fetchLimit = 1
-        _scopedRecentSamples = Query(scopedRecent)
     }
-
-    private static let recentTokenSampleDescriptor: FetchDescriptor<TokenSample> = {
-        var d = FetchDescriptor<TokenSample>(
-            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
-        )
-        d.fetchLimit = 1
-        return d
-    }()
 
     @AppStorage(PacerSettings.Key.menuBarChips, store: PacerSettings.store)
     private var chipsRaw: String = "icon,five_hour_pct"
@@ -264,21 +210,16 @@ struct MenuBarLabel: View {
 
     // MARK: - Derived state
 
-    /// The readings of each account a chip names, keyed by account id.
-    @State private var pinnedLoaded: [String: (fixed: [LimitSamplePoint], scoped: [ScopedWindowRow])] = [:]
-
-    /// Those accounts' windows, each through its own live values. Built in
-    /// `body`, so a new live value redraws the chip.
+    /// The windows of an account a chip names, each through its own live
+    /// values. Built in `body`, so a new live value redraws the chip.
     private func pinnedWindows(_ id: String) -> [MenuBarWindowItem]? {
-        guard let loaded = pinnedLoaded[id] else { return nil }
+        guard let loaded = feed.limits.pinned[id] else { return nil }
         return MenuBarWindowSource.items(
             fiveHour: loaded.fixed.first { $0.window == RateLimitWindowName.fiveHour },
             sevenDay: loaded.fixed.first { $0.window == RateLimitWindowName.sevenDay },
             scoped: loaded.scoped,
             live: LiveMeterBoard.shared.values[id] ?? [:])
     }
-    /// Short names for those accounts, so a chip reads "personal 42%".
-    @State private var accountLabels: [String: String] = [:]
 
     private var chipItems: [PacerSettings.MenuBarChipItem] {
         // Re-parse from the @AppStorage CSV so SwiftUI body-eval picks
@@ -289,11 +230,11 @@ struct MenuBarLabel: View {
     }
 
     private var fiveHour: LimitSamplePoint? {
-        rateSamples.first { $0.window == "five_hour" }
+        feed.limits.windows.fixed.first { $0.window == "five_hour" }
     }
 
     private var sevenDay: LimitSamplePoint? {
-        rateSamples.first { $0.window == "seven_day" }
+        feed.limits.windows.fixed.first { $0.window == "seven_day" }
     }
 
     /// `windows` is read several times per body (the icon driver, the chips,
@@ -309,15 +250,17 @@ struct MenuBarLabel: View {
     /// The board is read here, inside `body`'s evaluation, so a new live
     /// value redraws the label; `Render`'s equality keeps that from
     /// re-rasterizing the status item unless a drawn number moved.
+    ///
+    /// The live values are those of the account whose readings these are
+    /// (`Limits.account`, assigned in the same turn as the readings), or a
+    /// scope switch could pair one login's reading with the other's estimate
+    /// for the moment before the new read lands.
     private var windows: [MenuBarWindowItem] {
-        MenuBarWindowSource.items(fiveHour: fiveHour, sevenDay: sevenDay, scoped: scopedSamples,
-                                  live: loadedAccount.flatMap { LiveMeterBoard.shared.values[$0] } ?? [:])
+        let limits = feed.limits
+        return MenuBarWindowSource.items(
+            fiveHour: fiveHour, sevenDay: sevenDay, scoped: limits.windows.scoped,
+            live: limits.account.flatMap { LiveMeterBoard.shared.values[$0] } ?? [:])
     }
-
-    /// Whose readings `rateSamples` are: the live values must be the same
-    /// account's, or a scope switch could pair one login's reading with the
-    /// other's estimate for the moment before the reload lands.
-    @State private var loadedAccount: String?
 
     /// The window whose utilization drives the icon: the user's pick when it's
     /// present, else the 5-hour anchor. `nil` only with no windows at all.
@@ -378,17 +321,12 @@ struct MenuBarLabel: View {
 
     // MARK: - Chip data
 
-    private var todayCost: Double {
-        todayAggregates.reduce(0) { $0 + $1.totalCostUSD }
-    }
+    private var todayCost: Double { feed.usage.costUSD }
 
-    private var todayTokens: Int64 {
-        todayAggregates.reduce(0) { $0 + $1.tokens.all }
-    }
+    private var todayTokens: Int64 { feed.usage.tokens }
 
     private var activeModel: String? {
-        let latest = menuScope.isAll ? recentSamples.first : scopedRecentSamples.first
-        return latest.map { pacerModelDisplayName($0.model) }
+        feed.usage.latestModel.map(pacerModelDisplayName)
     }
 
     /// Whether the 5h-percent chip should prefix itself with "5h ". When
@@ -462,15 +400,14 @@ struct MenuBarLabel: View {
     // MARK: - Layout
 
     /// The fully-resolved render payload — exactly what the status item
-    /// draws. Recomputed on every @Query refresh (cheap: capped fetches
-    /// + small derivations), but the NSStatusItem only re-rasterizes when
-    /// this value changes, because the chrome below is wrapped in an
-    /// EquatableView. SwiftData @Query invalidation is entity-agnostic,
-    /// so without this gate the always-visible menu-bar item re-rendered
-    /// (and re-rasterized via `cacheDisplayInRect`) on every store save
-    /// all day — including token-only saves that touch no displayed
-    /// value, and changes to values that aren't even on screen. Same
-    /// remedy as the PR #102 toolbar pill.
+    /// draws. Recomputed on every body evaluation (cheap: small derivations
+    /// over values already read), but the NSStatusItem only re-rasterizes
+    /// when this value changes, because the chrome below is wrapped in an
+    /// EquatableView. Without this gate the always-visible menu-bar item
+    /// re-rendered (and re-rasterized via `cacheDisplayInRect`) whenever a
+    /// key or a read moved — a scan cycle that touched no displayed value, a
+    /// live value's tenth on a chip that draws whole numbers. Same remedy as
+    /// the PR #102 toolbar pill.
     private var rendered: Render {
         // `compactMap`: a scoped chip whose window isn't in the latest poll
         // resolves to nil and is dropped (dormant) — never drawn as a blank
@@ -520,7 +457,7 @@ struct MenuBarLabel: View {
             // business existing on a surface with several accounts on it.
             guard let window = pinnedWindows(accountId)?.first(where: { $0.key == key }),
                   let pct = window.usedPercentage else { return nil }
-            let label = accountLabels[accountId] ?? window.displayName
+            let label = feed.limits.accountLabels[accountId] ?? window.displayName
             return .percent(prefix: "\(label) ", pct: pct, isEstimate: window.isEstimate)
         case .scoped(let identity):
             // Read the scoped window's live % from the same dynamic window set
@@ -535,11 +472,25 @@ struct MenuBarLabel: View {
     }
 
     var body: some View {
+        // Read here, so a change to any part re-runs `body` and restarts the
+        // task keyed on it. Captured once, so the read is for exactly the key
+        // the task was started with.
+        let usageKey = self.usageKey
+        let limitsKey = self.limitsKey
         // `.equatable()` gates AppKit's re-rasterization: the outer view
-        // still re-evaluates on every save (cheap), but the hosted status
-        // item only redraws when `rendered` actually differs.
-        MenuBarLabelContent(rendered: rendered).equatable()
-            .task(id: reloadKey) { reloadWindows() }
+        // re-evaluates when a key or a read value moves (cheap: no fetch is
+        // made here), but the hosted status item only redraws when `rendered`
+        // actually differs.
+        return MenuBarLabelContent(rendered: rendered).equatable()
+            // No fetch on the main thread: each load reads on a fresh context
+            // in a detached task and assigns its values in one turn.
+            .task(id: limitsKey) {
+                await feed.loadLimits(limitsKey, from: menuModelContext.container)
+            }
+            .task(id: usageKey) {
+                guard let usageKey else { return }
+                await feed.loadUsage(usageKey, from: menuModelContext.container)
+            }
             // `initial: true` so the button gets a tooltip on first draw, not
             // only after the first value change.
             .onChange(of: rendered.tooltip, initial: true) { _, _ in
@@ -594,8 +545,8 @@ struct MenuBarLabel: View {
     }
 }
 
-/// The status-item chrome, isolated behind `Equatable` so a no-op @Query
-/// refresh is a true no-op down to AppKit's `cacheDisplayInRect`. There
+/// The status-item chrome, isolated behind `Equatable` so a no-op redraw of
+/// the label is a true no-op down to AppKit's `cacheDisplayInRect`. There
 /// is deliberately NO animation — the colored icon and numbers carry the
 /// signal; the old one-shot scale pulse was removed as wasted per-frame
 /// work in an always-on status item.
@@ -775,7 +726,7 @@ struct MenuStatusContent: View {
         }
     }
     @State private var perAccount: [AccountWindows] = []
-    /// Whose readings `rateLimits` are; see `MenuBarLabel.loadedAccount`.
+    /// Whose readings `rateLimits` are; see `MenuBarLabelFeed.Limits.account`.
     @State private var loadedAccount: String?
 
     /// The write signal and whose limits, both read here so either change

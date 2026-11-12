@@ -19,6 +19,22 @@ struct UpdateOutcomeLogTests {
         #expect(UpdateOutcomeLog.result(forErrorDomain: "Foo.Bar Baz/x", code: 1) == "error_bar_baz_x_1")
     }
 
+    @Test("a download failure keeps its error detail until a later result without one")
+    func errorDetailKept() {
+        let s = suite()
+        let detail = UpdateOutcomeLog.errorDetail(domain: "NSURLErrorDomain", code: -1009,
+                                                  underlyingDomain: "kCFErrorDomainCFNetwork", underlyingCode: -1)
+        #expect(detail == "error_nsurlerrordomain_-1009/error_kcferrordomaincfnetwork_-1")
+        #expect(UpdateOutcomeLog.errorDetail(domain: "SUSparkleErrorDomain", code: 2001) == "error_sparkle_2001")
+        UpdateOutcomeLog.record(.downloadFailed, version: "1.2.3", error: detail, store: s)
+        #expect(UpdateOutcomeLog.last(store: s)?.error == detail)
+        // The end-of-cycle repeat is ignored, so the reason survives it.
+        UpdateOutcomeLog.record("error_sparkle_4005", endOfCycle: true, store: s)
+        #expect(UpdateOutcomeLog.last(store: s)?.error == detail)
+        UpdateOutcomeLog.record(.found, version: "1.2.4", store: s)
+        #expect(UpdateOutcomeLog.last(store: s)?.error == nil)
+    }
+
     @Test("the last result and version are kept together")
     func roundTrip() {
         let s = suite()

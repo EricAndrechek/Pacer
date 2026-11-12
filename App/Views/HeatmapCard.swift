@@ -351,7 +351,10 @@ struct HeatmapCard: View {
     private static let coordSpaceName = "heatmap-card"
 
     var body: some View {
-        PacerCard("Activity heatmap", trailing: { metricPicker }) {
+        // One `@AppStorage` read per body, passed down: the cells used to read
+        // it once each (about 365 a pass; PACER-1A hung there).
+        let metric = self.metric
+        return PacerCard("Activity heatmap", trailing: { metricPicker }) {
             VStack(alignment: .leading, spacing: 8) {
                 ZStack(alignment: .topLeading) {
                     ScrollView(.horizontal, showsIndicators: false) {
@@ -360,7 +363,7 @@ struct HeatmapCard: View {
                             HStack(alignment: .top, spacing: Self.cellSpacing) {
                                 weekdayColumn
                                 ForEach(Array(grid.enumerated()), id: \.offset) { _, week in
-                                    weekColumn(week)
+                                    weekColumn(week, metric: metric)
                                 }
                             }
                         }
@@ -376,7 +379,7 @@ struct HeatmapCard: View {
                        let cell = cellById(id),
                        let frame = hoveredCellFrame {
                         TooltipBubble(
-                            color: color(for: cell.value(for: metric)),
+                            color: color(for: cell.value(for: metric), metric: metric),
                             valueText: formatTotal(cell.value(for: metric), kind: metric),
                             metricLabel: metric.label.lowercased(),
                             dateText: Self.tooltipDateFmt.string(from: cell.date)
@@ -536,11 +539,11 @@ struct HeatmapCard: View {
     }
 
     @ViewBuilder
-    private func weekColumn(_ week: [Cell?]) -> some View {
+    private func weekColumn(_ week: [Cell?], metric: ProjectMetric) -> some View {
         VStack(spacing: Self.cellSpacing) {
             ForEach(0..<7, id: \.self) { idx in
                 if let cell = week[idx] {
-                    cellView(cell)
+                    cellView(cell, metric: metric)
                 } else {
                     Color.clear.frame(width: Self.cellSize, height: Self.cellSize)
                 }
@@ -599,7 +602,7 @@ struct HeatmapCard: View {
     }
 
     @ViewBuilder
-    private func cellView(_ cell: Cell) -> some View {
+    private func cellView(_ cell: Cell, metric: ProjectMetric) -> some View {
         let v = cell.value(for: metric)
         if v > 0 {
             // Active cell: clickable + hoverable + cursor flips to link.
@@ -612,7 +615,7 @@ struct HeatmapCard: View {
             } label: {
                 ZStack {
                     RoundedRectangle(cornerRadius: 2)
-                        .fill(color(for: v))
+                        .fill(color(for: v, metric: metric))
                     if hoveredCellId == cell.dateKey {
                         RoundedRectangle(cornerRadius: 2)
                             .stroke(Color.primary.opacity(0.55), lineWidth: 1)
@@ -639,7 +642,7 @@ struct HeatmapCard: View {
                 if inside { enterCell(cell.dateKey) }
                 else { exitCell(cell.dateKey) }
             }
-            .accessibilityLabel(cellAccessibilityLabel(cell))
+            .accessibilityLabel(cellAccessibilityLabel(cell, metric: metric))
             .accessibilityHint("Opens the day's detailed breakdown")
         } else {
             // Empty day: just a swatch, no hover affordance, not
@@ -671,7 +674,7 @@ struct HeatmapCard: View {
     }()
 
 
-    private func color(for value: Double) -> Color {
+    private func color(for value: Double, metric: ProjectMetric) -> Color {
         guard value > 0 else { return Color.secondary.opacity(0.12) }
         let cap = max(cached.maxByMetric[metric] ?? 1, 0.0001)
         let intensity = min(1.0, value / cap)
@@ -688,7 +691,7 @@ struct HeatmapCard: View {
     /// the cell's value in the current metric ("Thu, May 7, 2026: $12.40").
     /// Uses the exact formatter pair so the screen reader speaks the
     /// precise number instead of the compact "$12.4k" form.
-    private func cellAccessibilityLabel(_ cell: Cell) -> String {
+    private func cellAccessibilityLabel(_ cell: Cell, metric: ProjectMetric) -> String {
         let date = Self.tooltipDateFmt.string(from: cell.date)
         let v = cell.value(for: metric)
         let valueText: String

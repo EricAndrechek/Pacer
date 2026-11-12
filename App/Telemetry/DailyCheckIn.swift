@@ -347,6 +347,7 @@ final class DailyCheckIn {
         if let update = UpdateOutcomeLog.last(store: store) {
             a["lifecycle.update_result"] = .string(update.result)
             if let version = update.version { a["lifecycle.update_version"] = .string(version) }
+            if let error = update.error { a["lifecycle.update_error"] = .string(error) }
         }
         let cpu = max(cpuSeconds() - cpuBefore, 0)
         a["energy.cpu_seconds"] = .double((cpu * 10).rounded() / 10)
