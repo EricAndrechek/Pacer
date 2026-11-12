@@ -145,7 +145,8 @@ struct CuratedPriceHistoryTests {
     @Test func cacheReadMultipliersMatchThePage() {
         // 0.025x on Fable/Mythos 5.1, 0.05x on Opus/Sonnet 5.5, 0.1x elsewhere.
         let cases: [(String, Double)] = [
-            ("claude-fable-5-1", 0.025), ("claude-mythos-5-1", 0.025), ("claude-opus-5-5", 0.05),
+            ("claude-fable-5-1", 0.025), ("claude-mythos-5-1", 0.025), ("claude-fable-5-2", 0.025),
+            ("claude-mythos-5-2", 0.025), ("claude-opus-5-5", 0.05),
             ("claude-sonnet-5-5", 0.05), ("claude-opus-5", 0.1), ("claude-fable-5", 0.1),
             ("claude-haiku-4-5", 0.1), ("claude-sonnet-4-6", 0.1),
         ]
@@ -196,7 +197,8 @@ struct CuratedPriceHistoryTests {
             ("claude-sonnet-4-6", "2026-04-14"), ("claude-opus-4-7", "2026-04-17"),
             ("claude-opus-4-8", "2026-05-28"), ("claude-fable-5", "2026-06-09"),
             ("claude-sonnet-5", "2026-07-01"), ("claude-opus-5", "2026-07-27"),
-            ("claude-fable-5-1", "2026-09-01"), ("claude-opus-5-5", "2026-09-23"),
+            ("claude-fable-5-1", "2026-09-01"), ("claude-fable-5-2", "2026-11-09"),
+            ("claude-mythos-5-2", "2026-11-09"), ("claude-opus-5-5", "2026-09-23"),
             ("claude-sonnet-5-5", "2026-09-30"), ("claude-haiku-5-5", "2026-10-14"),
         ]
         let curatedOnly = PriceLedger(records: Self.curated.records)

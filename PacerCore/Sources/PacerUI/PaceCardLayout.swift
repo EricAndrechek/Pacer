@@ -121,10 +121,21 @@ public struct PaceAccountGroupsLayout: Layout {
 
     private var grid: PaceColumnGrid { PaceColumnGrid() }
 
+    /// One `PaceColumnGrid` cache per account's run of columns, keyed by the
+    /// run's first child, so the size pass and the place pass measure each
+    /// column once (Sentry PACER-10). Cleared whenever the subviews change.
+    public struct Cache {
+        var grids: [Int: PaceColumnGrid.Cache] = [:]
+    }
+
+    public func makeCache(subviews: Subviews) -> Cache { Cache() }
+
+    public func updateCache(_ cache: inout Cache, subviews: Subviews) { cache = Cache() }
+
     public func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews,
-                             cache: inout ()) -> CGSize {
+                             cache: inout Cache) -> CGSize {
         var size = CGSize.zero
-        stack(width: proposal.width, subviews: subviews) { _, frame in
+        for (_, frame) in stack(width: proposal.width, subviews: subviews, cache: &cache) {
             size.width = max(size.width, frame.width)
             size.height = frame.maxY
         }
@@ -132,17 +143,18 @@ public struct PaceAccountGroupsLayout: Layout {
     }
 
     public func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize,
-                              subviews: Subviews, cache: inout ()) {
-        stack(width: bounds.width, subviews: subviews) { part, frame in
+                              subviews: Subviews, cache: inout Cache) {
+        // The parts are measured first (through the cache) and placed after: a
+        // visitor closure would hold `cache` while `stack` also modifies it.
+        for (part, frame) in stack(width: bounds.width, subviews: subviews, cache: &cache) {
             let at = frame.offsetBy(dx: bounds.minX, dy: bounds.minY)
             switch part {
             case .header(let index):
                 subviews[index].place(at: at.origin, anchor: .topLeading,
                                       proposal: ProposedViewSize(at.size))
             case .columns(let range):
-                var none: () = ()
                 grid.placeSubviews(in: at, proposal: ProposedViewSize(width: at.width, height: nil),
-                                   subviews: subviews[range], cache: &none)
+                                   subviews: subviews[range], cache: &cache.grids[range.lowerBound, default: .init()])
             }
         }
     }
@@ -155,25 +167,26 @@ public struct PaceAccountGroupsLayout: Layout {
     /// The parts top to bottom, each at the leading edge, offered the full
     /// width and sized by its own ideal height, as the stacks did. Frames
     /// are relative to the layout's origin.
-    private func stack(width: CGFloat?, subviews: Subviews, _ visit: (Part, CGRect) -> Void) {
+    private func stack(width: CGFloat?, subviews: Subviews, cache: inout Cache) -> [(Part, CGRect)] {
+        var parts: [(Part, CGRect)] = []
         let offered = ProposedViewSize(width: width, height: nil)
         var y: CGFloat = 0
         for (index, run) in Self.runs(isHeader: subviews.map { $0[IsHeader.self] }).enumerated() {
             if index > 0 { y += Self.accountSpacing }
             if let header = run.header {
                 let size = subviews[header].sizeThatFits(offered)
-                visit(.header(header), CGRect(origin: CGPoint(x: 0, y: y), size: size))
+                parts.append((.header(header), CGRect(origin: CGPoint(x: 0, y: y), size: size)))
                 y += size.height
                 if !run.columns.isEmpty { y += Self.headerSpacing }
             }
             if !run.columns.isEmpty {
-                var none: () = ()
                 let size = grid.sizeThatFits(proposal: offered, subviews: subviews[run.columns],
-                                             cache: &none)
-                visit(.columns(run.columns), CGRect(origin: CGPoint(x: 0, y: y), size: size))
+                                             cache: &cache.grids[run.columns.lowerBound, default: .init()])
+                parts.append((.columns(run.columns), CGRect(origin: CGPoint(x: 0, y: y), size: size)))
                 y += size.height
             }
         }
+        return parts
     }
 
     struct Run: Equatable {

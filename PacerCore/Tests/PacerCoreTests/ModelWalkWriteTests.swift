@@ -55,7 +55,7 @@ import Testing
     // MARK: - ModelWalk.update
 
     @ScanActor
-    @Test func offsetPagingWritesEveryRowOnce() throws {
+    @Test func writesEveryRowOnce() throws {
         for pageSize in [7, 5, 1, 23, 40] {
             let c = try container()
             let owner = ModelContext(c)
@@ -63,7 +63,7 @@ import Testing
             try owner.save()
             var handed: [String] = []
             let visited = try ModelWalk.update(FetchDescriptor<TokenSample>(), in: c, owner: owner,
-                                               paging: .offset, pageSize: pageSize) { s in
+                                               pageSize: pageSize) { s in
                 handed.append(s.dedupKey ?? "-")
                 s.outputTokens += 1_000
             }
@@ -75,11 +75,13 @@ import Testing
     }
 
     /// Stamping the rows a predicate picks as unstamped takes each out of the
-    /// predicate, so offset paging skips a page's worth after every page.
-    /// Draining stamps them all.
+    /// predicate. Offset windows skipped a page's worth after every page
+    /// there, which is why that case used to refetch from the top each page;
+    /// pages cut by row id reach every row either way (#394).
     @ScanActor
-    @Test func drainPagingReachesEveryRowItsBodyTakesOutOfThePredicate() throws {
-        func unstampedStore() throws -> (ModelContainer, ModelContext) {
+    @Test func reachesEveryRowItsBodyTakesOutOfThePredicate() throws {
+        let unstamped = FetchDescriptor<TokenSample>(predicate: #Predicate { $0.localHour < 0 })
+        for pageSize in [7, 1, 40, 41] {
             let c = try container()
             let owner = ModelContext(c)
             for i in 0..<40 {
@@ -88,19 +90,7 @@ import Testing
                 owner.insert(s)
             }
             try owner.save()
-            return (c, owner)
-        }
-        let unstamped = FetchDescriptor<TokenSample>(predicate: #Predicate { $0.localHour < 0 })
-
-        let (offsetStore, offsetOwner) = try unstampedStore()
-        try ModelWalk.update(unstamped, in: offsetStore, owner: offsetOwner,
-                             paging: .offset, pageSize: 7) { $0.localHour = 0 }
-        #expect(try rows(offsetStore).contains { $0.localHour < 0 }, "offset paging skipped none")
-
-        for pageSize in [7, 1, 40, 41] {
-            let (c, owner) = try unstampedStore()
-            let visited = try ModelWalk.update(unstamped, in: c, owner: owner,
-                                               paging: .drain, pageSize: pageSize) { s in
+            let visited = try ModelWalk.update(unstamped, in: c, owner: owner, pageSize: pageSize) { s in
                 s.localHour = Calendar.current.component(.hour, from: s.sampledAt)
             }
             #expect(visited == 40, "page size \(pageSize)")
@@ -108,8 +98,11 @@ import Testing
         }
     }
 
+    /// …and a body that leaves some of them in is handed each one once, and
+    /// the walk ends: the next page starts after the last row id handed out,
+    /// whatever still matches behind it.
     @ScanActor
-    @Test func drainThrowsRatherThanLoopWhenTheBodyLeavesARowIn() throws {
+    @Test func aBodyThatLeavesRowsInIsHandedEachOnce() throws {
         let c = try container()
         let owner = ModelContext(c)
         for i in 0..<10 {
@@ -119,14 +112,14 @@ import Testing
         }
         try owner.save()
         let unstamped = FetchDescriptor<TokenSample>(predicate: #Predicate { $0.localHour < 0 })
-        // Leaves the first row it is handed in; that row tops the next page.
-        var leftIn: PersistentIdentifier?
-        #expect(throws: ModelWalk.WalkError.drainMadeNoProgress) {
-            try ModelWalk.update(unstamped, in: c, owner: owner, paging: .drain, pageSize: 4) { s in
-                if leftIn == nil { leftIn = s.persistentModelID }
-                if s.persistentModelID != leftIn { s.localHour = 1 }
-            }
+        var handed: [PersistentIdentifier] = []
+        let visited = try ModelWalk.update(unstamped, in: c, owner: owner, pageSize: 4) { s in
+            handed.append(s.persistentModelID)
+            if handed.count.isMultiple(of: 2) { s.localHour = 1 }
         }
+        #expect(visited == 10)
+        #expect(Set(handed).count == 10)
+        #expect(try rows(c).filter { $0.localHour < 0 }.count == 5)
     }
 
     @ScanActor
@@ -135,8 +128,7 @@ import Testing
         let owner = ModelContext(c)
         owner.insert(TokenSample(from: entry(1)))
         #expect(throws: ModelWalk.WalkError.ownerHasPendingChanges) {
-            try ModelWalk.update(FetchDescriptor<TokenSample>(), in: c, owner: owner,
-                                 paging: .offset) { _ in }
+            try ModelWalk.update(FetchDescriptor<TokenSample>(), in: c, owner: owner) { _ in }
         }
     }
 
@@ -154,7 +146,7 @@ import Testing
         let held = try #require(try owner.fetch(FetchDescriptor<TokenSample>(
             predicate: #Predicate { $0.dedupKey == target })).first)
         try ModelWalk.update(FetchDescriptor<TokenSample>(), in: c, owner: owner,
-                             paging: .offset, pageSize: 6) { $0.projectPath = "/moved" }
+                             pageSize: 6) { $0.projectPath = "/moved" }
         #expect(held.projectPath == "/moved")
         #expect(!owner.hasChanges, "the walk saves what it wrote through the owner")
 

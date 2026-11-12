@@ -81,6 +81,30 @@ the lever the poller pulls.
 With one token this degrades cleanly to single-lane activity-gating. Tuning
 constants live in `OAuthPoller.Configuration` / `OAuthPollScheduler.Tuning`.
 
+## What each reading stores
+
+A poll writes one `RateLimitSample` per fixed window and one
+`UsageLimitSample` per `limits[]` item, stamped with the account and one
+`sampledAt`, in one save (`OAuthPoller.recordPoll`). They are kept forever:
+past `liveWindowDays` they move to `AccountUsageArchive`, never deleted.
+
+Each row also says which lane took it (`laneId`, #352): the token's 12-hex
+fingerprint (`OAuthPoller.laneId`, the `TokenLaneMeta.id`), never the token.
+It survives eviction to the archive and the fold back. That is what lets the
+lane stagger (#350) and per-lane freshness be checked from the store after the
+`[OAuthPoller]` log has rotated. It is nil on rows from before it was recorded
+(never backfilled) and on readings lifted from the switcher's cache, which no
+lane of Pacer's took.
+
+In that same save goes one `LiveMeterOutcome` per window the live meter had a
+value for (#352): what it showed the moment before the reading landed (built
+on the previous reading, as the snapshot built it then), the fit that built it
+(`fitDay`), the spend it counted, and what the lag and runaway guards made of
+the moment. It is a record for measuring the meter, and nothing in the app
+reads it. The poll measures it before the save, on the poller, with the
+bounded reads the `[LiveMeter]` drift line used to make after it, so a reading
+still costs one save and no read on the main actor.
+
 ## Sharing a token with another client
 
 Pacer is not necessarily the only thing on this machine polling these

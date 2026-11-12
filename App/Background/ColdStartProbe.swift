@@ -16,6 +16,10 @@ import PacerCore
 ///     swapped cache tier keeps every count identical while silently changing
 ///     everyone's cost.
 ///
+/// This measures the INSTALLED app, and it launches the binary: for a branch,
+/// use `make ingest-harness` (`IngestHarness` in PacerCore's tests), which runs
+/// the same scan in a test process and prints this probe's TOTALS line.
+///
 /// Run it headless — it never touches the real store (in-memory container),
 /// never starts the scan loop, and writes nothing:
 ///

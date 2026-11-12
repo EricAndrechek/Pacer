@@ -14,72 +14,91 @@ import SwiftData
 /// gigabytes it freed afterwards stayed in the heap as fragmentation: a
 /// rebuild ran three such walks.
 ///
+/// **Each page starts where the last one ended, never at an offset (#394).**
+/// A `fetchOffset` page makes SQLite step over every earlier row again: the
+/// table is a b-tree, so skipping 975,000 rows means reading the leaf pages
+/// that hold them. On a copy of a real 1,022,036-row store the last of 41
+/// such pages read 92,355 pages (the whole 369 MB table) to return 25,000
+/// rows, 17 s with the file cache gone, and the walk read the table 22 times
+/// over: 8.6 GB. Instead each page asks for the rows after the last one it
+/// was handed — `Z_PK > ?`, a seek on the table's own key, in the row-id order
+/// an unsorted fetch returns anyway — so the walk reads the table once
+/// (0.39 GB; 2,383 pages for that same last page, 0.03 s). Sorted walks do the
+/// same on their sort key, with the row id breaking ties
+/// (`forEach(_:orderedBy:in:)`).
+///
 /// **Read-only, saved rows only.** Each page's context is discarded, so a
 /// write through a model the body is handed is lost, and a fresh context
 /// sees what is saved, not what another context holds pending. Callers walk
 /// to compute values; a walk that writes goes through `update` (#338).
 ///
-/// **One writer.** Pages are `fetchOffset` windows over the descriptor's own
-/// order — the store's natural order when it has none, as `enumerate`'s was —
-/// so a row inserted or deleted mid-walk would shift a page boundary; a
-/// sorted walk tiles because SQLite breaks ties in an index (`sampledAt` has
-/// one) by row id. Every caller walks synchronously on the scan actor, the
-/// only place `TokenSample`s are inserted or deleted, so nothing moves under
-/// a walk.
+/// **One writer.** Every caller walks synchronously on the scan actor, the
+/// only place `TokenSample`s are inserted or deleted. A row inserted mid-walk
+/// would still be visited if it sorts after the current page, and a deleted
+/// one would simply be missing — no page boundary moves, unlike offset
+/// paging — but nothing relies on that.
 public enum ModelWalk {
 
-    /// Large on purpose. `fetchOffset` makes SQLite step over every earlier
-    /// row again for each page, so 5,000-row pages made a full rebuild's
-    /// walks ~25% slower than `enumerate` (a 746k-row cycle: 39.7 s → 46.4 s).
-    /// At 25,000 it took 39.0 s, and the cycle peaked at 317 MB against the
-    /// 3.5 GB it reached enumerating.
+    /// Rows per page. Large because each page is a fetch with its own
+    /// context: at 25,000 a 746k-row rebuild's walks took 39.0 s and the cycle
+    /// peaked at 317 MB, against 3.5 GB enumerating. (5,000 was ~25% slower
+    /// then, when every page also re-scanned the rows before it.)
     public static let pageSize = 25_000
 
-    /// `descriptor`'s own `fetchLimit` is ignored: the walk sets one per page.
+    public enum WalkError: Error, Equatable {
+        /// `update` was called with unsaved changes in `owner`.
+        case ownerHasPendingChanges
+        /// A descriptor with a `sortBy` reached a walk that pages by row id.
+        /// Pages are cut by the last row's key, so the walk has to know the
+        /// order: use `forEach(_:orderedBy:in:)`.
+        case sortedDescriptor
+    }
+
+    /// In row-id order — what an unsorted fetch returns, a full table scan.
+    /// `descriptor` must have no `sortBy`; its `fetchLimit` and `fetchOffset`
+    /// are ignored.
     public static func forEach<T: PersistentModel>(
         _ descriptor: FetchDescriptor<T>,
         in container: ModelContainer,
         pageSize: Int = pageSize,
         _ body: (T) throws -> Void
     ) throws {
-        var page = descriptor
-        page.fetchLimit = pageSize
-        var offset = descriptor.fetchOffset ?? 0
-        while true {
-            page.fetchOffset = offset
-            let fetched = try autoreleasepool { () throws -> Int in
-                let rows = try ModelContext(container).fetch(page)
-                for row in rows { try body(row) }
-                return rows.count
-            }
-            offset += fetched
-            if fetched < pageSize { return }
+        guard descriptor.sortBy.isEmpty else { throw WalkError.sortedDescriptor }
+        try walk(byRowID(descriptor, pageSize), in: container) { _, rows in
+            for row in rows { try body(row) }
         }
     }
 
-    /// How `update` moves from one page to the next.
-    public enum Paging: Sendable {
-        /// `fetchOffset` windows over the descriptor's order, as `forEach`.
-        /// Only for a body that leaves every row in the result set and in its
-        /// place: it falsifies no predicate, changes no sort key and deletes
-        /// nothing. An unsorted walk is in row-id order, which an update never
-        /// moves.
-        case offset
-        /// Every page from the top, until one comes back short. For a body
-        /// that takes every row it is handed OUT of the result set — stamping
-        /// the rows a predicate picks because they are unstamped. Offset
-        /// paging would skip rows there: the page just saved no longer
-        /// matches, so the next offset steps over rows that were never
-        /// handed out. A row handed out a second time means the body left it
-        /// in, and the walk throws rather than loop.
-        case drain
-    }
-
-    public enum WalkError: Error, Equatable {
-        /// `update` was called with unsaved changes in `owner`.
-        case ownerHasPendingChanges
-        /// A `.drain` page handed back a row the previous page was given.
-        case drainMadeNoProgress
+    /// In ascending `key` order, ties in row-id order — what SQLite returns
+    /// for an index on `key`, whose entries carry the row id. `descriptor`
+    /// must have no `sortBy` (the walk sets it); its `fetchLimit` and
+    /// `fetchOffset` are ignored.
+    ///
+    /// The page after a row whose key is `k` and id `p` is
+    /// `key >= k && (key > k || id > p)`: the leading `>=` is what lets SQLite
+    /// seek the index straight to `k`, where `key > k || …` alone would scan
+    /// it from the start every page.
+    public static func forEach<T: PersistentModel, Key: Comparable & Codable & Sendable>(
+        _ descriptor: FetchDescriptor<T>,
+        orderedBy key: KeyPath<T, Key> & Sendable,
+        in container: ModelContainer,
+        pageSize: Int = pageSize,
+        _ body: (T) throws -> Void
+    ) throws {
+        guard descriptor.sortBy.isEmpty else { throw WalkError.sortedDescriptor }
+        let base = descriptor.predicate
+        var first = descriptor
+        first.sortBy = [SortDescriptor(key, order: .forward), SortDescriptor(\.persistentModelID, order: .forward)]
+        first.fetchLimit = pageSize
+        first.fetchOffset = nil
+        let pages = Pages(first: first, limit: pageSize) { last in
+            let next = Self.after(key, last[keyPath: key], last.persistentModelID)
+            guard let base else { return next }
+            return #Predicate<T> { base.evaluate($0) && next.evaluate($0) }
+        }
+        try walk(pages, in: container) { _, rows in
+            for row in rows { try body(row) }
+        }
     }
 
     /// `forEach` for a body that writes: each page is fetched through a fresh
@@ -92,6 +111,14 @@ public enum ModelWalk {
     /// real 757,909-row store that peaked at 7.6 GB; paged here, 241 MB, in
     /// 85 s against 98 s. A page's changes are saved before the next page is
     /// fetched, so at most one page exists at a time.
+    ///
+    /// **Any body, any predicate.** Pages are cut by row id, which no write
+    /// moves, so a body may take the rows it is handed out of the predicate —
+    /// stamping the rows picked because they are unstamped — or leave them
+    /// in, and every matching row is handed out exactly once either way. (The
+    /// offset paging this replaced had to be told which: offset windows skip
+    /// rows when the page just saved stops matching, so that case refetched
+    /// from the top every page instead, re-scanning every row stamped so far.)
     ///
     /// **`owner` is the context the rest of the cycle reads and writes.** Two
     /// rules keep its view true while other contexts write underneath it:
@@ -118,52 +145,106 @@ public enum ModelWalk {
     /// rows, not the table.
     ///
     /// When it returns, every write has been saved. Returns the rows handed
-    /// to the body. `descriptor`'s own `fetchLimit` is ignored, and so is its
-    /// `fetchOffset` under `.drain`.
+    /// to the body. `descriptor` must have no `sortBy`; its `fetchLimit` and
+    /// `fetchOffset` are ignored.
     @discardableResult
     public static func update<T: PersistentModel>(
         _ descriptor: FetchDescriptor<T>,
         in container: ModelContainer,
         owner: ModelContext,
-        paging: Paging,
         pageSize: Int = pageSize,
         _ body: (T) throws -> Void
     ) throws -> Int {
         guard !owner.hasChanges else { throw WalkError.ownerHasPendingChanges }
-        var page = descriptor
-        page.fetchLimit = pageSize
-        var offset = paging == .offset ? (descriptor.fetchOffset ?? 0) : 0
+        guard descriptor.sortBy.isEmpty else { throw WalkError.sortedDescriptor }
         var visited = 0
-        // `.drain` only: the rows the previous page was handed.
-        var previous: Set<PersistentIdentifier> = []
-        while true {
-            page.fetchOffset = offset
-            let fetched = try autoreleasepool { () throws -> Int in
-                let context = ModelContext(container)
-                let rows = try context.fetch(page)
-                var handed: Set<PersistentIdentifier> = []
-                var ownerWrote = false
-                for row in rows {
-                    let id = row.persistentModelID
-                    if paging == .drain {
-                        guard !previous.contains(id) else { throw WalkError.drainMadeNoProgress }
-                        handed.insert(id)
-                    }
-                    if let live: T = owner.registeredModel(for: id) {
-                        try body(live)
-                        ownerWrote = true
-                    } else {
-                        try body(row)
-                    }
+        try walk(byRowID(descriptor, pageSize), in: container) { context, rows in
+            var ownerWrote = false
+            for row in rows {
+                if let live: T = owner.registeredModel(for: row.persistentModelID) {
+                    try body(live)
+                    ownerWrote = true
+                } else {
+                    try body(row)
                 }
-                if context.hasChanges { try context.save() }
-                if ownerWrote, owner.hasChanges { try owner.save() }
-                previous = handed
-                return rows.count
             }
-            visited += fetched
-            if paging == .offset { offset += fetched }
-            if fetched < pageSize { return visited }
+            if context.hasChanges { try context.save() }
+            if ownerWrote, owner.hasChanges { try owner.save() }
+            visited += rows.count
+        }
+        return visited
+    }
+
+    // MARK: - Paging
+
+    /// The first page's descriptor, and how to build the next page's
+    /// predicate from the last row of the one before.
+    private struct Pages<T: PersistentModel> {
+        let first: FetchDescriptor<T>
+        let limit: Int
+        let after: (T) -> Predicate<T>
+    }
+
+    private static func byRowID<T: PersistentModel>(
+        _ descriptor: FetchDescriptor<T>, _ pageSize: Int
+    ) -> Pages<T> {
+        let base = descriptor.predicate
+        var first = descriptor
+        // Row-id order made explicit: the order an unsorted fetch already
+        // returns, which SQLite serves from `Z_PK > ?` without a sort.
+        first.sortBy = [SortDescriptor(\.persistentModelID, order: .forward)]
+        first.fetchLimit = pageSize
+        first.fetchOffset = nil
+        return Pages(first: first, limit: pageSize) { last in
+            let id = last.persistentModelID
+            guard let base else { return #Predicate<T> { $0.persistentModelID > id } }
+            return #Predicate<T> { base.evaluate($0) && $0.persistentModelID > id }
+        }
+    }
+
+    /// Fetch page after page until one comes back short. The next page's
+    /// predicate is built from the last row before `page` returns, while that
+    /// row's context is still alive.
+    private static func walk<T: PersistentModel>(
+        _ pages: Pages<T>,
+        in container: ModelContainer,
+        _ page: (ModelContext, [T]) throws -> Void
+    ) throws {
+        var descriptor = pages.first
+        while true {
+            let next = try autoreleasepool { () throws -> Predicate<T>? in
+                let context = ModelContext(container)
+                let rows = try context.fetch(descriptor)
+                let next = rows.count < pages.limit ? nil : rows.last.map(pages.after)
+                try page(context, rows)
+                return next
+            }
+            guard let next else { return }
+            descriptor.predicate = next
+        }
+    }
+
+    /// `key >= k && (key > k || id > p)`, written out with the expression
+    /// builders `#Predicate` expands to, because the macro needs a literal
+    /// key path and this one is a parameter.
+    private static func after<T: PersistentModel, Key: Comparable & Codable & Sendable>(
+        _ key: KeyPath<T, Key> & Sendable, _ k: Key, _ p: PersistentIdentifier
+    ) -> Predicate<T> {
+        Predicate<T> { row in
+            PredicateExpressions.build_Conjunction(
+                lhs: PredicateExpressions.build_Comparison(
+                    lhs: PredicateExpressions.build_KeyPath(root: row, keyPath: key),
+                    rhs: PredicateExpressions.build_Arg(k),
+                    op: .greaterThanOrEqual),
+                rhs: PredicateExpressions.build_Disjunction(
+                    lhs: PredicateExpressions.build_Comparison(
+                        lhs: PredicateExpressions.build_KeyPath(root: row, keyPath: key),
+                        rhs: PredicateExpressions.build_Arg(k),
+                        op: .greaterThan),
+                    rhs: PredicateExpressions.build_Comparison(
+                        lhs: PredicateExpressions.build_KeyPath(root: row, keyPath: \.persistentModelID),
+                        rhs: PredicateExpressions.build_Arg(p),
+                        op: .greaterThan)))
         }
     }
 }

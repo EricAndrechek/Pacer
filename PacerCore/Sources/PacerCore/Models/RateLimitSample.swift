@@ -70,6 +70,16 @@ public final class RateLimitSample {
     /// nothing is unstamped, which is what lets the predicates stay a plain
     /// equality. See `Account`.
     public var accountId: String?
+    /// Which token lane took the reading: `OAuthPoller.laneId`, the 12-hex
+    /// fingerprint `TokenLaneMeta` and the Tokens table use, never the token
+    /// (#352). So poll freshness per lane, and the stagger in #350, can be
+    /// read back after the `[OAuthPoller]` log has rotated.
+    ///
+    /// Nil on every row from before it was recorded (never backfilled: which
+    /// lane took an old reading is not known) and on readings no lane of
+    /// Pacer's took (`source == cswap`). Not indexed: nothing filters on it;
+    /// a study reads an account's window and groups by it.
+    public var laneId: String?
 
     public init(
         sampledAt: Date,
@@ -77,7 +87,8 @@ public final class RateLimitSample {
         usedPercentage: Double,
         resetsAt: Date?,
         source: String,
-        accountId: String? = nil
+        accountId: String? = nil,
+        laneId: String? = nil
     ) {
         self.sampledAt = sampledAt
         self.window = window
@@ -85,6 +96,7 @@ public final class RateLimitSample {
         self.resetsAt = resetsAt
         self.source = source
         self.accountId = accountId
+        self.laneId = laneId
     }
 }
 

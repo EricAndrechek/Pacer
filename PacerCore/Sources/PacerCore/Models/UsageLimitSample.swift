@@ -88,6 +88,9 @@ public final class UsageLimitSample {
     ///
     /// Optional only for the migration; see `RateLimitSample.accountId`.
     public var accountId: String?
+    /// Which token lane took the reading; nil before it was recorded and for
+    /// the switcher cache. See `RateLimitSample.laneId`.
+    public var laneId: String?
 
     public init(
         sampledAt: Date,
@@ -103,8 +106,10 @@ public final class UsageLimitSample {
         modelDisplayName: String? = nil,
         surface: String? = nil,
         source: String,
-        accountId: String? = nil
+        accountId: String? = nil,
+        laneId: String? = nil
     ) {
+        self.laneId = laneId
         self.sampledAt = sampledAt
         self.identity = identity
         self.kind = kind
@@ -122,7 +127,8 @@ public final class UsageLimitSample {
     }
 
     /// Build a persistable row from a parsed `UsageLimit`.
-    public convenience init(from limit: UsageLimit, sampledAt: Date, source: String, accountId: String? = nil) {
+    public convenience init(from limit: UsageLimit, sampledAt: Date, source: String, accountId: String? = nil,
+                            laneId: String? = nil) {
         self.init(
             sampledAt: sampledAt,
             identity: limit.identity,
@@ -137,7 +143,8 @@ public final class UsageLimitSample {
             modelDisplayName: limit.scope?.model?.displayName,
             surface: limit.scope?.surface,
             source: source,
-            accountId: accountId
+            accountId: accountId,
+            laneId: laneId
         )
     }
 

@@ -63,9 +63,11 @@ public struct LiveMeterRates: Sendable, Equatable {
 }
 
 /// What the meter reads now, estimated from the spend since its last
-/// reading (#318). Never stored: not a `RateLimitSample`, not a
+/// reading (#318). Never stored as a reading: not a `RateLimitSample`, not a
 /// `UsageLimitSample`, not in the archive, the self-evaluation record or
-/// `RecentBurn`, all of which learn from real readings.
+/// `RecentBurn`, all of which learn from real readings. The one place it is
+/// kept is `LiveMeterOutcome`: what it was just before each reading that
+/// replaced it, for measuring the meter, which nothing learns from (#352).
 public struct LiveMeterValue: Sendable, Equatable {
 
     /// Which rates priced the spend that was counted.
@@ -115,11 +117,17 @@ public struct LiveMeterValue: Sendable, Equatable {
     /// Where inside its whole point the meter was estimated to sit at the
     /// reading (`LiveMeter.carry`); 0 after a reset.
     public let carry: Double
+    /// The `SpendMeterFit.fittedDay` of the rates that built it: carried on
+    /// the value rather than read again beside it, so the day the runaway
+    /// guard judges and `LiveMeterOutcome` records is the fit that was used,
+    /// even when the daily fit lands in between.
+    public let fittedDay: String
 
     public init(percent: Double, reading: MeterReading, addedPoints: Double, exactAdded: Double,
                 spendUSD: Double, rateSource: RateSource, restarted: Bool, asOf: Date,
                 carry: Double = 0, exactPercent: Double? = nil,
-                anchor: MeterReading? = nil, heldImplied: Double? = nil) {
+                anchor: MeterReading? = nil, heldImplied: Double? = nil, fittedDay: String = "") {
+        self.fittedDay = fittedDay
         self.percent = percent
         self.anchor = anchor ?? reading
         self.heldImplied = heldImplied
@@ -441,6 +449,6 @@ public enum LiveMeter {
             percent: percent, reading: reading, addedPoints: percent - start.base,
             exactAdded: exact, spendUSD: spent, rateSource: source,
             restarted: start.restarted, asOf: now, carry: carried, exactPercent: exactPercent,
-            anchor: anchor, heldImplied: anchor == reading ? nil : heldImplied)
+            anchor: anchor, heldImplied: anchor == reading ? nil : heldImplied, fittedDay: rates.fittedDay)
     }
 }

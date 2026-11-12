@@ -489,10 +489,12 @@ public actor OAuthPoller: TokenPoolTesting {
             let isActive = classifyIsActive(org: org)
             if isActive {
                 let key = activeAccountKey ?? Account.key(forOrg: org)
+                // Not a lane of the pool, but the same fingerprint it would
+                // have as one, so the reading names the token that took it.
                 await recordPoll(snap, accountKey: key, organizationId: org,
                                  subscriptionType: cred.subscriptionType,
                                  rateLimitTier: cred.rateLimitTier, isActive: true,
-                                 laneSource: .override)
+                                 laneSource: .override, laneId: Self.laneId(trimmed))
                 return .success(fiveHour: snap.fiveHour?.usedPercentage, sevenDay: snap.sevenDay?.usedPercentage)
             }
             return .otherAccount(org: org)
@@ -1056,6 +1058,7 @@ public actor OAuthPoller: TokenPoolTesting {
                              subscriptionType: nil,
                              isActive: activeAccountKey == key,
                              laneSource: .parked,
+                             laneId: nil,
                              source: RateLimitSource.cswap)
         }
         return tally
@@ -1644,11 +1647,14 @@ public actor OAuthPoller: TokenPoolTesting {
             let accountKey = isActive ? (activeAccountKey ?? Account.key(forOrg: org)) : Account.key(forOrg: org)
             let sub = lanes[idx].credential.subscriptionType
             let tier = lanes[idx].credential.rateLimitTier
+            // The lane that took this reading, by the fingerprint
+            // `TokenLaneMeta` and the Tokens table use (#352).
+            let laneId = Self.laneId(lanes[idx].credential.accessToken)
             if isActive {
                 lanes[idx].state.account = .primary
                 await recordPoll(snapshot, accountKey: accountKey, organizationId: org,
                                  subscriptionType: sub, rateLimitTier: tier, isActive: true,
-                                 laneSource: lanes[idx].source)
+                                 laneSource: lanes[idx].source, laneId: laneId)
                 return .success(
                     fiveHourPct: snapshot.fiveHour?.usedPercentage,
                     sevenDayPct: snapshot.sevenDay?.usedPercentage
@@ -1660,7 +1666,7 @@ public actor OAuthPoller: TokenPoolTesting {
                 lanes[idx].state.account = .secondary
                 await recordPoll(snapshot, accountKey: accountKey, organizationId: org,
                                  subscriptionType: sub, rateLimitTier: tier, isActive: false,
-                                 laneSource: lanes[idx].source)
+                                 laneSource: lanes[idx].source, laneId: laneId)
                 return .secondaryAccount(org: org)
             }
 
@@ -2033,6 +2039,11 @@ public actor OAuthPoller: TokenPoolTesting {
         rateLimitTier: String? = nil,
         isActive: Bool,
         laneSource: CredentialCandidate.Source,
+        /// The fingerprint (`laneId`) of the token that took the reading,
+        /// stamped on every sample row it writes (#352), so per-lane
+        /// freshness and the stagger in #350 can be checked after the log has
+        /// rotated. Nil when no token of Pacer's took it: the switcher cache.
+        laneId: String?,
         /// Which mechanism produced this observation. Defaults to a live poll;
         /// the switcher-cache path passes its own so the rows say where they
         /// came from and the dashboard's source chip stays honest.
@@ -2040,6 +2051,21 @@ public actor OAuthPoller: TokenPoolTesting {
     ) async {
         let container = self.container
         let captured = snapshot
+        // What the live meter showed for each window just before these
+        // readings land (#318), measured before the save so its record
+        // (`LiveMeterOutcome`, #352) lands in the same save as the readings.
+        // Here on the poller, not the main actor: a few bounded reads of its
+        // own, the ones the drift log made after the save until now.
+        let meterReadings: [(key: String, reading: MeterReading)] =
+            [(RateLimitWindowName.fiveHour, captured.fiveHour), (RateLimitWindowName.sevenDay, captured.sevenDay)]
+            .compactMap { key, w in
+                w.map { (key, MeterReading(at: captured.sampledAt, percent: $0.usedPercentage, resetsAt: $0.resetsAt)) }
+            }
+            + captured.limits.map {
+                ($0.identity, MeterReading(at: captured.sampledAt, percent: $0.percent, resetsAt: $0.resetsAt))
+            }
+        let measured = LiveMeterDrift.measure(container: container, account: accountKey,
+                                              at: captured.sampledAt, readings: meterReadings)
         await MainActor.run {
             let context = ModelContext(container)
 
@@ -2066,8 +2092,8 @@ public actor OAuthPoller: TokenPoolTesting {
             }
             account.lastSeenAt = captured.sampledAt
             if account.organizationId == nil, let organizationId { account.organizationId = organizationId }
-            if let subscriptionType { account.subscriptionType = subscriptionType }
-            if let rateLimitTier { account.rateLimitTier = rateLimitTier }
+            account.observePlan(subscriptionType: subscriptionType, rateLimitTier: rateLimitTier,
+                                at: captured.sampledAt, reportedBy: laneSource.rawValue, in: context)
             if isActive { account.isActive = true }
             if let w = captured.fiveHour {
                 account.latestFiveHourPct = w.usedPercentage
@@ -2115,7 +2141,8 @@ public actor OAuthPoller: TokenPoolTesting {
                     usedPercentage: window.usedPercentage,
                     resetsAt: window.resetsAt,
                     source: source,
-                    accountId: key
+                    accountId: key,
+                    laneId: laneId
                 ))
                 wroteRows = true
             }
@@ -2133,7 +2160,8 @@ public actor OAuthPoller: TokenPoolTesting {
                     usedPercentage: window.usedPercentage,
                     resetsAt: window.resetsAt,
                     source: source,
-                    accountId: key
+                    accountId: key,
+                    laneId: laneId
                 ))
                 wroteRows = true
             }
@@ -2163,9 +2191,16 @@ public actor OAuthPoller: TokenPoolTesting {
                     from: limit,
                     sampledAt: captured.sampledAt,
                     source: source,
-                    accountId: key
+                    accountId: key,
+                    laneId: laneId
                 ))
                 wroteRows = true
+            }
+            // One row per window the live meter had a value for, beside its
+            // reading. An insert each and nothing read: `measured` was built
+            // before this block.
+            if !measured.isEmpty, LiveMeterOutcome.isRegistered(in: context) {
+                for row in LiveMeterOutcome.rows(account: key, measurements: measured) { context.insert(row) }
             }
             if Self.evictionIsDue(now: captured.sampledAt) {
                 let moved = Self.evictStaleLiveRows(context: context, accountId: key)
@@ -2188,16 +2223,10 @@ public actor OAuthPoller: TokenPoolTesting {
                 if wroteRows {
                     postScanCycleSummary(ScanCycleSummary(
                         rateLimitsChanged: true, rateLimitAccountId: key))
-                    // What the live meter showed just before this reading,
-                    // beside it, so drift shows in the log (#318). Off the
-                    // main actor: a few bounded reads of its own.
-                    let readings: [(key: String, percent: Double)] =
-                        [(RateLimitWindowName.fiveHour, captured.fiveHour?.usedPercentage),
-                         (RateLimitWindowName.sevenDay, captured.sevenDay?.usedPercentage)]
-                        .compactMap { key, pct in pct.map { (key, $0) } }
-                        + captured.limits.map { ($0.identity, $0.percent) }
-                    Task.detached(priority: .utility) {
-                        LiveMeterDrift.log(container: container, account: key, at: written, readings: readings)
+                    // The drift lines for what was measured above (#318):
+                    // log writes only, off the main actor.
+                    if !measured.isEmpty {
+                        Task.detached(priority: .utility) { LiveMeterDrift.log(account: key, measurements: measured) }
                     }
                 }
             } catch {
@@ -2268,7 +2297,7 @@ public actor OAuthPoller: TokenPoolTesting {
                 kind: AccountUsageArchive.kindRateLimit,
                 sampledAt: r.sampledAt, window: r.window,
                 usedPercentage: r.usedPercentage, resetsAt: r.resetsAt,
-                source: r.source))
+                source: r.source, laneId: r.laneId))
             context.delete(r)
             moved += 1
         }
@@ -2296,7 +2325,7 @@ public actor OAuthPoller: TokenPoolTesting {
                 identity: l.identity, limitKind: l.kind, group: l.group,
                 label: l.label, severity: l.severity, isActive: l.isActive,
                 modelId: l.modelId, modelDisplayName: l.modelDisplayName,
-                surface: l.surface))
+                surface: l.surface, laneId: l.laneId))
             context.delete(l)
             moved += 1
         }
@@ -2457,7 +2486,8 @@ public actor OAuthPoller: TokenPoolTesting {
                     usedPercentage: row.usedPercentage ?? 0,
                     resetsAt: row.resetsAt,
                     source: row.source,
-                    accountId: row.accountId))
+                    accountId: row.accountId,
+                    laneId: row.laneId))
             case AccountUsageArchive.kindUsageLimit:
                 context.insert(UsageLimitSample(
                     sampledAt: row.sampledAt,
@@ -2473,7 +2503,8 @@ public actor OAuthPoller: TokenPoolTesting {
                     modelDisplayName: row.modelDisplayName,
                     surface: row.surface,
                     source: row.source,
-                    accountId: row.accountId))
+                    accountId: row.accountId,
+                    laneId: row.laneId))
             default:   // kindExtraUsage
                 context.insert(ExtraUsageSample(
                     sampledAt: row.sampledAt,

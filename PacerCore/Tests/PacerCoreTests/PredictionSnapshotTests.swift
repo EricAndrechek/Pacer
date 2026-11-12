@@ -138,4 +138,26 @@ struct PredictionSnapshotTests {
         let rows = (try? context.fetch(FetchDescriptor<PredictionSnapshot>())) ?? []
         #expect(rows.allSatisfy { $0.paramsVersion == EngineParams.version })
     }
+
+    /// The trail is kept forever (#352): it is the only record of what was
+    /// shown, so a recompute years later must not delete an old row.
+    @Test func recomputeNeverPrunesOldSnapshots() async throws {
+        let container = try PacerStore.makeInMemoryContainer()
+        let seed = ModelContext(container)
+        let old = Self.now.addingTimeInterval(-3 * 365 * 86_400)
+        seed.insert(PredictionSnapshot(
+            recordedAt: old, surface: "eod", method: "m", paramsVersion: "v",
+            engineVersion: "0", periodKey: "2023-07-06", periodEnd: nil,
+            value: 1, confidence: "low", support: 1))
+        try seed.save()
+
+        let engine = UsageIntelligenceEngine(modelContainer: container)
+        await engine.recompute(now: Self.now, calendar: Self.utc)
+        await engine.recompute(now: Self.now.addingTimeInterval(2 * 86_400), calendar: Self.utc)
+
+        let context = ModelContext(container)
+        let survivors = try context.fetch(FetchDescriptor<PredictionSnapshot>(
+            predicate: #Predicate { $0.recordedAt == old }))
+        #expect(survivors.count == 1)
+    }
 }

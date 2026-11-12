@@ -137,7 +137,7 @@ struct MenuBarLabel: View {
     /// the daemon's per-scan re-fire stays bounded (~5 model rows max).
     @Query private var globalToday: [DailyAggregate]
     @Query private var scopedToday: [AccountDailyAggregate]
-    @State private var menuScope = UsageScope.shared
+    private let menuScope: UsageScope
 
     /// Follows the window's account scope. The menu bar is ambient, so an
     /// argument exists for it always showing every account — but two numbers
@@ -209,15 +209,17 @@ struct MenuBarLabel: View {
     /// Pacer supports, and this keeps its ages current (#318).
     private let onTooltipChange: ((String) -> Void)?
 
-    init(onTooltipChange: ((String) -> Void)? = nil) {
+    /// `scope` defaults to the shared observable, which is what the AppKit-built
+    /// status item has: no parent view can pass it down. Its host is built once
+    /// and kept, so a scope change reaches the `@Query` predicates below only
+    /// because `MenuBarKeyedContent` rebuilds the view when the scope moves.
+    /// Same shape as `MenuStatusContent.init(scope:)` (#324, #391); a render
+    /// passes the scope it wants instead of reading the persisted one.
+    init(scope: UsageScope = .shared, onTooltipChange: ((String) -> Void)? = nil) {
         self.onTooltipChange = onTooltipChange
+        menuScope = scope
         let today = TokenSample.formatDate(Date())
-        // Read from the shared store rather than taken as a parameter: the
-        // menu bar is constructed by AppKit, not by a parent view that could
-        // pass it down. Its host is built once and kept, so a scope change
-        // reaches this only because `MenuBarKeyedContent` rebuilds the view
-        // when the scope moves.
-        let acct = UsageScope.storedAccountId ?? UsageScope.noAccountSentinel
+        let acct = scope.accountId ?? UsageScope.noAccountSentinel
         _globalToday = Query(
             filter: #Predicate<DailyAggregate> { $0.date == today }
         )

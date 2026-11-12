@@ -81,7 +81,7 @@ struct LaneStaggerPollerTests {
             for: Heartbeat.self, TokenSample.self, DailyAggregate.self,
             ProjectDailyAggregate.self, RateLimitSample.self, ExtraUsageSample.self,
             UsageLimitSample.self, SessionInfo.self, ClaudeCodeMeta.self,
-            TokenLaneMeta.self, Account.self, AccountUsageArchive.self,
+            TokenLaneMeta.self, Account.self, AccountPlanEvent.self, AccountUsageArchive.self,
             configurations: ModelConfiguration(isStoredInMemoryOnly: true))
     }
 

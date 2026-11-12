@@ -48,7 +48,30 @@ struct StoreIndexRepairTests {
         #expect(created.count == 2)
         let names = indexes(in: url, table: "ZRATELIMITSAMPLE")
         #expect(names.contains("pacer_ix_zratelimitsample_zaccountid_zsampledat"))
-        #expect(names.contains("Z_x_sampledAt"))   // never drops anything
+        #expect(names.contains("Z_x_sampledAt"))   // never drops what isn't its own
+    }
+
+    /// The migration that adds a column also builds every declared `#Index`
+    /// (`CREATE INDEX IF NOT EXISTS`, #387), so an upgraded store came to hold
+    /// SwiftData's index and ours on the same columns: twice the index writes
+    /// for one index's worth of reads.
+    @Test("its own index is dropped once SwiftData's covers the same columns")
+    func retiresWhatSwiftDataNowBuilds() throws {
+        let url = try makeStore([Self.table])
+        #expect(StoreIndexRepair.run(storeURL: url).count == 2)
+        var db: OpaquePointer?
+        #expect(sqlite3_open_v2(url.path, &db, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK)
+        let swiftData = "CREATE INDEX Z_RateLimitSample_SwiftDataIndexOnBinaryaccountIdsampledAt "
+            + "ON ZRATELIMITSAMPLE (ZACCOUNTID, ZSAMPLEDAT)"
+        #expect(sqlite3_exec(db, swiftData, nil, nil, nil) == SQLITE_OK)
+        sqlite3_close(db)
+
+        #expect(StoreIndexRepair.run(storeURL: url).isEmpty)
+        let names = indexes(in: url, table: "ZRATELIMITSAMPLE")
+        #expect(!names.contains("pacer_ix_zratelimitsample_zaccountid_zsampledat"))
+        #expect(names.contains("Z_RateLimitSample_SwiftDataIndexOnBinaryaccountIdsampledAt"))
+        // The other one has no SwiftData twin yet, so it stays.
+        #expect(names.contains("pacer_ix_zratelimitsample_zaccountid_zwindow_zsampledat"))
     }
 
     /// A fresh install already has SwiftData's own; a duplicate would cost

@@ -70,8 +70,7 @@ final class ArchiveSync {
             if watermark == nil { watermark = try archive.watermark() }
 
             let context = ModelContext(container)
-            var descriptor = FetchDescriptor<TokenSample>(
-                sortBy: [SortDescriptor(\.sampledAt, order: .forward)])
+            var descriptor = FetchDescriptor<TokenSample>()
             if let watermark {
                 descriptor.predicate = #Predicate<TokenSample> { $0.sampledAt > watermark }
             }
@@ -80,7 +79,7 @@ final class ArchiveSync {
             // Paged, not `enumerate`d: that held every row it visited (3.3 GB
             // for a whole 746k-row table, #337), and the reconcile below walks
             // thirty days of turns every half hour.
-            try ModelWalk.forEach(descriptor, in: container) { sample in
+            try ModelWalk.forEach(descriptor, orderedBy: \.sampledAt, in: container) { sample in
                 if newest == nil || sample.sampledAt > newest! { newest = sample.sampledAt }
                 rows.append(row(from: sample))
             }
@@ -166,11 +165,12 @@ final class ArchiveSync {
         let descriptor = FetchDescriptor<TokenSample>(
             predicate: since.map { cutoff in
                 #Predicate<TokenSample> { $0.sampledAt >= cutoff }
-            },
-            sortBy: [SortDescriptor(\.sampledAt, order: .forward)])
+            })
         var missed: [ArchiveRow] = []
         var upgraded = 0
-        try ModelWalk.forEach(descriptor, in: container) { sample in
+        // Thirty days is ~370k turns on a heavy store, fifteen pages: each
+        // seeks the `sampledAt` index to where the last ended (#394).
+        try ModelWalk.forEach(descriptor, orderedBy: \.sampledAt, in: container) { sample in
             guard let key = sample.dedupKey, !pending.contains(key) else { return }
             guard let archivedOutput = archived[key] else {
                 missed.append(row(from: sample))   // never archived
@@ -313,7 +313,10 @@ final class ArchiveSync {
             // The RAW cwd — canonicalization is a view over the alias graph,
             // and the graph changes. Never bake it in here.
             originalProjectPath: sample.originalProjectPath ?? sample.projectPath,
-            ccVersion: sample.ccVersion)
+            ccVersion: sample.ccVersion,
+            accountId: sample.accountId,
+            speed: sample.speed,
+            inferenceGeo: sample.inferenceGeo)
     }
 
     private func openIfNeeded() throws -> RawArchive {

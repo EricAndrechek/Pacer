@@ -33,8 +33,11 @@ import SwiftData
 /// scan cycle that left every number where it was would otherwise redraw
 /// the menu bar's status item each time (`asOf` alone always moves).
 ///
-/// **Never stored.** The values live here and nowhere else: not in the
-/// store, the archive, the engine's training or scoring, or `RecentBurn`.
+/// **Never stored from here.** The values live here and are not readings:
+/// not in the sample tables, the archive, the engine's training or scoring,
+/// or `RecentBurn`. The record of what the meter showed before each reading
+/// (`LiveMeterOutcome`) is written by the poll that lands the reading, not by
+/// this board.
 @MainActor
 @Observable
 public final class LiveMeterBoard {

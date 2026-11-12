@@ -25,10 +25,9 @@ import Testing
 @Suite struct StrandedHourlyAggregateTests {
 
     @ScanActor
-    @Test func strandedHourlyRowsAreDetectedAndDeleted() throws {
+    @Test func strandedHourlyRowsAreDetectedAndDeleted() async throws {
         let container = try ModelContainer(
-            for: TokenSample.self, HourlyAggregate.self, DailyAggregate.self,
-                ProjectDailyAggregate.self, SessionInfo.self,
+            for: Schema(PacerStore.allModelTypes),
             configurations: ModelConfiguration(isStoredInMemoryOnly: true))
         let context = ModelContext(container)
 
@@ -62,7 +61,13 @@ import Testing
         #expect(stranded.count == 1)
         #expect(stranded.first?.hour == (hour + 23) % 24)
 
-        #expect(try persister.deleteHourAggregates(stranded) == 1)
+        // Rebuilt from its samples, of which it has none: the recomputer
+        // deletes it (#388).
+        persister.addDirtyHourBuckets(stranded)
+        let recomputer = HourlyAggregateRecomputer(
+            container: container, context: context, mode: .display)
+        let stats = try await recomputer.recompute(buckets: persister.dirtyHourBuckets)
+        #expect(stats.aggregatesDeleted == 1)
         try context.save()
 
         // The legitimate row survives; totals now match the samples again.

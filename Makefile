@@ -36,7 +36,7 @@ LEGACY_STORE   := $(HOME)/Library/Group Containers/group.com.ericandrechek.pacer
 # get confused if a file with the same name appears.
 .PHONY: help build vendor fetch-weights prune verify test app install uninstall reinstall \
         logs logs-tail widget-log status open clean-data perf-snapshot screenshots verify-data \
-        verify-archive test-ingest-parity \
+        verify-archive test-ingest-parity ingest-harness \
         assign-accounts reassign-account \
         pricing-snapshot
 
@@ -116,6 +116,11 @@ test:  ## Run the PacerCore unit + ground-truth tests.
 
 test-ingest-parity: vendor  ## Both ingest paths (line parser, DuckDB importer) over one fixture tree must leave identical rows (#334). CI runs it.
 	@bin/dev-ingest-parity.sh --fixtures
+
+ingest-harness: vendor  ## Rule 8 for a branch, no app launch: ingest CLAUDE=<frozen claude dir> into STORE=<store copy> (or a new store), print TOTALS + per-phase time and bytes written. ARCHIVE=, OUT=, CONFIG=debug optional. See bin/dev-ingest-harness.sh.
+	@PACER_INGEST_CLAUDE_DIR="$(CLAUDE)" PACER_INGEST_STORE="$(STORE)" PACER_INGEST_ARCHIVE="$(ARCHIVE)" \
+		PACER_INGEST_CONFIG="$(or $(CONFIG),release)" \
+		bin/dev-ingest-harness.sh "$(or $(OUT),$(TMPDIR)pacer-ingest-harness)"
 
 verify-tooltip:  ## THE ONE SCREEN-TOUCHING CHECK. Takes the cursor for ~4s — only run it with the machine owner's explicit go-ahead, for that run. See AGENTS.md "Never take over the machine".
 	@bin/verify-menubar-tooltip.sh

@@ -5,7 +5,8 @@
 #
 #   bin/dev-ingest-parity.sh --fixtures
 #       `IngestParityTests` over its synthetic transcript tree: both paths,
-#       compared row by row. CI's app job runs this. Seconds once built.
+#       compared row by row. Also `RawArchiveMigrationTests`, the archive's
+#       own schema upgrade. CI's app job runs this. Seconds once built.
 #
 #   bin/dev-ingest-parity.sh <pre-upgrade pacer.sqlite> <claude dir> <out dir>
 #       `IngestParityProbe` on real data: each path into its own clone of the
@@ -29,13 +30,14 @@
 
 set -euo pipefail
 
-usage() { sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; exit 64; }
+usage() { sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit 64; }
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 DUCKDB="$REPO/Vendor/DuckDB.xcframework/macos-arm64"
 [ -f "$DUCKDB/libduckdb.a" ] || { echo "no vendored DuckDB — run make vendor" >&2; exit 1; }
 
-# The package: CDuckDB as a module, the importer with that import added, and
-# every parity test PacerCore carries.
+# The package: CDuckDB as a module, the importer and the archive with that
+# import added, every parity test PacerCore carries, and the archive's
+# migration test (#352).
 make_package() {
   local pkg="$1"
   mkdir -p "$pkg/Sources/CDuckDB/include" "$pkg/Tests/IngestParity"
@@ -43,10 +45,12 @@ make_package() {
   printf 'module CDuckDB {\n    header "duckdb.h"\n    export *\n}\n' \
     > "$pkg/Sources/CDuckDB/include/module.modulemap"
   : > "$pkg/Sources/CDuckDB/shim.c"
-  { echo "import CDuckDB"; cat "$REPO/App/Archive/ArchiveImporter.swift"; } \
-    > "$pkg/Tests/IngestParity/ArchiveImporter.swift"
+  for f in ArchiveImporter RawArchive; do
+    { echo "import CDuckDB"; cat "$REPO/App/Archive/$f.swift"; } > "$pkg/Tests/IngestParity/$f.swift"
+  done
   cp "$REPO/PacerCore/Tests/PacerCoreTests/IngestParityTests.swift" \
-     "$REPO/PacerCore/Tests/PacerCoreTests/IngestParityProbe.swift" "$pkg/Tests/IngestParity/"
+     "$REPO/PacerCore/Tests/PacerCoreTests/IngestParityProbe.swift" \
+     "$REPO/PacerCore/Tests/PacerCoreTests/RawArchiveMigrationTests.swift" "$pkg/Tests/IngestParity/"
   cat > "$pkg/Package.swift" <<EOF
 // swift-tools-version: 6.0
 import PackageDescription
@@ -73,7 +77,8 @@ if [ "${1:-}" = "--fixtures" ]; then
   make_package "$PKG"
   # pipefail (set above): a failing test fails this script, whatever the
   # filter shows.
-  PACER_ISOLATED_DEFAULTS=1 swift test --package-path "$PKG" --filter IngestParityTests 2>&1 \
+  PACER_ISOLATED_DEFAULTS=1 swift test --package-path "$PKG" \
+    --filter 'IngestParityTests|RawArchiveMigrationTests' 2>&1 \
     | grep -E "error:|✘|􀢄|Expectation failed|recorded an issue|passed after|failed after|Test run"
   exit 0
 fi

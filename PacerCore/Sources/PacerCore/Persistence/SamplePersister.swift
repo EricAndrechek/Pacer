@@ -47,6 +47,61 @@ public struct DateHourModelTriple: Hashable, Sendable {
     }
 }
 
+/// Every rollup bucket the stored samples fill: the samples' half of the
+/// integrity check, compared against the rollup tables by
+/// `SamplePersister.checkIntegrity(against:)` (#388).
+///
+/// Plain values, so the read can run off the scan actor and be handed over.
+public struct StoredBuckets: Sendable {
+    public var daily: Set<DateModelPair> = []
+    public var project: Set<ProjectDatePair> = []
+    public var hourly: Set<DateHourModelTriple> = []
+    public var sessions: Set<String> = []
+    /// Samples read.
+    public var rows = 0
+
+    public init() {}
+
+    mutating func note(date: String, model: String, projectPath: String?,
+                       sessionId: String?, hour: Int) {
+        rows += 1
+        daily.insert(DateModelPair(date: date, model: model))
+        project.insert(ProjectDatePair(
+            projectPath: projectPath ?? ProjectDailyAggregate.unknownProjectPath, date: date))
+        hourly.insert(DateHourModelTriple(date: date, hour: hour, model: model))
+        if let sessionId, !sessionId.isEmpty { sessions.insert(sessionId) }
+    }
+
+    /// Every saved sample's buckets. Straight from SQLite when the store is a
+    /// file — one pass on a connection of its own, so it holds nothing the
+    /// main thread's reads wait on — and paged through SwiftData when it
+    /// isn't, or when the file surprises the raw reader.
+    public static func read(from container: ModelContainer,
+                            pageSize: Int = ModelWalk.pageSize) throws -> StoredBuckets {
+        var buckets = StoredBuckets()
+        if let url = RawSampleReader.storeURL(of: container),
+           RawSampleReader.forEach(storeURL: url, { row in
+               buckets.note(date: row.date, model: row.model, projectPath: row.projectPath,
+                            sessionId: row.sessionId, hour: row.localHour)
+           }) {
+            return buckets
+        }
+        // What a read that stopped early noted is real; start over anyway, so
+        // `rows` counts each sample once.
+        buckets = StoredBuckets()
+        var descriptor = FetchDescriptor<TokenSample>()
+        descriptor.propertiesToFetch = [\.date, \.model, \.projectPath, \.sessionId,
+                                        \.sampledAt, \.localHour]
+        try ModelWalk.forEach(descriptor, in: container, pageSize: pageSize) { s in
+            buckets.note(date: s.date, model: s.model, projectPath: s.projectPath,
+                         sessionId: s.sessionId,
+                         hour: s.localHour >= 0
+                            ? s.localHour : Calendar.current.component(.hour, from: s.sampledAt))
+        }
+        return buckets
+    }
+}
+
 /// Idempotent inserter for `TokenSample` rows. The hot loop in a full
 /// historical scan will call `insert(_:)` ~500K times on the user's
 /// dataset, so the dedup check has to be O(1). Pre-loads every
@@ -314,10 +369,11 @@ public final class SamplePersister {
     /// map is always built before the first row that could need it, and a
     /// cycle with nothing to ingest never pays.
     ///
-    /// The walk also seeds the integrity sets (missing aggregates, stranded
-    /// hourly rows), which are NOT insert-driven — they look for pre-existing
-    /// damage. `ScanCoordinator` forces this on a schedule so that keeps
-    /// working; see `integrityWalkInterval`.
+    /// A walk also checks the rollups against the samples on the way
+    /// (`checkIntegrity`) — missing aggregates, stranded hourly rows — which
+    /// is NOT insert-driven: it looks for pre-existing damage. A loaded index
+    /// checks nothing, so `ScanCoordinator` runs that check on its own
+    /// schedule (#388); see `integrityWalkInterval`.
     public func ensurePreloaded() throws {
         guard !preloaded else { return }
         preloaded = true
@@ -336,8 +392,8 @@ public final class SamplePersister {
     /// 2-3x inflated costs.
     ///
     /// Note this seeds ONLY the dedup map. The integrity sets (missing
-    /// aggregates, stranded hourly rows) still require the walk, which is why
-    /// `ScanCoordinator` forces one daily regardless.
+    /// aggregates, stranded hourly rows) need the samples read, which
+    /// `ScanCoordinator` does once a day regardless (#388).
     private func loadDedupIndex() throws -> Bool {
         guard let indexURL, let index = DedupIndex.load(from: indexURL) else { return false }
 
@@ -353,6 +409,7 @@ public final class SamplePersister {
         }
 
         bestOutputByKey = index.entries
+        loadedDedupIndex = true
         // Rows written after the index was saved are still unaccounted for;
         // pick them up so a merely-behind index is usable rather than binned.
         let since = index.watermark        // predicates can't traverse `index.`
@@ -379,6 +436,9 @@ public final class SamplePersister {
 
     /// Newest `sampledAt` the in-memory map accounts for.
     private var indexWatermark = Date(timeIntervalSince1970: 0)
+    /// Whether the dedup map came from the on-disk index rather than a walk
+    /// of the store.
+    private(set) var loadedDedupIndex = false
 
     /// Which account each incoming sample should be attributed to, resolved
     /// by timestamp. Refreshed by `ScanCoordinator` at the top of every
@@ -412,8 +472,22 @@ public final class SamplePersister {
     private var lastIndexWriteAt: Date?
 
     /// Persist the dedup map so the next launch skips the walk. Called after a
-    /// cycle's writes have landed; failures are logged and ignored, since the
-    /// index is only ever an optimisation.
+    /// cycle's terminal save, and on shutdown; failures are logged and
+    /// ignored, since the index is only ever an optimisation.
+    ///
+    /// What is written is the map as the STORE has it (`committedIndex`), not
+    /// as this persister does. The two differ between an insert and the save
+    /// that commits it, and the shutdown write lands in that gap whenever a
+    /// quit catches a cycle part-way — on a loaded Mac, where a cycle's
+    /// rollups can take minutes, that is most quits. Written from the map, the
+    /// index then claimed rows the store never got: "dedup index covers
+    /// 896242 rows, store has 895856 — rebuilding", and again five days later
+    /// with 1016535 against 1016280 (#395). The count check caught those and
+    /// paid a rebuild for each. It could not catch an upgrade decided but not
+    /// saved: the row count still matched, the index carried the finished
+    /// copy's output, the store the partial's, and the finished copy — read
+    /// again from the cursor the quit left behind — was then a "duplicate" of
+    /// itself. That turn stayed partial for good (rule 7).
     ///
     /// `force` bypasses the throttle — used on shutdown, where the next write
     /// opportunity may be a long time away.
@@ -422,17 +496,85 @@ public final class SamplePersister {
         if !force, let last = lastIndexWriteAt,
            Date().timeIntervalSince(last) < Self.indexWriteInterval { return }
         do {
-            let keyed = FetchDescriptor<TokenSample>(
-                predicate: #Predicate<TokenSample> { $0.dedupKey != nil })
-            let index = DedupIndex(entries: bestOutputByKey,
-                                   rowCount: try context.fetchCount(keyed),
-                                   watermark: indexWatermark)
-            try index.write(to: indexURL)
-            indexNeedsWrite = false
-            lastIndexWriteAt = Date()
+            switch try committedIndex() {
+            case .tooManyToLookUp(let count):
+                Log.write("SamplePersister", "dedup index not written: \(count) unsaved row(s) to look up, "
+                          + "over \(Self.committedLookupLimit) — the next launch rebuilds it")
+            case .ready(let index, let leftOutUnsaved):
+                try index.write(to: indexURL)
+                // What it left out is written once it is saved.
+                indexNeedsWrite = leftOutUnsaved
+                lastIndexWriteAt = Date()
+            }
         } catch {
             Log.write("SamplePersister", "dedup index write failed (harmless): \(error)")
         }
+    }
+
+    /// Most stored rows `committedIndex` looks up one at a time. Live cycles
+    /// leave a handful unsaved; a quit in the middle of a full re-read can
+    /// leave thousands, and then it writes nothing — the next launch rebuilds,
+    /// as it would have anyway.
+    static let committedLookupLimit = 2_000
+
+    /// `leftOutUnsaved`: it left something out, which is still owed a write
+    /// once saved.
+    enum CommittedIndex {
+        case ready(DedupIndex, leftOutUnsaved: Bool)
+        case tooManyToLookUp(Int)
+    }
+
+    /// The dedup map as the store has it committed: what a walk of the store
+    /// would build right now (#395).
+    ///
+    /// The map is ahead of the store by exactly what this persister has done
+    /// since the last save: turns inserted (in the context, unsaved), upgrades
+    /// applied (changed in the context) or decided (`pendingUpgrades`, not yet
+    /// in the context at all), and duplicates deleted. Inserted keys have no
+    /// stored row, so they are dropped. Every other key is read back from the
+    /// store through a fresh context, which sees only what is saved — the
+    /// last row under the key in row-id order, as a walk would leave it. The
+    /// count and the watermark come from the store too.
+    func committedIndex() throws -> CommittedIndex {
+        var inserted: Set<String> = []
+        var changed = Set(pendingUpgrades.keys)
+        for case let s as TokenSample in context.insertedModelsArray {
+            if let key = s.dedupKey { inserted.insert(key) }
+        }
+        for case let s as TokenSample in context.changedModelsArray {
+            if let key = s.dedupKey { changed.insert(key) }
+        }
+        for case let s as TokenSample in context.deletedModelsArray {
+            if let key = s.dedupKey { changed.insert(key) }
+        }
+        changed.subtract(inserted)
+
+        let store = ModelContext(context.container)
+        let keyed = FetchDescriptor<TokenSample>(
+            predicate: #Predicate<TokenSample> { $0.dedupKey != nil })
+        let rowCount = try store.fetchCount(keyed)
+        guard !inserted.isEmpty || !changed.isEmpty else {
+            return .ready(DedupIndex(entries: bestOutputByKey, rowCount: rowCount,
+                                     watermark: indexWatermark), leftOutUnsaved: false)
+        }
+        guard changed.count <= Self.committedLookupLimit else { return .tooManyToLookUp(changed.count) }
+
+        var entries = bestOutputByKey
+        for key in inserted { entries[DedupIndex.Key(key)] = nil }
+        for key in changed {
+            let k = key
+            var d = FetchDescriptor<TokenSample>(
+                predicate: #Predicate<TokenSample> { $0.dedupKey == k },
+                sortBy: [SortDescriptor(\.persistentModelID, order: .reverse)])
+            d.fetchLimit = 1
+            entries[DedupIndex.Key(key)] = try store.fetch(d).first?.outputTokens
+        }
+        var newest = FetchDescriptor<TokenSample>(
+            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
+        newest.fetchLimit = 1
+        let watermark = try store.fetch(newest).first?.sampledAt ?? Date(timeIntervalSince1970: 0)
+        return .ready(DedupIndex(entries: entries, rowCount: rowCount, watermark: watermark),
+                      leftOutUnsaved: true)
     }
 
     /// Set for a full re-read of history (a `currentScanVersion` bump): a
@@ -725,25 +867,24 @@ public final class SamplePersister {
     }
 
     /// Hourly rows with no samples behind them, drained once. The caller
-    /// deletes them; leaving them makes every hourly total read high.
+    /// marks them for rebuild (`addDirtyHourBuckets`): the hourly recomputer
+    /// deletes a bucket it finds empty, per-account rows included, and
+    /// rebuilds one that has gained a sample since it was found. Left alone
+    /// they make every hourly total read high.
     public func consumeStrandedHourBuckets() -> Set<DateHourModelTriple> {
         let out = strandedHourBuckets
         strandedHourBuckets = []
         return out
     }
 
-    /// Delete the given `HourlyAggregate` rows. Returns how many went.
-    @discardableResult
-    public func deleteHourAggregates(_ buckets: Set<DateHourModelTriple>) throws -> Int {
-        guard !buckets.isEmpty else { return 0 }
-        var deleted = 0
-        for agg in try context.fetch(FetchDescriptor<HourlyAggregate>()) {
-            let key = DateHourModelTriple(date: agg.date, hour: agg.hour, model: agg.model)
-            guard buckets.contains(key) else { continue }
-            context.delete(agg)
-            deleted += 1
-        }
-        return deleted
+    /// Set when the integrity sets were filled — by a walk of the store or
+    /// by `checkIntegrity` — and the coordinator hasn't been told yet. It
+    /// records the check as done when it drains them.
+    public private(set) var integrityCheckUnreported = false
+
+    public func consumeIntegrityCheck() -> Bool {
+        defer { integrityCheckUnreported = false }
+        return integrityCheckUnreported
     }
 
     /// Reset the batching counter. The coordinator calls this after the
@@ -1146,12 +1287,13 @@ public final class SamplePersister {
         // Paged and saved a page at a time (#338): on a store older than the
         // field that is every row, and `enumerate` here kept every one of
         // them pending in this context until the cycle's save (7.3 GB on a
-        // 757,909-row copy; 239 MB paged). Draining, because stamping takes a
-        // row out of the predicate. Saved first, as `update` requires. The
-        // stamp is the value `localHour(of:)` already derives for a -1 row,
-        // so committing it ahead of the rebuild changes no bucket.
+        // 757,909-row copy; 239 MB paged). Stamping takes a row out of the
+        // predicate, which the walk's row-id paging doesn't mind (#394).
+        // Saved first, as `update` requires. The stamp is the value
+        // `localHour(of:)` already derives for a -1 row, so committing it
+        // ahead of the rebuild changes no bucket.
         if context.hasChanges { try context.save() }
-        try ModelWalk.update(unstamped, in: context.container, owner: context, paging: .drain,
+        try ModelWalk.update(unstamped, in: context.container, owner: context,
                              pageSize: walkPageSize) { sample in
             sample.localHour = Self.localHour(of: sample.sampledAt)
         }
@@ -1209,8 +1351,7 @@ public final class SamplePersister {
         // Paged and saved a page at a time (#338): the first run backfills
         // `originalProjectPath` on every row, and `enumerate` here kept every
         // changed row pending in this context until the cycle's save — the
-        // whole table, 7.6 GB on a 757,909-row copy. Offset paging is safe: no
-        // predicate, no sort, and an update doesn't move a row in row-id order.
+        // whole table, 7.6 GB on a 757,909-row copy.
         //
         // Saved first, as `update` requires: a page sees only saved rows, and
         // a row this context held pending would be written under it. The
@@ -1220,7 +1361,7 @@ public final class SamplePersister {
         var changedCount = 0
         // `continue` becomes `return` — the body is a per-row closure now.
         try ModelWalk.update(FetchDescriptor<TokenSample>(), in: context.container,
-                             owner: context, paging: .offset, pageSize: walkPageSize) { sample in
+                             owner: context, pageSize: walkPageSize) { sample in
             guard let pre = sample.projectPath else { return }
             // Backfill `originalProjectPath` whenever it's nil. The
             // pre-migration `projectPath` is the best historical
@@ -1384,11 +1525,7 @@ public final class SamplePersister {
         // `ModelWalk` takes a fresh one per page, because a single context
         // `enumerate`d over the table still peaked at 3.3 GB on a 746k-row
         // store; paged, a whole rebuild peaked at 317 MB (#337).
-        var samplePairs: Set<DateModelPair> = []
-        var sampleProjectPairs: Set<ProjectDatePair> = []
-        var sampleHourBuckets: Set<DateHourModelTriple> = []
-        var sampleSessionIds: Set<String> = []
-        var rowCount = 0
+        var stored = StoredBuckets()
         // The walk covers everything currently stored, so its newest row
         // becomes the index watermark.
         var maxSampledAt = Date(timeIntervalSince1970: 0)
@@ -1400,7 +1537,6 @@ public final class SamplePersister {
         // is pulled, so the whole table never exists as objects at once.
         func note(dedupKey: String?, date: String, model: String, projectPath: String?,
                   sessionId: String?, sampledAt: Date, outputTokens: Int64, hour: Int) {
-            rowCount += 1
             if sampledAt > maxSampledAt { maxSampledAt = sampledAt }
             if let dedupKey {
                 // Seed with what's stored so a finished copy arriving in a
@@ -1408,16 +1544,14 @@ public final class SamplePersister {
                 // upgrade it, not just skip it as a duplicate.
                 bestOutputByKey[DedupIndex.Key(dedupKey)] = outputTokens
             }
-            samplePairs.insert(DateModelPair(date: date, model: model))
-            let path = projectPath ?? ProjectDailyAggregate.unknownProjectPath
-            sampleProjectPairs.insert(ProjectDatePair(projectPath: path, date: date))
-            sampleHourBuckets.insert(DateHourModelTriple(date: date, hour: hour, model: model))
-            if let sessionId, !sessionId.isEmpty { sampleSessionIds.insert(sessionId) }
+            stored.note(date: date, model: model, projectPath: projectPath,
+                        sessionId: sessionId, hour: hour)
         }
         // Straight from SQLite when the store is a file: one pass over the
-        // table, against the paged walk's offset scans. Any surprise in the
-        // file and it walks instead; what a read that stopped early noted is
-        // real, and the walk notes it again to the same values.
+        // table on a connection of its own, with no model object per row and
+        // no fetch on the coordinator the main thread's reads share. Any
+        // surprise in the file and it walks instead; what a read that stopped
+        // early noted is real, and the walk notes it again to the same values.
         let readRaw = RawSampleReader.storeURL(of: context.container).map { url in
             RawSampleReader.forEachDedupRow(storeURL: url) { row in
                 note(dedupKey: row.dedupKey, date: row.date, model: row.model, projectPath: row.projectPath,
@@ -1426,7 +1560,7 @@ public final class SamplePersister {
             }
         } ?? false
         if !readRaw {
-            rowCount = 0
+            stored = StoredBuckets()
             try ModelWalk.forEach(sampleDescriptor, in: context.container, pageSize: walkPageSize) { sample in
                 note(dedupKey: sample.dedupKey, date: sample.date, model: sample.model,
                      projectPath: sample.projectPath, sessionId: sample.sessionId, sampledAt: sample.sampledAt,
@@ -1446,8 +1580,23 @@ public final class SamplePersister {
             // splitting it means the next person tuning this doesn't guess.
             Log.write("SamplePersister", String(
                 format: "preload: %d rows — walk %.0fms · gaps %.0fms",
-                rowCount, walkMs, Date().timeIntervalSince(tGaps) * 1000))
+                stored.rows, walkMs, Date().timeIntervalSince(tGaps) * 1000))
         }
+        // Free here: the walk has every sample's buckets in hand.
+        try checkIntegrity(against: stored)
+    }
+
+    /// Compare the buckets the samples fill against the rollup tables, and
+    /// hold what disagrees for the coordinator's drains (`consumeMissing*`,
+    /// `consumeStrandedHourBuckets`), which mark it all for a rebuild from
+    /// samples (#388).
+    ///
+    /// `stored` may be older than the rollups it is compared with: the
+    /// coordinator reads it off the scan actor while cycles go on writing.
+    /// That is safe because nothing here deletes or writes a row. A bucket
+    /// that only looks missing or stranded because of the gap is rebuilt from
+    /// whatever samples it has by then, and comes out as it was.
+    public func checkIntegrity(against stored: StoredBuckets) throws {
 
         // Pairs that have aggregate rows already are *not* gaps; only
         // the difference needs recompute. Aggregate counts are small
@@ -1460,7 +1609,7 @@ public final class SamplePersister {
         for agg in try context.fetch(aggDesc) {
             aggregatePairs.insert(DateModelPair(date: agg.date, model: agg.model))
         }
-        missingAggregatePairs = samplePairs.subtracting(aggregatePairs)
+        missingAggregatePairs.formUnion(stored.daily.subtracting(aggregatePairs))
 
         var projAggDesc = FetchDescriptor<ProjectDailyAggregate>()
         projAggDesc.propertiesToFetch = [\.projectPath, \.date]
@@ -1468,7 +1617,7 @@ public final class SamplePersister {
         for agg in try context.fetch(projAggDesc) {
             projectAggregatePairs.insert(ProjectDatePair(projectPath: agg.projectPath, date: agg.date))
         }
-        missingProjectAggregatePairs = sampleProjectPairs.subtracting(projectAggregatePairs)
+        missingProjectAggregatePairs.formUnion(stored.project.subtracting(projectAggregatePairs))
 
         var hourAggDesc = FetchDescriptor<HourlyAggregate>()
         hourAggDesc.propertiesToFetch = [\.date, \.hour, \.model]
@@ -1477,7 +1626,7 @@ public final class SamplePersister {
             hourAggregateTriples.insert(DateHourModelTriple(
                 date: agg.date, hour: agg.hour, model: agg.model))
         }
-        missingHourBuckets = sampleHourBuckets.subtracting(hourAggregateTriples)
+        missingHourBuckets.formUnion(stored.hourly.subtracting(hourAggregateTriples))
         // …and the other direction: hourly rows with no samples behind them.
         //
         // Unlike `date`, which `TokenSample` stores at insert, the hour is
@@ -1504,12 +1653,13 @@ public final class SamplePersister {
         // store: 0 stranded daily, 0 project, 0 session.
         //
         // Both sets are already in hand here, so detecting them is free.
-        strandedHourBuckets = hourAggregateTriples.subtracting(sampleHourBuckets)
+        strandedHourBuckets.formUnion(hourAggregateTriples.subtracting(stored.hourly))
 
         var sessDesc = FetchDescriptor<SessionInfo>()
         sessDesc.propertiesToFetch = [\.sessionId]
         var sessionRowIds: Set<String> = []
         for s in try context.fetch(sessDesc) { sessionRowIds.insert(s.sessionId) }
-        missingSessionIds = sampleSessionIds.subtracting(sessionRowIds)
+        missingSessionIds.formUnion(stored.sessions.subtracting(sessionRowIds))
+        integrityCheckUnreported = true
     }
 }

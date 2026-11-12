@@ -21,6 +21,11 @@ import Foundation
 ///   trust an index whose recorded row count doesn't match the store's exactly
 ///   (`isValid(against:)`). Any mismatch — a crash mid-write, a restore from
 ///   backup, an account-timeline swap — falls back to the full walk.
+/// - **Values ahead of the store** ⇒ a finished copy is dropped as a
+///   duplicate of itself. An upgrade decided but not yet saved, written into
+///   the index by a quit mid-cycle, left the row count matching and the
+///   stored row partial for good. Prevented by writing only what the store
+///   has committed (`SamplePersister.committedIndex`, #395).
 /// - **False hits** ⇒ a real turn is dropped. Prevented by keying on a
 ///   **128-bit** digest rather than a 64-bit one. At 2.78M turns (five years
 ///   at the maintainer's rate) a 64-bit key carries a ~1-in-5-million chance

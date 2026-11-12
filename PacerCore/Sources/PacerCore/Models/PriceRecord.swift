@@ -78,6 +78,23 @@ public final class PriceRecord {
     public var sourceURL: String?
     /// When Pacer wrote this row.
     public var recordedAt: Date
+    /// When Pacer first saw the price this row holds (#352).
+    ///
+    /// `effectiveFrom` says when a price applied, and is backdated (to a
+    /// curated launch date, say); this says when Pacer *knew* it, so research
+    /// on past data can price a moment with only the prices Pacer had seen by
+    /// then. Set when the row is written and never moved while the row keeps
+    /// the same price: a refresh that restates it writes nothing, and a
+    /// catalog change opens a new row with its own time. Moved only by an
+    /// in-place correction that changes the rates (a curated record edited
+    /// under the same id, a record re-stated in the instant it was opened),
+    /// because the row then holds a price first seen at that moment.
+    ///
+    /// Not in `PriceRecordValue`: the ledger's `fingerprint` and equality are
+    /// about prices, and a knowledge time is not one. Nil on rows written
+    /// before it existed, where `recordedAt` (the insert time) is the nearest
+    /// stand-in. `PriceCatalogSnapshot` keeps what the catalog said as a whole.
+    public var firstSeenAt: Date?
 
     public init(_ value: PriceRecordValue, recordedAt: Date = Date()) {
         recordId = value.id
@@ -102,10 +119,13 @@ public final class PriceRecord {
         note = value.note
         sourceURL = value.sourceURL
         self.recordedAt = recordedAt
+        firstSeenAt = recordedAt
     }
 
-    /// Overwrite every field from `value` (same id).
-    public func update(from value: PriceRecordValue) {
+    /// Overwrite every field from `value` (same id). `seenAt` becomes
+    /// `firstSeenAt` only when the price itself changes.
+    public func update(from value: PriceRecordValue, seenAt: Date) {
+        if !self.value.samePrice(as: value) { firstSeenAt = seenAt }
         inputPerToken = value.rates.input
         outputPerToken = value.rates.output
         cacheReadPerToken = value.rates.cacheRead

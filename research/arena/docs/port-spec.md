@@ -657,7 +657,7 @@ the engine's write policy (`UsageIntelligenceEngine.recordPredictionSnapshots`,
 - `ForecastModelOutcome` once a cycle completes (`modelId` as above), so
   the scoreboard compares shadow and shipping models on the same cycles.
 
-Retention is the snapshot table's (180 days); nothing else needs storing.
+The snapshot table keeps every row (#352); nothing else needs storing.
 
 ---
 

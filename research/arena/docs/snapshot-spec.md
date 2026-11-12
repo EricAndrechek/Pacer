@@ -74,7 +74,7 @@ Scope key: **E** = every Pacer user; **M** = users with several accounts; **S** 
 **`app_alive`.** Polling intervals: gaps over 15 min between oauth polls close an interval.
 
 **Records of what the app did.**
-- `predictions_of_record`: every PredictionSnapshot column, including `pricingVersion`, `paramsVersion`, `engineVersion` and `method` (with a `lab` flag). They are preserved past the app's 180-day pruning.
+- `predictions_of_record`: every PredictionSnapshot column, including `pricingVersion`, `paramsVersion`, `engineVersion` and `method` (with a `lab` flag). The app no longer prunes them (#352); the snapshot keeps them regardless.
 - `eval_of_record`: add `retro` (period ended before 06-11, or a per-account period before 09-04) and `rescored`.
 - Both are **baselines and labels only, never features.**
 

@@ -25,7 +25,7 @@ See `docs/design.md` for the full v1 design.
   test-ingest-parity` (the line parser and the DuckDB importer must leave
   identical rows), the DuckDB differential gate (`docs/duckdb-archive.md`),
   `make verify-data` (every rollup against the raw samples of a real
-  store), and `PACER_COLD_START_PROBE` on a frozen real `~/.claude`
+  store), and `make ingest-harness` on a frozen real `~/.claude`
   (correctness rule 8). `ccusage` is a reference: the opt-in
   `CCusageGroundTruthTests` compare the token counts both tools count the
   same way (input, cache read, flat cache creation) against
@@ -198,10 +198,16 @@ These are subtle, easy to miss, and break user-visible numbers:
 8. **Verify ingest changes against a REAL store, not a synthetic one.**
    Both performance bugs and the dedup bug above were invisible on a
    fresh in-memory store — an empty store has nothing to upgrade and no
-   cursors to rewrite. Freeze a copy of a real `~/.claude`, point at it
-   with `CLAUDE_CONFIG_DIR`, and run `PACER_COLD_START_PROBE=1` (see
-   `App/Background/ColdStartProbe.swift`), which reports phase timings
-   AND all six per-field token totals. Row count alone proves nothing
+   cursors to rewrite. Freeze a copy of a real `~/.claude`
+   (`cp -c -R ~/.claude/projects <dir>/`) and, for branch work, run
+   `make ingest-harness CLAUDE=<dir> [STORE=<store copy>]`
+   (`IngestHarness`, #323): the real coordinator in a test process, no
+   app launch, no window, any worktree. It reports phase timings, the
+   bytes each launch phase writes (#387), the cold-start probe's TOTALS
+   line (all six per-field token totals) and the rollup's cost.
+   `PACER_COLD_START_PROBE=1` (`App/Background/ColdStartProbe.swift`)
+   stays the tool for measuring the INSTALLED app; it launches the
+   binary, so never run it from a branch. Row count alone proves nothing
    about field mapping — a swapped cache tier leaves every count
    identical while changing everyone's cost.
 9. **Never match a rate-limit cycle with `resetsAt ==`.** The server
@@ -1091,6 +1097,16 @@ A new large transient allocation also needs a `MemoryHygiene.relieve` afterwards
 The hourly `[Memory]` log line is how a regression shows up.
 A rebuild reads `TokenSample` through `RawSampleReader` (its own read-only SQLite connection, `Z_PK` order); the SwiftData walk is the fallback (#335).
 
+**Never page with `fetchOffset`.** SQLite steps over every earlier row again for
+each page: walking a 1,022,036-row copy in 41 offset pages read its 369 MB table
+22 times over (8.6 GB, 505 s on a loaded Mac), against once (0.39 GB, 55 s)
+paged by key (#394). `ModelWalk` pages by key: each page asks for the rows after
+the last one it handed out (`persistentModelID > last`, which is `Z_PK > ?`).
+Give it a descriptor with no `sortBy` for row-id order — what an unsorted fetch
+returns — or use `forEach(_:orderedBy:)` for an indexed column's order (ties by
+row id); a descriptor that brings its own sort is refused. Write any paged fetch
+of your own the same way.
+
 ### Default to scoped fetches; nothing should fetch then filter
 
 - **Always predicate-scope `@Query` and `FetchDescriptor`** to the rows
@@ -1194,14 +1210,40 @@ The forecast networks are memory maps: 2.6 GB can be resident at a 100 MB footpr
   The app process keeps using `makeModelContainer()` at startup because
   `PacerAppDelegate` owns container lifecycle explicitly.
 
+### A new `@Model` sorts after every shipped one
+
+Core Data numbers a store's entities (`Z_ENT`) in name order, and that
+number is written into every row of every table and into every
+persistent-history change. SwiftData's entity name is the class name, with no
+way to set another. So a new model whose name sorts among the shipped ones
+renumbers every entity after it, and its release's first launch rewrites those
+tables and the history: 2.1 GB written in `prepareStore` on a real 1.4 GB
+store, against 0.7 MB for the same change with the new model named to sort
+last (#387). 0.8.0's `PriceRecord` (entity 18 of 30) did that to every Mac
+that upgraded.
+
+- **Name a new model `Z<NNN><Name>`** (`Z001LiveMeterOutcome`), plus `public typealias LiveMeterOutcome = Z001LiveMeterOutcome` so call sites keep the plain name (raw SQL names the table `ZZ<NNN><NAME>`, e.g. `ZZ001LIVEMETEROUTCOME`), with the next
+  three-digit number after the highest in use, so it sorts after every shipped
+  entity and after every earlier addition. `EntityNumberingTests` fails on any
+  other new name and on any shipped entity whose number moved. When a release
+  ships, add its new models to `EntityNumberingTests.shipped`.
+- **Removing or renaming a shipped model renumbers too**, and removing,
+  renaming or retyping an attribute makes Core Data copy the whole table.
+  Adding an optional attribute or an `#Index` is cheap (`ALTER TABLE … ADD
+  COLUMN`, `CREATE INDEX IF NOT EXISTS`). `docs/perf-tuning.md` has the
+  numbers.
+- **Measure a schema change before it ships:** `make ingest-harness
+  STORE=<copy of a store from the last release> CLAUDE=<frozen tree>`. The
+  `open` line is what every user's first launch of it writes.
+
 ### Adding a new rollup table
 
 If a new view legitimately needs a grouping no existing rollup covers,
 add a new rollup following the template. The full set of touchpoints:
 
-1. **`@Model` type** in `PacerCore/Sources/PacerCore/Models/` — `@Attribute(.unique)` PK string `"date|model|..."`, `#Index` for every column used in a predicate or sort, columns mirror the rollup's metric needs (tokens, totalCostUSD, sampleCount). Register in `PacerStore.makeModelContainer()`'s schema list.
+1. **`@Model` type** in `PacerCore/Sources/PacerCore/Models/`, named `Z<NNN><Name>` (the section above) — `@Attribute(.unique)` PK string `"date|model|..."`, `#Index` for every column used in a predicate or sort, columns mirror the rollup's metric needs (tokens, totalCostUSD, sampleCount). Register in `PacerStore.makeModelContainer()`'s schema list.
 2. **Dirty-set in `SamplePersister`** — `dirtyXBuckets: Set<...Triple>` populated by `insert(_:)`, also from `markEverySampleDirty()` (cost-recompute version bump), cleared in `clearDirtyPairs()`. Add `addDirtyXBuckets(_:)` for external folding.
-3. **Recovery drain** — `missingXBuckets: Set<...>` computed during `preloadFromStore()` as `sampleXBuckets.subtracting(existingRollupXBuckets)`. `consumeMissingXBuckets()` returns and clears, one-shot.
+3. **Recovery drain** — the bucket in `StoredBuckets` (filled by a dedup rebuild's walk and by the daily background read, #388), and `missingXBuckets: Set<...>` computed in `checkIntegrity(against:)` as `stored.x.subtracting(existingRollupXBuckets)`. `consumeMissingXBuckets()` returns and clears; the coordinator marks what it returns for a rebuild, never deletes on it (the samples may be older than the rollups).
 4. **Recomputer** in `PacerCore/Sources/PacerCore/Persistence/` — `@MainActor` class with per-pair path, plus a sister `@ModelActor` worker for the bulk path above the 64-pair threshold. Cost mode + `PricingTable` threaded through both paths; per-entry cost summation, never sum-tokens-then-price: a request's price depends on its own timestamp (the rate in effect then) and its own prompt size (the tier), so a day's tokens have no single price (see the comment in `AggregateRecomputer`).
 5. **Wire into `ScanCoordinator.runScanCycle`** — drain the missing set into the dirty set, log the recovery line, run the recomputer in the existing sequence, include its stats in `ScanReport` and `cycleDidWork`, add to `formatReport`.
 6. **Tests** in `PacerCoreTests/` — single insert→dirty, clearDirty, recomputer single-bucket, multi-bucket, multi-model-within-bucket, upsert-on-second-pass, missing-bucket-bootstrap. Float-cost expects need an epsilon (`abs(actual - expected) < 1e-9`).

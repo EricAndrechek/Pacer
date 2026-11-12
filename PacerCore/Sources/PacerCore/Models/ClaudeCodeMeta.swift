@@ -41,10 +41,11 @@ public enum ClaudeCodeMetaKey {
     /// Used for diagnostics; the actual decision to do a fresh full
     /// scan keys off `scanVersion`.
     public static let lastFullScanAt = "last_full_scan_at"
-    /// When `SamplePersister`'s store walk last ran for integrity purposes.
-    /// The walk is otherwise lazy (see `SamplePersister.ensurePreloaded`), so
-    /// this is what keeps the integrity checks — missing aggregates, stranded
-    /// hourly rows — running on a store that ingests nothing for a while.
+    /// When the rollups were last checked against the samples — missing
+    /// aggregates, stranded hourly rows — by a dedup rebuild's walk or by the
+    /// coordinator's daily read (#388). The check isn't insert-driven, so this
+    /// is what keeps it running on a store that ingests nothing for a while,
+    /// or keeps a valid dedup index and so never walks.
     public static let lastIntegrityWalkAt = "last_integrity_walk_at"
     /// The start of the hour up to which every closed hour and day bucket
     /// has been rebuilt from its samples after it closed. Persisted so closes

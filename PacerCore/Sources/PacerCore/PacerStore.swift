@@ -245,6 +245,9 @@ public enum PacerStore {
         AccountSessionInfo.self,
         PriceRecord.self,
         SpendMeterFit.self,
+        LiveMeterOutcome.self,
+        PriceCatalogSnapshot.self,
+        AccountPlanEvent.self,
     ]
 
     public static func makeModelContainer() throws -> ModelContainer {
@@ -265,7 +268,10 @@ public enum PacerStore {
         let configuration = ModelConfiguration(url: url)
         // **Schema evolution:** Pacer relies on SwiftData's implicit
         // lightweight migration — safe for added optional fields and
-        // added @Model types. Anything heavier (added NON-optional
+        // added @Model types, and cheap for a new type only when its name
+        // sorts after every shipped one (`Z<NNN><Name>`): Core Data numbers
+        // entities by name, and a renumber rewrites the store on every
+        // user's first launch (`EntityNumberingTests`, #387). Anything heavier (added NON-optional
         // field without default, removed field, renamed field, type
         // change on an existing field) requires a `VersionedSchema` +
         // `SchemaMigrationPlan` here; otherwise the container open
