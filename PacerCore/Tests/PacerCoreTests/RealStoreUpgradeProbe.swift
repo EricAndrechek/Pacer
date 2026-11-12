@@ -466,9 +466,10 @@ struct RealStoreUpgradeProbe {
 /// - `context`: plus `container.mainContext`, which the app always has, and
 ///   which SwiftData merges every other context's saves into on the main
 ///   thread.
-/// - `reader` (the default): plus the menu bar label's own reads, on the
-///   main context, after every save any context makes, as its `@Query`s do —
-///   the menu-bar-only user's always-mounted surface.
+/// - `reader` (the default): plus the reads the menu bar label made on the
+///   main context after every save any context made, as its `@Query`s did
+///   until PACER-19 moved them off the main thread (`MenuBarLabelFeed`). Kept
+///   as the heavy case: the dropdown's retained host still holds two of them.
 @MainActor
 final class MainActorWatch {
     enum Mode: String { case off, beat, context, reader }
@@ -562,8 +563,8 @@ final class MainActorWatch {
         }
     }
 
-    /// `MenuBarLabel`'s four `@Query`s and `MenuBarWindowSource.load`'s two
-    /// fetches, on the main context.
+    /// What `MenuBarLabel`'s four `@Query`s and its window load fetched before
+    /// PACER-19, on the main context.
     private func read() {
         let began = Date()
         let ctx = container.mainContext

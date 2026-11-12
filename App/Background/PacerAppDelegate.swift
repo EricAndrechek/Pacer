@@ -1150,9 +1150,9 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
 
-        // Host MenuBarLabel as a SwiftUI view inside the button. We
-        // get @Query reactivity, the pulse animation, and tooltip for
-        // free. The host is a `SizingHostingView` — a tiny subclass
+        // Host MenuBarLabel as a SwiftUI view inside the button, so it
+        // redraws on the observable signals it reads. The host is a
+        // `SizingHostingView` — a tiny subclass
         // that reports SwiftUI body size changes back via a closure
         // so we can resize the NSStatusItem to fit.
         // The tooltip is set on the button in AppKit, not left to SwiftUI's
@@ -1174,12 +1174,14 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let applyToolTip: (String) -> Void = { [weak item] text in
             item?.button?.toolTip = text
         }
+        // Not inside `MenuBarKeyedContent`, unlike the dropdown: the label
+        // captures nothing at `init` (its reads are keyed on the day and the
+        // scope in `body`, PACER-19), so rebuilding it on either would only
+        // throw away the values it shows until the new read lands.
         let host = SizingHostingView(
             rootView: AnyView(
-                MenuBarKeyedContent {
-                    MenuBarLabel(onTooltipChange: applyToolTip)
-                        .modelContainer(store.container)
-                }
+                MenuBarLabel(onTooltipChange: applyToolTip)
+                    .modelContainer(store.container)
             )
         )
         host.translatesAutoresizingMaskIntoConstraints = false
