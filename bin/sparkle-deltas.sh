@@ -56,8 +56,9 @@
 # others. Exit status: 0 done (any number of deltas), 1 --strict and something
 # failed, 2 bad usage or missing tools.
 #
-# Nothing on screen: DMGs are attached -nobrowse -readonly -noautoopen and no
-# app is ever launched.
+# Nothing on screen: DMGs are attached -nobrowse -readonly -noautoopen, no app
+# is ever launched, and the app copies live only in the work dir, which is
+# removed at exit unless --work or --keep-work says otherwise.
 
 set -euo pipefail
 
@@ -131,6 +132,8 @@ log "BinaryDelta: $BINARY_DELTA${SPARKLE_TOOLS_VERSION:+ (Sparkle ${SPARKLE_TOOL
 if [ -z "$WORK" ]; then WORK="$(mktemp -d "${TMPDIR:-/tmp}/sparkle-deltas.XXXXXX")"; OWN_WORK=1; else mkdir -p "$WORK"; OWN_WORK=0; fi
 WORK="$(cd "$WORK" && pwd)"
 mkdir -p "$OUT"; OUT="$(cd "$OUT" && pwd)"
+# Whatever is in --out afterwards is exactly this run's passing deltas.
+rm -f "$OUT"/*.delta "$OUT/deltas.xml" "$OUT/deltas.xml.tmp"
 MOUNTS=""
 cleanup() {
   local m
@@ -448,7 +451,14 @@ fi
       "$([ "$z" = - ] && echo - || awk -v z="$z" 'BEGIN{printf "%.2f MB", z/1048576}')" \
       "$([ "$c" = - ] && echo - || echo "${c}s")" "$([ "$v" = - ] && echo - || echo "${v}s")" "$n"
   done
-  if [ -n "$NEW_DMG_SIZE" ]; then awk -v z="$NEW_DMG_SIZE" 'BEGIN{printf "\nFull DMG: %.2f MB.\n", z/1048576}'; fi
+  echo
+  if [ -n "$NEW_DMG_SIZE" ]; then awk -v z="$NEW_DMG_SIZE" 'BEGIN{printf "Full DMG: %.2f MB. ", z/1048576}'; fi
+  # Say which checks ran: a new app that does not assess as notarized here
+  # (no network, an unnotarized local build) means patched apps were not
+  # checked for it either.
+  printf 'New app team %s, notarized: %s. Tools: Sparkle %s.\n' "${NEW_TEAM:-none}" \
+    "$([ "$NEW_NOTARIZED" = 1 ] && echo 'yes (each patched app checked too)' || echo 'no (not checked)')" \
+    "${SPARKLE_TOOLS_VERSION:-unknown}"
 } > "$OUT/summary.md"
 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then cat "$OUT/summary.md" >> "$GITHUB_STEP_SUMMARY"; fi
 
