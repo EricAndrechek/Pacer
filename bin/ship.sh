@@ -224,8 +224,10 @@ cmd_verify() {
   done
   [ "$waited" -gt 0 ] && info "waited ${waited}s for appcast propagation"
   local pubkey; pubkey="$(grep -E 'SUPublicEDKey:' project.yml | head -1 | sed -E 's/.*SUPublicEDKey:[[:space:]]*//')"
-  APPCAST_URL="$APPCAST_URL" VERSION="$version" ASSET_SIZE="$size" python3 - <<'PY' || rc=1
-import os, sys, urllib.request, xml.etree.ElementTree as ET
+  local assets_all
+  assets_all="$(gh release view "$tag" --json assets 2>/dev/null || echo '{"assets":[]}')"
+  APPCAST_URL="$APPCAST_URL" VERSION="$version" ASSET_SIZE="$size" ASSETS_JSON="$assets_all" python3 - <<'PY' || rc=1
+import json, os, sys, urllib.request, xml.etree.ElementTree as ET
 url, version, asset_size = os.environ["APPCAST_URL"], os.environ["VERSION"], int(os.environ["ASSET_SIZE"])
 _tty = sys.stdout.isatty()
 G, R, X = ("\033[32m", "\033[31m", "\033[0m") if _tty else ("", "", "")
@@ -253,6 +255,19 @@ if enc_url.endswith(f"Pacer-{version}.dmg"): ok(f"enclosure → {enc_url.split('
 else: bad(f"enclosure URL unexpected: {enc_url}")
 if enc_len == asset_size: ok(f"enclosure length matches the published asset ({enc_len} bytes)")
 else: bad(f"enclosure length {enc_len} != asset size {asset_size}")
+# Delta updates (bin/sparkle-deltas.sh): each one the feed names must be an
+# asset of this release at exactly its stated length. If one is not, undo
+# them: docs/releasing.md, "Rolling back delta updates".
+S = "{" + ns["s"] + "}"
+deltas = [e for d in item.findall("s:deltas", ns) for e in d.findall("enclosure")]
+assets = {a["name"]: a["size"] for a in json.loads(os.environ.get("ASSETS_JSON") or '{"assets":[]}')["assets"]}
+for e in deltas:
+    dname = e.get("url", "").rsplit("/", 1)[-1]
+    dlen = int(e.get("length", "0"))
+    if assets.get(dname) == dlen: ok(f"delta from build {e.get(S + 'deltaFrom')}: {dname} is a release asset of its stated length ({dlen} bytes)")
+    else: bad(f"delta {dname}: the feed says {dlen} bytes, the release has {assets.get(dname)}; see 'Rolling back delta updates' in docs/releasing.md")
+if not deltas:
+    print("  · no delta updates in this item")
 sys.exit(1 if FAIL else 0)
 PY
 
@@ -270,8 +285,11 @@ for it in root.iter("item"):
         enc=it.find("enclosure")
         print(enc.get("{http://www.andymatuschak.org/xml-namespaces/sparkle}edSignature",""))
         print(enc.get("url",""))
+        for d in it.findall("s:deltas/enclosure",ns):
+            print("DELTA", d.get("url",""), d.get("{http://www.andymatuschak.org/xml-namespaces/sparkle}edSignature",""))
 PY
 )"
+  local delta_lines; delta_lines="$(printf '%s\n' "$sig" | grep '^DELTA ' || true)"
   encurl="$(printf '%s\n' "$sig" | sed -n 2p)"; sig="$(printf '%s\n' "$sig" | sed -n 1p)"
   if command -v uv >/dev/null 2>&1 && [ -n "$sig" ] && [ -n "$encurl" ] && [ -n "$pubkey" ]; then
     info "EdDSA-verifying the DMG against the app's embedded SUPublicEDKey"
@@ -288,6 +306,24 @@ except BadSignatureError:
 PY
     then ok "EdDSA signature valid — installed clients will accept this update"
     else bad "EdDSA signature did NOT verify against SUPublicEDKey"; rc=1; fi
+    # Each delta is checked by the OLD app's Sparkle, with the key that app
+    # embeds. The key has never rotated, so project.yml's is that key.
+    local _d durl dsig
+    while read -r _d durl dsig; do
+      [ -n "$durl" ] || continue
+      if PUBKEY="$pubkey" SIG="$dsig" DMG="$durl" uv run --quiet --with pynacl python - <<'PY'
+import os, base64, urllib.request, sys
+from nacl.signing import VerifyKey
+from nacl.exceptions import BadSignatureError
+data = urllib.request.urlopen(os.environ["DMG"], timeout=60).read()
+try:
+    VerifyKey(base64.b64decode(os.environ["PUBKEY"])).verify(data, base64.b64decode(os.environ["SIG"])); print("OK")
+except BadSignatureError:
+    print("BAD"); sys.exit(1)
+PY
+      then ok "EdDSA signature valid for ${durl##*/}"
+      else bad "EdDSA signature did NOT verify for ${durl##*/}; see 'Rolling back delta updates' in docs/releasing.md"; rc=1; fi
+    done <<<"$delta_lines"
   else
     warn "skipped EdDSA crypto-verify (need uv + a signature/pubkey); asset+length checks still cover integrity"
   fi
