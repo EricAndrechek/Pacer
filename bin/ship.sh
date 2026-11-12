@@ -61,10 +61,14 @@ next_version() {
 # tag? A @Model / schema-version edit is the tell. Only a *hint* — the caller
 # confirms the patch-vs-minor call.
 schema_touched() {
-  local base="$1"
-  git diff --unified=0 "${base}..HEAD" -- '*.swift' 2>/dev/null \
-    | grep -qE '^\+.*(@Model|VersionedSchema|SchemaMigrationPlan|@Attribute\(\.unique)' \
-    && return 0 || return 1
+  local base="$1" diff
+  # Diff into a variable first. `git diff | grep -q` under `set -o pipefail`
+  # reports a FALSE negative on a real match: grep -q exits at the first hit,
+  # git diff dies of SIGPIPE writing the rest, and pipefail turns that 141 into
+  # the pipeline's status. That is how 0.9.0 (three new @Models) was suggested
+  # as a patch.
+  diff="$(git diff --unified=0 "${base}..HEAD" -- '*.swift' 2>/dev/null || true)"
+  grep -qE '^\+.*(@Model|VersionedSchema|SchemaMigrationPlan|@Attribute\(\.unique)' <<<"$diff"
 }
 
 assert_releasable() {
