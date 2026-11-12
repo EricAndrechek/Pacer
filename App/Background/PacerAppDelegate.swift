@@ -680,6 +680,9 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             TelemetryController.shared.prepareForTermination()
             AnalyticsController.shared.prepareForTermination()
             DailyCheckIn.markCleanExit()
+            // Log lines are written on a background queue (`Log`); make sure
+            // the last ones (this shutdown's) are on disk before the process ends.
+            await Task.detached { Log.flush() }.value
             NSApp.reply(toApplicationShouldTerminate: true)
         }
         return .terminateLater
