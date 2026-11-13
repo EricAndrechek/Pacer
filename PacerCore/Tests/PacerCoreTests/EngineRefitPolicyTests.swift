@@ -30,4 +30,19 @@ struct EngineRefitPolicyTests {
         #expect(EngineRefitPolicy.recordBackfillAllowed(pressure: .warning))
         #expect(!EngineRefitPolicy.recordBackfillAllowed(pressure: .critical))
     }
+
+    @Test func heavyPageInUnderPressureDefersTheNextRefit() {
+        let heavy: UInt64 = 373_000_000
+        #expect(EngineRefitPolicy.floor(base: 300, pressure: .warning, lastPageinBytes: heavy) == 1200)
+        #expect(EngineRefitPolicy.floor(base: 300, pressure: .critical, lastPageinBytes: heavy) == 3600)
+        // Capped at an hour whatever the base.
+        #expect(EngineRefitPolicy.floor(base: 600, pressure: .critical, lastPageinBytes: heavy) == 3600)
+    }
+
+    @Test func nothingChangesWithoutBothPressureAndAHeavyPageIn() {
+        let heavy: UInt64 = 489_000_000
+        #expect(EngineRefitPolicy.floor(base: 300, pressure: .normal, lastPageinBytes: heavy) == 300)
+        #expect(EngineRefitPolicy.floor(base: 300, pressure: .warning, lastPageinBytes: 99_000_000) == 600)
+        #expect(EngineRefitPolicy.floor(base: 300, pressure: .warning, lastPageinBytes: 0) == 600)
+    }
 }

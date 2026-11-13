@@ -80,6 +80,9 @@ final class AppBackgroundService {
     private var engineRefitCount = 0
     private var engineRefitTotalMs = 0
     private var lastEngineRecomputeAt: Date?
+    /// What the last refit paged in; a heavy one lengthens the next floor while
+    /// the Mac is short of memory (`EngineRefitPolicy.floor(…lastPageinBytes:)`).
+    private var lastRefitPageinBytes: UInt64 = 0
     /// A refit is running. A Mac in dark wake polls, passes the floor and starts
     /// another while the last is still parked on the engines, and one production
     /// Mac woke to six stacked refits finishing together (#389).
@@ -790,7 +793,8 @@ final class AppBackgroundService {
         let base = rateLimitsChanged
             ? Self.engineRecomputeMinInterval
             : Self.engineRecomputeIdleInterval
-        let floor = EngineRefitPolicy.floor(base: base, pressure: MemoryPressure.shared.level)
+        let floor = EngineRefitPolicy.floor(base: base, pressure: MemoryPressure.shared.level,
+                                            lastPageinBytes: lastRefitPageinBytes)
         if !force, let last = lastEngineRecomputeAt, now.timeIntervalSince(last) < floor {
             if now.timeIntervalSince(last) >= base { TelemetryCounters.add("engine.refit.deferred_pressure") }
             return false
@@ -859,6 +863,7 @@ final class AppBackgroundService {
             }
         }.value
         let reading = meter.finish()
+        lastRefitPageinBytes = reading.activity.pageinBytes
         // Awake time: a refit the Mac slept through took no time at all. Wall
         // time made this metric's p95 39 minutes on one production Mac (#389).
         let refitMs = reading.awakeMilliseconds
