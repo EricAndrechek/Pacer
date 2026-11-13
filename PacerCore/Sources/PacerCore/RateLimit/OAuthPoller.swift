@@ -317,6 +317,15 @@ public actor OAuthPoller: TokenPoolTesting {
     private var persistedMeta: [String: LaneMetaSnapshot] = [:]
     private var metaLoaded = false
 
+    /// Each account's plan as last applied, and its newest plan events, so a
+    /// poll decides whether its plan is news without a fetch (#413). Loaded
+    /// from the store the first time an account reports a plan, here on the
+    /// poller, then kept. The poller is the only writer of an account's plan
+    /// fields and of `AccountPlanEvent`, so what it remembers is what the
+    /// store holds; a save that fails forgets the account, and its next poll
+    /// reads it again.
+    private var planStates: [String: AccountPlanState] = [:]
+
     private var loopTask: Task<Void, Never>?
     private var sleeper: Task<Void, Never>?
     private var stopping = false
@@ -2068,7 +2077,12 @@ public actor OAuthPoller: TokenPoolTesting {
             }
         let measured = LiveMeterDrift.measure(container: container, account: accountKey,
                                               at: captured.sampledAt, readings: meterReadings)
-        await MainActor.run {
+        // Whether this poll's plan is news, decided here rather than by a
+        // fetch of the plan events inside the main-actor block below (#413).
+        let plan = observePlan(account: accountKey, subscriptionType: subscriptionType,
+                               rateLimitTier: rateLimitTier, at: captured.sampledAt,
+                               reportedBy: laneSource.rawValue)
+        let saved = await MainActor.run { () -> Bool in
             let context = ModelContext(container)
 
             // --- Upsert the account + its cached latest readings ---
@@ -2094,8 +2108,7 @@ public actor OAuthPoller: TokenPoolTesting {
             }
             account.lastSeenAt = captured.sampledAt
             if account.organizationId == nil, let organizationId { account.organizationId = organizationId }
-            account.observePlan(subscriptionType: subscriptionType, rateLimitTier: rateLimitTier,
-                                at: captured.sampledAt, reportedBy: laneSource.rawValue, in: context)
+            if let plan { account.apply(plan, in: context) }
             if isActive { account.isActive = true }
             if let w = captured.fiveHour {
                 account.latestFiveHourPct = w.usedPercentage
@@ -2213,8 +2226,9 @@ public actor OAuthPoller: TokenPoolTesting {
             }
             do {
                 try context.save()
-                // The row's cached readings and plan, which the window's
-                // title reads (`AccountList`).
+                // The row's cached readings, which the window's title shows
+                // (`AccountList`), and its plan when `plan` moved it: one
+                // post for both, since they land in this one save.
                 AccountWriteSignal.post(from: self)
                 // Every account's rows, not only the active one's: the pace
                 // chart and menu draw all of them. See `RateLimitWriteSignal`.
@@ -2234,11 +2248,39 @@ public actor OAuthPoller: TokenPoolTesting {
                         Task.detached(priority: .utility) { LiveMeterDrift.log(account: key, measurements: measured) }
                     }
                 }
+                return true
             } catch {
                 Log.write("OAuthPoller", "persist failed: \(error)")
+                return false
             }
         }
+        // The plan this poll decided never reached the store: read it again
+        // next time rather than trust a memory of a write that did not land.
+        if !saved { planStates[accountKey] = nil }
     }
+
+    /// Apply a poll's reported plan to the account's remembered state and say
+    /// what the poll's save must write (`AccountPlanState`). Nil when the poll
+    /// reports no plan (a switcher-cache reading), which reads nothing.
+    ///
+    /// The first report for an account reads its row and newest events, here
+    /// on the poller and never on the main actor; every report after that is
+    /// decided in memory. Synchronous, so two polls of one account cannot both
+    /// decide against the same state.
+    private func observePlan(
+        account key: String, subscriptionType: String?, rateLimitTier: String?,
+        at observedAt: Date, reportedBy: String?
+    ) -> AccountPlanState.Change? {
+        guard subscriptionType != nil || rateLimitTier != nil else { return nil }
+        var state = planStates[key] ?? AccountPlanState.load(accountId: key, in: ModelContext(container))
+        let change = state.observe(subscriptionType: subscriptionType, rateLimitTier: rateLimitTier,
+                                   at: observedAt, reportedBy: reportedBy)
+        planStates[key] = state
+        return change
+    }
+
+    /// Test seam: the plan state the poller holds for `account`, if loaded.
+    func planStateForTesting(_ account: String) -> AccountPlanState? { planStates[account] }
 
     /// Whether any live row predates `accountId`. One indexed count per table,
     /// so the steady-state cost of re-running the fold every launch is three
