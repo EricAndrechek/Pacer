@@ -935,6 +935,20 @@ of them. Mentioned here so future agents don't repeat them:
    new path between "quit old app" and "install new app", so existing
    dev installs upgrade transparently.
 
+6. **`NSApp.terminate` from a main-queue block or a main-actor Task never
+   finishes.** `applicationShouldTerminate` answers `.terminateLater` and
+   replies from a main-actor Task. `terminate` then spins a nested run loop
+   until the reply, and a run loop nested inside a main-queue block never
+   services the main queue again; main-actor jobs are main-queue blocks, so
+   the reply never comes. The first SIGTERM handler did this, and the
+   on-machine relauncher check caught it (Pacer hung until the fallback
+   ended it, with no shutdown). A quit Apple Event (Quit, AppleScript,
+   Sparkle's installer via `NSRunningApplication.terminate`) and an AppKit
+   action are outside any main-queue block, so they are fine; from anywhere
+   else, call it in a `CFRunLoopPerformBlock` on the main run loop.
+   `make lint-hangs` flags every `terminate` call (`terminate-call`) until
+   it says which of those it is.
+
 **Trust `swift build` and `swift test`, not SourceKit diagnostics.**
 Real Swift 6 compile errors are flagged by the build. SourceKit's IDE
 diagnostics frequently complain "Cannot find type X in scope" right

@@ -146,11 +146,23 @@ enum CrashRelauncher {
             source?.cancel()
             RelaunchProcess.send(.quit, to: fd)
             Log.write("CrashRelaunch", "SIGTERM: quitting (not a crash, so no relaunch)")
-            DispatchQueue.main.async {
+            // A run-loop block, never `DispatchQueue.main` or a main-actor
+            // Task: `terminate` returns `.terminateLater` and spins a nested
+            // run loop until the reply, and a run loop nested inside a
+            // main-queue block never services the main queue again, so the
+            // main-actor shutdown Task that sends the reply could never run.
+            // That deadlocked until the fallback below in the on-machine
+            // check; reproduced off-screen with a bare NSApplication. A
+            // run-loop block runs outside the main queue, as the quit Apple
+            // Event (Quit, AppleScript, Sparkle's installer) does.
+            let mainLoop = CFRunLoopGetMain()
+            CFRunLoopPerformBlock(mainLoop, CFRunLoopMode.defaultMode.rawValue) {
                 MainActor.assumeIsolated {
+                    // lint:allow terminate-call a CFRunLoopPerformBlock, outside the main queue
                     if !shutdownBegan.load(ordering: .relaxed) { NSApp.terminate(nil) }
                 }
             }
+            CFRunLoopWakeUp(mainLoop)
             DispatchQueue.global().asyncAfter(deadline: .now() + 10) {
                 let began = shutdownBegan.load(ordering: .relaxed)
                 DispatchQueue.global().asyncAfter(deadline: .now() + (began ? 50 : 0)) {

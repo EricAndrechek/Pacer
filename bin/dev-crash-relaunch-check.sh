@@ -124,6 +124,7 @@ pacer_running || reopen
 
 # 3. SIGTERM is someone asking Pacer to stop: a quit, never relaunched.
 pid="$(pacer_pid)"
+term_pid="$pid"
 kill -TERM "$pid"
 if wait_until 15 neither_running; then
     sleep 15
@@ -137,6 +138,11 @@ pacer_running || reopen
 
 # 4. A kill is relaunched, in the background, by the relauncher.
 pid="$(pacer_pid)"
+if [ "$pid" = "$term_pid" ]; then
+    # Its relauncher was told "quit", so a kill now proves nothing.
+    fail "kill: skipped, the Pacer from step 3 is still shutting down"
+    exit 1
+fi
 old_relauncher="$(relauncher_for "$pid")"
 front_before="$(front_app)"
 killed_at="$(date +%s)"

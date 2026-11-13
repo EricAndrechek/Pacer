@@ -1475,6 +1475,7 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func menuQuit() {
         Analytics.capture(.menubarItemClicked(.quit))
+        // lint:allow terminate-call an NSMenu action, called from event handling
         NSApp.terminate(nil)
     }
 

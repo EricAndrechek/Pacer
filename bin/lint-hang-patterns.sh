@@ -27,6 +27,13 @@
 #                         main (PACER-N). Use `LoginItemController.statusOffMain`.
 #   main-sync             `DispatchQueue.main.sync`: deadlocks when already on
 #                         main, and blocks the caller on a busy main thread.
+#   terminate-call        `NSApp.terminate`. Pacer answers `.terminateLater` and
+#                         replies from a main-actor Task; called inside a
+#                         main-queue block or a main-actor Task, terminate's
+#                         nested run loop never services the main queue, so the
+#                         reply never comes (the SIGTERM handler, found by the
+#                         on-machine relauncher check). Every call says why its
+#                         context is safe: an AppKit action, or a run-loop block.
 #
 # It is a grep, not a compiler: it reads the source line by line and knows
 # nothing about actors. That is the point — it is fast enough for every push
@@ -86,9 +93,12 @@ func f() {
     FileHandle.standardError.write(Data("x".utf8)) // lint:allow stderr-write
     let msg = "FileHandle.standardError.write is only a string"
     /// SMAppService.mainApp.status in a doc comment
+    NSApp.terminate(nil)
+    // lint:allow terminate-call an NSMenu action, called from event handling
+    NSApplication.shared.terminate(self)
 }
 SWIFT
-    expected=$'4 formatter-in-body\n8 formatter-in-body\n9 fetch-in-body\n13 formatter-in-body\n17 un-sync\n19 un-sync\n26 main-sync\n27 smappservice-status\n28 allow-without-reason\n28 stderr-write'
+    expected=$'4 formatter-in-body\n8 formatter-in-body\n9 fetch-in-body\n13 formatter-in-body\n17 un-sync\n19 un-sync\n26 main-sync\n27 smappservice-status\n28 allow-without-reason\n28 stderr-write\n31 terminate-call'
     actual=$(bin/lint-hang-patterns.sh "$dir/Fixture.swift" 2>/dev/null \
         | sed -nE 's/^[^:]+:([0-9]+): \[([a-z-]+)\].*/\1 \2/p' || true)
     if [[ "$actual" == "$expected" ]]; then
@@ -244,6 +254,10 @@ FNR == 1 {
     # main-sync
     if (c ~ /DispatchQueue\.main\.sync[ \t]*[({]/ && !allowed("main-sync", raw, prev))
         report("main-sync", "DispatchQueue.main.sync deadlocks on main and blocks on a busy main thread. Hop with await MainActor.run or main.async")
+
+    # terminate-call
+    if (c ~ /(NSApp|NSApplication\.shared)\.terminate[ \t]*\(/ && !allowed("terminate-call", raw, prev))
+        report("terminate-call", "NSApp.terminate inside a main-queue block or main-actor Task never gets its .terminateLater reply. Call it from an AppKit action or CFRunLoopPerformBlock, and say which")
 
     prev = raw
 }
