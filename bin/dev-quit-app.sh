@@ -48,7 +48,9 @@ fi
 # starts a new relauncher. Matched by exact process name, so only Pacer's.
 # Always runs, even when the app is not: a relauncher can be in its back-off
 # wait after a crash, about to relaunch.
+stopped_relauncher=0
 if pgrep -x PacerRelauncher >/dev/null 2>&1; then
+    stopped_relauncher=1
     echo "    Stopping the crash relauncher (so nothing relaunches mid-install)" >&2
     pkill -TERM -x PacerRelauncher 2>/dev/null || true
     for _ in 1 2 3 4 5 6 7 8 9 10; do
@@ -59,7 +61,10 @@ if pgrep -x PacerRelauncher >/dev/null 2>&1; then
 fi
 
 if ! pgrep -f "${APP_PATH_REGEX}" >/dev/null 2>&1; then
-    echo 0
+    # Not running, but a relauncher was waiting to bring it back after a
+    # crash. We just cancelled that relaunch, so say "was running": the
+    # install then reopens the new build instead of leaving Pacer closed.
+    echo "${stopped_relauncher}"
     exit 0
 fi
 
