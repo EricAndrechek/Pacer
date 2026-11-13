@@ -83,4 +83,32 @@ struct UpdateOutcomeLogTests {
         UpdateOutcomeLog.record("error_sparkle_4005", endOfCycle: true, now: t.addingTimeInterval(5), store: s)
         #expect(UpdateOutcomeLog.last(store: s)?.result == "error_sparkle_4005")
     }
+
+    @Test("an install records whether it arrived as a delta, and a later result clears it")
+    func deltaStoredWithInstallAndCleared() {
+        let s = suite()
+        let t = Date(timeIntervalSince1970: 1_800_000_000)
+        UpdateOutcomeLog.record(.willInstall, version: "0.9.1", delta: true, now: t, store: s)
+        #expect(UpdateOutcomeLog.last(store: s)?.delta == true)
+        UpdateOutcomeLog.record(.idleInstall, version: "0.9.1", delta: false, now: t, store: s)
+        #expect(UpdateOutcomeLog.last(store: s)?.delta == false)
+        UpdateOutcomeLog.record(.found, version: "0.9.2", now: t, store: s)
+        #expect(UpdateOutcomeLog.last(store: s)?.delta == nil)
+    }
+
+    @Test("an end-of-cycle error that is ignored keeps the install's delta flag")
+    func deltaSurvivesIgnoredEndOfCycle() {
+        let s = suite()
+        let t = Date(timeIntervalSince1970: 1_800_000_000)
+        UpdateOutcomeLog.record(.idleInstall, version: "0.9.1", delta: true, now: t, store: s)
+        UpdateOutcomeLog.record("error_sparkle_4005", endOfCycle: true, now: t.addingTimeInterval(5), store: s)
+        #expect(UpdateOutcomeLog.last(store: s)?.delta == true)
+    }
+
+    @Test("a result with no delta argument reads nil")
+    func deltaAbsentByDefault() {
+        let s = suite()
+        UpdateOutcomeLog.record(.noUpdate, store: s)
+        #expect(UpdateOutcomeLog.last(store: s)?.delta == nil)
+    }
 }

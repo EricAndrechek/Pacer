@@ -348,6 +348,8 @@ final class DailyCheckIn {
             a["lifecycle.update_result"] = .string(update.result)
             if let version = update.version { a["lifecycle.update_version"] = .string(version) }
             if let error = update.error { a["lifecycle.update_error"] = .string(error) }
+            // Present only with an install result: whether it arrived as a delta.
+            if let delta = update.delta { a["lifecycle.update_delta"] = .bool(delta) }
         }
         let cpu = max(cpuSeconds() - cpuBefore, 0)
         a["energy.cpu_seconds"] = .double((cpu * 10).rounded() / 10)
