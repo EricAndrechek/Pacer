@@ -180,9 +180,23 @@ cmd_wait_ci() {
   # a newer push to the same ref starts one, so the run worth waiting for is
   # that newer one. Reporting the cancellation as red once sent a release
   # agent off debugging a run that had been superseded on purpose (#134).
-  local conclusion branch newer hops=0
+  local conclusion status branch newer hops=0 unread=0 started
+  started="$(date +%s)"
   while :; do
     gh run watch "$id" >/dev/null 2>&1 || true
+    # `gh run watch` can return before the run is over (an API error, a
+    # network blip), and a run still going has no conclusion yet, which the
+    # `case` below used to read as a failure (#416: the 0.9.1 release job
+    # reported main's CI red while its last jobs were still running). Decide
+    # only on a completed run; keep waiting otherwise, within bounds.
+    status="$(gh run view "$id" --json status --jq .status 2>/dev/null || true)"
+    if [ "$status" != completed ]; then
+      if [ -z "$status" ]; then unread=$((unread + 1)); else unread=0; fi
+      [ "$unread" -lt 30 ] || { bad "could not read the status of CI run ${id} for 10 minutes"; return 1; }
+      [ $(( $(date +%s) - started )) -lt 10800 ] || { bad "CI run ${id} still ${status:-unreadable} after 3 hours — $(gh run view "$id" --json url --jq .url 2>/dev/null)"; return 1; }
+      sleep "${SHIP_CI_POLL:-20}"
+      continue
+    fi
     conclusion="$(gh run view "$id" --json conclusion --jq .conclusion 2>/dev/null || true)"
     case "$conclusion" in
       success|skipped)
@@ -202,7 +216,7 @@ cmd_wait_ci() {
         # hand, and that is not a green light.
         [ -n "$newer" ] || { bad "CI cancelled, and no newer run replaced it — $(gh run view "$id" --json url --jq .url)"; return 1; }
         warn "run ${id} was cancelled by a newer push to ${branch} — following run ${newer}"
-        id="$newer"; hops=$((hops + 1)) ;;
+        id="$newer"; hops=$((hops + 1)); started="$(date +%s)" ;;
       *)
         bad "CI ${conclusion:-failed} — $(gh run view "$id" --json url --jq .url)"; return 1 ;;
     esac
