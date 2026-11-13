@@ -133,6 +133,7 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 // the store READ-ONLY, and a schema change needs a write to
                 // migrate. So the first render after a model change fails until
                 // the app itself has launched once. Say that, and exit.
+                // lint:allow stderr-write live-render failure, the line before exit(2), to the terminal that ran it
                 FileHandle.standardError.write(Data("""
                     [Pacer live-render] could not open the store: \(error)
                     [Pacer live-render] if a model changed, launch Pacer once to migrate, then re-run.
@@ -199,6 +200,13 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // is already running we activate it and exit immediately,
         // skipping container creation and scan-loop bring-up.
         Self.exitIfAnotherInstanceIsRunning()
+
+        // Start the relauncher that brings Pacer back if it exits without
+        // quitting (#412). After the gate, so a second instance arms nothing,
+        // and after the stderr redirect, which the relauncher inherits for its
+        // own log lines; before the store opens, so a crash opening or
+        // migrating it is covered too.
+        CrashRelauncher.armAtLaunch()
 
         // Register defaults before any @AppStorage reads can happen,
         // same reason PacerApp.init used to: `@AppStorage`'s default-
@@ -365,6 +373,8 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         default:
             break
         }
+        // Not a crash: relaunching would only put this alert up again.
+        CrashRelauncher.standDown()
         exit(1)
     }
 
@@ -380,14 +390,21 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private static func exitIfAnotherInstanceIsRunning() {
         guard let bundleID = Bundle.main.bundleIdentifier else { return }
         let mine = ProcessInfo.processInfo.processIdentifier
+        // Not one that has terminated: Launch Services can list an instance
+        // that just crashed for a moment after it is gone.
         let others = NSRunningApplication
             .runningApplications(withBundleIdentifier: bundleID)
-            .filter { $0.processIdentifier != mine }
+            .filter { $0.processIdentifier != mine && !$0.isTerminated }
         guard let other = others.first else { return }
         // Bring the existing one forward so the user gets the same
         // "Pacer popped open" feeling they expected from the second
-        // launch — then exit.
-        other.activate(options: [.activateAllWindows])
+        // launch — then exit. Unless nobody launched this one: the crash
+        // relauncher (#412) lost a race with someone reopening Pacer, and
+        // activating it would take the front from whatever they are doing.
+        if !CrashRelauncher.isRelaunch {
+            other.activate(options: [.activateAllWindows])
+        }
+        // lint:allow stderr-write the line before exit(0), from a process that is leaving; Log's queue would not flush first
         FileHandle.standardError.write(Data(
             "[Pacer] another instance is running (pid \(other.processIdentifier)); exiting this one\n".utf8
         ))
@@ -664,6 +681,10 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // instant, and that is the anchor `make record-relaunch` lines the
         // video up against.
         Log.write("Lifecycle", "terminating")
+        // Before anything that can hang: from here on, an end that is not
+        // clean (stuck shutdown killed by `make install` or logout) is still
+        // a quit, never a crash to relaunch from (#412).
+        CrashRelauncher.standDown()
         Task { @MainActor in
             // A quit during a migration waits for it: SQLite would roll an
             // interrupted transaction back, but there is no reason to find out
@@ -677,8 +698,8 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 await NotificationCoordinator.shared.notifyCollectionPaused()
             }
             AnalyticsUsage.shared.appQuit()
-            TelemetryController.shared.prepareForTermination()
-            AnalyticsController.shared.prepareForTermination()
+            await TelemetryController.shared.prepareForTermination()
+            await AnalyticsController.shared.prepareForTermination()
             DailyCheckIn.markCleanExit()
             // Log lines are written on a background queue (`Log`); make sure
             // the last ones (this shutdown's) are on disk before the process ends.
@@ -1262,21 +1283,33 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.autoenablesItems = false
 
         // Custom-view item: pace rows + today's totals. NSHostingController
-        // is retained on the delegate so SwiftData @Query subscriptions
-        // stay live between opens. The view re-evaluates its body in
-        // response to data changes regardless of whether the menu is
-        // visible — so when the user opens the menu, the numbers are
-        // already current.
+        // is retained on the delegate, so the view stays mounted between
+        // opens and follows its read keys while the menu is closed: when the
+        // user opens the menu, the numbers are already current. It reads
+        // nothing on the main thread (#408): its feed reads off it.
+        //
+        // The feed is made here, outside `MenuBarKeyedContent`, so a rebuild
+        // of the view keeps its values, and read once now. The view's own
+        // reads are `.task`s, which start when SwiftUI first updates it, and
+        // a host that is in no window may not be updated until something its
+        // body read changes (a probe of a bare `NSHostingController` ran no
+        // `.task` until then). Read here, the first opening after launch
+        // finds the values in place rather than "—" for a moment.
+        let dropdownFeed = MenuDropdownFeed()
         let contentController = NSHostingController(
             rootView: AnyView(
                 MenuBarKeyedContent {
-                    MenuStatusContent()
+                    MenuStatusContent(feed: dropdownFeed)
                         .modelContainer(store.container)
                         .environment(\.usageEngine, store.engine)
                         .environment(\.usageEngines, store.engines)
                 }
             )
         )
+        let container = store.container
+        Task { @MainActor in
+            await MenuStatusContent.load(dropdownFeed, scope: .shared, from: container)
+        }
         // NSMenuItem.view doesn't auto-size — the menu reads the
         // view's frame at attach time. Use the host's fittingSize so
         // the SwiftUI body's intrinsic dimensions drive the layout.
@@ -1354,8 +1387,9 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// time (`buildStatusMenu`), so a scoped per-model window discovered *after*
     /// the menu was built would otherwise render into a too-short frame and clip
     /// its lower rows. Re-reading `fittingSize` here — after SwiftUI has laid the
-    /// current window set out (its @Query stays live while the menu is closed) —
-    /// keeps the drop-down tall enough for however many windows are in play.
+    /// current window set out (its reads follow every write while the menu is
+    /// closed) — keeps the drop-down tall enough for however many windows are in
+    /// play.
     func menuWillOpen(_ menu: NSMenu) {
         StatusMenuOpening.shared.willOpen()
         TelemetryCounters.add("ui.menu.open")
@@ -1441,6 +1475,7 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func menuQuit() {
         Analytics.capture(.menubarItemClicked(.quit))
+        // lint:allow terminate-call an NSMenu action, called from event handling
         NSApp.terminate(nil)
     }
 

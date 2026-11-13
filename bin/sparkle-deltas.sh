@@ -138,7 +138,9 @@ MOUNTS=""
 cleanup() {
   local m
   for m in $MOUNTS; do detach "$m"; done
-  if [ "$OWN_WORK" = 1 ] && [ "$KEEP_WORK" = 0 ]; then rm -rf "$WORK"; fi
+  if [ "$OWN_WORK" = 1 ] && [ "$KEEP_WORK" = 0 ]; then rm -rf "$WORK" || true; fi
+  # A cleanup problem must never change the exit status (set -e is live here).
+  return 0
 }
 trap cleanup EXIT
 
@@ -368,7 +370,9 @@ build_delta() {
              | sed 's|.*/||; s|\.lproj$||' | grep -vxE 'en|Base' | sort | head -7 | paste -sd, - || true)"
 
   if [ -z "$KEY_FILE" ]; then
-    cp "$delta" "$OUT/$name"
+    if ! cp "$delta" "$OUT/$name" || [ "$(stat -f%z "$OUT/$name" 2>/dev/null)" != "$size" ]; then
+      rm -f "$OUT/$name"; fail "copying the delta into --out failed or is the wrong size"; return 1
+    fi
     log "OK ${old} -> ${VERSION}: ${size} B, create ${create_s}s, verify ${verify_s}s (unsigned: no --key-file)"
     row "$old" "$old_build" ok "$size" "$create_s" "$verify_s" "verified, unsigned"
     N_OK=$((N_OK + 1))
@@ -389,7 +393,9 @@ build_delta() {
     fail "signature does not verify against $([ -n "$PUBLIC_KEY" ] && echo --public-key || echo "the ${old} app's SUPublicEDKey")"; return 1
   fi
 
-  cp "$delta" "$OUT/$name"
+  if ! cp "$delta" "$OUT/$name" || [ "$(stat -f%z "$OUT/$name" 2>/dev/null)" != "$size" ]; then
+    rm -f "$OUT/$name"; fail "copying the delta into --out failed or is the wrong size"; return 1
+  fi
   {
     printf '    <enclosure\n'
     printf '        url="%s/%s"\n' "$URL_BASE" "$name"

@@ -14,6 +14,7 @@ import PacerUI
 ///
 /// Renders nothing with one account.
 struct AccountScopeControl: View {
+    // lint:allow query-always-mounted known debt: toolbar item, re-renders on every save; moving it needs every Account writer to signal (proposed issue)
     @Query(AccountScopeControl.accountsDescriptor) private var accounts: [Account]
     @State private var scope = UsageScope.shared
 

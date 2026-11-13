@@ -8,10 +8,12 @@ let package = Package(
         .library(name: "PacerCore", targets: ["PacerCore"]),
         .library(name: "PacerUI", targets: ["PacerUI"]),
         .library(name: "PacerPace", targets: ["PacerPace"]),
+        .library(name: "PacerRelaunch", targets: ["PacerRelaunch"]),
     ],
     targets: [
         .target(
             name: "PacerCore",
+            dependencies: ["PacerRelaunch"],
             resources: [
                 .copy("Resources/litellm-pricing.json"),
                 .copy("Resources/price-history.json"),
@@ -34,9 +36,14 @@ let package = Package(
             name: "PacerPace",
             dependencies: ["PacerCore"]
         ),
+        // Relaunching Pacer after it exits without quitting (#412): the policy,
+        // the wire format, and the relauncher that `Relauncher/main.swift`
+        // runs. No dependencies, not even Foundation, so the relauncher that
+        // links it stays tiny; PacerCore and the app use it from their side.
+        .target(name: "PacerRelaunch"),
         .testTarget(
             name: "PacerCoreTests",
-            dependencies: ["PacerCore", "PacerUI"],
+            dependencies: ["PacerCore", "PacerUI", "PacerRelaunch"],
             // The forecast arena's port fixtures (`research/arena`,
             // `arena port-fixtures`): synthetic inputs and the Python
             // reference's outputs, which the Swift ports must reproduce.
@@ -47,6 +54,10 @@ let package = Package(
             dependencies: ["PacerPace", "PacerCore"],
             // The frozen bash implementation the port is compared against.
             exclude: ["Oracle"]
+        ),
+        .testTarget(
+            name: "PacerRelaunchTests",
+            dependencies: ["PacerRelaunch"]
         ),
     ]
 )

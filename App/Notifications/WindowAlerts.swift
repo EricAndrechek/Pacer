@@ -32,14 +32,17 @@ extension NotificationCoordinator {
         let mute = UNNotificationAction(
             identifier: Self.muteAction, title: "Mute until reset", options: [],
             icon: UNNotificationActionIcon(systemImageName: "bell.slash"))
-        center.setNotificationCategories([
+        // The delegate above has to be set before launch returns; the
+        // categories are an XPC round trip, so they go off the main thread.
+        let categories: Set<UNNotificationCategory> = [
             // `.customDismissAction` so a dismissed alert reaches `didReceive`
             // (`notification_action` dismiss); it changes nothing on screen.
             UNNotificationCategory(identifier: Self.windowCategory, actions: [mute, open],
                                    intentIdentifiers: [], options: [.customDismissAction]),
             UNNotificationCategory(identifier: Self.generalCategory, actions: [open],
                                    intentIdentifiers: [], options: [.customDismissAction]),
-        ])
+        ]
+        OffMainQueue.notifications.run { center.setNotificationCategories(categories) }
     }
 
     // MARK: - Slots
@@ -60,9 +63,13 @@ extension NotificationCoordinator {
 
     /// Take a window's alert down and end its mute: the window reset, so
     /// neither is true any more.
-    func windowDidReset(windowKey: String) {
-        UNUserNotificationCenter.current().removeDeliveredNotifications(
-            withIdentifiers: [AlertSlot.identifier(windowKey: windowKey)])
+    /// Waits for the removal to finish, off the main thread: both callers
+    /// post the reset notice into the same slot right after, and that post
+    /// must reach the notification daemon after the remove, never before.
+    func windowDidReset(windowKey: String) async {
+        let ids = [AlertSlot.identifier(windowKey: windowKey)]
+        let center = UNUserNotificationCenter.current()
+        await OffMainQueue.notifications.perform { center.removeDeliveredNotifications(withIdentifiers: ids) }
         var mutes = Self.loadMutes()
         if mutes.until[windowKey] != nil {
             mutes.unmute(windowKey)
@@ -78,7 +85,8 @@ extension NotificationCoordinator {
     /// sends no reset instant afterwards, is cleared all the same.
     func sweepStaleWindowAlerts(now: Date = Date()) {
         let center = UNUserNotificationCenter.current()
-        center.getDeliveredNotifications { delivered in
+        OffMainQueue.notifications.run {
+          center.getDeliveredNotifications { delivered in
             let stale = delivered
                 .filter { $0.request.identifier.hasPrefix(AlertSlot.prefix) }
                 .filter { AlertSlot.isStale(resetsAt: AlertSlot.resetsAt(from: $0.request.content.userInfo), now: now) }
@@ -86,7 +94,15 @@ extension NotificationCoordinator {
             guard !stale.isEmpty else { return }
             center.removeDeliveredNotifications(withIdentifiers: stale)
             Log.write("Notify", "cleared \(stale.count) alert(s) whose window reset: \(stale.joined(separator: ", "))")
+          }
         }
+    }
+
+    /// Takes delivered alerts down off the main thread: the call waits on the
+    /// notification daemon (PACER-1G).
+    private static func removeDelivered(_ ids: [String]) {
+        let center = UNUserNotificationCenter.current()
+        OffMainQueue.notifications.run { center.removeDeliveredNotifications(withIdentifiers: ids) }
     }
 
     // MARK: - Mute until reset
@@ -104,8 +120,7 @@ extension NotificationCoordinator {
         mutes.mute(windowKey, resetsAt: resetsAt,
                    fallback: PaceMath.windowDuration(for: window) ?? 5 * 3600, now: now)
         Self.storeMutes(mutes)
-        UNUserNotificationCenter.current().removeDeliveredNotifications(
-            withIdentifiers: [AlertSlot.identifier(windowKey: windowKey)])
+        Self.removeDelivered([AlertSlot.identifier(windowKey: windowKey)])
         Log.write("Notify", "muted \(windowKey) until \(mutes.until[windowKey].map { "\($0)" } ?? "?")")
     }
 

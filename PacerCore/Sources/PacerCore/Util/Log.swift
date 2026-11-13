@@ -11,10 +11,8 @@ import Synchronization
 /// faster than a person — a screen recording of a relaunch, or the order of a
 /// window move and the display change that caused it, both happen inside one.
 ///
-/// Writes are short enough (well under PIPE_BUF) that a single
-/// `FileHandle.write` is atomic; we don't need to add a lock just to
-/// avoid interleaving across the daemon's two log streams (signal
-/// handler vs main task).
+/// Lines are written with `write(2)` on stderr's descriptor, never through
+/// `FileHandle`: see `writeAll` for why.
 public enum Log {
     nonisolated(unsafe) private static let formatter: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
@@ -57,8 +55,48 @@ public enum Log {
     private static let dropped = Mutex(0)
     private static let installExit: Void = { atexit { Log.flush() } }()
 
-    /// Where lines end up. stderr, except in tests. Called on the writer queue.
-    static let sink = Mutex<@Sendable (Data) -> Void>({ FileHandle.standardError.write($0) })
+    /// A test's replacement for stderr: nil in the app. Called on the writer
+    /// queue.
+    ///
+    /// Wrapped in a struct, never stored as a bare closure. 0.9.0 kept it as
+    /// `Mutex<@Sendable (Data) -> Void>` and read it with `withLock { $0 }`.
+    /// `withLock` hands its body an `inout` value, so the closure is
+    /// reabstracted on the way in and again on the write-back: every read
+    /// stored it two thunks deeper. One read per log line meant the writer's
+    /// stack grew by two frames a line, in Release as well as Debug, until it
+    /// overflowed. The owner's crash report shows the recursion 6,672 deep
+    /// (13,359 frames) after 4.4 hours, and that crash stopped Pacer
+    /// recording for 15 hours. A struct (or any non-function type) is stored
+    /// as itself, so a round trip through the lock adds nothing.
+    /// `LogAsyncTests.sinkRoundTripsDoNotDeepenTheStack` holds it there.
+    struct Sink: Sendable {
+        let write: @Sendable (Data) -> Void
+    }
+    static let sink = Mutex<Sink?>(nil)
+
+    /// Write all of `data` to `fd` with `write(2)`, retrying on `EINTR` and
+    /// finishing short writes. Any other error drops the rest of the line:
+    /// a log must never take the app down. Plain `write(2)` rather than
+    /// `FileHandle.write`: one system call, no Foundation objects per line,
+    /// and nothing it calls can throw an Objective-C exception on a closed
+    /// descriptor.
+    static func writeAll(_ data: Data, to fd: Int32 = STDERR_FILENO) {
+        data.withUnsafeBytes { raw in
+            guard var p = raw.baseAddress else { return }
+            var left = raw.count
+            while left > 0 {
+                let n = Darwin.write(fd, p, left)
+                if n > 0 {
+                    p += n
+                    left -= n
+                } else if n < 0 && errno == EINTR {
+                    continue
+                } else {
+                    return
+                }
+            }
+        }
+    }
 
     public static func write(_ tag: String, _ message: String) {
         let prefix = processTag.map { "\($0):" } ?? ""
@@ -72,18 +110,30 @@ public enum Log {
         guard admitted else { dropped.withLock { $0 += 1 }; return }
         let data = Data(line.utf8)
         queue.async {
-            let write = sink.withLock { $0 }
-            write(data)
+            let override = sink.withLock { $0 }
+            let emit: (Data) -> Void = { line in
+                if let override { override.write(line) } else { writeAll(line) }
+            }
+            emit(data)
             pending.withLock { $0 -= 1 }
             let lost = dropped.withLock { n -> Int in defer { n = 0 }; return n }
             if lost > 0 {
-                write(Data("\(formatter.string(from: Date())) [Log] dropped \(lost) lines while the log file was not accepting writes\n".utf8))
+                emit(Data("\(formatter.string(from: Date())) [Log] dropped \(lost) lines while the log file was not accepting writes\n".utf8))
             }
         }
     }
 
-    /// Wait until every line written so far has reached the sink.
-    public static func flush() {
-        queue.sync {}
+    /// Wait until every line written so far has reached the sink, for at most
+    /// `timeout`. Bounded because it runs on the terminate path and in the
+    /// `atexit` handler: during a disk stall (the reason the writer is off
+    /// the main thread at all, PACER-15) an unbounded wait would hold up a
+    /// quit or an update's relaunch for the whole stall. Returns false if it
+    /// gave up. Never deadlocks if called on the writer queue itself; it just
+    /// times out.
+    @discardableResult
+    public static func flush(timeout: TimeInterval = 2) -> Bool {
+        let drained = DispatchSemaphore(value: 0)
+        queue.async { drained.signal() }
+        return drained.wait(timeout: .now() + timeout) == .success
     }
 }

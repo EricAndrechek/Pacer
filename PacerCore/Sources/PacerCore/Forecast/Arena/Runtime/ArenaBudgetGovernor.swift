@@ -316,14 +316,24 @@ public final class ArenaBudgetGovernor: @unchecked Sendable {
     /// to tag crash and CPU reports; PacerCore does not link Sentry. Called
     /// off the main thread; keep it cheap.
     public static var onModeChange: (@Sendable (String) -> Void) {
-        get { modeObserver.withLock { $0 } }
-        set { modeObserver.withLock { $0 = newValue } }
+        get { modeObserver.withLock { $0.call } }
+        set { modeObserver.withLock { $0 = ModeObserver(call: newValue) } }
+    }
+    /// The observer lives in a struct, never as a bare closure in the
+    /// `Mutex`: `withLock` writes its `inout` value back, and a bare function
+    /// value comes back wrapped in two more reabstraction thunks each time, so
+    /// every read of `onModeChange` deepened every later call by two frames.
+    /// That is the same mechanism that crashed 0.9.0's log writer
+    /// (`Log.Sink`). Reads happen on each budget change, on a 512 KB-stack
+    /// utility queue.
+    private struct ModeObserver: Sendable {
+        let call: @Sendable (String) -> Void
     }
     /// The last mode reported, for an observer installed after the first
     /// evaluation (nil before it).
     public static var lastModeName: String? { lastMode.withLock { $0 } }
     private static let lastMode = Mutex<String?>(nil)
-    private static let modeObserver = Mutex<@Sendable (String) -> Void>({ _ in })
+    private static let modeObserver = Mutex(ModeObserver(call: { _ in }))
 
     private let budget: ArenaCPUBudget
     private let shareRate: Double

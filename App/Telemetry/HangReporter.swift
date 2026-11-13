@@ -111,11 +111,5 @@ enum HangReporter {
     }
 
     /// A debugger stopped at a breakpoint is not a hang.
-    private static var isBeingTraced: Bool {
-        var info = kinfo_proc()
-        var size = MemoryLayout<kinfo_proc>.stride
-        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid()]
-        guard sysctl(&mib, u_int(mib.count), &info, &size, nil, 0) == 0 else { return false }
-        return (info.kp_proc.p_flag & P_TRACED) != 0
-    }
+    private static var isBeingTraced: Bool { DebuggerProbe.isAttached }
 }

@@ -821,8 +821,8 @@ final class AppBackgroundService {
         var accountIds = FetchDescriptor<Account>()
         accountIds.propertiesToFetch = [\.id, \.isActive]
         let accounts = (try? container.mainContext.fetch(accountIds)) ?? []
-        await engines.keepFitted(accounts: accounts.map(\.id),
-                                 active: accounts.first(where: \.isActive)?.id)
+        engines.keepFitted(accounts: accounts.map(\.id),
+                           active: accounts.first(where: \.isActive)?.id)
         // Every engine competes the arena models it can draw. Adopting is a
         // property set; an engine made between refits adopts on the next one.
         // Set from the detached task below, not from here: an engine is a

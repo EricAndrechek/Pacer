@@ -46,7 +46,7 @@ release is the version), all performance metrics and spans (stalls, click
 delay, slow scans, rebuilds, downloads, arena passes, CLI durations, widget
 timeline times, `energy.cpu_seconds`), forecast accuracy, and the health
 counters (`data.*`, `oauth.*`, `cred.*`, `telemetry.*`, `main_thread.*`,
-`api.snapshot_ms.*`, `ui.click.delay.*`, `accounts.*`).
+`api.snapshot_ms.*`, `ui.click.delay.*`, `accounts.*`, `crash_relaunch.*`).
 
 `accounts.login_change.explained` / `accounts.login_change.unexplained`: counters of default-login changes a switcher's own log does / does not account for, drained by the daily check-in. No ids. A healthy machine has near zero unexplained; several a day means the switcher-log parse broke (#382). Non-usage counters, so Sentry metrics.
 
@@ -61,6 +61,14 @@ counters (`data.*`, `oauth.*`, `cred.*`, `telemetry.*`, `main_thread.*`,
 `beforeSend` budgets errors, hangs, crashes and MetricKit (`TelemetryBudget.kind`). Transactions also pass through it, spend nothing there, and are budgeted in `tracesSampler`.
 The check-in also runs when the Sentry release differs from `pacer.telemetry.checkin.lastRelease`, with `checkin.reason` = `day`/`version`. A `version` check-in omits `cli.*`, `widget.timeline_ms`, `widget_inventory` `refreshes.*` and `forecast.*`. Count Macs by unique users.
 `Telemetry.problem`: a fixed message, with string/bool attributes as tags and numbers as extra; crash toggle and `.error` cap. First use is "Store prepare failed": `error.domain`, `error.code`, `error.underlying_*`, `store.before`, extra `elapsed_ms`.
+
+## Crash relaunch (since 0.9.1, #412)
+`PacerRelauncher` brings Pacer back after it exits without quitting (AGENTS.md, "Relaunch after a crash"). Three health counters (not usage: Sentry metrics, and `counter.*` in PostHog's `daily_checkin`), no ids, no paths:
+- `crash_relaunch.relaunched`: launches the relauncher made.
+- `crash_relaunch.gave_up`: launches that reached the cap (three relaunches in 30 minutes), after which another unexpected exit leaves Pacer closed.
+- `crash_relaunch.unavailable`: normal launches that could not start the relauncher (missing from the build, or the spawn failed), so ran unprotected.
+
+The first two are kept in the app's defaults (`crashRelaunch.unreported.*`) until a check-in sends them (`CrashRelaunch.moveCountsToTelemetry`, just before `TelemetryCounters.drain`), not added to the in-memory tally at launch: in a crash loop no process lives to its check-in. The crash itself still arrives the usual way, from SentryCrash at the relaunched launch, which is now seconds after the crash rather than whenever someone reopens Pacer. A relaunch counts as a manual launch in `lifecycle.launches_manual` and as unclean in `lifecycle.unclean`, like any launch after a crash.
 
 ## PostHog
 
@@ -546,7 +554,7 @@ if they rarely do, download them only when cheaper models leave room to improve.
     counts, archive size, transcript file count, both config dirs present, `CLAUDE_CONFIG_DIR`
     set, time-zone offset (day-boundary bugs).
 14. **Lifecycle**: launched at login or by hand, uptime, restarts per day, unclean exits, Sparkle
-    check/install failures, time from a release to each Mac running it. `lifecycle.update_result` is one of `no_update`, `found`, `download_failed`, `will_install`, `ready_to_install` (downloaded, waiting for a quiet moment), `idle_install` (relaunched to install at one), `error_<domain>_<code>`. `lifecycle.update_error` (only with `download_failed`) is why it failed: `error_<domain tail>_<code>`, then `/` and the same for the underlying error when there is one (e.g. `error_nsurlerrordomain_-1009/error_kcfstreamerrordomain_-2`). Domain tail and code only, never a description; cleared by any later result without an error (#406).
+    check/install failures, time from a release to each Mac running it. `lifecycle.update_result` is one of `no_update`, `found`, `download_failed`, `will_install`, `ready_to_install` (downloaded, waiting for a quiet moment), `idle_install` (relaunched to install at one), `error_<domain>_<code>`. `lifecycle.update_error` (only with `download_failed`) is why it failed: `error_<domain tail>_<code>`, then `/` and the same for the underlying error when there is one (e.g. `error_nsurlerrordomain_-1009/error_kcfstreamerrordomain_-2`). Domain tail and code only, never a description; cleared by any later result without an error (#406). `lifecycle.update_delta` (`true`/`false`, only with an install result: `ready_to_install`, `will_install`, `idle_install`) is whether the installed update was a Sparkle delta; Sparkle falls back to the full DMG without reporting a failure, and the item it hands `willInstallUpdate` is the one actually installed, so a fallback reads `false`. Cleared by any later result without one.
 15. **Energy**: process CPU seconds per hour and while idle (the 0 % idle invariant, fleet-wide).
 16. **Feature errors**: notification permission state, API server port in use, skill install
     failures, widget timeline failures.

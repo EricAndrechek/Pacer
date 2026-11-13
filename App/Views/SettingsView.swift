@@ -97,8 +97,14 @@ struct SettingsView: View {
         }
         .onChange(of: switcherEnabled) { _, _ in
             // A toggle is the user asking to try now, failure or not.
-            ParkedCredentialStore.shared.resetFailures()
             Task {
+                // Off the main thread: the store's lock is held for the whole
+                // of a discovery, which lists the keychain and runs `security`
+                // per changed item (up to 5 s each), so taking it here froze
+                // Settings for as long as a discovery in flight took.
+                await Task.detached(priority: .userInitiated) {
+                    ParkedCredentialStore.shared.resetFailures()
+                }.value
                 await TokenPoolStatus.shared.rediscoverTokens()
                 await loadSwitcherStatus()
             }
@@ -1553,7 +1559,7 @@ private struct DailySummaryCard: View {
                 LabeledControlRow(label: "Send at") {
                     Picker("Send at", selection: $dailySummaryHour) {
                         ForEach(0..<24, id: \.self) { h in
-                            Text(formatHour(h)).tag(h)
+                            Text(pacerHourLabel(h)).tag(h)
                         }
                     }
                     .labelsHidden()
@@ -1564,20 +1570,6 @@ private struct DailySummaryCard: View {
         }, footer: {
             Text("Quiet, informational banner showing today's spend and top model. Fires once per day after the chosen time, only if you've used Claude Code that day.")
         })
-    }
-
-    /// Locale-aware hour label: 12-hour locales get "9 PM"; 24-hour
-    /// locales get "21:00".
-    private func formatHour(_ h: Int) -> String {
-        var components = DateComponents()
-        components.hour = h
-        let f = DateFormatter()
-        f.locale = .current
-        f.dateFormat = pacerUses24HourClock ? "HH:mm" : "h a"
-        guard let date = Calendar.current.date(from: components) else {
-            return "\(h):00"
-        }
-        return f.string(from: date)
     }
 }
 

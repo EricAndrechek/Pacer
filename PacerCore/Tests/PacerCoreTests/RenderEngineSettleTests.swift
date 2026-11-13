@@ -163,7 +163,7 @@ struct RenderEngineSettleTests {
                     await host.engine(forAccount: id).recompute(now: now)
                 }
             case .scopedNeverFitted:
-                await host.keepFitted(accounts: [Self.acme, Self.globex], active: Self.acme)
+                host.keepFitted(accounts: [Self.acme, Self.globex], active: Self.acme)
             }
             switch pass {
             case 1: await Task.yield()

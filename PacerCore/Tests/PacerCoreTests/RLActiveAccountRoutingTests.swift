@@ -47,7 +47,7 @@ struct RLActiveAccountRoutingTests {
         let container = try Self.seededContainer()
         let host = EngineHost(container: container,
                               preseeded: [.allAccounts: UsageIntelligenceEngine(modelContainer: container)])
-        await host.keepFitted(accounts: [Self.work, Self.home], active: Self.work)
+        host.keepFitted(accounts: [Self.work, Self.home], active: Self.work)
         for (_, engine) in host.all { await engine.recompute(now: Self.now) }
 
         let routed = host.rateLimitEngine
@@ -94,7 +94,7 @@ struct RLActiveAccountRoutingTests {
         // this host mid-test. The handler itself is called directly below.
         let host = EngineHost(container: container,
                               preseeded: [.allAccounts: UsageIntelligenceEngine(modelContainer: container)])
-        await host.keepFitted(accounts: [Self.work, Self.home], active: Self.work)
+        host.keepFitted(accounts: [Self.work, Self.home], active: Self.work)
         #expect(host.rateLimitEngine === host.engine(for: .account(Self.work)))
         host.activeAccountDidChange(to: Self.home)
         #expect(host.activeAccountId == Self.home)

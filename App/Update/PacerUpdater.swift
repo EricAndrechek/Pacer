@@ -110,7 +110,11 @@ private class PacerUpdaterDelegate: NSObject, SPUUpdaterDelegate {
 
     func updater(_ updater: SPUUpdater, willInstallUpdate item: SUAppcastItem) {
         let byPolicy = MainActor.assumeIsolated { UpdateInstallScheduler.shared.installingByPolicy }
-        UpdateOutcomeLog.record(byPolicy ? .idleInstall : .willInstall, version: item.displayVersionString)
+        // `item` is the one being installed: after a failed delta Sparkle swaps
+        // in the full-DMG item before this fires (`fallBackAndDownloadRegularUpdate`),
+        // so a fallback reads `false` here, which is the point.
+        UpdateOutcomeLog.record(byPolicy ? .idleInstall : .willInstall, version: item.displayVersionString,
+                                delta: item.isDeltaUpdate)
     }
 
     // Returning true keeps the automatic driver, and so Sparkle's session,
@@ -120,10 +124,13 @@ private class PacerUpdaterDelegate: NSObject, SPUUpdaterDelegate {
     func updater(_ updater: SPUUpdater, willInstallUpdateOnQuit item: SUAppcastItem,
                  immediateInstallationBlock immediateInstallHandler: @escaping () -> Void) -> Bool {
         let version = item.displayVersionString
+        // This item is the one the automatic driver was handed; a later
+        // `willInstallUpdate` carries the one actually installed and overwrites.
+        let delta = item.isDeltaUpdate
         let held = MainActor.assumeIsolated {
             UpdateInstallScheduler.shared.hold(version: version, updater: updater, install: immediateInstallHandler)
         }
-        if held { UpdateOutcomeLog.record(.readyToInstall, version: version) }
+        if held { UpdateOutcomeLog.record(.readyToInstall, version: version, delta: delta) }
         return held
     }
 

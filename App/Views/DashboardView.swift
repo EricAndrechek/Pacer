@@ -21,11 +21,14 @@ struct DashboardView: View {
     @State private var scope = UsageScope.shared
 
     @State private var modalRoot: PacerModalDestination?
+    /// For `DesktopCredentialPrompt`; read off the main thread on appear.
+    @State private var desktopAvailable = false
 
     var body: some View {
         // Read in this body and captured below, not read inside
         // `PageScaffold`'s stored closures. See `ProjectsView.body` (#140).
         let scopeAccountId = scope.accountId, limitAccountId = scope.limitAccountId
+        let desktopAvailable = self.desktopAvailable
         PageScaffold(
             "Dashboard",
             subtitle: "Realtime view of your Claude Code usage.",
@@ -48,7 +51,7 @@ struct DashboardView: View {
             }
         ) {
             WelcomeCard().layoutShiftProbe("welcome")
-            DesktopCredentialPrompt().layoutShiftProbe("desktop-prompt")
+            DesktopCredentialPrompt(desktopAvailable: desktopAvailable).layoutShiftProbe("desktop-prompt")
             NowStrip(
                 onTodayTap: openToday,
                 onSessionTap: { sessionId, displayName in
@@ -85,6 +88,14 @@ struct DashboardView: View {
                 .layoutShiftProbe("month-outlook")
         }
         .pacerModalNavigation(modalRoot, root: $modalRoot)
+        .task {
+            // Files only, never the keychain, but it reads every Desktop
+            // install's config and waits on `DesktopSessionDirectory`'s lock,
+            // which the scan holds while it lists Desktop's session folders.
+            self.desktopAvailable = await Task.detached(priority: .utility) {
+                DesktopOAuth.isClaudeDesktopAvailable
+            }.value
+        }
     }
 
     /// Open today's day-detail modal. Pinned to the user's local
@@ -125,7 +136,7 @@ struct RateLimitSourceChip: View {
     @State private var owner: String?
     @Environment(\.modelContext) private var modelContext
 
-    struct Sample: Equatable {
+    struct Sample: Equatable, Sendable {
         let sampledAt: Date
         let source: String
     }
@@ -159,7 +170,7 @@ struct RateLimitSourceChip: View {
         TimelineView(.periodic(from: .now, by: 30)) { _ in
             HStack(spacing: 0) { content(latest: latest, owner: owner) }
         }
-        .task(id: key) { refresh() }
+        .task(id: key) { await refresh() }
     }
 
     private struct RefreshKey: Equatable {
@@ -167,16 +178,34 @@ struct RateLimitSourceChip: View {
         let generation: UInt64
     }
 
+    /// Off the main thread: it re-runs on every account's poll write, and on
+    /// the main context each read waits its turn for the store, so a refit or
+    /// a big scan holding it turned a poll into a main-thread stall.
     @MainActor
-    private func refresh() {
-        latest = (try? modelContext.fetch(
-            LimitScope.rateLimits(account: limitAccountId, limit: 1)))?
-            .first.map { Sample(sampledAt: $0.sampledAt, source: $0.source) }
+    private func refresh() async {
+        let container = modelContext.container, account = limitAccountId
+        let read = await Task.detached(priority: .userInitiated) {
+            Self.read(container: container, account: account)
+        }.value
+        // `.task(id:)` cancelled this one for a newer key: that task's read
+        // is the one to show.
+        guard !Task.isCancelled else { return }
+        latest = read.latest
+        owner = read.owner
+    }
 
-        let accounts = (try? modelContext.fetch(FetchDescriptor<Account>())) ?? []
-        owner = accounts.count > 1
-            ? accounts.first { $0.id == limitAccountId }?.shortLabel
+    private nonisolated static func read(
+        container: ModelContainer, account: String?
+    ) -> (latest: Sample?, owner: String?) {
+        let context = ModelContext(container)
+        let latest = (try? context.fetch(
+            LimitScope.rateLimits(account: account, limit: 1)))?
+            .first.map { Sample(sampledAt: $0.sampledAt, source: $0.source) }
+        let accounts = (try? context.fetch(FetchDescriptor<Account>())) ?? []
+        let owner = accounts.count > 1
+            ? accounts.first { $0.id == account }?.shortLabel
             : nil
+        return (latest, owner)
     }
 
     @ViewBuilder private func content(latest: Sample?, owner: String?) -> some View {

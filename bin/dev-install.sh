@@ -124,6 +124,23 @@ case "${BUILD_CONFIGURATION}" in
     Debug|Release) ;;
     *) echo "ERROR: PACER_BUILD_CONFIGURATION must be Debug or Release, not ${BUILD_CONFIGURATION}"; exit 1 ;;
 esac
+# Which code this build is, for `bin/ship.sh soak` (written to the install
+# stamp below). Captured before building: building and notarizing take
+# minutes, and a commit made meanwhile must not be recorded as what was
+# built. The same paths as the soak compares, which are everything that
+# ends up in the bundle.
+STAMP_PATHS=(App PacerCore Widgets Relauncher CLI Skills project.yml Vendor/duckdb-version.txt)
+build_commit=""
+build_tree=""
+if git -C "${REPO_ROOT}" rev-parse HEAD >/dev/null 2>&1; then
+    build_commit="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
+    if [ -n "$(git -C "${REPO_ROOT}" status --porcelain -- "${STAMP_PATHS[@]}" 2>/dev/null)" ]; then
+        build_tree=dirty
+    else
+        build_tree=clean
+    fi
+fi
+
 echo
 echo "==> Building Pacer.app (${BUILD_CONFIGURATION}, unsigned, build ${DEV_BUILD_VERSION})"
 xcodebuild \
@@ -265,6 +282,9 @@ CLI_APP="${BUILD_OUTPUT}/Contents/Helpers/PacerCLI.app"
     sign "" "${CLI_APP}/Contents/Resources/PacerCore_PacerCore.bundle"
 sign "${CLI_ENTITLEMENTS_SIGN}" "${CLI_APP}"
 
+# The crash relauncher (#412): a bare tool with no entitlements.
+sign "" "${BUILD_OUTPUT}/Contents/Helpers/PacerRelauncher"
+
 # Outer app bundle last, so its signature covers everything inside.
 sign "${APP_ENTITLEMENTS_SIGN}" "${BUILD_OUTPUT}"
 
@@ -382,7 +402,9 @@ xcrun stapler validate "${BUILD_OUTPUT}" 2>&1 | tail -1
 fi  # PACER_DEV_SKIP_NOTARIZE
 
 # 3a. Quit Pacer.app if running, capturing whether it was so we can
-#     re-open at the end.
+#     re-open at the end. Its crash relauncher (#412) is stopped first, so
+#     a quit that ends in SIGKILL is never relaunched mid-install; the
+#     `open -g` at the end starts the new build, which starts a new one.
 echo
 echo "==> Quitting any running Pacer.app GUI"
 APP_WAS_RUNNING="$("${REPO_ROOT}/bin/dev-quit-app.sh")"
@@ -488,6 +510,21 @@ cp -R "${BUILD_OUTPUT}" "${INSTALL_DIR}/"
 echo
 echo "==> Preparing log directory at ${LOG_DIR}"
 mkdir -p "${LOG_DIR}"
+
+# Record which code this install is, for `bin/ship.sh soak`: it checks that
+# the code being tagged is the code that soaked. That's a content check,
+# because a squash merge restamps every commit with the merge time, so
+# comparing times always looked newer than the install. Outside the bundle:
+# writing into the signed app would break its signature.
+# The commit and tree state were captured before the build (above). Without
+# git there is nothing to record, and the previous install's stamp would
+# describe a build that is no longer here, so it goes.
+INSTALL_STAMP="${LOG_DIR}/installed-commit"
+if [ -n "${build_commit}" ]; then
+    printf '%s %s %s\n' "${build_commit}" "${build_tree}" "$(date +%s)" > "${INSTALL_STAMP}"
+else
+    rm -f "${INSTALL_STAMP}"
+fi
 
 if [ "${APP_WAS_RUNNING}" = "1" ] || [ "${RESTORE_APP}" = "1" ]; then
     echo

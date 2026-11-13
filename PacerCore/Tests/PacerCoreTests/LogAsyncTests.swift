@@ -27,7 +27,7 @@ struct LogAsyncTests {
 
     private func withSink<T>(_ c: Collector, _ body: () -> T) -> T {
         let old = Log.sink.withLock { $0 }
-        Log.sink.withLock { $0 = { c.sink($0) } }
+        Log.sink.withLock { $0 = Log.Sink(write: { c.sink($0) }) }
         defer { Log.flush(); Log.sink.withLock { $0 = old } }
         return body()
     }
@@ -51,6 +51,56 @@ struct LogAsyncTests {
         let lines = c.lines.withLock { $0 }.filter { $0.contains("] [T] ") || $0.contains("[T] ") }
         #expect(lines.count == n)
         for (i, l) in lines.enumerated() { #expect(l.hasSuffix("[T] line \(i)\n")) }
+    }
+
+    /// The 0.9.0 crash: the sink was a bare closure in a `Mutex`, and every
+    /// `withLock { $0 }` stored it two reabstraction thunks deeper, so the
+    /// writer's stack grew two frames per log line until it overflowed (6,672
+    /// deep in the owner's crash report). Pushing 1,500 lines through an
+    /// installed sink must leave the stack depth inside it where it started.
+    /// Under the old shape it grows by about 3,000 frames.
+    @Test("sink round trips do not deepen the writer's stack")
+    func sinkRoundTripsDoNotDeepenTheStack() {
+        let depths = Mutex<[Int]>([])
+        let old = Log.sink.withLock { $0 }
+        Log.sink.withLock {
+            $0 = Log.Sink(write: { data in
+                guard String(decoding: data, as: UTF8.self).contains("[Depth] ") else { return }
+                let depth = Thread.callStackReturnAddresses.count
+                depths.withLock { $0.append(depth) }
+            })
+        }
+        defer { Log.flush(); Log.sink.withLock { $0 = old } }
+        for i in 0..<1_500 { Log.write("Depth", "line \(i)") }
+        #expect(Log.flush(timeout: 10))
+        let seen = depths.withLock { $0 }
+        #expect(seen.count == 1_500)
+        if let first = seen.first, let last = seen.last {
+            #expect(last <= first + 2, "stack grew from \(first) to \(last) frames over \(seen.count) lines")
+        }
+    }
+
+    /// `writeAll` is plain `write(2)`: it must write every byte of a payload
+    /// far larger than one `write` call takes at a time, from any thread,
+    /// including one with a deliberately tiny stack.
+    @Test("writeAll writes every byte from a thread with a tiny stack")
+    func writeAllOnASmallStack() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pacer-log-writeall-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let fd = open(url.path, O_WRONLY | O_CREAT | O_TRUNC, 0o600)
+        try #require(fd >= 0)
+        let payload = Data((0..<(1 << 20)).map { UInt8(truncatingIfNeeded: $0 &* 31) })
+        let done = DispatchSemaphore(value: 0)
+        let thread = Thread {
+            Log.writeAll(payload, to: fd)
+            done.signal()
+        }
+        thread.stackSize = 64 * 1024
+        thread.start()
+        #expect(done.wait(timeout: .now() + 10) == .success)
+        close(fd)
+        #expect(try Data(contentsOf: url) == payload)
     }
 
     @Test("flush waits for lines already queued")

@@ -44,6 +44,7 @@ public enum LoginItemController {
     /// the daily check-in on the main thread). Call it directly only off the
     /// main thread; everywhere else use `statusOffMain`.
     public static func currentStatus() -> Status {
+        // lint:allow smappservice-status the one sanctioned read; every caller is off main (statusOffMain, reconcileAtLaunch, setEnabled)
         Self.map(SMAppService.mainApp.status)
     }
 

@@ -79,7 +79,7 @@ Commit it all, then open the PR.
 
 ## 4 · Release — autonomous, backgrounded
 
-- `bin/ship.sh release <version>` — **run it with `run_in_background: true`**. It
+- `bin/ship.sh release <version>` — **run it with `run_in_background: true`**. It runs `bin/ship.sh soak` first and won't tag while the installed build is older than the code, has run under an hour, has crashed since install, or isn't running (see docs/releasing.md "Soak check before tagging"); `SHIP_SKIP_SOAK=1` only for an emergency fix. It
   tags, watches the Release run, then verifies (asset present · appcast
   advertises the version · enclosure length matches the asset · EdDSA signature
   validates against the app's embedded `SUPublicEDKey` · each delta update is an

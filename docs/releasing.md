@@ -158,7 +158,13 @@ gh variable set PACER_SPARKLE_DELTAS --body off -R EricAndrechek/Pacer   # off
 gh variable delete PACER_SPARKLE_DELTAS -R EricAndrechek/Pacer           # back on
 ```
 
-A manual run takes `-f deltas=off` too.
+A manual run takes `-f deltas=off` too. `off`, `false` and `0` all switch them
+off, in any case (`OFF`, `False`).
+
+The delta step is bounded (20 minutes) and, on a tag push, tolerated: a failure
+or timeout there, a failed delta upload, or a failed asset listing at the
+appcast step each leave the release published with the full DMG and an appcast
+item that names only the deltas that really are assets. A manual run is strict.
 
 ### Testing them, publishing nothing
 
@@ -200,6 +206,24 @@ register a second Pacer, widget included, beside the real one. Launching an
 old Pacer to update itself would open the shared store and the dashboard. A
 client run belongs on a disposable machine.
 
+### Pulling a bad release
+
+1. **Take its item out of the appcast** (a commit on `gh-pages` that deletes
+   the `<item>`), so Sparkle stops offering it. The GitHub release can stay.
+2. **Check the Homebrew cask: it does not follow the appcast.** The tap pins
+   releases itself and only ever moves forward, so it keeps installing the
+   pulled version (`gh api repos/EricAndrechek/homebrew-tap/contents/Casks/pacer.rb
+   --jq .content | base64 -d | grep version`).
+   - A **patch** release (no store migration): pin the cask back with a PR to
+     the tap.
+   - A **minor** release migrated the store, and the version before it cannot
+     open a migrated store. Pinning back would give a brew user who already
+     has it a Pacer that can't read their data. Ship the fix as the next
+     version instead; the tap moves forward to it.
+
+   0.9.0 (2026-11-13) is the case this is from: the appcast was pulled within
+   hours, the cask stayed on 0.9.0 until 0.9.1 shipped.
+
 ### Rolling back delta updates
 
 In order of how fast they act. None of them needs a new build.
@@ -229,8 +253,12 @@ In order of how fast they act. None of them needs a new build.
 
    ```sh
    curl -fsSL https://ericandrechek.github.io/Pacer/appcast.xml | grep -c '<sparkle:deltas>'
-   bin/ship.sh verify 0.8.4                                # "no delta updates in this item"
+   SHIP_ALLOW_NO_DELTAS=1 bin/ship.sh verify 0.8.4         # "no delta updates in this item"
    ```
+
+   Without `SHIP_ALLOW_NO_DELTAS=1`, `verify` fails on an item with no deltas.
+   The delta step only warns when it fails on a tag push, so that failure is
+   how a release that quietly lost its deltas gets noticed.
 
 3. **Optionally delete the delta assets**, after step 2 is live:
 
@@ -459,3 +487,15 @@ When it goes green, you're ready to tag.
   one sanctioned edit is removing a release's `<sparkle:deltas>` block with
   `bin/appcast-drop-deltas.sh`, which leaves every item and full
   `<enclosure>` as it was.
+
+## Soak check before tagging
+
+`bin/ship.sh release` runs `bin/ship.sh soak` first, and refuses to tag when:
+- Pacer isn't running on this Mac;
+- the installed build is not the code being released: `make install` records the commit it built in `~/Library/Logs/Pacer/installed-commit`, and the soak fails if that commit differs from `HEAD` under `App/`, `PacerCore/`, `Widgets/`, `Relauncher/`, `CLI/` or `project.yml`, or was built from a tree with uncommitted changes. It compares content, not time, so the squash merge (which restamps everything) does not fail it; without a stamp it falls back to comparing the install time with the last change;
+- it has run less than `SHIP_SOAK_MIN_HOURS` (default 1; overnight is better);
+- macOS filed any `Pacer-*.ips` crash report since the install (Retired/ included).
+
+It also prints the hangs and the awake stall lines since the install, so you can compare with the previous build. `SHIP_SKIP_SOAK=1` skips it, for an emergency fix only.
+
+Why: 0.9.0 was tagged about 2.5 h after its code was installed. It crashed on the owner's Mac about 2 h after that (the log writer's stack grew with every line), and every 0.9.0 install had the same crash. Run `make install` first, then open the PR: CI and the release run take long enough to give the soak its hour.

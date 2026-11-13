@@ -1,0 +1,5 @@
+# lint-hang-patterns baseline: findings in code another branch owns and is
+# already fixing. One per line: <rule>\t<path>\t<the source line, trimmed>.
+# Matched on the text, so an entry stops matching, and the lint reports it
+# stale, once the fix lands: then delete it. Never add new code here; fix it,
+# or give it a `// lint:allow <rule> <why>` marker if it is fine as it is.

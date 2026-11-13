@@ -68,9 +68,10 @@ enum MenuBarWindowSource {
 
     /// The menu bar's window inputs, fetched once per change rather than once
     /// per body evaluation, on `context` (`MenuBarWindowReadings.read` says
-    /// what is fetched and why it is bounded). The dropdown and Settings read
-    /// them on the main context; the always-mounted label reads the same
-    /// fetches off the main thread (`MenuBarLabelFeed`, PACER-19).
+    /// what is fetched and why it is bounded). Settings reads them on the main
+    /// context; the always-mounted label and dropdown read the same fetches
+    /// off the main thread (`MenuBarLabelFeed`, PACER-19; `MenuDropdownFeed`,
+    /// #408).
     ///
     /// These were `@Query`s. A `@Query` re-executes whenever the model context
     /// changes, and Pacer's context changes every scan cycle — so the menu bar
@@ -679,107 +680,69 @@ final class StatusMenuOpening {
 /// shows in the menu bar all the time (gauge + chips); this is what
 /// drops down when the user clicks.
 struct MenuStatusContent: View {
-    @State private var rateLimits: [LimitSamplePoint] = []
-    @Query private var globalToday: [DailyAggregate]
-    @Query private var scopedToday: [AccountDailyAggregate]
+    /// What the dropdown draws from the store, read off the main thread when
+    /// one of the keys below moves (#408). See `MenuDropdownFeed` for what was
+    /// fetched on the main thread before, and why that mattered here.
+    ///
+    /// The app's feed is made by `PacerAppDelegate`, which reads it when it
+    /// builds the menu, and is handed in, so it outlives this view:
+    /// `MenuBarKeyedContent` rebuilds the view on a scope switch and at
+    /// midnight, and the dropdown keeps showing the last values until the new
+    /// key's read lands, a few milliseconds later, rather than "$0.00" or
+    /// empty bars in between. A render makes its own.
+    @State private var feed: MenuDropdownFeed
+
     /// An input, not a read of the stored value: a render walks scopes
     /// ephemerally (`UsageScope.selectEphemeral`), and the live menu follows the
     /// same observable, so both group by the scope they were handed (#324).
     private let menuScope: UsageScope
 
-    /// Follows the window's account scope. The menu bar is ambient, so an
-    /// argument exists for it always showing every account — but two numbers
-    /// on screen at once disagreeing about "today's cost" is worse than
-    /// either answer, and the scope is a deliberate choice the user made.
-    private var todayAggregates: [DailyRow] {
-        menuScope.isAll ? globalToday.map(\.dailyRow) : scopedToday.map(\.dailyRow)
-    }
-
-    /// Recent scoped `limits[]` rows — the source of the dynamic per-model
-    /// rows the dropdown lists beneath 5h / 7d. Bounded to the latest polls.
-    @State private var scopedSamples: [ScopedWindowRow] = []
-
-    /// "Something was written" — see `RateLimitWriteSignal`. The scoped fetch
-    /// it gates is the expensive part, and runs once per write rather than once
-    /// per body evaluation.
+    /// Only its container is used: every read makes its own context off the
+    /// main thread.
     @Environment(\.modelContext) private var menuModelContext
 
-    /// One account's windows, for the concurrent case. Empty otherwise.
-    struct AccountWindows: Identifiable {
-        let id: String
-        let label: String
-        let isActive: Bool
-        /// Other clients active on it (#245): "Desktop · Work". The CLI is
-        /// `isActive`, said as "signed in".
-        var clients: [String] = []
-        let fixed: [LimitSamplePoint]
-        let scoped: [ScopedWindowRow]
-
-        /// Its windows at their live values. Built where `body` reads it,
-        /// so a new value redraws the row.
-        @MainActor var windows: [MenuBarWindowItem] {
-            MenuBarWindowSource.items(
-                fiveHour: fixed.first { $0.window == RateLimitWindowName.fiveHour },
-                sevenDay: fixed.first { $0.window == RateLimitWindowName.sevenDay },
-                scoped: scoped,
-                live: LiveMeterBoard.shared.values[id] ?? [:])
-        }
-    }
-    @State private var perAccount: [AccountWindows] = []
-    /// Whose readings `rateLimits` are; see `MenuBarLabelFeed.Limits.account`.
-    @State private var loadedAccount: String?
-
-    /// The write signal and whose limits, both read here so either change
-    /// re-runs the load. The account comes through the observable scope so a
-    /// login switch under "All accounts" counts; the store lookup is only the
-    /// cold-start fallback.
-    var reloadKey: String {
-        let account = menuScope.resolvedLimitAccountId(in: menuModelContext)
-        // Which clients are active moves the grouping (#245), including when
-        // a Desktop's 30 minutes run out with nothing written.
-        return "\(RateLimitWriteSignal.shared.generation):\(account ?? "none")"
-            + ":\(AccountClientsMonitor.shared.generation)"
+    /// What the Today row's read depends on, each part read here so its change
+    /// re-runs the read: the local day, the spend scope and
+    /// `SampleWriteSignal`, which moves on each scan cycle that wrote turns.
+    ///
+    /// The scope is the window's. The menu bar is ambient, so an argument
+    /// exists for it always showing every account — but two numbers on screen
+    /// at once disagreeing about "today's cost" is worse than either answer,
+    /// and the scope is a deliberate choice the user made.
+    static func todayKey(scope: UsageScope) -> MenuBarLabelFeed.UsageKey {
+        MenuBarLabelFeed.UsageKey(
+            day: PacerToday.shared.key, account: scope.accountId,
+            writes: SampleWriteSignal.shared.generation, today: true, model: false)
     }
 
-    @MainActor
-    func reloadWindows() {
-        let account = menuScope.resolvedLimitAccountId(in: menuModelContext)
-        let loaded = MenuBarWindowSource.load(menuModelContext, account: account)
-        rateLimits = loaded.fixed
-        scopedSamples = loaded.scoped
-        loadedAccount = account
+    /// What the blocks' read depends on: the rate-limit write signal; whose
+    /// limits, through the observable scope so a login switch under "All
+    /// accounts" counts (the store's active row is only the cold-start
+    /// fallback, resolved in the read); which clients are active, which moves
+    /// the grouping (#245); and the opening, so every open re-reads.
+    static func limitsKey(scope: UsageScope) -> MenuDropdownFeed.LimitsKey {
+        MenuDropdownFeed.LimitsKey(
+            writes: RateLimitWriteSignal.shared.generation,
+            scope: scope.accountId, active: scope.activeAccountId,
+            clients: AccountClientsMonitor.shared.generation,
+            opening: StatusMenuOpening.shared.count)
+    }
 
-        // Concurrent accounts get a block each; sequential ones do not.
-        //
-        // When two accounts run at the same time both caps bind at once, and
-        // showing one is showing half. Used one at a time — the ordinary
-        // switcher case — only one binds, and a second block is noise in a
-        // menu that has to stay glanceable. The mode is decided from facts,
-        // not a heuristic: a session-mode config root, or activation spans
-        // that genuinely overlap.
-        //
-        // Several clients on several accounts at once is the same thing
-        // (#245): Desktop running a routine on one account while the CLI is on
-        // another binds both, so the menu groups whenever more than one
-        // account is active, and shows the active ones.
-        let clients = AccountClientsMonitor.shared
-        let all = ((try? menuModelContext.fetch(FetchDescriptor<Account>())) ?? [])
-            .sorted(by: Account.listOrder)
-        guard let grouped = AccountClients.menuGroupAccounts(
-            all: all.map(\.id),
-            concurrent: AccountParallelism.mode(context: menuModelContext) == .concurrent,
-            active: clients.activeAccountIds)
-        else {
-            perAccount = []
-            return
-        }
-        perAccount = all.filter { grouped.contains($0.id) }.map { account in
-            let its = MenuBarWindowSource.load(menuModelContext, account: account.id)
-            return AccountWindows(
-                id: account.id, label: account.shortLabel, isActive: account.isActive,
-                clients: PacerClientChip.others(clients.active(on: account.id)).map(\.label),
-                fixed: its.fixed, scoped: its.scoped)
-        }
+    /// The active clients the limits read groups by, as of now. Read when a
+    /// read starts, never in `body`: the monitor's clock moves on every scan
+    /// cycle, and `limitsKey` already carries its generation.
+    static func activeClients() -> MenuDropdownFeed.ActiveClients {
+        let monitor = AccountClientsMonitor.shared
+        return Dictionary(uniqueKeysWithValues: monitor.activeAccountIds.map { id in
+            (id, PacerClientChip.others(monitor.active(on: id)).map(\.label))
+        })
+    }
+
+    /// Read both halves for the current keys: what the delegate runs when it
+    /// builds the menu, so the first opening after launch finds them read.
+    static func load(_ feed: MenuDropdownFeed, scope: UsageScope, from container: ModelContainer) async {
+        await feed.loadToday(todayKey(scope: scope), from: container)
+        await feed.loadLimits(limitsKey(scope: scope), clients: activeClients(), from: container)
     }
 
     // MARK: - Blocks
@@ -810,36 +773,34 @@ struct MenuStatusContent: View {
     }
 
     /// Every block the dropdown lists: one per active account when they run
-    /// concurrently, else the scope's account. Built in `body`, so a new live
-    /// value redraws it.
+    /// concurrently, else the scope's account (`MenuDropdownFeed.readLimits`
+    /// decides which, and names them). Built in `body` from the last read,
+    /// with no fetch, so a new live value redraws it.
+    ///
+    /// Before the first read lands, the scope's block with no readings: the
+    /// 5-hour and 7-day rows say "—", as they do before a first poll, rather
+    /// than 0%.
     private var blocks: [Block] {
-        guard perAccount.isEmpty else {
-            return perAccount.map {
-                Block(id: $0.id, account: $0.id, name: $0.label, signedIn: $0.isActive ? true : nil,
-                      clients: $0.clients, windows: $0.windows)
-            }
+        let limits = feed.limits
+            ?? MenuDropdownFeed.Limits(grouped: false, blocks: [.init(account: nil)])
+        return limits.blocks.map { block in
+            Block(id: limits.grouped ? block.account ?? Self.scopeBlock : Self.scopeBlock,
+                  account: block.account, name: block.name, signedIn: block.signedIn,
+                  clients: block.clients,
+                  windows: Self.windows(block.readings, account: block.account))
         }
-        // Whose limits these are, when that is a question at all. The menu
-        // bar reads the picked account, or the signed-in one when the scope
-        // is "all accounts", and it is the surface read without opening the
-        // app, so a percentage with no owner is a number you cannot act on.
-        let all = (try? menuModelContext.fetch(FetchDescriptor<Account>())) ?? []
-        let shown = menuScope.resolvedLimitAccountId(in: menuModelContext)
-        let name = all.count > 1 ? all.first { $0.id == shown }?.shortLabel : nil
-        let signedIn = shown.map { id in all.first { $0.isActive }?.id == id } ?? true
-        return [Block(id: Self.scopeBlock, account: loadedAccount, name: name,
-                      signedIn: name == nil ? nil : signedIn, clients: [], windows: windows)]
     }
 
-    private var fiveHour: LimitSamplePoint? { rateLimits.first { $0.window == "five_hour" } }
-    private var sevenDay: LimitSamplePoint? { rateLimits.first { $0.window == "seven_day" } }
-
-    /// The scope's windows: 5h, 7d, then each scoped per-model window in the
-    /// latest poll, in the dashboard's glued-heroes order, at their live
-    /// values.
-    private var windows: [MenuBarWindowItem] {
-        MenuBarWindowSource.items(fiveHour: fiveHour, sevenDay: sevenDay, scoped: scopedSamples,
-                                  live: loadedAccount.flatMap { LiveMeterBoard.shared.values[$0] } ?? [:])
+    /// An account's windows: 5h, 7d, then each scoped per-model window in the
+    /// latest poll, in the dashboard's glued-heroes order, each at the live
+    /// value of the account whose readings these are, so a scope switch never
+    /// pairs one login's reading with the other's estimate.
+    private static func windows(_ readings: MenuBarWindowReadings, account: String?) -> [MenuBarWindowItem] {
+        MenuBarWindowSource.items(
+            fiveHour: readings.fixed.first { $0.window == RateLimitWindowName.fiveHour },
+            sevenDay: readings.fixed.first { $0.window == RateLimitWindowName.sevenDay },
+            scoped: readings.scoped,
+            live: account.flatMap { LiveMeterBoard.shared.values[$0] } ?? [:])
     }
 
     // MARK: - Forecasts
@@ -955,26 +916,17 @@ struct MenuStatusContent: View {
     }
 
     /// `scope` defaults to the shared observable, which is what AppKit-built
-    /// hosts have: no parent view can pass it down. Their host is built once
-    /// and kept, so a scope change reaches the `@Query` predicates below only
-    /// because `MenuBarKeyedContent` rebuilds the view when the scope moves.
-    init(scope: UsageScope = .shared) {
+    /// hosts have: no parent view can pass it down. Its values are read in
+    /// `body` (`todayKey`, `limitsKey`), so a scope switch reaches the reads
+    /// without anything captured here. `feed` is the app's, which outlives
+    /// this view (see `feed`); nil makes one, for a render.
+    init(scope: UsageScope = .shared, feed: MenuDropdownFeed? = nil) {
         menuScope = scope
-        let today = TokenSample.formatDate(Date())
-        let acct = scope.accountId ?? UsageScope.noAccountSentinel
-        _globalToday = Query(
-            filter: #Predicate<DailyAggregate> { $0.date == today }
-        )
-        _scopedToday = Query(
-            filter: #Predicate<AccountDailyAggregate> {
-                $0.date == today && $0.accountId == acct
-            }
-        )
+        _feed = State(initialValue: feed ?? MenuDropdownFeed())
     }
 
-    private var todayCost: Double {
-        todayAggregates.reduce(0) { $0 + $1.totalCostUSD }
-    }
+    /// Today's spend for the scope; nil until the first read lands.
+    private var todayCost: Double? { feed.today?.costUSD }
 
     /// The popover's fixed width, the approved mockup's. Named because the
     /// screenshot harness used to carry its own hard-coded copy, close enough
@@ -992,6 +944,13 @@ struct MenuStatusContent: View {
         // opens and nothing else here moves with the clock.
         let _ = StatusMenuOpening.shared.count
         let now = PacerClock.now
+        // Read here, so a change to any part re-runs `body` and restarts the
+        // read keyed on it (the opening is part of `limitsKey`, so each open
+        // re-reads the blocks, off the main thread). Captured once, so each
+        // read is for exactly the key its task was started with.
+        let todayKey = Self.todayKey(scope: menuScope)
+        let limitsKey = Self.limitsKey(scope: menuScope)
+        let todayCost = self.todayCost
         let blocks = self.blocks
         let plans = blocks.map { block in
             EnginePlan(block: block.id, account: block.account, windows: block.windows.map {
@@ -1010,14 +969,26 @@ struct MenuStatusContent: View {
             Divider()
                 .padding(.vertical, 8)
             VStack(alignment: .leading, spacing: 4) {
-                todayValueRow(label: "Today", value: pacerCost(todayCost), tooltip: pacerCostExact(todayCost))
-                outlookRow
+                // "—" only before the first read lands, which the delegate
+                // starts when it builds the menu: never a "$0.00" that is
+                // really "not read yet".
+                todayValueRow(label: "Today", value: todayCost.map(pacerCost) ?? "—",
+                              tooltip: todayCost.map(pacerCostExact))
+                outlookRow(spendSoFar: todayCost ?? 0)
             }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
         .frame(width: Self.popoverWidth, alignment: .leading)
-        .task(id: reloadKey) { reloadWindows() }
+        // No fetch on the main thread: each load reads on a fresh context in
+        // a detached task and assigns its values in one turn (#408).
+        .task(id: todayKey) {
+            await feed.loadToday(todayKey, from: menuModelContext.container)
+        }
+        .task(id: limitsKey) {
+            await feed.loadLimits(limitsKey, clients: Self.activeClients(),
+                                  from: menuModelContext.container)
+        }
         // Re-ask when the window set changes (a scoped window appears), a
         // live value crosses a whole point, or the engine recomputes.
         .task(id: engineKey) { await refreshEngine(plans) }
@@ -1171,9 +1142,9 @@ struct MenuStatusContent: View {
     /// Fixed Outlook row, same language as the dashboard's Today tile:
     /// "≈$650 by tonight" once the range is actionable, the pace phrase
     /// before that, an em dash while warming up (constant row count).
-    @ViewBuilder private var outlookRow: some View {
+    @ViewBuilder private func outlookRow(spendSoFar: Double) -> some View {
         let value: String = {
-            if let e = todayEOD, IntelligenceFormatting.rangeIsActionable(e, spendSoFar: todayCost) {
+            if let e = todayEOD, IntelligenceFormatting.rangeIsActionable(e, spendSoFar: spendSoFar) {
                 return "≈\(IntelligenceFormatting.approxCost(e.value)) by tonight"
             }
             if let p = pacePercentile {
@@ -1188,7 +1159,7 @@ struct MenuStatusContent: View {
         // self-test (`MenuBarTooltipSelfTest`) hovers the bottom rows.
         let help: String = {
             if let e = todayEOD, let band = e.interval80,
-               IntelligenceFormatting.rangeIsActionable(e, spendSoFar: todayCost) {
+               IntelligenceFormatting.rangeIsActionable(e, spendSoFar: spendSoFar) {
                 return "Likely \(IntelligenceFormatting.approxCost(band.lowerBound))–"
                     + "\(IntelligenceFormatting.approxCost(band.upperBound)) by midnight"
             }

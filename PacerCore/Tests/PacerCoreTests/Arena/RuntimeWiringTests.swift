@@ -38,7 +38,7 @@ struct RuntimeWiringTests {
         let container = try RuntimeEngineTests.seeded()
         let engines = EngineHost(container: container)
         let account = RuntimeEngineTests.account
-        await engines.keepFitted(accounts: [account], active: account)
+        engines.keepFitted(accounts: [account], active: account)
         let redraws = RuntimeEngineTests.Landed()
         let runtime = Self.appRuntime(container: container, engines: engines,
                                       roster: ArenaRoster(registry: [RuntimeEngineTests.oracle]),

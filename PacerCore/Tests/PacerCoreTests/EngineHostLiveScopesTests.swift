@@ -71,14 +71,14 @@ struct EngineHostLiveScopesTests {
     @Test("every known account is refitted, asked for or not")
     func knownAccountsAreAlwaysLive() async throws {
         let host = try makeHost(accounts: ["orgA"])
-        await host.keepFitted(accounts: ["orgA", "orgB"])
+        host.keepFitted(accounts: ["orgA", "orgB"])
         let everyone: Set<EngineScope> = [.allAccounts, .account("orgA"), .account("orgB")]
         #expect(Set(host.live.map(\.scope)) == everyone)
         host.markAskedForTesting(.account("orgA"),
                                  at: Date().addingTimeInterval(-EngineHost.idleScopeGrace - 60))
         #expect(Set(host.live.map(\.scope)) == everyone)
         // An account that leaves the list falls back to the ask rule.
-        await host.keepFitted(accounts: ["orgB"])
+        host.keepFitted(accounts: ["orgB"])
         #expect(Set(host.live.map(\.scope)) == [.allAccounts, .account("orgB")])
     }
 
@@ -88,7 +88,7 @@ struct EngineHostLiveScopesTests {
     @Test("an engine created for a known account is scoped before anything fits it")
     func createdEnginesAreScoped() async throws {
         let host = try makeHost()
-        await host.keepFitted(accounts: ["orgB"])
+        host.keepFitted(accounts: ["orgB"])
         let engine = try #require(host.all.first { $0.scope == .account("orgB") }?.engine)
         #expect(await engine.scope == .account("orgB"))
     }

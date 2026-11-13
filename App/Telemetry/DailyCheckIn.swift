@@ -182,6 +182,9 @@ final class DailyCheckIn {
         let installed = await Self.installedWidgets()
         let widgets = Self.widgetAttributes(installed)
         let widgetsEnd = Date()
+        // Crash relaunches and give-ups wait in defaults until a check-in
+        // sends them: the process that counted one may not have lived this long.
+        CrashRelaunch.moveCountsToTelemetry()
         let counters = TelemetryCounters.drain()
 
         let storeStart = Date()
@@ -348,6 +351,8 @@ final class DailyCheckIn {
             a["lifecycle.update_result"] = .string(update.result)
             if let version = update.version { a["lifecycle.update_version"] = .string(version) }
             if let error = update.error { a["lifecycle.update_error"] = .string(error) }
+            // Present only with an install result: whether it arrived as a delta.
+            if let delta = update.delta { a["lifecycle.update_delta"] = .bool(delta) }
         }
         let cpu = max(cpuSeconds() - cpuBefore, 0)
         a["energy.cpu_seconds"] = .double((cpu * 10).rounded() / 10)

@@ -18,6 +18,10 @@ public enum UpdateOutcomeLog {
     /// `/` and the same for its underlying error when it has one. Never a
     /// description.
     public static let errorKey = "pacer.telemetry.update.error"
+    /// Whether the update being installed is a Sparkle delta (`true`) or a
+    /// full download (`false`). Stored only with an install result, so a
+    /// Mac whose delta failed and fell back to the full DMG reads `false`.
+    public static let deltaKey = "pacer.telemetry.update.delta"
 
     /// Sparkle's `SUNoUpdateError`: not a failure, the "you're up to date"
     /// answer, which Sparkle delivers through the error channel.
@@ -57,7 +61,7 @@ public enum UpdateOutcomeLog {
     /// download is followed by a cycle that "ends with an error"). It must not
     /// replace a more specific result recorded in the last two minutes.
     public static func record(_ result: String, version: String? = nil, error: String? = nil,
-                              endOfCycle: Bool = false, now: Date = Date(), store: UserDefaults = PacerPreferences.store) {
+                              delta: Bool? = nil, endOfCycle: Bool = false, now: Date = Date(), store: UserDefaults = PacerPreferences.store) {
         if endOfCycle,
            let previous = store.string(forKey: resultKey),
            [Outcome.downloadFailed, .willInstall, .idleInstall].map(\.rawValue).contains(previous),
@@ -69,6 +73,8 @@ public enum UpdateOutcomeLog {
         // Cleared like the version: a later result without an error must not
         // keep an older failure's reason beside it.
         if let error { store.set(error, forKey: errorKey) } else { store.removeObject(forKey: errorKey) }
+        // Cleared the same way: only an install result knows how it arrived.
+        if let delta { store.set(delta, forKey: deltaKey) } else { store.removeObject(forKey: deltaKey) }
         // A result without a version (no update, an error before an appcast
         // item) clears the old one so the pair never disagrees.
         if let version, FormatDrift.isReportable(version) {
@@ -79,9 +85,10 @@ public enum UpdateOutcomeLog {
     }
 
     public static func record(_ outcome: Outcome, version: String? = nil, error: String? = nil,
-                              endOfCycle: Bool = false,
+                              delta: Bool? = nil, endOfCycle: Bool = false,
                               now: Date = Date(), store: UserDefaults = PacerPreferences.store) {
-        record(outcome.rawValue, version: version, error: error, endOfCycle: endOfCycle, now: now, store: store)
+        record(outcome.rawValue, version: version, error: error, delta: delta,
+               endOfCycle: endOfCycle, now: now, store: store)
     }
 
     /// The reason for a failed download: the error's domain tail and code,
@@ -94,8 +101,9 @@ public enum UpdateOutcomeLog {
     }
 
     /// What the check-in reports: nil until Sparkle has said anything.
-    public static func last(store: UserDefaults = PacerPreferences.store) -> (result: String, version: String?, error: String?)? {
+    public static func last(store: UserDefaults = PacerPreferences.store) -> (result: String, version: String?, error: String?, delta: Bool?)? {
         guard let result = store.string(forKey: resultKey) else { return nil }
-        return (result, store.string(forKey: versionKey), store.string(forKey: errorKey))
+        let delta = store.object(forKey: deltaKey) as? Bool
+        return (result, store.string(forKey: versionKey), store.string(forKey: errorKey), delta)
     }
 }

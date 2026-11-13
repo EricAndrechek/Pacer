@@ -162,11 +162,82 @@ cmd_wait_ci() {
   done
 }
 
+# The installed build must have run on this Mac, crash-free, before its code is
+# tagged. 0.9.0 was tagged about 2.5 h after its code was installed and crashed
+# on the owner's Mac about 2 h after that: the log writer's stack grew with
+# every line. Every 0.9.0 install had the same crash, and nothing looked before
+# tagging. This looks.
+#   SHIP_SOAK_MIN_HOURS  minimum time Pacer has run on the installed build (default 1)
+#   SHIP_SKIP_SOAK=1     skip, for an emergency fix only (loudly)
+cmd_soak() {
+  local app=/Applications/Pacer.app min_h="${SHIP_SOAK_MIN_HOURS:-1}" rc=0
+  info "Soak check: the installed build on this Mac"
+  local pid
+  pid="$(pgrep -x Pacer | head -1 || true)"
+  if [ -z "$pid" ]; then bad "Pacer is not running: it may have crashed. Relaunch it and look before releasing."; rc=1
+  else ok "Pacer is running (pid ${pid})"; fi
+
+  [ -d "$app" ] || { bad "no ${app}"; return 1; }
+  local installed stamp="$HOME/Library/Logs/Pacer/installed-commit" code_paths="App PacerCore Widgets Relauncher CLI Skills project.yml Vendor/duckdb-version.txt"  # = STAMP_PATHS in bin/dev-install.sh
+  installed="$(stat -f %m "$app")"
+  # Is the code being tagged the code that soaked? `make install` records the
+  # commit it built (bin/dev-install.sh). Compare content, not time: a squash
+  # merge restamps everything with the merge time, so a time check always
+  # read "older than the last change" right after the merge.
+  local s_commit s_tree
+  if [ -f "$stamp" ] && read -r s_commit s_tree _ < "$stamp" && git cat-file -e "${s_commit}^{commit}" 2>/dev/null; then
+    if [ "$s_tree" != clean ]; then
+      bad "the installed build had uncommitted changes (${s_commit:0:8}+dirty): \`make install\` a committed tree"; rc=1
+    elif ! git diff --quiet "$s_commit" HEAD -- $code_paths; then
+      bad "the installed build (${s_commit:0:8}) differs from HEAD in app code: \`make install\` this code and let it run first"
+      git diff --stat "$s_commit" HEAD -- $code_paths | tail -1 | sed 's/^/      /'; rc=1
+    else ok "installed ${s_commit:0:8} on $(date -r "$installed" '+%F %R'): the same app code as HEAD"; fi
+  else
+    # No usable stamp (installed before stamps existed, or from a commit this
+    # clone lacks): fall back to time, which may be wrong after a squash.
+    local code_changed
+    code_changed="$(git log -1 --format=%ct -- $code_paths 2>/dev/null || echo 0)"
+    if [ "$installed" -lt "$code_changed" ]; then
+      bad "no install stamp, and the installed build ($(date -r "$installed" '+%F %R')) is older than the last code change: \`make install\` this code and let it run first"; rc=1
+    else ok "installed $(date -r "$installed" '+%F %R'), after the last code change (no install stamp)"; fi
+  fi
+
+  if [ -n "$pid" ]; then
+    local started up_h
+    started="$(date -j -f '%a %b %d %T %Y' "$(ps -o lstart= -p "$pid" | sed 's/  */ /g; s/^ //')" +%s 2>/dev/null || echo "$installed")"
+    up_h="$(( ( $(date +%s) - started ) / 3600 ))"
+    if [ "$up_h" -lt "$min_h" ]; then bad "it has run ${up_h} h of the ${min_h} h minimum (SHIP_SOAK_MIN_HOURS)"; rc=1
+    else ok "running for ${up_h} h"; fi
+  fi
+
+  local crashes
+  # Compare mtimes directly: BSD find has no -newermt @epoch, and a quiet
+  # failure there reported "no crashes" over a real one. Retired/ included.
+  crashes="$(find "$HOME/Library/Logs/DiagnosticReports" -name 'Pacer-*.ips' 2>/dev/null \
+    | while read -r f; do [ "$(stat -f %m "$f")" -ge "$installed" ] && echo "$f"; done || true)"
+  if [ -n "$crashes" ]; then bad "crash report(s) since the install:"; printf '      %s\n' $crashes; rc=1
+  else ok "no Pacer crash reports since the install"; fi
+
+  local log="$HOME/Library/Logs/Pacer/Pacer.err.log" since hangs stalls_awake
+  if [ -f "$log" ]; then
+    since="$(date -u -r "$installed" +%Y-%m-%dT%H:%M:%S)"
+    hangs="$(awk -v s="$since" '$1 >= s && /\[Hang\] main thread was stuck/' "$log" | wc -l | tr -d ' ')"
+    stalls_awake="$(awk -v s="$since" '$1 >= s && /\[MainThread\] stalled/ && !/displays asleep/' "$log" | wc -l | tr -d ' ')"
+    info "since the install: ${hangs} hang(s) of 2 s or more, ${stalls_awake} stall line(s) with a display awake (compare with the previous build before tagging)"
+  fi
+  return "$rc"
+}
+
 cmd_release() {
   local version="${1:?usage: ship.sh release <version>}" tag
   version="${version#v}"; tag="v${version}"
   need gh
   assert_releasable
+  if [ "${SHIP_SKIP_SOAK:-}" = 1 ]; then
+    warn "SKIPPING the soak check (SHIP_SKIP_SOAK=1): emergency fixes only"
+  else
+    cmd_soak || die "soak check failed: fix it, wait, or set SHIP_SKIP_SOAK=1 for an emergency fix"
+  fi
   git rev-parse "$tag" >/dev/null 2>&1 && die "tag ${tag} already exists"
   info "Tagging ${tag} on $(git rev-parse --short HEAD) and pushing"
   # Remember when we started, so we can tell OUR Release run from an earlier
@@ -270,8 +341,13 @@ for e in deltas:
     dlen = int(e.get("length", "0"))
     if assets.get(dname) == dlen: ok(f"delta from build {e.get(S + 'deltaFrom')}: {dname} is a release asset of its stated length ({dlen} bytes)")
     else: bad(f"delta {dname}: the feed says {dlen} bytes, the release has {assets.get(dname)}; see 'Rolling back delta updates' in docs/releasing.md")
+# No deltas is a failure unless asked for: the delta step tolerates its own
+# failures on a tag push (the release must not wait on it) and only leaves a
+# warning on the run, so this is where a release that quietly lost them,
+# with notes promising small updates, gets noticed.
 if not deltas:
-    print("  · no delta updates in this item")
+    if os.environ.get("SHIP_ALLOW_NO_DELTAS") == "1": print("  · no delta updates in this item (SHIP_ALLOW_NO_DELTAS=1)")
+    else: bad("no delta updates in this item: the Release run's delta step failed or was switched off (see its warnings). Re-run it, or SHIP_ALLOW_NO_DELTAS=1 if that was intended")
 sys.exit(1 if FAIL else 0)
 PY
 
@@ -351,6 +427,16 @@ PY
       else
         ok "pacer command line present, team-signed, with the App Group"
       fi
+      # The crash relauncher (#412): without it a crash leaves Pacer down.
+      local relauncher="${mnt}/Pacer.app/Contents/Helpers/PacerRelauncher"
+      if [ ! -x "$relauncher" ]; then
+        bad "the app has no Contents/Helpers/PacerRelauncher"; rc=1
+      elif ! codesign --verify --strict \
+             -R='anchor apple generic and certificate leaf[subject.OU] = "YZXWMJ5VBY"' "$relauncher" 2>/dev/null; then
+        bad "Contents/Helpers/PacerRelauncher is not signed by the team"; rc=1
+      else
+        ok "crash relauncher present and team-signed"
+      fi
       hdiutil detach -quiet "$mnt" || true
     else
       warn "could not download or mount the DMG to check the pacer command line"
@@ -391,8 +477,9 @@ case "$sub" in
   wait-ci)   cmd_wait_ci "$@" ;;
   release)   cmd_release "$@" ;;
   verify)    cmd_verify "$@" ;;
+  soak)      cmd_soak "$@" ;;
   ""|-h|--help|help)
     sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
     ;;
-  *) die "unknown subcommand: $sub (try: preflight | notes | wait-ci | release | verify)" ;;
+  *) die "unknown subcommand: $sub (try: preflight | notes | wait-ci | soak | release | verify)" ;;
 esac

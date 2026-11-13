@@ -13,8 +13,8 @@ public struct MenuBarWindowReadings: Sendable, Equatable {
         self.scoped = scoped
     }
 
-    /// Read on `context`, which may be any context: the dropdown passes its
-    /// main one, the label a fresh one off the main thread.
+    /// Read on `context`, which may be any context: Settings passes its main
+    /// one, the label and the dropdown a fresh one off the main thread.
     ///
     /// Latest batch only for the fixed windows: a window the last poll no
     /// longer reported (the 5-hour one on a verified Ultra account) must not

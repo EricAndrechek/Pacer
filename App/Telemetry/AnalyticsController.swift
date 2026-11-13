@@ -66,8 +66,12 @@ final class AnalyticsController {
         Log.write("Telemetry", "analytics started · usage=\(TelemetryController.analyticsAllowed)")
     }
 
-    func prepareForTermination() {
-        client?.flushBeforeExit(timeout: 2)
+    /// Off the main thread for the same reason as
+    /// `TelemetryController.prepareForTermination`: it waits up to 2 s on the
+    /// network, `HangWatch`'s threshold.
+    func prepareForTermination() async {
+        guard let client else { return }
+        await Task.detached(priority: .userInitiated) { client.flushBeforeExit(timeout: 2) }.value
     }
 
     /// Turned off: nothing already queued may leave.

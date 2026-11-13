@@ -523,6 +523,9 @@ App/
                                   synchronously in `init`; the first launch after a schema change
                                   migrates it off main (`PacerStore.prepareStore`, #376) and store
                                   users wait for `.ready`.
+    CrashRelauncher.swift       — starts `PacerRelauncher` at launch and tells it `quit` on every
+                                  deliberate exit; it relaunches Pacer after a crash or kill (#412,
+                                  "Relaunch after a crash").
   Settings/
     PacerSettings.swift         — App Group UserDefaults wrapper + enum types for menu bar
                                   style/icon and notification thresholds. Single source of
@@ -641,6 +644,8 @@ same scenes on each SDK and diffing:
     - `Widgets/` → `PacerWidgets.appex` (widget extension)
     - `PacerCore/` → local Swift package (models, parsers, store,
       `LoginItemController` wrapping `SMAppService.mainApp`)
+    - `Relauncher/` → `Contents/Helpers/PacerRelauncher`, the crash
+      relauncher (a tool; its logic is `PacerRelaunch` in PacerCore)
 - Each non-package target has its own `.entitlements` file declaring the
   shared App Group `YZXWMJ5VBY.com.ericandrechek.pacer`. The App Group
   lets the app and widgets share a single SwiftData container at
@@ -684,8 +689,9 @@ you've made changes the user will want to actually run:
 make install
 ```
 
-`make install` is idempotent: it quits the running Pacer.app GUI (so
-the in-memory binary releases the bundle), regenerates the Xcode
+`make install` is idempotent: it stops the crash relauncher and quits
+the running Pacer.app GUI (so the in-memory binary releases the bundle,
+and nothing relaunches the old one mid-install), regenerates the Xcode
 project from `project.yml`, builds with signing, notarizes via
 `xcrun notarytool`, staples the ticket, replaces
 `/Applications/Pacer.app`, boots out any leftover legacy daemon
@@ -699,7 +705,9 @@ or LaunchAgent. Data collection runs inside the app process via
 `AppBackgroundService` and starts from
 `PacerAppDelegate.applicationDidFinishLaunching`. To run at login,
 the user toggles "Open at Login" in Settings → General, which
-registers via `SMAppService.mainApp`.
+registers via `SMAppService.mainApp`. The one other process a run
+has is `PacerRelauncher`, which collects nothing and only brings
+Pacer back after a crash ("Relaunch after a crash", below).
 
 `make help` lists every target. The ones you'll reach for most often:
 
@@ -749,6 +757,50 @@ agent stays alive after the last window closes (see
 (`com.ericandrechek.pacer.daemon.dev` or `com.ericandrechek.pacer.daemon`)
 and removes the old plist on every install — the migration is
 automatic for users coming from the prior daemon-based architecture.
+
+### Relaunch after a crash (#412)
+
+The login item starts Pacer once; nothing restarted it after a crash, and on
+2026-11-12 one left it down for 15 hours (no usage recorded, every `pacer`
+gate stale, and SentryCrash only reports at the next launch). Now every
+normal launch starts `Contents/Helpers/PacerRelauncher` as a child in its own
+session (`CrashRelauncher` in the app, `PacerRelaunch` in PacerCore). Its
+stdin is a pipe whose only write end Pacer holds, and the kernel closes that
+end when Pacer's process ends, however it ends, so the relauncher reads
+end-of-file:
+
+- after `quit`, which Pacer writes first thing in `applicationShouldTerminate`
+  (Quit, ⌘Q, logout, shutdown, Sparkle, any AppleScript quit), on SIGTERM
+  (`kill`, `killall Pacer`; handled off the main thread, so a hung Pacer
+  still goes), before the fatal store alert's `exit(1)`, and when Sparkle
+  says it will relaunch, the relauncher just exits;
+- otherwise (a crash, or a SIGKILL from a watchdog, the memory killer or
+  Force Quit) it relaunches Pacer with `open -n -g` after 10 s, then 30 s,
+  then 2 min (`RelaunchPolicy`). A fourth unexpected exit within 30 minutes
+  leaves Pacer closed: `[Relauncher] … not relaunching` in the log, and
+  `crash_relaunch.gave_up` in telemetry. Opening Pacer by hand starts over.
+
+**Why this and not the old daemon or a LaunchAgent.** It collects nothing,
+registers nothing, and ends with the run it watches (or right after the
+relaunch it makes). A launchd
+`KeepAlive` agent (`SMAppService.agent`) only restarts what launchd started,
+and Pacer is started by Finder, the login item, Sparkle and `open`; it would
+also show "Background Items Added", put a switch in System Settings, and
+(`SuccessfulExit` implies `RunAtLoad`) start Pacer at every login whatever
+"Open at Login" says. The relauncher covers every way Pacer starts, whether
+or not "Open at Login" is on, with no prompt.
+
+- **`kill -9` brings Pacer back; a plain `kill` does not.** SIGKILL looks like
+  any other crash. `bin/dev-quit-app.sh` (so `make install`, `make uninstall`,
+  `make record`) stops the relauncher first, because its fallback is a
+  SIGKILL; anything else that must force-kill Pacer runs
+  `pkill -x PacerRelauncher` first.
+- Not armed under a debugger (Xcode's Stop is a SIGKILL) or when started from
+  a terminal. `defaults write com.ericandrechek.pacer crashRelaunch.disabled
+  -bool YES` turns it off from the next launch.
+- The real-session check is `bin/dev-crash-relaunch-check.sh`. It quits and
+  kills the owner's Pacer, so it runs only with his go-ahead; bare, it prints
+  its plan.
 
 ### Why we do not use the Xcode project's signing flags from CLI directly
 
@@ -882,6 +934,20 @@ of them. Mentioned here so future agents don't repeat them:
    and the UserDefaults plist from the legacy container path to the
    new path between "quit old app" and "install new app", so existing
    dev installs upgrade transparently.
+
+6. **`NSApp.terminate` from a main-queue block or a main-actor Task never
+   finishes.** `applicationShouldTerminate` answers `.terminateLater` and
+   replies from a main-actor Task. `terminate` then spins a nested run loop
+   until the reply, and a run loop nested inside a main-queue block never
+   services the main queue again; main-actor jobs are main-queue blocks, so
+   the reply never comes. The first SIGTERM handler did this, and the
+   on-machine relauncher check caught it (Pacer hung until the fallback
+   ended it, with no shutdown). A quit Apple Event (Quit, AppleScript,
+   Sparkle's installer via `NSRunningApplication.terminate`) and an AppKit
+   action are outside any main-queue block, so they are fine; from anywhere
+   else, call it in a `CFRunLoopPerformBlock` on the main run loop.
+   `make lint-hangs` flags every `terminate` call (`terminate-call`) until
+   it says which of those it is.
 
 **Trust `swift build` and `swift test`, not SourceKit diagnostics.**
 Real Swift 6 compile errors are flagged by the build. SourceKit's IDE

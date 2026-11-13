@@ -242,6 +242,7 @@ see [`CONTRIBUTING.md`](CONTRIBUTING.md).
 | `PacerWidgets` | WidgetKit extension — reads the shared App Group store directly. |
 | `PacerCore` | Shared Swift package — parsers, models, scan coordinator, recomputers. |
 | `Skills/pacer` | The Claude Code skill, copied into `Pacer.app/Contents/Resources` and installed into `~/.claude/skills/` on request. `ClaudeSkillInstaller` re-syncs it after an app update. |
+| `PacerRelauncher` | At `Pacer.app/Contents/Helpers/PacerRelauncher`: a small process each running Pacer starts, which relaunches Pacer if it crashes or is killed (never after a quit), and stops after three relaunches in 30 minutes. It collects nothing; its logic is the `PacerRelaunch` library in `PacerCore`. |
 | `PacerCLI.app` | The `pacer` command line, at `Pacer.app/Contents/Helpers/PacerCLI.app/Contents/MacOS/pacer`: an app-like bundle signed into the App Group, so it can read the store with the local API off. Its logic is the `PacerPace` library in `PacerCore`. |
 
 ### Building from source
