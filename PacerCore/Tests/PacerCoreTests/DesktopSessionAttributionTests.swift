@@ -185,9 +185,19 @@ struct DesktopSessionDirectoryTests {
     }
 
     /// Runs `body` on another thread and says whether it finished in time.
+    /// Each step on a thread of its own, not `DispatchQueue.global()`: these
+    /// tests hold a thread on purpose, and in the full parallel suite GCD's
+    /// global pool is often at its thread limit, so a queued block did not
+    /// start for minutes and every wait timed out (r092). A `Thread` always
+    /// starts.
+    private static func onThread(_ body: @escaping @Sendable () -> Void) {
+        let thread = Thread { body() }
+        thread.start()
+    }
+
     private static func finishes(within seconds: TimeInterval, _ body: @escaping @Sendable () -> Void) -> Bool {
         let done = DispatchSemaphore(value: 0)
-        DispatchQueue.global().async { body(); done.signal() }
+        Self.onThread { body(); done.signal() }
         return done.wait(timeout: .now() + seconds) == .success
     }
 
@@ -201,7 +211,7 @@ struct DesktopSessionDirectoryTests {
         #expect(directory.recordedAccount(forSession: "session-a") == desktopOrg)
 
         let refreshed = DispatchSemaphore(value: 0)
-        DispatchQueue.global().async { directory.refresh(); refreshed.signal() }
+        Self.onThread { directory.refresh(); refreshed.signal() }
         #expect(held.entered.wait(timeout: .now() + 5) == .success)
 
         let quick = Self.finishes(within: 5) {
@@ -237,9 +247,9 @@ struct DesktopSessionDirectoryTests {
         #expect(directory.installs.count == 1)
 
         let first = DispatchSemaphore(value: 0), second = DispatchSemaphore(value: 0)
-        DispatchQueue.global().async { directory.refresh(); first.signal() }
+        Self.onThread { directory.refresh(); first.signal() }
         #expect(held.entered.wait(timeout: .now() + 5) == .success)
-        DispatchQueue.global().async { directory.refresh(); second.signal() }
+        Self.onThread { directory.refresh(); second.signal() }
         // Let the second get as far as it will before the first finishes.
         Thread.sleep(forTimeInterval: 0.05)
         held.release.signal()
@@ -261,11 +271,11 @@ struct DesktopSessionDirectoryTests {
         let directory = DesktopSessionDirectory(discover: { held.discover() })
 
         let loaded = DispatchSemaphore(value: 0)
-        DispatchQueue.global().async { _ = directory.accounts; loaded.signal() }
+        Self.onThread { _ = directory.accounts; loaded.signal() }
         #expect(held.entered.wait(timeout: .now() + 5) == .success)
         let answer = Box<String?>(nil)
         let looked = DispatchSemaphore(value: 0)
-        DispatchQueue.global().async {
+        Self.onThread {
             answer.value = directory.recordedAccount(forSession: "session-a")
             looked.signal()
         }

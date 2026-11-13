@@ -177,9 +177,19 @@ struct ParkedCredentialStoreTests {
     /// Runs `body` on another thread and says whether it finished in time.
     /// The caller always lets any held read go afterwards, so a regression
     /// fails the test instead of hanging it.
+    /// Each step on a thread of its own, not `DispatchQueue.global()`: these
+    /// tests hold a thread on purpose, and in the full parallel suite GCD's
+    /// global pool is often at its thread limit, so a queued block did not
+    /// start for minutes and every wait timed out (r092). A `Thread` always
+    /// starts.
+    private static func onThread(_ body: @escaping @Sendable () -> Void) {
+        let thread = Thread { body() }
+        thread.start()
+    }
+
     private static func finishes(within seconds: TimeInterval, _ body: @escaping @Sendable () -> Void) -> Bool {
         let done = DispatchSemaphore(value: 0)
-        DispatchQueue.global().async { body(); done.signal() }
+        Self.onThread { body(); done.signal() }
         return done.wait(timeout: .now() + seconds) == .success
     }
 
@@ -191,7 +201,7 @@ struct ParkedCredentialStoreTests {
             read: { _ in held.hold(); return .data(Self.blob("tok")) },
             switcherEnabled: { true })
         let discovery = DispatchSemaphore(value: 0)
-        DispatchQueue.global().async { _ = store.credentials(); discovery.signal() }
+        Self.onThread { _ = store.credentials(); discovery.signal() }
         #expect(held.entered.wait(timeout: .now() + 5) == .success)
 
         let quick = Self.finishes(within: 5) {
@@ -222,7 +232,7 @@ struct ParkedCredentialStoreTests {
             },
             switcherEnabled: { true })
         let discovery = DispatchSemaphore(value: 0)
-        DispatchQueue.global().async { _ = store.credentials(); discovery.signal() }
+        Self.onThread { _ = store.credentials(); discovery.signal() }
         #expect(held.entered.wait(timeout: .now() + 5) == .success)
 
         let reset = Self.finishes(within: 5) { store.resetFailures() }
