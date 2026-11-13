@@ -156,6 +156,9 @@ final class AppBackgroundService {
         // The live meter every surface reads (#318), rebuilt on each reading
         // and each scan cycle that wrote turns.
         LiveMeterBoard.shared.start(container: container)
+        // The window's title and account menu (#413), read before the window
+        // asks for them so neither draws empty for a frame.
+        AccountList.shared.start(container: container)
 
         let costMode = PacerPreferences.costMode()
         Log.write("AppBackground", "starting; cost mode: \(costMode)")
