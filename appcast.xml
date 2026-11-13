@@ -1502,5 +1502,89 @@ colour, which had quietly flattened every stacked view.</p>]]></description>
             type="application/octet-stream"
             sparkle:edSignature="ooKFptSEiDz1EKo60yF62kUaCyumWLsKsbx9zIMCuCaZE1GpcZMSttEh8B9BkRjYLHVDSLVcuBKSYUYK66T2Dw==" />
     </item>
+            <item>
+        <title>Version 0.9.1</title>
+        <description><![CDATA[<p>Smaller updates, fewer freezes, and Pacer comes back by itself if it ever crashes. This release includes everything from 0.9.0, which was withdrawn hours after release because it could stop within a few hours of running.</p>
+<p><strong>If Pacer only runs in your menu bar:</strong> quit it and reopen it once so this update installs. After that, updates install by themselves while you're not using Pacer.</p>
+<h2>Fixed</h2>
+<ul>
+<li>0.9.0 could crash after a few hours and stay closed until it was reopened. If you had 0.9.0, this update fixes it.</li>
+</ul>
+<h2>Keeps running</h2>
+<ul>
+<li>If Pacer crashes or is force-quit, it reopens itself in the background about 10 seconds later, so your usage keeps being recorded. It never reopens after you quit it, log out, or update, and it gives up after three tries in half an hour.</li>
+</ul>
+<h2>Smaller updates</h2>
+<ul>
+<li>Updates now download only what changed: a few megabytes instead of about 160 MB, from any of the last five releases.</li>
+<li>Updating no longer rewrites your whole usage history. Earlier updates could write about 2 GB at first launch; this one writes about 1 MB and is ready in seconds.</li>
+<li>If an update fails to download, Pacer notes why, so download problems can be found and fixed.</li>
+</ul>
+<h2>Smoother</h2>
+<ul>
+<li>Alerts, the cost chart, the menu bar dropdown, project collections and several dashboard chips no longer do their work on the thread that draws the window, which was the cause of most reported freezes.</li>
+<li>The menu bar no longer reads your data on every save, and the pace card no longer freezes while it lays out its columns.</li>
+<li>A slow disk can no longer freeze Pacer while it writes its log or while it quits.</li>
+<li>Pacer re-reads far less of your history when it checks itself, and runs its daily self-check again.</li>
+</ul>
+<h2>Kept for better forecasts</h2>
+<p>Pacer now keeps what its live meter showed before each reading, which of your logins took each reading, when your plan changes, and when each price first appeared. Past predictions are no longer deleted after 180 days. All of it stays on your Mac.</p>
+<h2>Prices</h2>
+<p>Claude Fable 5.2 and Claude Mythos 5.2 are priced from their launch on November 9.</p>
+<h2>Privacy</h2>
+<p>Pacer now counts how many times it reopened itself after a crash, and whether an update arrived as a small download. Freezes while your displays are asleep are counted instead of reported. No new kinds of data are sent. Pacer never sends prompts, projects, files, accounts or costs.</p>
+<p><strong>Your data is untouched.</strong> Coming from 0.8, Pacer upgrades it in seconds on first launch. After that, an older version of Pacer can't open it, so this one can't be downgraded.</p>]]></description>
+        <pubDate>Fri, 13 Nov 2026 21:48:18 +0000</pubDate>
+        <sparkle:version>1794605188</sparkle:version>
+        <sparkle:shortVersionString>0.9.1</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.1/Pacer-0.9.1.dmg"
+            length="158903909"
+            type="application/octet-stream"
+            sparkle:edSignature="F5MxkN3QVFYJBD+EN0Bkgl8QRoCRdqQapaEmv+jqvO8Mft6YazwagOmF3LzP6Gr3n05cagMHP4ofioEFUBWyDA==" />
+        <sparkle:deltas>
+            <enclosure
+                url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.1/Pacer-0.9.1-from-0.9.0.delta"
+                sparkle:deltaFrom="1794528744"
+                length="5026254"
+                type="application/octet-stream"
+                sparkle:deltaFromSparkleExecutableSize="976432"
+                sparkle:deltaFromSparkleLocales="ar,ca,cs,da,de,el,es"
+                sparkle:edSignature="DLQAjYu6Tr2IHfGcHn/Z/oE3Cbc0DkyLF8DrM4VR5TB5nxZT7b7vOcVcWQSlTXdZtrIIGiS3zgzTz0ZMbI3SBw==" />
+            <enclosure
+                url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.1/Pacer-0.9.1-from-0.8.3.delta"
+                sparkle:deltaFrom="1794413280"
+                length="6542142"
+                type="application/octet-stream"
+                sparkle:deltaFromSparkleExecutableSize="976432"
+                sparkle:deltaFromSparkleLocales="ar,ca,cs,da,de,el,es"
+                sparkle:edSignature="MVoK97EowfvsMeUCFT6sE05B/hctW5X73kHlsP9fDATKyXmUJTEpr7kFSrfQWEX3OYAoNERsIUcZY6tsJNgnAg==" />
+            <enclosure
+                url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.1/Pacer-0.9.1-from-0.8.2.delta"
+                sparkle:deltaFrom="1793828065"
+                length="8131810"
+                type="application/octet-stream"
+                sparkle:deltaFromSparkleExecutableSize="976432"
+                sparkle:deltaFromSparkleLocales="ar,ca,cs,da,de,el,es"
+                sparkle:edSignature="NAVA5tXTNMNui0wh54TQ6BDoOaxLcoQZbJmS01kukU0BbaJq7jZCgD1Ag18PrgUwPxSS5ZYJAqZvaCPcrTsMBg==" />
+            <enclosure
+                url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.1/Pacer-0.9.1-from-0.8.1.delta"
+                sparkle:deltaFrom="1793656792"
+                length="8789498"
+                type="application/octet-stream"
+                sparkle:deltaFromSparkleExecutableSize="976432"
+                sparkle:deltaFromSparkleLocales="ar,ca,cs,da,de,el,es"
+                sparkle:edSignature="T/TO02AVSXAqt0RzgrqD+oqHQKnxh/4p8s6qouGDmSLl+Fo8w1KqEfX99EKiwjXXtmjIf7MbEjAHQbrQ4i8bDg==" />
+            <enclosure
+                url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.1/Pacer-0.9.1-from-0.8.0.delta"
+                sparkle:deltaFrom="1793651156"
+                length="8848878"
+                type="application/octet-stream"
+                sparkle:deltaFromSparkleExecutableSize="976432"
+                sparkle:deltaFromSparkleLocales="ar,ca,cs,da,de,el,es"
+                sparkle:edSignature="60JQrUFveDdB7ykCt9aH3uXj8lnqvEIn0S/IZ52jX4yaHKpeBGtdE5DL/K5AILqxcQ33Z6M8qvXsBWkiuu5bBg==" />
+        </sparkle:deltas>
+    </item>
         </channel>
 </rss>
