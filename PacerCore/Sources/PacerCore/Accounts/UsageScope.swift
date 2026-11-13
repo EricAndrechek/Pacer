@@ -408,6 +408,13 @@ public final class UsageScope {
     /// "all accounts" the card reads the global table instead, and the scoped
     /// query costs an indexed miss.
     public nonisolated static let noAccountSentinel = "\u{0000}none"
+
+    /// The `date` that matches no global rollup row. A page showing one
+    /// account holds its all-accounts `@Query` too (`@Query` is built in
+    /// `init`), and with no predicate that query would re-materialize the
+    /// whole table on every save for rows the body never reads. Dates are
+    /// `yyyy-MM-dd`, so the empty string equals none of them.
+    public nonisolated static let noDateSentinel = ""
 }
 
 /// Scope-aware reads for processes with no `UsageScope` instance — the widget
