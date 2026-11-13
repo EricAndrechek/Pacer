@@ -126,9 +126,16 @@ enum IntelligenceFormatting {
     }
 
     static func ordinal(_ n: Int) -> String {
-        let f = NumberFormatter(); f.numberStyle = .ordinal
-        return f.string(from: NSNumber(value: n)) ?? "\(n)th"
+        ordinalFormatter.string(from: NSNumber(value: n)) ?? "\(n)th"
     }
+
+    /// Built once: `ordinal` runs in the advisor badges' body, which redraws
+    /// with the dashboard. Only ever formats after setup.
+    nonisolated(unsafe) private static let ordinalFormatter: NumberFormatter = {
+        let f = NumberFormatter()
+        f.numberStyle = .ordinal
+        return f
+    }()
 
     // MARK: - Forecast chip colours
 

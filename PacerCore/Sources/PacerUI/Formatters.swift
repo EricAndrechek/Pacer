@@ -162,9 +162,18 @@ public func pacerTokensExact(_ count: Int64) -> String {
 /// line up with what the user sees in Finder rather than diverging by
 /// the binary-vs-decimal factor. Negative inputs clamp to 0.
 public func pacerBytes(_ bytes: Int64) -> String {
-    let formatter = ByteCountFormatter()
-    formatter.countStyle = .file
-    return formatter.string(fromByteCount: max(0, bytes))
+    PacerBytesFormatter.file.string(fromByteCount: max(0, bytes))
+}
+
+/// Built once rather than per call: Settings → Storage formats several sizes
+/// per body pass. Only ever formats after setup, which `ByteCountFormatter`
+/// allows from any thread; it is not `Sendable`, hence `nonisolated(unsafe)`.
+private enum PacerBytesFormatter {
+    nonisolated(unsafe) static let file: ByteCountFormatter = {
+        let f = ByteCountFormatter()
+        f.countStyle = .file
+        return f
+    }()
 }
 
 // MARK: - Strings
