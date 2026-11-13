@@ -494,6 +494,21 @@ echo
 echo "==> Preparing log directory at ${LOG_DIR}"
 mkdir -p "${LOG_DIR}"
 
+# Record which code this install is, for `bin/ship.sh soak`: it checks that
+# the code being tagged is the code that soaked. That's a content check,
+# because a squash merge restamps every commit with the merge time, so
+# comparing times always looked newer than the install. Outside the bundle:
+# writing into the signed app would break its signature.
+INSTALL_STAMP="${LOG_DIR}/installed-commit"
+if git -C "${REPO_ROOT}" rev-parse HEAD >/dev/null 2>&1; then
+    if [ -n "$(git -C "${REPO_ROOT}" status --porcelain -- App PacerCore Widgets Relauncher CLI project.yml 2>/dev/null)" ]; then
+        install_tree=dirty
+    else
+        install_tree=clean
+    fi
+    printf '%s %s %s\n' "$(git -C "${REPO_ROOT}" rev-parse HEAD)" "${install_tree}" "$(date +%s)" > "${INSTALL_STAMP}"
+fi
+
 if [ "${APP_WAS_RUNNING}" = "1" ] || [ "${RESTORE_APP}" = "1" ]; then
     echo
     echo "==> Re-opening Pacer.app in the background (was running before install)"

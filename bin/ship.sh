@@ -178,12 +178,29 @@ cmd_soak() {
   else ok "Pacer is running (pid ${pid})"; fi
 
   [ -d "$app" ] || { bad "no ${app}"; return 1; }
-  local installed code_changed
+  local installed stamp="$HOME/Library/Logs/Pacer/installed-commit" code_paths="App PacerCore Widgets Relauncher CLI project.yml"
   installed="$(stat -f %m "$app")"
-  code_changed="$(git log -1 --format=%ct -- App PacerCore Widgets project.yml 2>/dev/null || echo 0)"
-  if [ "$installed" -lt "$code_changed" ]; then
-    bad "the installed build ($(date -r "$installed" '+%F %R')) is older than the last code change ($(date -r "$code_changed" '+%F %R')): \`make install\` this code and let it run first"; rc=1
-  else ok "installed $(date -r "$installed" '+%F %R'), after the last code change"; fi
+  # Is the code being tagged the code that soaked? `make install` records the
+  # commit it built (bin/dev-install.sh). Compare content, not time: a squash
+  # merge restamps everything with the merge time, so a time check always
+  # read "older than the last change" right after the merge.
+  local s_commit s_tree
+  if [ -f "$stamp" ] && read -r s_commit s_tree _ < "$stamp" && git cat-file -e "${s_commit}^{commit}" 2>/dev/null; then
+    if [ "$s_tree" != clean ]; then
+      bad "the installed build had uncommitted changes (${s_commit:0:8}+dirty): \`make install\` a committed tree"; rc=1
+    elif ! git diff --quiet "$s_commit" HEAD -- $code_paths; then
+      bad "the installed build (${s_commit:0:8}) differs from HEAD in app code: \`make install\` this code and let it run first"
+      git diff --stat "$s_commit" HEAD -- $code_paths | tail -1 | sed 's/^/      /'; rc=1
+    else ok "installed ${s_commit:0:8} on $(date -r "$installed" '+%F %R'): the same app code as HEAD"; fi
+  else
+    # No usable stamp (installed before stamps existed, or from a commit this
+    # clone lacks): fall back to time, which may be wrong after a squash.
+    local code_changed
+    code_changed="$(git log -1 --format=%ct -- $code_paths 2>/dev/null || echo 0)"
+    if [ "$installed" -lt "$code_changed" ]; then
+      bad "no install stamp, and the installed build ($(date -r "$installed" '+%F %R')) is older than the last code change: \`make install\` this code and let it run first"; rc=1
+    else ok "installed $(date -r "$installed" '+%F %R'), after the last code change (no install stamp)"; fi
+  fi
 
   if [ -n "$pid" ]; then
     local started up_h

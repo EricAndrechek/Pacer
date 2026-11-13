@@ -470,7 +470,7 @@ When it goes green, you're ready to tag.
 
 `bin/ship.sh release` runs `bin/ship.sh soak` first, and refuses to tag when:
 - Pacer isn't running on this Mac;
-- the installed build is older than the last change under `App/`, `PacerCore/`, `Widgets/` or `project.yml`, so the soak didn't cover the code being released;
+- the installed build is not the code being released: `make install` records the commit it built in `~/Library/Logs/Pacer/installed-commit`, and the soak fails if that commit differs from `HEAD` under `App/`, `PacerCore/`, `Widgets/`, `Relauncher/`, `CLI/` or `project.yml`, or was built from a tree with uncommitted changes. It compares content, not time, so the squash merge (which restamps everything) does not fail it; without a stamp it falls back to comparing the install time with the last change;
 - it has run less than `SHIP_SOAK_MIN_HOURS` (default 1; overnight is better);
 - macOS filed any `Pacer-*.ips` crash report since the install (Retired/ included).
 
