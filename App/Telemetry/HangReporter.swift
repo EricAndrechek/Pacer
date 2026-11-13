@@ -43,10 +43,16 @@ enum HangReporter {
         case .began(let hang):
             guard !isBeingTraced else { return }
             writeMarker(for: hang)
+            // Every thread's stack, once, for both the send and the log. The
+            // log line is written for every hang, sent or not: Sentry's daily
+            // cap leaves most hangs with no stack anywhere otherwise.
+            let threads = SentryDependencyContainer.sharedInstance().threadInspector
+                .getCurrentThreadsWithStackTrace()
             // Displays asleep: counted, not sent (`HangReportPolicy`). The marker
             // and log line stay, so a real force-quit is still reported.
-            if TelemetryController.crashAllowed, HangReportPolicy.admit() { capture(hang) }
-            Log.write("Hang", "main thread stuck \(Int(hang.duration * 1000)) ms and counting (\(phase(hang)))")
+            if TelemetryController.crashAllowed, HangReportPolicy.admit() { capture(hang, threads: threads) }
+            Log.write("Hang", "main thread stuck \(Int(hang.duration * 1000)) ms and counting (\(phase(hang)))"
+                      + (topFrames(of: threads).map { " · top frames: \($0)" } ?? ""))
         case .continuing:
             guard let url = HangMarker.defaultURL(), var marker = HangMarker.read(at: url) else { return }
             marker.lastSeenAt = Date()
@@ -89,10 +95,9 @@ enum HangReporter {
     /// The event `SentryHangTrackingIntegration.anrDetected` builds on macOS,
     /// with a phase tag. Sent even without stacks: a hang with no stack still
     /// says that and when it happened.
-    private static func capture(_ hang: HangWatch.Hang) {
+    private static func capture(_ hang: HangWatch.Hang, threads: [SentryThread]) {
         let container = SentryDependencyContainer.sharedInstance()
         // Index 0 is the main thread (the inspector puts it first).
-        let threads = container.threadInspector.getCurrentThreadsWithStackTrace()
         let exception = Exception(value: message, type: "App Hanging")
         exception.mechanism = Mechanism(type: "AppHang")
         if let main = threads.first {
@@ -108,6 +113,12 @@ enum HangReporter {
         }
         event.tags = ["hang.phase": phase(hang)]
         SentrySDK.capture(event: event)
+    }
+
+    /// The main thread's innermost frames, names only (`HangStackSummary`).
+    private static func topFrames(of threads: [SentryThread]) -> String? {
+        guard let frames = threads.first?.stacktrace?.frames else { return nil }
+        return HangStackSummary.format(frames: frames.map { ($0.function, $0.instructionAddress) })
     }
 
     /// A debugger stopped at a breakpoint is not a hang.
