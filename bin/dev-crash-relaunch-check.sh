@@ -129,7 +129,7 @@ kill -TERM "$pid"
 if wait_until 15 neither_running; then
     sleep 15
     if pacer_running; then fail "terminate: Pacer came back after SIGTERM"
-    elif new_log | grep -q 'SIGTERM: quitting'; then pass "terminate: SIGTERM taken as a quit, nothing came back"
+    elif grep -q 'SIGTERM: quitting' <<< "$(new_log)"; then pass "terminate: SIGTERM taken as a quit, nothing came back"
     else fail "terminate: Pacer exited but never logged taking SIGTERM as a quit"; fi
 else
     fail "terminate: still running 15 s after SIGTERM (Pacer: $(pgrep -x Pacer | xargs), relauncher: $(pgrep -x PacerRelauncher | xargs))"
@@ -145,6 +145,14 @@ if [ "$pid" = "$term_pid" ]; then
 fi
 old_relauncher="$(relauncher_for "$pid")"
 front_before="$(front_app)"
+# What the relaunch must not do is take the front. Whether the frontmost app
+# merely changed proves nothing: the owner is using the Mac during the run
+# (the first rerun failed on Brave -> iTerm2 while Pacer's own log said it
+# never took the front). So sample the frontmost app through the kill and the
+# relaunch and look for Pacer in it.
+fronts="$(mktemp)"
+( end=$(( $(date +%s) + 45 )); while [ "$(date +%s)" -lt "$end" ]; do front_app; sleep 0.25; done ) > "$fronts" 2>/dev/null &
+sampler=$!
 killed_at="$(date +%s)"
 kill -KILL "$pid"
 relaunched() { local p; p="$(pacer_pid)"; [ -n "$p" ] && [ "$p" != "$pid" ]; }
@@ -162,15 +170,21 @@ if wait_until 40 relaunched; then
         "[Relauncher] relaunched Pacer" \
         "[CrashRelaunch] relaunched after Pacer exited without quitting (1 of 3 in 30 min)" \
         "[CrashRelaunch] armed"; do
-        printf '%s\n' "$lines" | grep -qF -- "$expected" && pass "log: ${expected}" || fail "log: missing \"${expected}\""
+        # A here-string, not a pipe: under pipefail, grep -q exiting at its
+        # first match fails the writer (EPIPE), and a found line read as missing.
+        grep -qF -- "$expected" <<< "$lines" && pass "log: ${expected}" || fail "log: missing \"${expected}\""
     done
-    front_after="$(front_app)"
-    if [ "$front_before" = "$front_after" ] || [ "$front_before" = "com.ericandrechek.pacer" ]; then
-        pass "kill: the frontmost app is still ${front_after}"
+    kill "$sampler" 2>/dev/null; wait "$sampler" 2>/dev/null
+    if [ "$front_before" = "com.ericandrechek.pacer" ]; then
+        pass "kill: Pacer was frontmost before the kill, so focus is not judged"
+    elif grep -qx "com.ericandrechek.pacer" "$fronts"; then
+        fail "kill: Pacer became the frontmost app during the relaunch"
     else
-        fail "kill: the frontmost app changed from ${front_before} to ${front_after}"
+        pass "kill: Pacer never became the frontmost app ($(sort -u "$fronts" | tr '\n' ' ')seen in front)"
     fi
+    rm -f "$fronts"
 else
+    kill "$sampler" 2>/dev/null; rm -f "$fronts"
     fail "kill: no new Pacer within 40 s"
 fi
 
