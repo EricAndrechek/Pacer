@@ -1502,5 +1502,41 @@ colour, which had quietly flattened every stacked view.</p>]]></description>
             type="application/octet-stream"
             sparkle:edSignature="ooKFptSEiDz1EKo60yF62kUaCyumWLsKsbx9zIMCuCaZE1GpcZMSttEh8B9BkRjYLHVDSLVcuBKSYUYK66T2Dw==" />
     </item>
+            <item>
+        <title>Version 0.9.0</title>
+        <description><![CDATA[<p>Updates that barely touch your disk, fewer freezes, and more history kept for better forecasts.</p>
+<p><strong>If Pacer only runs in your menu bar:</strong> quit it and reopen it once so this update installs. After that, updates install by themselves while you're not using Pacer.</p>
+<h2>Updates and your disk</h2>
+<ul>
+<li>Updating Pacer no longer rewrites your whole usage history. Earlier updates could write about 2 GB at the first launch; this one writes about 1 MB and is ready in seconds.</li>
+<li>Pacer drops seven duplicate indexes from your data, which makes it a little smaller and every save a little lighter.</li>
+<li>If an update fails to download, Pacer now notes why, so download problems can be found and fixed.</li>
+</ul>
+<h2>Smoother</h2>
+<ul>
+<li>The menu bar no longer reads your data on every save, a source of freezes on busy Macs.</li>
+<li>The dashboard's pace card no longer freezes while it lays out its columns.</li>
+<li>The History heatmap draws without re-reading its setting for every day.</li>
+<li>A slow disk can no longer freeze Pacer while it writes its log.</li>
+<li>Pacer re-reads far less of your history when it checks itself, keeps its index of recorded turns in step with what's saved, and runs its daily self-check again.</li>
+<li>The README screenshots no longer flip between "limit in 3 days" and "may hit limit in 3 days".</li>
+</ul>
+<h2>Kept for better forecasts</h2>
+<p>Pacer now keeps what its live meter showed before each reading, which of your logins took each reading, when your plan changes, and when each price first appeared. Past predictions are no longer deleted after 180 days. All of it stays on your Mac.</p>
+<h2>Prices</h2>
+<p>Claude Fable 5.2 and Claude Mythos 5.2 are priced from their launch on November 9.</p>
+<h2>Privacy</h2>
+<p>Freezes that happen while your displays are asleep are counted instead of reported, since nobody saw them. A failed update download reports its error code. No new kinds of data are sent. Pacer never sends prompts, projects, files, accounts or costs.</p>
+<p><strong>Your data is untouched.</strong> Pacer upgrades it in seconds on first launch. After that, an older version of Pacer can't open it, so this one can't be downgraded.</p>]]></description>
+        <pubDate>Fri, 13 Nov 2026 00:21:41 +0000</pubDate>
+        <sparkle:version>1794528744</sparkle:version>
+        <sparkle:shortVersionString>0.9.0</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.0/Pacer-0.9.0.dmg"
+            length="158667363"
+            type="application/octet-stream"
+            sparkle:edSignature="NYBDGXdGptVO0mYmmJjs3XV6mPm/OzpfDMqyL9TWDdIHv8j6aS2TKpg957MFDQ7ftTj9b4UE7LoDorTepMqjBw==" />
+    </item>
         </channel>
 </rss>
