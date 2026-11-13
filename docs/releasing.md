@@ -206,6 +206,24 @@ register a second Pacer, widget included, beside the real one. Launching an
 old Pacer to update itself would open the shared store and the dashboard. A
 client run belongs on a disposable machine.
 
+### Pulling a bad release
+
+1. **Take its item out of the appcast** (a commit on `gh-pages` that deletes
+   the `<item>`), so Sparkle stops offering it. The GitHub release can stay.
+2. **Check the Homebrew cask: it does not follow the appcast.** The tap pins
+   releases itself and only ever moves forward, so it keeps installing the
+   pulled version (`gh api repos/EricAndrechek/homebrew-tap/contents/Casks/pacer.rb
+   --jq .content | base64 -d | grep version`).
+   - A **patch** release (no store migration): pin the cask back with a PR to
+     the tap.
+   - A **minor** release migrated the store, and the version before it cannot
+     open a migrated store. Pinning back would give a brew user who already
+     has it a Pacer that can't read their data. Ship the fix as the next
+     version instead; the tap moves forward to it.
+
+   0.9.0 (2026-11-13) is the case this is from: the appcast was pulled within
+   hours, the cask stayed on 0.9.0 until 0.9.1 shipped.
+
 ### Rolling back delta updates
 
 In order of how fast they act. None of them needs a new build.
@@ -235,8 +253,12 @@ In order of how fast they act. None of them needs a new build.
 
    ```sh
    curl -fsSL https://ericandrechek.github.io/Pacer/appcast.xml | grep -c '<sparkle:deltas>'
-   bin/ship.sh verify 0.8.4                                # "no delta updates in this item"
+   SHIP_ALLOW_NO_DELTAS=1 bin/ship.sh verify 0.8.4         # "no delta updates in this item"
    ```
+
+   Without `SHIP_ALLOW_NO_DELTAS=1`, `verify` fails on an item with no deltas.
+   The delta step only warns when it fails on a tag push, so that failure is
+   how a release that quietly lost its deltas gets noticed.
 
 3. **Optionally delete the delta assets**, after step 2 is live:
 

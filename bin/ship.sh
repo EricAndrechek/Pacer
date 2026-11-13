@@ -178,7 +178,7 @@ cmd_soak() {
   else ok "Pacer is running (pid ${pid})"; fi
 
   [ -d "$app" ] || { bad "no ${app}"; return 1; }
-  local installed stamp="$HOME/Library/Logs/Pacer/installed-commit" code_paths="App PacerCore Widgets Relauncher CLI project.yml"
+  local installed stamp="$HOME/Library/Logs/Pacer/installed-commit" code_paths="App PacerCore Widgets Relauncher CLI Skills project.yml Vendor/duckdb-version.txt"  # = STAMP_PATHS in bin/dev-install.sh
   installed="$(stat -f %m "$app")"
   # Is the code being tagged the code that soaked? `make install` records the
   # commit it built (bin/dev-install.sh). Compare content, not time: a squash
@@ -341,8 +341,13 @@ for e in deltas:
     dlen = int(e.get("length", "0"))
     if assets.get(dname) == dlen: ok(f"delta from build {e.get(S + 'deltaFrom')}: {dname} is a release asset of its stated length ({dlen} bytes)")
     else: bad(f"delta {dname}: the feed says {dlen} bytes, the release has {assets.get(dname)}; see 'Rolling back delta updates' in docs/releasing.md")
+# No deltas is a failure unless asked for: the delta step tolerates its own
+# failures on a tag push (the release must not wait on it) and only leaves a
+# warning on the run, so this is where a release that quietly lost them,
+# with notes promising small updates, gets noticed.
 if not deltas:
-    print("  · no delta updates in this item")
+    if os.environ.get("SHIP_ALLOW_NO_DELTAS") == "1": print("  · no delta updates in this item (SHIP_ALLOW_NO_DELTAS=1)")
+    else: bad("no delta updates in this item: the Release run's delta step failed or was switched off (see its warnings). Re-run it, or SHIP_ALLOW_NO_DELTAS=1 if that was intended")
 sys.exit(1 if FAIL else 0)
 PY
 

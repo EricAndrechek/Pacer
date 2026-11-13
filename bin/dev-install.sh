@@ -124,6 +124,23 @@ case "${BUILD_CONFIGURATION}" in
     Debug|Release) ;;
     *) echo "ERROR: PACER_BUILD_CONFIGURATION must be Debug or Release, not ${BUILD_CONFIGURATION}"; exit 1 ;;
 esac
+# Which code this build is, for `bin/ship.sh soak` (written to the install
+# stamp below). Captured before building: building and notarizing take
+# minutes, and a commit made meanwhile must not be recorded as what was
+# built. The same paths as the soak compares, which are everything that
+# ends up in the bundle.
+STAMP_PATHS=(App PacerCore Widgets Relauncher CLI Skills project.yml Vendor/duckdb-version.txt)
+build_commit=""
+build_tree=""
+if git -C "${REPO_ROOT}" rev-parse HEAD >/dev/null 2>&1; then
+    build_commit="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
+    if [ -n "$(git -C "${REPO_ROOT}" status --porcelain -- "${STAMP_PATHS[@]}" 2>/dev/null)" ]; then
+        build_tree=dirty
+    else
+        build_tree=clean
+    fi
+fi
+
 echo
 echo "==> Building Pacer.app (${BUILD_CONFIGURATION}, unsigned, build ${DEV_BUILD_VERSION})"
 xcodebuild \
@@ -499,14 +516,14 @@ mkdir -p "${LOG_DIR}"
 # because a squash merge restamps every commit with the merge time, so
 # comparing times always looked newer than the install. Outside the bundle:
 # writing into the signed app would break its signature.
+# The commit and tree state were captured before the build (above). Without
+# git there is nothing to record, and the previous install's stamp would
+# describe a build that is no longer here, so it goes.
 INSTALL_STAMP="${LOG_DIR}/installed-commit"
-if git -C "${REPO_ROOT}" rev-parse HEAD >/dev/null 2>&1; then
-    if [ -n "$(git -C "${REPO_ROOT}" status --porcelain -- App PacerCore Widgets Relauncher CLI project.yml 2>/dev/null)" ]; then
-        install_tree=dirty
-    else
-        install_tree=clean
-    fi
-    printf '%s %s %s\n' "$(git -C "${REPO_ROOT}" rev-parse HEAD)" "${install_tree}" "$(date +%s)" > "${INSTALL_STAMP}"
+if [ -n "${build_commit}" ]; then
+    printf '%s %s %s\n' "${build_commit}" "${build_tree}" "$(date +%s)" > "${INSTALL_STAMP}"
+else
+    rm -f "${INSTALL_STAMP}"
 fi
 
 if [ "${APP_WAS_RUNNING}" = "1" ] || [ "${RESTORE_APP}" = "1" ]; then
