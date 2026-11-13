@@ -452,7 +452,12 @@ jobs:
         # input set to `off` skips this step, and with no deltas built the
         # release and appcast steps below do exactly what they did before.
         # contains() compares strings case-insensitively: off, OFF, false, 0.
-        if: ${{ !contains(fromJSON('["off","false","0"]'), vars.PACER_SPARKLE_DELTAS) && !contains(fromJSON('["off","false","0"]'), github.event.inputs.deltas) }}
+        # Each side falls back to 'on' when unset. On a tag push `inputs.deltas`
+        # is null, and the expression engine coerces both null and "0" to the
+        # number 0, so a bare null made contains() true and skipped this step
+        # on every real release. A manual dry run sets the input, so it never
+        # showed.
+        if: ${{ !contains(fromJSON('["off","false","0"]'), vars.PACER_SPARKLE_DELTAS || 'on') && !contains(fromJSON('["off","false","0"]'), github.event.inputs.deltas || 'on') }}
         # A hang in the download, hdiutil or BinaryDelta must not eat the job
         # (which also covers the notary wait). Five deltas take about a minute
         # each. On a tag push a timeout or any other failure of this step is
