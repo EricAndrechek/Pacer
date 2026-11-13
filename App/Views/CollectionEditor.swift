@@ -321,7 +321,9 @@ private struct RuleRowView: View {
     private var matches: [String] {
         let v = rule.value.trimmingCharacters(in: .whitespaces)
         guard !v.isEmpty else { return [] }
-        return knownPaths.filter { CollectionRuleMatcher.matches(path: $0, rule: v) }
+        // Compiled once for the whole list: this re-runs on every keystroke.
+        let compiled = CollectionRuleMatcher.Compiled(v)
+        return knownPaths.filter { compiled.matches(path: $0) }
     }
 
     var body: some View {

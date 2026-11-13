@@ -45,6 +45,9 @@ public enum CollectionResolver {
         // resolved higher in the stack contributes nothing on revisit —
         // its members are gathered by the in-progress call.
         var onStack: Set<String> = []
+        // Every known path, normalized once for the whole resolve rather than
+        // once per (path, rule) pair; built on the first collection with rules.
+        var normalizedKnown: [(path: String, normalized: String)]?
 
         func walk(_ id: String, _ depth: Int) -> Set<String> {
             guard depth < maxNestingDepth else {
@@ -59,11 +62,18 @@ public enum CollectionResolver {
 
             var paths = Set(collection.includePaths)
 
-            let rules = collection.rules
+            // Compiled once per collection, not once per known path: a glob
+            // rule used to build its `NSRegularExpression` for every path it
+            // was tested against, and the Projects tab resolves every
+            // collection on the main thread on each scan tick.
+            let rules = collection.rules.map(CollectionRuleMatcher.Compiled.init)
             if !rules.isEmpty {
-                for path in knownPaths
-                where rules.contains(where: { CollectionRuleMatcher.matches(path: path, rule: $0) }) {
-                    paths.insert(path)
+                let known = normalizedKnown
+                    ?? knownPaths.map { (path: $0, normalized: CollectionRuleMatcher.normalize($0)) }
+                normalizedKnown = known
+                for entry in known
+                where rules.contains(where: { $0.matches(normalizedPath: entry.normalized) }) {
+                    paths.insert(entry.path)
                 }
             }
 
@@ -115,14 +125,43 @@ public enum CollectionRuleMatcher {
     /// match `/a/foobar`). Glob rules (`*`, `**`, `?`) match by pattern.
     /// Both tilde-expanded.
     public static func matches(path: String, rule: String) -> Bool {
-        let p = normalize(path)
-        let r = normalize(rule)
-        guard !r.isEmpty else { return false }
-        if isGlob(r) {
-            return globMatches(path: p, pattern: r)
+        Compiled(rule).matches(path: path)
+    }
+
+    /// One rule, normalized and (for a glob) compiled once, to test against
+    /// many paths. Build it outside the loop over paths: compiling the glob's
+    /// regex is the expensive part, and it used to happen per path.
+    public struct Compiled {
+        /// The normalized rule; empty matches nothing.
+        let rule: String
+        /// The anchored regex for a glob rule; nil for a folder rule, or for
+        /// a glob that does not compile (which then matches nothing).
+        let regex: NSRegularExpression?
+        let isGlob: Bool
+
+        public init(_ rule: String) {
+            let r = CollectionRuleMatcher.normalize(rule)
+            self.rule = r
+            isGlob = !r.isEmpty && CollectionRuleMatcher.isGlob(r)
+            regex = isGlob
+                ? try? NSRegularExpression(pattern: "^" + CollectionRuleMatcher.globToRegex(r) + "$")
+                : nil
         }
-        if p == r { return true }
-        return p.hasPrefix(r + "/")
+
+        public func matches(path: String) -> Bool {
+            matches(normalizedPath: CollectionRuleMatcher.normalize(path))
+        }
+
+        /// `path` already passed through `CollectionRuleMatcher.normalize`.
+        func matches(normalizedPath p: String) -> Bool {
+            guard !rule.isEmpty else { return false }
+            if isGlob {
+                guard let regex else { return false }
+                return regex.firstMatch(in: p, range: NSRange(p.startIndex..., in: p)) != nil
+            }
+            if p == rule { return true }
+            return p.hasPrefix(rule + "/")
+        }
     }
 
     /// A rule is a glob (not a plain folder prefix) when it carries a glob
@@ -135,12 +174,6 @@ public enum CollectionRuleMatcher {
         var t = (value as NSString).expandingTildeInPath
         while t.count > 1, t.hasSuffix("/") { t.removeLast() }
         return t
-    }
-
-    private static func globMatches(path: String, pattern: String) -> Bool {
-        let regex = "^" + globToRegex(pattern) + "$"
-        guard let re = try? NSRegularExpression(pattern: regex) else { return false }
-        return re.firstMatch(in: path, range: NSRange(path.startIndex..., in: path)) != nil
     }
 
     /// Translate a shell-style glob into an anchored regex body.

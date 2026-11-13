@@ -207,6 +207,33 @@ private extension CollectionRollupResult {
     #expect(!CollectionRuleMatcher.matches(path: "/a/v1Xapp", rule: "/a/v1.app"))
 }
 
+@Test func compiledRuleMatchesTheSameAsTheOneShotMatcher() {
+    // `resolve` and the editor compile a rule once and test every path with
+    // it; that must answer exactly what `matches(path:rule:)` answers.
+    let home = NSHomeDirectory()
+    let rules = ["/a/*-app", "/Code/**/web", "/a/v?", "/a/work", "/a/work/", "~/Code", "", "/a/v1.app*", "/a/[x"]
+    let paths = ["/a/web-app", "/a/x/y-app", "/Code/x/y/web", "/Code/web", "/a/v1", "/a/v12",
+                 "/a/work", "/a/work/api", "/a/workspace", "\(home)/Code/x", "/a/v1.app", "/a/[x"]
+    for rule in rules {
+        let compiled = CollectionRuleMatcher.Compiled(rule)
+        for path in paths {
+            #expect(compiled.matches(path: path) == CollectionRuleMatcher.matches(path: path, rule: rule),
+                    "rule \(rule) path \(path)")
+        }
+    }
+}
+
+@Test func resolveAppliesGlobRulesAcrossNestedCollections() {
+    let child = ProjectCollection(id: "child", name: "Child", rules: ["/Code/**/web"])
+    let parent = ProjectCollection(id: "parent", name: "Parent", childCollectionIDs: ["child"],
+                                   rules: ["/a/*-app", "~/notes"])
+    let home = NSHomeDirectory()
+    let known = ["/a/web-app", "/a/x/y-app", "/Code/x/web", "/Other/web", "\(home)/notes/today"]
+    let members = CollectionResolver.resolve("parent", collections: ["parent": parent, "child": child],
+                                             knownPaths: known)
+    #expect(members == ["/a/web-app", "/Code/x/web", "\(home)/notes/today"])
+}
+
 // MARK: Reverse membership index
 
 @Test func membershipIndexInvertsResolution() {
