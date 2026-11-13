@@ -465,3 +465,15 @@ When it goes green, you're ready to tag.
   one sanctioned edit is removing a release's `<sparkle:deltas>` block with
   `bin/appcast-drop-deltas.sh`, which leaves every item and full
   `<enclosure>` as it was.
+
+## Soak check before tagging
+
+`bin/ship.sh release` runs `bin/ship.sh soak` first, and refuses to tag when:
+- Pacer isn't running on this Mac;
+- the installed build is older than the last change under `App/`, `PacerCore/`, `Widgets/` or `project.yml`, so the soak didn't cover the code being released;
+- it has run less than `SHIP_SOAK_MIN_HOURS` (default 1; overnight is better);
+- macOS filed any `Pacer-*.ips` crash report since the install (Retired/ included).
+
+It also prints the hangs and the awake stall lines since the install, so you can compare with the previous build. `SHIP_SKIP_SOAK=1` skips it, for an emergency fix only.
+
+Why: 0.9.0 was tagged about 2.5 h after its code was installed. It crashed on the owner's Mac about 2 h after that (the log writer's stack grew with every line), and every 0.9.0 install had the same crash. Run `make install` first, then open the PR: CI and the release run take long enough to give the soak its hour.

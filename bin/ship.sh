@@ -162,11 +162,65 @@ cmd_wait_ci() {
   done
 }
 
+# The installed build must have run on this Mac, crash-free, before its code is
+# tagged. 0.9.0 was tagged about 2.5 h after its code was installed and crashed
+# on the owner's Mac about 2 h after that: the log writer's stack grew with
+# every line. Every 0.9.0 install had the same crash, and nothing looked before
+# tagging. This looks.
+#   SHIP_SOAK_MIN_HOURS  minimum time Pacer has run on the installed build (default 1)
+#   SHIP_SKIP_SOAK=1     skip, for an emergency fix only (loudly)
+cmd_soak() {
+  local app=/Applications/Pacer.app min_h="${SHIP_SOAK_MIN_HOURS:-1}" rc=0
+  info "Soak check: the installed build on this Mac"
+  local pid
+  pid="$(pgrep -x Pacer | head -1 || true)"
+  if [ -z "$pid" ]; then bad "Pacer is not running: it may have crashed. Relaunch it and look before releasing."; rc=1
+  else ok "Pacer is running (pid ${pid})"; fi
+
+  [ -d "$app" ] || { bad "no ${app}"; return 1; }
+  local installed code_changed
+  installed="$(stat -f %m "$app")"
+  code_changed="$(git log -1 --format=%ct -- App PacerCore Widgets project.yml 2>/dev/null || echo 0)"
+  if [ "$installed" -lt "$code_changed" ]; then
+    bad "the installed build ($(date -r "$installed" '+%F %R')) is older than the last code change ($(date -r "$code_changed" '+%F %R')): \`make install\` this code and let it run first"; rc=1
+  else ok "installed $(date -r "$installed" '+%F %R'), after the last code change"; fi
+
+  if [ -n "$pid" ]; then
+    local started up_h
+    started="$(date -j -f '%a %b %d %T %Y' "$(ps -o lstart= -p "$pid" | sed 's/  */ /g; s/^ //')" +%s 2>/dev/null || echo "$installed")"
+    up_h="$(( ( $(date +%s) - started ) / 3600 ))"
+    if [ "$up_h" -lt "$min_h" ]; then bad "it has run ${up_h} h of the ${min_h} h minimum (SHIP_SOAK_MIN_HOURS)"; rc=1
+    else ok "running for ${up_h} h"; fi
+  fi
+
+  local crashes
+  # Compare mtimes directly: BSD find has no -newermt @epoch, and a quiet
+  # failure there reported "no crashes" over a real one. Retired/ included.
+  crashes="$(find "$HOME/Library/Logs/DiagnosticReports" -name 'Pacer-*.ips' 2>/dev/null \
+    | while read -r f; do [ "$(stat -f %m "$f")" -ge "$installed" ] && echo "$f"; done || true)"
+  if [ -n "$crashes" ]; then bad "crash report(s) since the install:"; printf '      %s\n' $crashes; rc=1
+  else ok "no Pacer crash reports since the install"; fi
+
+  local log="$HOME/Library/Logs/Pacer/Pacer.err.log" since hangs stalls_awake
+  if [ -f "$log" ]; then
+    since="$(date -u -r "$installed" +%Y-%m-%dT%H:%M:%S)"
+    hangs="$(awk -v s="$since" '$1 >= s && /\[Hang\] main thread was stuck/' "$log" | wc -l | tr -d ' ')"
+    stalls_awake="$(awk -v s="$since" '$1 >= s && /\[MainThread\] stalled/ && !/displays asleep/' "$log" | wc -l | tr -d ' ')"
+    info "since the install: ${hangs} hang(s) of 2 s or more, ${stalls_awake} stall line(s) with a display awake (compare with the previous build before tagging)"
+  fi
+  return "$rc"
+}
+
 cmd_release() {
   local version="${1:?usage: ship.sh release <version>}" tag
   version="${version#v}"; tag="v${version}"
   need gh
   assert_releasable
+  if [ "${SHIP_SKIP_SOAK:-}" = 1 ]; then
+    warn "SKIPPING the soak check (SHIP_SKIP_SOAK=1): emergency fixes only"
+  else
+    cmd_soak || die "soak check failed: fix it, wait, or set SHIP_SKIP_SOAK=1 for an emergency fix"
+  fi
   git rev-parse "$tag" >/dev/null 2>&1 && die "tag ${tag} already exists"
   info "Tagging ${tag} on $(git rev-parse --short HEAD) and pushing"
   # Remember when we started, so we can tell OUR Release run from an earlier
@@ -391,8 +445,9 @@ case "$sub" in
   wait-ci)   cmd_wait_ci "$@" ;;
   release)   cmd_release "$@" ;;
   verify)    cmd_verify "$@" ;;
+  soak)      cmd_soak "$@" ;;
   ""|-h|--help|help)
     sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
     ;;
-  *) die "unknown subcommand: $sub (try: preflight | notes | wait-ci | release | verify)" ;;
+  *) die "unknown subcommand: $sub (try: preflight | notes | wait-ci | soak | release | verify)" ;;
 esac
