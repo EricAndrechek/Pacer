@@ -60,6 +60,7 @@ enum MenuBarTooltipSelfTest {
     }
 
     private static func log(_ message: String) {
+        // lint:allow stderr-write diagnostic mode only (never the user's app): its output is the terminal that started the run
         FileHandle.standardError.write(Data("[Pacer tooltip-selftest] \(message)\n".utf8))
     }
 

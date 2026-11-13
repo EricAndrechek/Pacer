@@ -36,7 +36,7 @@ LEGACY_STORE   := $(HOME)/Library/Group Containers/group.com.ericandrechek.pacer
 # get confused if a file with the same name appears.
 .PHONY: help build vendor fetch-weights prune verify test app install uninstall reinstall \
         logs logs-tail widget-log status open clean-data perf-snapshot screenshots verify-data \
-        verify-archive test-ingest-parity ingest-harness \
+        verify-archive test-ingest-parity ingest-harness lint-hangs \
         assign-accounts reassign-account \
         pricing-snapshot
 
@@ -113,6 +113,10 @@ test:  ## Run the PacerCore unit + ground-truth tests.
 	@# domain is removed), so they are swept here, whatever the result (#336).
 	@set -o pipefail; cd PacerCore && PACER_ISOLATED_DEFAULTS=1 swift test 2>&1 | tail -3; \
 		status=$$?; rm -f "$$HOME"/Library/Preferences/pacer.testprocess.*.plist; exit $$status
+
+lint-hangs:  ## Flag the code shapes behind production hangs and the 0.9.0 crash (sync XPC on main, @Query in always-mounted views, formatters in view bodies, stderr writes). A grep; seconds. See bin/lint-hang-patterns.sh.
+	@bin/lint-hang-patterns.sh --self-test
+	@bin/lint-hang-patterns.sh
 
 test-ingest-parity: vendor  ## Both ingest paths (line parser, DuckDB importer) over one fixture tree must leave identical rows (#334). CI runs it.
 	@bin/dev-ingest-parity.sh --fixtures

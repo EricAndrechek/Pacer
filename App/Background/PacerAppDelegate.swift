@@ -133,6 +133,7 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 // the store READ-ONLY, and a schema change needs a write to
                 // migrate. So the first render after a model change fails until
                 // the app itself has launched once. Say that, and exit.
+                // lint:allow stderr-write live-render failure, the line before exit(2), to the terminal that ran it
                 FileHandle.standardError.write(Data("""
                     [Pacer live-render] could not open the store: \(error)
                     [Pacer live-render] if a model changed, launch Pacer once to migrate, then re-run.
@@ -388,6 +389,7 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // "Pacer popped open" feeling they expected from the second
         // launch — then exit.
         other.activate(options: [.activateAllWindows])
+        // lint:allow stderr-write the line before exit(0), from a process that is leaving; Log's queue would not flush first
         FileHandle.standardError.write(Data(
             "[Pacer] another instance is running (pid \(other.processIdentifier)); exiting this one\n".utf8
         ))

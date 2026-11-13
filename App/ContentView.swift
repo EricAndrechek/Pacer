@@ -82,6 +82,7 @@ struct ContentView: View {
     /// account in it, the newest eight rows can be one login's and the
     /// subtitle then reports the wrong account's pacing. Two rows of cached
     /// latest-readings answer the question exactly, and cost nothing.
+    // lint:allow query-always-mounted known debt: a handful of rows, but it re-fetches and re-runs the shell body on every save; moving it needs every Account writer to signal (proposed issue)
     @Query private var accounts: [Account]
     @State private var scope = UsageScope.shared
 
