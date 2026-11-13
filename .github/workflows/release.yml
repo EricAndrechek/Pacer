@@ -450,7 +450,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
-        # bin/sparkle-deltas.sh diffs each of the last three releases' apps
+        # bin/sparkle-deltas.sh diffs each of the last five releases' apps
         # (from their published DMGs) against the app in the DMG just
         # notarized, applies every delta to a fresh copy of the old app and
         # requires the result to match the new app file for file, pass

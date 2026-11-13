@@ -62,7 +62,7 @@ The steps `bin/ship.sh` automates, spelled out:
    - Sign the DMG, notarize it (one submission; Apple tickets the app inside
      too) and staple it, then check the app inside assesses as notarized.
    - Sign the Sparkle update with the EdDSA private key.
-   - Build a delta update from each of the last three releases, prove each
+   - Build a delta update from each of the last five releases, prove each
      one rebuilds the new app exactly, and sign the ones that pass
      ([Delta updates](#delta-updates) below).
    - Publish the DMG and the deltas as assets on a GitHub Release named `vX.Y.Z`.
@@ -98,7 +98,7 @@ doesn't fit (an older version, a modified app) gets the full DMG as before.
 
 The `Build Sparkle delta updates` step runs
 [`bin/sparkle-deltas.sh`](../bin/sparkle-deltas.sh) after the DMG is notarized.
-For each of the last three published releases it:
+For each of the last five published releases it:
 
 1. downloads that release's DMG and copies its app out (read-only mount);
 2. runs `BinaryDelta create` old → new, in the delta format the *old* app's
@@ -164,7 +164,7 @@ A manual run takes `-f deltas=off` too.
 
 **In CI, with the real keys.** A manual run of the Release workflow never
 publishes (the release and appcast steps only run on a tag push). On a manual
-run the delta step is strict: deltas from the last three releases to the
+run the delta step is strict: deltas from the last five releases to the
 run's build must all build, apply, match, pass codesign and notarization
 assessment, and sign and verify against the old apps' keys, or the run
 fails. A last step adds the item to a copy of the live appcast with the same

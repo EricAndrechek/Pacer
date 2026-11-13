@@ -14,7 +14,7 @@
 #                      deltas.tsv and summary.md.
 #   --from LIST        Comma-separated earlier versions (0.8.2,0.8.1). Default:
 #                      the newest --count published releases other than --new.
-#   --count N          Default 3.
+#   --count N          Default 5.
 #   --key-file FILE    EdDSA private key in `sign_update -f` format. Without
 #                      it, deltas are built and verified but not signed, and no
 #                      deltas.xml is written.
@@ -64,7 +64,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-NEW=""; OUT=""; FROM=""; COUNT=3; KEY_FILE=""; PUBLIC_KEY=""; URL_BASE=""; VERSION=""
+NEW=""; OUT=""; FROM=""; COUNT=5; KEY_FILE=""; PUBLIC_KEY=""; URL_BASE=""; VERSION=""
 SPARKLE_BIN="${SPARKLE_BIN:-}"; DMG_CACHE=""; WORK=""; KEEP_WORK=0; STRICT=0
 REPO="${GITHUB_REPOSITORY:-EricAndrechek/Pacer}"
 
