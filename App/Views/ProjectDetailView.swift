@@ -50,6 +50,13 @@ struct ProjectDetailView: View {
     /// re-read every project-day row on each store save while the modal
     /// was open, and the menu rebuilt its list from it on every render.
     @State private var knownProjectPathsForBulkMerge: [String] = []
+    /// Whether the project's folder is on disk, from an off-main check
+    /// (a stale mount can block `stat` for seconds). nil until it answers:
+    /// the header shows the probe's state meanwhile, never "missing".
+    @State private var folderExists: Bool?
+    /// Bumped on every scan cycle that finishes: the folder can vanish
+    /// without any row changing.
+    @State private var existenceTick = 0
 
     /// Pending source→canonical pair waiting on the user's confirm
     /// click after picking a target from the "Merge this into…"
@@ -550,6 +557,15 @@ struct ProjectDetailView: View {
             refreshDetail()
             refreshKnownProjectPaths()
         }
+        // Keyed on the path and the scan tick: the two inputs that change the answer.
+        .task(id: ExistenceKey(path: projectPath, tick: existenceTick)) {
+            let path = projectPath
+            let found = await Task.detached(priority: .utility) {
+                FileManager.default.fileExists(atPath: path)
+            }.value
+            guard !Task.isCancelled else { return }
+            folderExists = found
+        }
         // The session rows are live `@Query` results (scans, a scope switch
         // re-reading the other table); the table's rows follow them.
         .onChange(of: sessions, initial: true) { _, new in
@@ -581,6 +597,7 @@ struct ProjectDetailView: View {
                 refreshDetail()
             }
             if summary.projectAttributionChanged { refreshKnownProjectPaths() }
+            existenceTick &+= 1
         }
         // Cost-mode toggle in Settings must re-price the raw-sample cards —
         // `CostCalculator.sampleCost(mode:)` flips between stored /
@@ -630,13 +647,16 @@ struct ProjectDetailView: View {
 
     // MARK: - Project status
 
+    struct ExistenceKey: Equatable {
+        let path: String
+        let tick: Int
+    }
+
     /// Badge state for the modal header — derived from the single
-    /// probe row scoped to this project + a fileExists check. Cheap
-    /// (one syscall) and runs once per body render since both
-    /// inputs are reactive.
+    /// probe row scoped to this project + `folderExists`, which is checked
+    /// off the main thread (`.task(id:)` below), so this does no I/O.
     private var detailStatus: ProjectStatusBadge.State {
-        let exists = FileManager.default.fileExists(atPath: projectPath)
-        if !exists { return .missing }
+        if folderExists == false { return .missing }
         guard let probe = probesForThisProject.first else { return .unknown }
         return probe.gitRoot != nil ? .git : .noGit
     }
