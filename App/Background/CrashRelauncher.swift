@@ -1,3 +1,4 @@
+import AppKit
 import Darwin
 import Foundation
 import PacerCore
@@ -77,6 +78,7 @@ enum CrashRelauncher {
             TelemetryCounters.add(CrashRelaunch.unavailableCounter)
         case .success(let started):
             input = started.input
+            terminateSource = Self.treatTerminateAsQuit(input: started.input)
             switch plan.instruction {
             case .relaunch(let seconds):
                 Log.write("CrashRelaunch", "armed (relauncher pid \(started.pid)): "
@@ -104,6 +106,46 @@ enum CrashRelauncher {
         // A relauncher already gone (`bin/dev-quit-app.sh` stops it first)
         // makes this a quiet failure: the write end raises no SIGPIPE.
         RelaunchProcess.send(.quit, to: input)
+    }
+
+    /// `kill`, `killall Pacer` and `pkill Pacer` send SIGTERM: someone asked
+    /// Pacer to stop. Without this, the relauncher saw an exit without `quit`
+    /// and brought Pacer back 10 s later. Crashes and system kills arrive as
+    /// other signals (SIGSEGV, SIGBUS, SIGABRT, SIGKILL), so nothing they are
+    /// protected from is lost.
+    ///
+    /// Handled off the main thread, so a hung Pacer still goes: `quit` is
+    /// written straight to the pipe (one `write`, safe from any thread; the
+    /// second `quit` from `applicationShouldTerminate` is harmless, and the
+    /// write end raises no SIGPIPE), then the app is asked to terminate
+    /// normally so its saves flush. If the main thread has not finished that
+    /// in 10 s the process ends as SIGTERM's default would have (`_exit`, no
+    /// atexit work racing the main thread), after flushing the log.
+    ///
+    /// A no-op handler rather than `SIG_IGN`: an ignored signal stays ignored
+    /// in every child Pacer spawns afterwards, and `SecurityCLI` stops a hung
+    /// `security` with SIGTERM. A handler is reset to the default across
+    /// `exec`. The dispatch source sees the signal either way (kqueue records
+    /// every delivery attempt). `nonisolated` so the event handler is not a
+    /// main-actor closure called on a background queue.
+    private static var terminateSource: DispatchSourceSignal?
+    nonisolated private static func treatTerminateAsQuit(input fd: Int32) -> DispatchSourceSignal {
+        _ = signal(SIGTERM) { _ in }
+        let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global(qos: .userInitiated))
+        source.setEventHandler { [weak source] in
+            // Once: a second SIGTERM must not start a second shutdown.
+            source?.cancel()
+            RelaunchProcess.send(.quit, to: fd)
+            Log.write("CrashRelaunch", "SIGTERM: quitting (not a crash, so no relaunch)")
+            DispatchQueue.main.async { MainActor.assumeIsolated { NSApp.terminate(nil) } }
+            DispatchQueue.global().asyncAfter(deadline: .now() + 10) {
+                Log.write("CrashRelaunch", "SIGTERM: shutdown took over 10 s; exiting")
+                _ = Log.flush()
+                _exit(0)
+            }
+        }
+        source.resume()
+        return source
     }
 
     /// A run that hit the cap at launch, then stayed up: once its relaunches

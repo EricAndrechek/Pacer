@@ -770,9 +770,10 @@ end when Pacer's process ends, however it ends, so the relauncher reads
 end-of-file:
 
 - after `quit`, which Pacer writes first thing in `applicationShouldTerminate`
-  (Quit, ⌘Q, logout, shutdown, Sparkle, any AppleScript quit), before the
-  fatal store alert's `exit(1)`, and when Sparkle says it will relaunch, the
-  relauncher just exits;
+  (Quit, ⌘Q, logout, shutdown, Sparkle, any AppleScript quit), on SIGTERM
+  (`kill`, `killall Pacer`; handled off the main thread, so a hung Pacer
+  still goes), before the fatal store alert's `exit(1)`, and when Sparkle
+  says it will relaunch, the relauncher just exits;
 - otherwise (a crash, or a SIGKILL from a watchdog, the memory killer or
   Force Quit) it relaunches Pacer with `open -n -g` after 10 s, then 30 s,
   then 2 min (`RelaunchPolicy`). A fourth unexpected exit within 30 minutes
@@ -789,10 +790,11 @@ also show "Background Items Added", put a switch in System Settings, and
 "Open at Login" says. The relauncher covers every way Pacer starts, whether
 or not "Open at Login" is on, with no prompt.
 
-- **Killing Pacer by hand brings it back.** `bin/dev-quit-app.sh` (so
-  `make install`, `make uninstall`, `make record`) stops the relauncher first;
-  anything else should quit Pacer (`osascript -e 'quit app "Pacer"'`) or run
-  `pkill -x PacerRelauncher` before a `kill`.
+- **`kill -9` brings Pacer back; a plain `kill` does not.** SIGKILL looks like
+  any other crash. `bin/dev-quit-app.sh` (so `make install`, `make uninstall`,
+  `make record`) stops the relauncher first, because its fallback is a
+  SIGKILL; anything else that must force-kill Pacer runs
+  `pkill -x PacerRelauncher` first.
 - Not armed under a debugger (Xcode's Stop is a SIGKILL) or when started from
   a terminal. `defaults write com.ericandrechek.pacer crashRelaunch.disabled
   -bool YES` turns it off from the next launch.

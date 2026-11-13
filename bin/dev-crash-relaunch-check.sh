@@ -4,7 +4,7 @@
 #
 # It QUITS AND KILLS THE RUNNING PACER, so it runs only with the machine
 # owner's go-ahead, for that run (AGENTS.md, "Never take over the machine").
-# Bare, it prints its plan and exits. APPROVED=1 runs it. About a minute.
+# Bare, it prints its plan and exits. APPROVED=1 runs it. About two minutes.
 # It reports verdicts read from the process table and the log, not pictures.
 #
 # Install the build under test first (`make install`).
@@ -17,7 +17,7 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 plan() {
     cat <<EOF
-Crash relauncher check (#412). With APPROVED=1 it will, in about a minute:
+Crash relauncher check (#412). With APPROVED=1 it will, in about two minutes:
 
   0. Check that ${APP} has the relauncher, that one Pacer is running, and
      that a PacerRelauncher is watching it. If not, stop and change nothing.
@@ -29,21 +29,25 @@ Crash relauncher check (#412). With APPROVED=1 it will, in about a minute:
   2. Install:  run bin/dev-quit-app.sh, which make install runs. Pass: the
                relauncher is stopped, Pacer quits, nothing comes back within
                15 s. Then reopen it in the background.
-  3. Kill:     SIGKILL the running Pacer, which is what a watchdog or memory
+  3. Terminate: SIGTERM the running Pacer (what kill and killall send).
+               Pass: Pacer and its relauncher both exit, the log says SIGTERM
+               was taken as a quit, and nothing comes back within 15 s. Then
+               reopen it in the background.
+  4. Kill:     SIGKILL the running Pacer, which is what a watchdog or memory
                kill is. Pass: a new Pacer appears 10-25 s later, the log has
                the relauncher's lines, the new Pacer has its own relauncher,
                and the frontmost app is the same before and after.
 
-What you will see: the menu-bar item disappears and comes back three times;
+What you will see: the menu-bar item disappears and comes back four times;
 if the dashboard is open it closes and reopens where it was, without taking
-focus; the two quits may post the usual "Pacer paused" notification, which
+focus; the three quits may post the usual "Pacer paused" notification, which
 the relaunch clears. Nothing is clicked or typed. SIGKILL rather than a crash signal: a SIGSEGV would also put macOS's
 "quit unexpectedly" dialog on screen and send a made-up crash to Sentry. The
 relauncher cannot tell them apart (both are an exit without "quit"). The
 kill can lose the scan cycle in flight, which the next scan redoes, and the
 next daily check-in from this Mac will count one relaunch.
 
-Leaves Pacer running (relaunched by step 3) with one relaunch in its
+Leaves Pacer running (relaunched by step 4) with one relaunch in its
 history, which ages out in 30 minutes. If anything fails, Pacer is reopened
 on the way out.
 
@@ -118,7 +122,20 @@ else
 fi
 pacer_running || reopen
 
-# 3. A kill is relaunched, in the background, by the relauncher.
+# 3. SIGTERM is someone asking Pacer to stop: a quit, never relaunched.
+pid="$(pacer_pid)"
+kill -TERM "$pid"
+if wait_until 15 neither_running; then
+    sleep 15
+    if pacer_running; then fail "terminate: Pacer came back after SIGTERM"
+    elif new_log | grep -q 'SIGTERM: quitting'; then pass "terminate: SIGTERM taken as a quit, nothing came back"
+    else fail "terminate: Pacer exited but never logged taking SIGTERM as a quit"; fi
+else
+    fail "terminate: still running 15 s after SIGTERM (Pacer: $(pgrep -x Pacer | xargs), relauncher: $(pgrep -x PacerRelauncher | xargs))"
+fi
+pacer_running || reopen
+
+# 4. A kill is relaunched, in the background, by the relauncher.
 pid="$(pacer_pid)"
 old_relauncher="$(relauncher_for "$pid")"
 front_before="$(front_app)"
