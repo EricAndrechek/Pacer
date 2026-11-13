@@ -375,6 +375,7 @@ private struct ProjectsContent: View {
         self.onManageCollections = onManageCollections
         self.onEditCollection = onEditCollection
         let acct = scopeAccountId ?? UsageScope.noAccountSentinel
+        let noDate = UsageScope.noDateSentinel
         if let cutoffString {
             _globalAggregates = Query(
                 filter: #Predicate<ProjectDailyAggregate> { $0.date >= cutoffString }
@@ -385,7 +386,11 @@ private struct ProjectsContent: View {
                 }
             )
         } else {
-            _globalAggregates = Query()
+            // Scoped to one account, the global table is unread: match nothing
+            // rather than keep the whole table live on every save.
+            _globalAggregates = scopeAccountId == nil
+                ? Query()
+                : Query(filter: #Predicate<ProjectDailyAggregate> { $0.date == noDate })
             _scopedAggregates = Query(
                 filter: #Predicate<AccountProjectDailyAggregate> { $0.accountId == acct }
             )
