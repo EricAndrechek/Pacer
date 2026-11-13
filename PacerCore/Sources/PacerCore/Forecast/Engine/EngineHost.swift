@@ -37,6 +37,10 @@ public final class EngineHost {
     /// so a caller that must not race one can wait for it (`settleForRender`).
     /// Finished tasks stay: one per scope, and scopes are few.
     private var warmUps: [EngineScope: Task<Void, Never>] = [:]
+    /// Test seam: awaited at the start of each warm-up `engine(for:)` starts
+    /// from now on, so a test can hold one back and put a refit ahead of it
+    /// (`EngineWarmUpOrderTests`). Nil in the app.
+    var warmUpGate: (@Sendable () async -> Void)?
     /// When each scope was last asked for. Keeps a scope outside
     /// `keptAccounts` live for a while after its last ask — see `live`.
     private var lastAsked: [EngineScope: Date] = [:]
@@ -166,12 +170,20 @@ public final class EngineHost {
     /// until its first recompute lands. That is why the first one is kicked off
     /// here rather than waiting for the next scan tick — a scope switch should
     /// fill in within a second, not within five minutes.
+    ///
+    /// The engine is built in its scope (`init(modelContainer:scope:)`), not
+    /// told it by the warm-up (#404). A refit cycle that finds the engine
+    /// already made skips it in `keepFitted` and fits it alongside the
+    /// warm-up, in either order; when the scope arrived with the warm-up's
+    /// first message, a refit that got there first fitted the engine as all
+    /// accounts, and a hit claim waited a cycle longer for its second refit.
     @discardableResult
     public func engine(for scope: EngineScope) -> UsageIntelligenceEngine {
         lastAsked[scope] = Date()
         if let existing = engines[scope] { return existing }
-        let engine = UsageIntelligenceEngine(modelContainer: container)
+        let engine = UsageIntelligenceEngine(modelContainer: container, scope: scope)
         engines[scope] = engine
+        let gate = warmUpGate
         // `Task.detached`, emphatically. This type is `@MainActor`, and a plain
         // `Task` inherits that — so `await engine.recompute()` resumes the fit
         // *inline on the main thread* under the uncontended-actor optimisation.
@@ -179,7 +191,7 @@ public final class EngineHost {
         // asked for. `AppBackgroundService` carries the same warning on its own
         // recompute; I walked straight into it anyway.
         warmUps[scope] = Task.detached(priority: .userInitiated) {
-            await engine.adopt(scope: scope)
+            await gate?()
             await engine.recompute()
             await MainActor.run {
                 NotificationCenter.default.post(name: .pacerEngineDidRecompute, object: nil)
@@ -212,16 +224,19 @@ public final class EngineHost {
     /// is active (`fitsRateLimits`), so only the warm-up's fit counted, the
     /// claim streak stood at one, and the chip hedged: "may hit limit in 3
     /// days". Six README images flipped between those from run to run.
+    /// (`engine(for:)` now builds an engine in its scope, so that race is gone
+    /// everywhere, #404; the steps below still pin how many fits each engine
+    /// has had when the capture is drawn.)
     ///
     /// So, in order: every account gets an engine, scoped before anything fits
     /// it (`keepFitted`); every warm-up already started finishes; every engine
-    /// re-adopts its own scope, so none is left in the scope an overtaking fit
-    /// gave it; then `UsageIntelligenceEngine.claimConfirmRefits` refits of
+    /// re-adopts its own scope, so a preseeded one fitted outside it is put
+    /// back; then `UsageIntelligenceEngine.claimConfirmRefits` refits of
     /// every engine, one at a time in scope order. A claim the data supports is
     /// then confirmed, as it is in the app two refits after the data arrived,
     /// whichever way anything before this interleaved.
     public func settleForRender(accounts ids: [String], active: String?, now: Date = Date()) async {
-        await keepFitted(accounts: ids, active: active)
+        keepFitted(accounts: ids, active: active)
         await warmUpsFinished()
         let engines = live.sorted { $0.scope.key < $1.scope.key }
         // Detached, as everywhere else an engine is fitted: an `await` from
@@ -242,18 +257,18 @@ public final class EngineHost {
     /// `engine(for:)` starts: the refit this call precedes fits it anyway, and
     /// a second fit racing the first would do the work twice.
     ///
-    /// Awaits each new engine's `adopt(scope:)` before returning. A recompute
-    /// reaching an engine before its scope is set would fit every account's
-    /// data under one account's name. Adopting only sets the scope, so the hop
-    /// costs nothing.
-    public func keepFitted(accounts ids: [String], active: String? = nil) async {
+    /// Each new engine is built in its scope (`init(modelContainer:scope:)`):
+    /// a recompute reaching an engine before its scope was set would fit every
+    /// account's data under one account's name. Built that way there is no
+    /// hop to wait for, so this no longer sends `adopt(scope:)` to each new
+    /// engine from the main actor (AGENTS.md: never await a `@ModelActor`
+    /// from it).
+    public func keepFitted(accounts ids: [String], active: String? = nil) {
         keptAccounts = Set(ids)
         if let active { activeAccountId = active }
         for id in ids where engines[.account(id)] == nil {
             let scope = EngineScope.account(id)
-            let engine = UsageIntelligenceEngine(modelContainer: container)
-            engines[scope] = engine
-            await engine.adopt(scope: scope)
+            engines[scope] = UsageIntelligenceEngine(modelContainer: container, scope: scope)
         }
     }
 

@@ -73,12 +73,32 @@ public enum EngineQuestion: Sendable, Equatable {
 @ModelActor
 public actor UsageIntelligenceEngine {
 
-    /// Which usage this instance is fitted to. `@ModelActor` generates the
-    /// `init(modelContainer:)`, so the scope is adopted immediately after —
-    /// `EngineHost` is the only thing that constructs engines and it always
-    /// does both. Defaulting to `.allAccounts` means every existing call site
-    /// (the screenshot harness, tests) keeps today's behaviour untouched.
+    /// Which usage this instance is fitted to. `EngineHost` builds every engine
+    /// it hands out with `init(modelContainer:scope:)`, so an engine is in its
+    /// scope before anything can reach it. Defaulting to `.allAccounts` keeps
+    /// `@ModelActor`'s own `init(modelContainer:)` (the screenshot harness,
+    /// tests) the all-accounts engine it always was.
     public private(set) var scope: EngineScope = .allAccounts
+
+    /// An engine born in `scope` (#404).
+    ///
+    /// The host used to build an engine with `init(modelContainer:)` and send
+    /// `adopt(scope:)` from its warm-up, a detached task. A refit that reached
+    /// the new engine first fitted it as all accounts, which fits no rate
+    /// limits while an account is active (`fitsRateLimits`), so that fit did
+    /// not count toward the refits a hit claim needs. Set here, the scope is
+    /// part of the engine before it exists to anyone else: no ordering of the
+    /// warm-up and a refit can fit it in another.
+    ///
+    /// The body is `@ModelActor`'s generated `init(modelContainer:)` plus the
+    /// scope. It cannot delegate to that init instead: an actor's delegating
+    /// initializer is nonisolated, and may not set the scope after it.
+    public init(modelContainer: ModelContainer, scope: EngineScope) {
+        let modelContext = ModelContext(modelContainer)
+        self.modelExecutor = DefaultSerialModelExecutor(modelContext: modelContext)
+        self.modelContainer = modelContainer
+        self.scope = scope
+    }
 
     public func adopt(scope: EngineScope) {
         self.scope = scope
