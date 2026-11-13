@@ -72,12 +72,17 @@ final class TelemetryController {
 
     /// Ends the day's session and sends what is queued before the app quits.
     /// Bounded: quitting must not wait on the network.
-    func prepareForTermination() {
+    ///
+    /// The wait happens off the main thread. On main, a slow network held it
+    /// for the whole 2 s, which is `HangWatch`'s threshold: the quit itself
+    /// was reported as a hang, and the process ending mid-"hang" left a marker
+    /// the next launch reported again as `ended=terminated`.
+    func prepareForTermination() async {
         guard isRunning else { return }
         if sessionDay != nil { SentrySDK.endSession() }
         sessionDay = nil
         TelemetryBudget.shared.flush()
-        SentrySDK.flush(timeout: 2)
+        await Task.detached(priority: .userInitiated) { SentrySDK.flush(timeout: 2) }.value
     }
 
     /// Send what is queued now, waiting at most `timeout`: for a report made
