@@ -20,6 +20,7 @@
 #   bin/ship.sh wait-ci [<ref>]                 # block until CI on <ref> is green
 #   bin/ship.sh release <version>               # tag → watch Release run → verify
 #   bin/ship.sh verify <version>                # health-check a published release
+#   bin/ship.sh self-test                       # the schema matcher against fixtures
 #
 # `release` and `wait-ci` are the long-running ones — run them backgrounded
 # (they print a structured summary at the end) so nothing has to poll them.
@@ -62,13 +63,59 @@ next_version() {
 # confirms the patch-vs-minor call.
 schema_touched() {
   local base="$1" diff
-  # Diff into a variable first. `git diff | grep -q` under `set -o pipefail`
-  # reports a FALSE negative on a real match: grep -q exits at the first hit,
-  # git diff dies of SIGPIPE writing the rest, and pipefail turns that 141 into
-  # the pipeline's status. That is how 0.9.0 (three new @Models) was suggested
-  # as a patch.
-  diff="$(git diff --unified=0 "${base}..HEAD" -- '*.swift' 2>/dev/null || true)"
-  grep -qE '^\+.*(@Model|VersionedSchema|SchemaMigrationPlan|@Attribute\(\.unique)' <<<"$diff"
+  # Diff into a variable first, and test the result with -n rather than
+  # `| grep -q`: under `set -o pipefail`, grep -q exiting at its first hit
+  # makes the writer die of SIGPIPE, and pipefail turns that 141 into the
+  # pipeline's status, a FALSE negative on a real match. That is how 0.9.0
+  # (three new @Models) was suggested as a patch.
+  # Tests declare throwaway @Model types (migration fixtures); they are not
+  # the app's schema, and they made 0.8.3 look like a schema change.
+  diff="$(git diff --unified=0 "${base}..HEAD" -- '*.swift' ':(exclude,glob)**/Tests/**' 2>/dev/null || true)"
+  [ -n "$(schema_change_lines <<<"$diff")" ]
+}
+
+# The lines of a unified diff (stdin) that look like a schema change: an
+# @Model type, a VersionedSchema, a SchemaMigrationPlan or a unique
+# @Attribute, added OR removed (removing a model renumbers the store too).
+# Judged on code only: comment lines are dropped, trailing comments cut and
+# string literals emptied, and @Model must be the whole attribute, because `@ModelActor` is a
+# concurrency attribute. Three doc comments mentioning `@ModelActor` made
+# 0.9.1, which changed no model, read as a minor bump (#415).
+schema_change_lines() {
+  grep -E '^[+-]' | grep -vE '^(\+\+\+|---) ' \
+    | sed -E 's/^[+-]//' \
+    | grep -vE '^[[:space:]]*(//|/\*|\*)' \
+    | sed -E 's/"([^"\\]|\\.)*"/""/g; s#[[:space:]]//.*$##' \
+    | grep -E '@Model([^A-Za-z0-9_]|$)|VersionedSchema|SchemaMigrationPlan|@Attribute\(\.unique' || true
+}
+
+# `ship.sh self-test`: the schema matcher against fixtures with a known
+# answer, so a change to it cannot quietly stop it firing (or make it fire
+# on comments again). Runs in CI next to `make lint-hangs`.
+cmd_self_test() {
+  local failed=0 line want got
+  while IFS='|' read -r want line; do
+    [ -n "$line" ] || continue
+    if [ -n "$(schema_change_lines <<<"$line")" ]; then got=yes; else got=no; fi
+    if [ "$got" = "$want" ]; then ok "schema: ${want}  ${line}"
+    else bad "schema: expected ${want}, got ${got}: ${line}"; failed=1; fi
+  done <<'FIXTURES'
+yes|+@Model final class Z002Thing {
+yes|+    @Model public final class Z003Other {
+yes|-@Model final class OldThing {
+yes|+    @Attribute(.unique) var key: String
+yes|+enum SchemaV2: VersionedSchema {
+yes|+enum PacerMigrations: SchemaMigrationPlan {
+no|+    /// engine from the main actor (never await a `@ModelActor`
+no|+    // @Model in a line comment
+no|+     * @Model inside a block comment
+no|+@ModelActor actor UsageIntelligenceEngine {
+no|+    let host = ModelContainer(for: schema) // see the @Model list
+no|+    @Attribute(.externalStorage) var blob: Data
+no|+        log("schema: + \\(name) (a release adding a @Model)")
+no|+++ b/PacerCore/Sources/PacerCore/Models/Foo.swift
+FIXTURES
+  [ "$failed" = 0 ] && ok "ship.sh self-test passed" || { bad "ship.sh self-test FAILED"; return 1; }
 }
 
 assert_releasable() {
@@ -478,8 +525,9 @@ case "$sub" in
   release)   cmd_release "$@" ;;
   verify)    cmd_verify "$@" ;;
   soak)      cmd_soak "$@" ;;
+  self-test) cmd_self_test "$@" ;;
   ""|-h|--help|help)
     sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
     ;;
-  *) die "unknown subcommand: $sub (try: preflight | notes | wait-ci | soak | release | verify)" ;;
+  *) die "unknown subcommand: $sub (try: preflight | notes | wait-ci | soak | release | verify | self-test)" ;;
 esac
