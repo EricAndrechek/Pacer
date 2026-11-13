@@ -21,11 +21,14 @@ struct DashboardView: View {
     @State private var scope = UsageScope.shared
 
     @State private var modalRoot: PacerModalDestination?
+    /// For `DesktopCredentialPrompt`; read off the main thread on appear.
+    @State private var desktopAvailable = false
 
     var body: some View {
         // Read in this body and captured below, not read inside
         // `PageScaffold`'s stored closures. See `ProjectsView.body` (#140).
         let scopeAccountId = scope.accountId, limitAccountId = scope.limitAccountId
+        let desktopAvailable = self.desktopAvailable
         PageScaffold(
             "Dashboard",
             subtitle: "Realtime view of your Claude Code usage.",
@@ -48,7 +51,7 @@ struct DashboardView: View {
             }
         ) {
             WelcomeCard().layoutShiftProbe("welcome")
-            DesktopCredentialPrompt().layoutShiftProbe("desktop-prompt")
+            DesktopCredentialPrompt(desktopAvailable: desktopAvailable).layoutShiftProbe("desktop-prompt")
             NowStrip(
                 onTodayTap: openToday,
                 onSessionTap: { sessionId, displayName in
@@ -85,6 +88,14 @@ struct DashboardView: View {
                 .layoutShiftProbe("month-outlook")
         }
         .pacerModalNavigation(modalRoot, root: $modalRoot)
+        .task {
+            // Files only, never the keychain, but it reads every Desktop
+            // install's config and waits on `DesktopSessionDirectory`'s lock,
+            // which the scan holds while it lists Desktop's session folders.
+            self.desktopAvailable = await Task.detached(priority: .utility) {
+                DesktopOAuth.isClaudeDesktopAvailable
+            }.value
+        }
     }
 
     /// Open today's day-detail modal. Pinned to the user's local

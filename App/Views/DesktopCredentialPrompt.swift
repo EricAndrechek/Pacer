@@ -22,8 +22,12 @@ struct DesktopCredentialPrompt: View {
     @AppStorage(PacerSettings.Key.desktopOnboardingDismissed, store: PacerSettings.store)
     private var dismissed: Bool = false
 
-    // Cheap, file-only check (no keychain prompt); snapshot once per view.
-    private let desktopAvailable = DesktopOAuth.isClaudeDesktopAvailable
+    /// Whether Desktop has a token cache to offer, read by the dashboard off
+    /// the main thread. It was a stored property initialised here, which ran on
+    /// every dashboard body pass, on main: a read and JSON parse of each
+    /// install's `config.json`, behind the lock the scan holds while it lists
+    /// Desktop's session folders.
+    let desktopAvailable: Bool
 
     var body: some View {
         if enabled || dismissed || !desktopAvailable || ScreenshotMode.isActive {
