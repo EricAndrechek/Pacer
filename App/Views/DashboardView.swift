@@ -125,7 +125,7 @@ struct RateLimitSourceChip: View {
     @State private var owner: String?
     @Environment(\.modelContext) private var modelContext
 
-    struct Sample: Equatable {
+    struct Sample: Equatable, Sendable {
         let sampledAt: Date
         let source: String
     }
@@ -159,7 +159,7 @@ struct RateLimitSourceChip: View {
         TimelineView(.periodic(from: .now, by: 30)) { _ in
             HStack(spacing: 0) { content(latest: latest, owner: owner) }
         }
-        .task(id: key) { refresh() }
+        .task(id: key) { await refresh() }
     }
 
     private struct RefreshKey: Equatable {
@@ -167,16 +167,34 @@ struct RateLimitSourceChip: View {
         let generation: UInt64
     }
 
+    /// Off the main thread: it re-runs on every account's poll write, and on
+    /// the main context each read waits its turn for the store, so a refit or
+    /// a big scan holding it turned a poll into a main-thread stall.
     @MainActor
-    private func refresh() {
-        latest = (try? modelContext.fetch(
-            LimitScope.rateLimits(account: limitAccountId, limit: 1)))?
-            .first.map { Sample(sampledAt: $0.sampledAt, source: $0.source) }
+    private func refresh() async {
+        let container = modelContext.container, account = limitAccountId
+        let read = await Task.detached(priority: .userInitiated) {
+            Self.read(container: container, account: account)
+        }.value
+        // `.task(id:)` cancelled this one for a newer key: that task's read
+        // is the one to show.
+        guard !Task.isCancelled else { return }
+        latest = read.latest
+        owner = read.owner
+    }
 
-        let accounts = (try? modelContext.fetch(FetchDescriptor<Account>())) ?? []
-        owner = accounts.count > 1
-            ? accounts.first { $0.id == limitAccountId }?.shortLabel
+    private nonisolated static func read(
+        container: ModelContainer, account: String?
+    ) -> (latest: Sample?, owner: String?) {
+        let context = ModelContext(container)
+        let latest = (try? context.fetch(
+            LimitScope.rateLimits(account: account, limit: 1)))?
+            .first.map { Sample(sampledAt: $0.sampledAt, source: $0.source) }
+        let accounts = (try? context.fetch(FetchDescriptor<Account>())) ?? []
+        let owner = accounts.count > 1
+            ? accounts.first { $0.id == account }?.shortLabel
             : nil
+        return (latest, owner)
     }
 
     @ViewBuilder private func content(latest: Sample?, owner: String?) -> some View {
