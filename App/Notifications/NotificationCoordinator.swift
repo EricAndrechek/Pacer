@@ -272,9 +272,14 @@ public final class NotificationCoordinator {
     /// once a process for the bundle exists again, and removing the
     /// pending request preempts it.
     public func clearCollectionPausedNotification() {
+        // Off the main thread: both calls wait on the notification daemon
+        // (PACER-1G, a 2 s+ hang at launch). The center is thread-safe.
         let ids = [Self.collectionPausedIdentifier]
-        center.removeDeliveredNotifications(withIdentifiers: ids)
-        center.removePendingNotificationRequests(withIdentifiers: ids)
+        let center = center
+        OffMainQueue.notifications.run {
+            center.removeDeliveredNotifications(withIdentifiers: ids)
+            center.removePendingNotificationRequests(withIdentifiers: ids)
+        }
     }
 
     /// Once-per-day informational summary. Fires at most once per
