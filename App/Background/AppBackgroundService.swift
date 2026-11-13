@@ -147,7 +147,7 @@ final class AppBackgroundService {
         arenaGate = gate
         gate.armSafetyNet()
         gate.mark(.store)
-        RateLimitWriteSignal.shared.seed(from: container.mainContext)
+        RateLimitWriteSignal.shared.seedInBackground(from: container)
         // The live meter every surface reads (#318), rebuilt on each reading
         // and each scan cycle that wrote turns.
         LiveMeterBoard.shared.start(container: container)

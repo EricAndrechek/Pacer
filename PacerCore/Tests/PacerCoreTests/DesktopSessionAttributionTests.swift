@@ -157,6 +157,134 @@ struct DesktopSessionDirectoryTests {
         #expect(directory.drainDiscovered() == [compact: desktopOrg, late: desktopOrg, pretty: desktopOrg])
     }
 
+    // MARK: - Locking (#413)
+    //
+    // A refresh discovers installs and lists every record folder. It used to
+    // do that under the lock every lookup takes, so the scan's per-turn
+    // lookups, and the HTTP API's, waited out a slow listing or Settings'
+    // forced refresh.
+
+    /// A `discover` that blocks on the calls the test chooses until let go.
+    private final class HeldDiscovery: @unchecked Sendable {
+        let entered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        private let lock = NSLock()
+        private var calls = 0
+        /// Which call numbers (from 1) block, and what each call returns.
+        let holds: Set<Int>
+        let answer: @Sendable (Int) -> [DesktopInstall]
+        init(holds: Set<Int>, answer: @escaping @Sendable (Int) -> [DesktopInstall] = { _ in [] }) {
+            self.holds = holds
+            self.answer = answer
+        }
+        func discover() -> [DesktopInstall] {
+            let n = lock.withLock { calls += 1; return calls }
+            if holds.contains(n) { entered.signal(); release.wait() }
+            return answer(n)
+        }
+    }
+
+    /// Runs `body` on another thread and says whether it finished in time.
+    private static func finishes(within seconds: TimeInterval, _ body: @escaping @Sendable () -> Void) -> Bool {
+        let done = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async { body(); done.signal() }
+        return done.wait(timeout: .now() + seconds) == .success
+    }
+
+    @Test("lookups do not wait for a refresh's discovery or listing")
+    func lookupsDoNotWaitForARefresh() throws {
+        let root = try tempDirectory("desktop-sessions")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try writeRecord(in: root, org: desktopOrg, cliSessionId: "session-a")
+        let held = HeldDiscovery(holds: [2]) { _ in [DesktopInstall(dataDirectory: root)] }
+        let directory = DesktopSessionDirectory(discover: { held.discover() })
+        #expect(directory.recordedAccount(forSession: "session-a") == desktopOrg)
+
+        let refreshed = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async { directory.refresh(); refreshed.signal() }
+        #expect(held.entered.wait(timeout: .now() + 5) == .success)
+
+        let quick = Self.finishes(within: 5) {
+            _ = directory.recordedAccount(forSession: "session-a")
+            _ = directory.account(forAgentRoot: "/nowhere")
+            _ = directory.accounts
+            _ = directory.scanRoots
+            _ = directory.installs
+            _ = directory.activity
+            _ = directory.drainDiscovered()
+            // The running refresh started just now, so this one is not due
+            // and must not queue behind it.
+            directory.refreshIfDue()
+        }
+        held.release.signal()
+        #expect(quick, "a lookup waited for the refresh's discovery")
+        #expect(refreshed.wait(timeout: .now() + 5) == .success)
+        #expect(directory.recordedAccount(forSession: "session-a") == desktopOrg)
+    }
+
+    /// A refresh that started first and finishes last must not put back the
+    /// older view: here, an install list from before a new install appeared.
+    @Test("a slow refresh cannot publish over a newer one")
+    func noStalePublish() throws {
+        let (a, b) = (try tempDirectory("desktop-a"), try tempDirectory("desktop-b"))
+        defer { for url in [a, b] { try? FileManager.default.removeItem(at: url) } }
+        try writeRecord(in: b, org: otherDesktopOrg, cliSessionId: "session-b")
+        let held = HeldDiscovery(holds: [2]) { n in
+            n <= 2 ? [DesktopInstall(dataDirectory: a)]
+                : [DesktopInstall(dataDirectory: a), DesktopInstall(dataDirectory: b)]
+        }
+        let directory = DesktopSessionDirectory(discover: { held.discover() })
+        #expect(directory.installs.count == 1)
+
+        let first = DispatchSemaphore(value: 0), second = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async { directory.refresh(); first.signal() }
+        #expect(held.entered.wait(timeout: .now() + 5) == .success)
+        DispatchQueue.global().async { directory.refresh(); second.signal() }
+        // Let the second get as far as it will before the first finishes.
+        Thread.sleep(forTimeInterval: 0.05)
+        held.release.signal()
+        #expect(first.wait(timeout: .now() + 5) == .success)
+        #expect(second.wait(timeout: .now() + 5) == .success)
+
+        #expect(Set(directory.installs.map(\.id)) == [a.path, b.path])
+        #expect(directory.recordedAccount(forSession: "session-b") == otherDesktopOrg)
+    }
+
+    /// The first read of anything loads; a read arriving meanwhile waits for
+    /// that load rather than answering from an empty directory.
+    @Test("a lookup during the first load waits for it and then answers")
+    func lookupDuringFirstLoad() throws {
+        let root = try tempDirectory("desktop-sessions")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try writeRecord(in: root, org: desktopOrg, cliSessionId: "session-a")
+        let held = HeldDiscovery(holds: [1]) { _ in [DesktopInstall(dataDirectory: root)] }
+        let directory = DesktopSessionDirectory(discover: { held.discover() })
+
+        let loaded = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async { _ = directory.accounts; loaded.signal() }
+        #expect(held.entered.wait(timeout: .now() + 5) == .success)
+        let answer = Box<String?>(nil)
+        let looked = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            answer.value = directory.recordedAccount(forSession: "session-a")
+            looked.signal()
+        }
+        held.release.signal()
+        #expect(loaded.wait(timeout: .now() + 5) == .success)
+        #expect(looked.wait(timeout: .now() + 5) == .success)
+        #expect(answer.value == desktopOrg)
+    }
+
+    private final class Box<T>: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: T
+        init(_ value: T) { stored = value }
+        var value: T {
+            get { lock.withLock { stored } }
+            set { lock.withLock { stored = newValue } }
+        }
+    }
+
     @Test("no folder, or no root at all, is simply no records")
     func absentFolder() throws {
         let missing = DesktopSessionDirectory(
