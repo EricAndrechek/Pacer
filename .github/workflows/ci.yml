@@ -40,6 +40,14 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # The main-thread hang and crash shapes production kept hitting
+      # (sync notification-center calls, @Query in always-mounted views,
+      # formatters or fetches in a view body, raw stderr writes). Seconds,
+      # bash and awk only, so it runs once, on one image.
+      - name: Lint for hang patterns
+        if: matrix.os == 'macos-15'
+        run: make lint-hangs
+
       - name: Show toolchain
         run: |
           xcodebuild -version

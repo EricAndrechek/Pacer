@@ -3,19 +3,3 @@
 # Matched on the text, so an entry stops matching, and the lint reports it
 # stale, once the fix lands: then delete it. Never add new code here; fix it,
 # or give it a `// lint:allow <rule> <why>` marker if it is fine as it is.
-
-# r091/small-fixes (PACER-1G): these move onto OffMainQueue.notifications.
-un-sync	App/Notifications/NotificationCoordinator.swift	center.removeDeliveredNotifications(withIdentifiers: ids)
-un-sync	App/Notifications/NotificationCoordinator.swift	center.removePendingNotificationRequests(withIdentifiers: ids)
-un-sync	App/Notifications/WindowAlerts.swift	center.setNotificationCategories([
-un-sync	App/Notifications/WindowAlerts.swift	UNUserNotificationCenter.current().removeDeliveredNotifications(
-un-sync	App/Notifications/WindowAlerts.swift	center.getDeliveredNotifications { delivered in
-
-# r091/dropdown-engine (#408): the dropdown's today totals.
-query-always-mounted	App/Views/MenuBarContent.swift	@Query private var globalToday: [DailyAggregate]
-query-always-mounted	App/Views/MenuBarContent.swift	@Query private var scopedToday: [AccountDailyAggregate]
-query-always-mounted	App/Views/MenuBarContent.swift	_globalToday = Query(
-query-always-mounted	App/Views/MenuBarContent.swift	_scopedToday = Query(
-
-# r091/log-crash (PACER-15, the 0.9.0 crash): the sink becomes write(2).
-stderr-write	PacerCore/Sources/PacerCore/Util/Log.swift	static let sink = Mutex<@Sendable (Data) -> Void>({ FileHandle.standardError.write($0) })
