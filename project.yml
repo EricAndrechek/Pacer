@@ -204,6 +204,8 @@ targets:
         product: PacerCore
       - package: PacerCore
         product: PacerUI
+      - package: PacerCore
+        product: PacerRelaunch
       - package: Sparkle
         product: Sparkle
       - package: Sentry
@@ -214,6 +216,15 @@ targets:
       # everything else; bin/dev-install.sh and release.yml sign it with its
       # own entitlements before the app's seal.
       - target: PacerCLI
+        embed: true
+        codeSign: false
+        copy:
+          destination: wrapper
+          subpath: Contents/Helpers
+      # The crash relauncher (#412), at Contents/Helpers/PacerRelauncher.
+      # Signed by bin/dev-install.sh and release.yml before the app's seal,
+      # like the CLI.
+      - target: PacerRelauncher
         embed: true
         codeSign: false
         copy:
@@ -317,3 +328,29 @@ targets:
     dependencies:
       - package: PacerCore
         product: PacerPace
+
+  # Relaunches Pacer after it exits without quitting: a crash, a watchdog or
+  # memory kill (#412). Pacer starts one per run (App/Background/
+  # CrashRelauncher.swift has the design, and why it is not a LaunchAgent).
+  # A bare tool, not a bundle: it needs no entitlements and no App Group, only
+  # a pipe and `open`. It links PacerRelaunch alone, which has no Foundation,
+  # so it is a few hundred kilobytes and idles blocked in `read`.
+  PacerRelauncher:
+    type: tool
+    platform: macOS
+    sources:
+      - path: Relauncher
+    settings:
+      base:
+        PRODUCT_NAME: PacerRelauncher
+        PRODUCT_BUNDLE_IDENTIFIER: com.ericandrechek.pacer.relauncher
+        # An Info.plist inside the binary, so its signature and crash reports
+        # carry this identifier rather than the bare file name.
+        GENERATE_INFOPLIST_FILE: YES
+        CREATE_INFOPLIST_SECTION_IN_BINARY: YES
+        MARKETING_VERSION: "0.3.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SKIP_INSTALL: YES
+    dependencies:
+      - package: PacerCore
+        product: PacerRelaunch

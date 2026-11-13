@@ -201,6 +201,13 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // skipping container creation and scan-loop bring-up.
         Self.exitIfAnotherInstanceIsRunning()
 
+        // Start the relauncher that brings Pacer back if it exits without
+        // quitting (#412). After the gate, so a second instance arms nothing,
+        // and after the stderr redirect, which the relauncher inherits for its
+        // own log lines; before the store opens, so a crash opening or
+        // migrating it is covered too.
+        CrashRelauncher.armAtLaunch()
+
         // Register defaults before any @AppStorage reads can happen,
         // same reason PacerApp.init used to: `@AppStorage`'s default-
         // value parameter only kicks in when the key is totally
@@ -366,6 +373,8 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         default:
             break
         }
+        // Not a crash: relaunching would only put this alert up again.
+        CrashRelauncher.standDown()
         exit(1)
     }
 
@@ -381,14 +390,20 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private static func exitIfAnotherInstanceIsRunning() {
         guard let bundleID = Bundle.main.bundleIdentifier else { return }
         let mine = ProcessInfo.processInfo.processIdentifier
+        // Not one that has terminated: Launch Services can list an instance
+        // that just crashed for a moment after it is gone.
         let others = NSRunningApplication
             .runningApplications(withBundleIdentifier: bundleID)
-            .filter { $0.processIdentifier != mine }
+            .filter { $0.processIdentifier != mine && !$0.isTerminated }
         guard let other = others.first else { return }
         // Bring the existing one forward so the user gets the same
         // "Pacer popped open" feeling they expected from the second
-        // launch — then exit.
-        other.activate(options: [.activateAllWindows])
+        // launch — then exit. Unless nobody launched this one: the crash
+        // relauncher (#412) lost a race with someone reopening Pacer, and
+        // activating it would take the front from whatever they are doing.
+        if !CrashRelauncher.isRelaunch {
+            other.activate(options: [.activateAllWindows])
+        }
         // lint:allow stderr-write the line before exit(0), from a process that is leaving; Log's queue would not flush first
         FileHandle.standardError.write(Data(
             "[Pacer] another instance is running (pid \(other.processIdentifier)); exiting this one\n".utf8
@@ -666,6 +681,10 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // instant, and that is the anchor `make record-relaunch` lines the
         // video up against.
         Log.write("Lifecycle", "terminating")
+        // Before anything that can hang: from here on, an end that is not
+        // clean (stuck shutdown killed by `make install` or logout) is still
+        // a quit, never a crash to relaunch from (#412).
+        CrashRelauncher.standDown()
         Task { @MainActor in
             // A quit during a migration waits for it: SQLite would roll an
             // interrupted transaction back, but there is no reason to find out

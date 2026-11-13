@@ -405,6 +405,16 @@ PY
       else
         ok "pacer command line present, team-signed, with the App Group"
       fi
+      # The crash relauncher (#412): without it a crash leaves Pacer down.
+      local relauncher="${mnt}/Pacer.app/Contents/Helpers/PacerRelauncher"
+      if [ ! -x "$relauncher" ]; then
+        bad "the app has no Contents/Helpers/PacerRelauncher"; rc=1
+      elif ! codesign --verify --strict \
+             -R='anchor apple generic and certificate leaf[subject.OU] = "YZXWMJ5VBY"' "$relauncher" 2>/dev/null; then
+        bad "Contents/Helpers/PacerRelauncher is not signed by the team"; rc=1
+      else
+        ok "crash relauncher present and team-signed"
+      fi
       hdiutil detach -quiet "$mnt" || true
     else
       warn "could not download or mount the DMG to check the pacer command line"

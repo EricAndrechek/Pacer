@@ -182,6 +182,9 @@ final class DailyCheckIn {
         let installed = await Self.installedWidgets()
         let widgets = Self.widgetAttributes(installed)
         let widgetsEnd = Date()
+        // Crash relaunches and give-ups wait in defaults until a check-in
+        // sends them: the process that counted one may not have lived this long.
+        CrashRelaunch.moveCountsToTelemetry()
         let counters = TelemetryCounters.drain()
 
         let storeStart = Date()

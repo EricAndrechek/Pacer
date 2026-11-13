@@ -324,11 +324,16 @@ jobs:
             sign "" "${CLI_APP}/Contents/Resources/PacerCore_PacerCore.bundle"
           sign "${CLI_ENT}" "${CLI_APP}"
 
+          # The crash relauncher (#412): a bare tool with no entitlements.
+          # Required: without it a crash leaves Pacer down until reopened.
+          sign "" "${APP_PATH}/Contents/Helpers/PacerRelauncher"
+
           # Outer app bundle.
           sign "${APP_ENT}" "${APP_PATH}"
 
           codesign --verify --deep --strict --verbose=2 "${APP_PATH}"
           codesign --verify --strict --verbose=2 "${APP_PATH}/Contents/Helpers/PacerCLI.app"
+          codesign --verify --strict --verbose=2 "${APP_PATH}/Contents/Helpers/PacerRelauncher"
           echo "APP_PATH=${APP_PATH}" >> "${GITHUB_ENV}"
 
       - name: Build DMG

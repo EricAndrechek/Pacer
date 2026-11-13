@@ -2,7 +2,8 @@
 # Quit the running Pacer.app GUI (if any) so the install script can
 # safely replace the bundle. Tries AppleScript quit first (so SwiftUI
 # termination handlers run cleanly), falls back to SIGKILL after a
-# bounded wait. Also terminates the WidgetKit extension (see below).
+# bounded wait. Also terminates the WidgetKit extension and the crash
+# relauncher (see below).
 #
 # Stdout: "1" if the app was running and has been stopped; "0" if it
 # was not running. The install script captures this to decide whether
@@ -36,6 +37,25 @@ if pgrep -f "${WIDGET_PATH_REGEX}" >/dev/null 2>&1; then
     # Belt-and-suspenders: a wedged extension that ignored SIGTERM would
     # otherwise survive into the new bundle. SIGKILL is safe here.
     pkill -KILL -f "${WIDGET_PATH_REGEX}" 2>/dev/null || true
+fi
+
+# The crash relauncher (#412) goes first, before the app is asked to quit.
+# Pacer tells it "quit" as it starts to terminate, so a clean quit never
+# relaunches; but if the AppleScript quit below times out, the SIGKILL that
+# follows looks exactly like a crash, and the relauncher would start the old
+# app back up while the install is replacing the bundle. With it gone there
+# is nothing to race: the install's own `open -g` starts the new build, which
+# starts a new relauncher. Matched by exact process name, so only Pacer's.
+# Always runs, even when the app is not: a relauncher can be in its back-off
+# wait after a crash, about to relaunch.
+if pgrep -x PacerRelauncher >/dev/null 2>&1; then
+    echo "    Stopping the crash relauncher (so nothing relaunches mid-install)" >&2
+    pkill -TERM -x PacerRelauncher 2>/dev/null || true
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        pgrep -x PacerRelauncher >/dev/null 2>&1 || break
+        sleep 0.2
+    done
+    pkill -KILL -x PacerRelauncher 2>/dev/null || true
 fi
 
 if ! pgrep -f "${APP_PATH_REGEX}" >/dev/null 2>&1; then

@@ -119,7 +119,12 @@ final class UpdateInstallScheduler {
         timer = nil
     }
 
-    func noteRelaunching() { isRelaunchingForUpdate = true }
+    func noteRelaunching() {
+        isRelaunchingForUpdate = true
+        // Sparkle relaunches the new version from here; the crash relauncher
+        // starting this one again would race it (#412).
+        CrashRelauncher.standDown()
+    }
 
     /// "Relaunch to Update": someone asked, so no policy applies.
     func installNow() {

@@ -265,6 +265,9 @@ CLI_APP="${BUILD_OUTPUT}/Contents/Helpers/PacerCLI.app"
     sign "" "${CLI_APP}/Contents/Resources/PacerCore_PacerCore.bundle"
 sign "${CLI_ENTITLEMENTS_SIGN}" "${CLI_APP}"
 
+# The crash relauncher (#412): a bare tool with no entitlements.
+sign "" "${BUILD_OUTPUT}/Contents/Helpers/PacerRelauncher"
+
 # Outer app bundle last, so its signature covers everything inside.
 sign "${APP_ENTITLEMENTS_SIGN}" "${BUILD_OUTPUT}"
 
@@ -382,7 +385,9 @@ xcrun stapler validate "${BUILD_OUTPUT}" 2>&1 | tail -1
 fi  # PACER_DEV_SKIP_NOTARIZE
 
 # 3a. Quit Pacer.app if running, capturing whether it was so we can
-#     re-open at the end.
+#     re-open at the end. Its crash relauncher (#412) is stopped first, so
+#     a quit that ends in SIGKILL is never relaunched mid-install; the
+#     `open -g` at the end starts the new build, which starts a new one.
 echo
 echo "==> Quitting any running Pacer.app GUI"
 APP_WAS_RUNNING="$("${REPO_ROOT}/bin/dev-quit-app.sh")"
