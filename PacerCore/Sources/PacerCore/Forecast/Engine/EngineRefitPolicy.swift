@@ -44,7 +44,13 @@ public enum EngineRefitPolicy {
                              lastPageinBytes: UInt64) -> TimeInterval {
         let plain = floor(base: base, pressure: pressure)
         guard pressure >= .warning, lastPageinBytes > heavyPageinBytes else { return plain }
-        return max(plain, min(plain * 2, heavyFloorCap))
+        let doubled = min(plain * 2, heavyFloorCap)
+        // Under warning, stay inside the five-hour arena line's lifetime, as
+        // `floor(base:pressure:)` does: a longer floor blanks the line a person
+        // is reading between refits. Critical has already given that up.
+        guard pressure == .warning else { return max(plain, doubled) }
+        let fiveHourLine = ArenaLiveCache.maxAge(duration: 5 * 3600) - 60
+        return max(plain, min(doubled, fiveHourLine))
     }
 
     /// Which of a window's arena models (the pick first) to make this refit.

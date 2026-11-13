@@ -33,7 +33,11 @@ struct EngineRefitPolicyTests {
 
     @Test func heavyPageInUnderPressureDefersTheNextRefit() {
         let heavy: UInt64 = 373_000_000
-        #expect(EngineRefitPolicy.floor(base: 300, pressure: .warning, lastPageinBytes: heavy) == 1200)
+        // Under warning, longer but still inside the five-hour arena line's
+        // 15-minute lifetime, so the line a person reads never blanks.
+        #expect(EngineRefitPolicy.floor(base: 300, pressure: .warning, lastPageinBytes: heavy) == 840)
+        // A base already past it (the idle interval) is not stretched further.
+        #expect(EngineRefitPolicy.floor(base: 600, pressure: .warning, lastPageinBytes: heavy) == 1200)
         #expect(EngineRefitPolicy.floor(base: 300, pressure: .critical, lastPageinBytes: heavy) == 3600)
         // Capped at an hour whatever the base.
         #expect(EngineRefitPolicy.floor(base: 600, pressure: .critical, lastPageinBytes: heavy) == 3600)
