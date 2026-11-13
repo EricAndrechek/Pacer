@@ -1262,21 +1262,33 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.autoenablesItems = false
 
         // Custom-view item: pace rows + today's totals. NSHostingController
-        // is retained on the delegate so SwiftData @Query subscriptions
-        // stay live between opens. The view re-evaluates its body in
-        // response to data changes regardless of whether the menu is
-        // visible — so when the user opens the menu, the numbers are
-        // already current.
+        // is retained on the delegate, so the view stays mounted between
+        // opens and follows its read keys while the menu is closed: when the
+        // user opens the menu, the numbers are already current. It reads
+        // nothing on the main thread (#408): its feed reads off it.
+        //
+        // The feed is made here, outside `MenuBarKeyedContent`, so a rebuild
+        // of the view keeps its values, and read once now. The view's own
+        // reads are `.task`s, which start when SwiftUI first updates it, and
+        // a host that is in no window may not be updated until something its
+        // body read changes (a probe of a bare `NSHostingController` ran no
+        // `.task` until then). Read here, the first opening after launch
+        // finds the values in place rather than "—" for a moment.
+        let dropdownFeed = MenuDropdownFeed()
         let contentController = NSHostingController(
             rootView: AnyView(
                 MenuBarKeyedContent {
-                    MenuStatusContent()
+                    MenuStatusContent(feed: dropdownFeed)
                         .modelContainer(store.container)
                         .environment(\.usageEngine, store.engine)
                         .environment(\.usageEngines, store.engines)
                 }
             )
         )
+        let container = store.container
+        Task { @MainActor in
+            await MenuStatusContent.load(dropdownFeed, scope: .shared, from: container)
+        }
         // NSMenuItem.view doesn't auto-size — the menu reads the
         // view's frame at attach time. Use the host's fittingSize so
         // the SwiftUI body's intrinsic dimensions drive the layout.
@@ -1354,8 +1366,9 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// time (`buildStatusMenu`), so a scoped per-model window discovered *after*
     /// the menu was built would otherwise render into a too-short frame and clip
     /// its lower rows. Re-reading `fittingSize` here — after SwiftUI has laid the
-    /// current window set out (its @Query stays live while the menu is closed) —
-    /// keeps the drop-down tall enough for however many windows are in play.
+    /// current window set out (its reads follow every write while the menu is
+    /// closed) — keeps the drop-down tall enough for however many windows are in
+    /// play.
     func menuWillOpen(_ menu: NSMenu) {
         StatusMenuOpening.shared.willOpen()
         TelemetryCounters.add("ui.menu.open")

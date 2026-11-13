@@ -457,14 +457,16 @@ struct ContentView: View {
 /// Rebuilds `content` whenever the local day rolls over or the account scope
 /// changes.
 ///
-/// The menu bar's dropdown builds its `@Query` predicates in `init()`: today's
-/// date, and the scoped account. Its host, a retained `NSHostingController`,
-/// is built once and kept, so those predicates stayed on the day and the
-/// scope the menu bar was built with. (The status item's label no longer
-/// needs this: it has no `@Query`s and keys its reads on both in `body`,
-/// PACER-19.) After midnight today's rows stopped matching. After a
-/// scope switch the Today, Tokens and model figures kept reading the old
-/// account, or read $0 when launched on "All accounts", until midnight.
+/// The menu bar's dropdown is hosted in a retained `NSHostingController`,
+/// built once and kept. It used to build `@Query` predicates in `init()` for
+/// today's date and the scoped account, which this rebuild kept current. It
+/// now reads the store off the main thread, keyed on the day and the scope in
+/// `body` (#408), and its feed outlives the rebuild, so its numbers no longer
+/// need it. What still does is its engine state: the forecasts behind each
+/// block's caption and the Outlook row are answers for one scope and one day,
+/// and an ask is not cancelled by a switch, so the rebuild drops them rather
+/// than let an old account's answer land and stay (`askEngineOnce`). (The
+/// status item's label has neither, and is not wrapped, PACER-19.)
 ///
 /// Reading both keys in `body` (each tracked by `@Observable`) re-evaluates
 /// this view when either moves, and the changed `.id` rebuilds `content`,
