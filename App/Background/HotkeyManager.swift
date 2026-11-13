@@ -1,5 +1,6 @@
 import AppKit
 import Carbon
+import PacerCore
 
 /// Global hotkey registration using the Carbon `RegisterEventHotKey`
 /// API. SwiftUI's `keyboardShortcut` modifier only works while Pacer is
@@ -121,10 +122,11 @@ final class HotkeyManager {
     }
 
     private func log(_ message: String) {
-        // FileHandle write avoids pulling PacerCore.Log into the
-        // hotkey path; we want this to work even if PacerCore isn't
-        // fully bootstrapped.
-        FileHandle.standardError.write(Data("[Pacer/Hotkey] \(message)\n".utf8))
+        // Through `Log`, not a direct `FileHandle.standardError.write`: this
+        // runs on the main thread at launch, and a synchronous stderr write
+        // there is PACER-15's hang. `Log` needs no bootstrapping; it writes on
+        // its own queue.
+        Log.write("Hotkey", message)
     }
 }
 
