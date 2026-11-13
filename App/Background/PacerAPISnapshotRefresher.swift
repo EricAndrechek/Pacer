@@ -44,10 +44,8 @@ final class PacerAPISnapshotRefresher: @unchecked Sendable {
 
     /// Backstop cadence for state that changes without an event.
     static let interval: TimeInterval = 15
-    /// Least time between the starts of two builds. A trigger that lands just
-    /// after one finished waits out the rest of this rather than starting a
-    /// second pass over the same rows.
-    static let minimumSpacing: TimeInterval = 2
+    // Spacing between builds is `PacerSnapshotSpacing`: at least 2 s after the
+    // last build *ended*, and 3x that build's duration when it was slow.
     /// A timer tick this soon after a build started skips: that build already
     /// did the tick's job.
     static let timerSkipWindow: TimeInterval = 5
@@ -78,6 +76,7 @@ final class PacerAPISnapshotRefresher: @unchecked Sendable {
     /// Shared by the poller's announcement and the `UsageScope` watch.
     private var accountDetector = PacerAccountChange.Detector(last: nil)
     private var lastStartedAt: Date?
+    private var spacing = PacerSnapshotSpacing()
     private var announcedFirstBuild = false
     private var onBroadcast: (@Sendable (PacerAPISnapshot) -> Void)?
     private var observers: [NSObjectProtocol] = []
@@ -108,7 +107,12 @@ final class PacerAPISnapshotRefresher: @unchecked Sendable {
         // on the poster's thread rather than hopping anywhere.
         let newObservers = [
             center.addObserver(forName: .pacerScanCycleDidComplete, object: nil, queue: nil) {
-                [weak self] _ in self?.trigger()
+                [weak self] _ in
+                // Under memory pressure a scan cycle does not rebuild: the
+                // 15 s timer is the only thing that does.
+                guard PacerSnapshotSpacing.scanRequestMayBuild(pressure: MemoryPressure.shared.level)
+                else { return }
+                self?.trigger()
             },
             center.addObserver(forName: .pacerEngineDidRecompute, object: nil, queue: nil) {
                 [weak self] _ in self?.trigger(broadcast: true)
@@ -149,6 +153,7 @@ final class PacerAPISnapshotRefresher: @unchecked Sendable {
             running = true
             generation &+= 1
             announcedFirstBuild = false
+            spacing = PacerSnapshotSpacing()
             // The first build is pushed to the stream as well: a client that
             // connected before any snapshot existed got headers and nothing
             // else, and would otherwise wait for the next engine refit.
@@ -252,8 +257,7 @@ final class PacerAPISnapshotRefresher: @unchecked Sendable {
 
     /// Must hold `lock`.
     private func delayBeforeNextBuild(now: Date) -> TimeInterval {
-        guard let lastStartedAt else { return 0 }
-        return max(0, Self.minimumSpacing - now.timeIntervalSince(lastStartedAt))
+        spacing.delay(now: now)
     }
 
     private func schedule(after delay: TimeInterval) {
@@ -280,7 +284,8 @@ final class PacerAPISnapshotRefresher: @unchecked Sendable {
 
         let startedAt = Date()
         let result = Result { try PacerAPISnapshot.build(now: startedAt) }
-        let elapsed = Date().timeIntervalSince(startedAt)
+        let endedAt = Date()
+        let elapsed = endedAt.timeIntervalSince(startedAt)
         // Every build reads the window's turns and every account's rollups
         // into a throwaway context; rate-limited, so a quiet machine isn't
         // walking its heap every 15 s (#337).
@@ -294,6 +299,7 @@ final class PacerAPISnapshotRefresher: @unchecked Sendable {
             // A stop or restart while this was building: its rows may predate
             // whatever the user changed, so it is dropped rather than served.
             let wanted = running && generation == job.generation
+            spacing.buildFinished(startedAt: startedAt, endedAt: endedAt)
             var first = false
             if wanted, case .success(let snapshot) = result {
                 // Swapped in under the lock that `stop` clears under, so the
