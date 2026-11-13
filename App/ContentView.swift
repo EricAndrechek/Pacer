@@ -574,11 +574,16 @@ struct ToolbarFreshness: View {
     // ago" moves with the cards' "read 3m ago". It used to tick once a
     // second, sixty times the label's own granularity.
     @State private var display: Display = Display(state: .none, label: "", tooltip: "")
-    /// What the derived getters below read. Refreshed by `refresh()`; these
-    /// were `@Query` arrays, and everything downstream is unchanged.
-    @State private var tokens: [TokenSample] = []
-    @State private var rateLimits: [RateLimitSample] = []
+    /// What the derived getters below read. Refreshed by
+    /// `refreshScopedProbes()`, off the main thread; these were `@Query`
+    /// arrays, of which only the newest row's timestamp was ever read.
+    @State private var latestTokenAt: Date?
+    @State private var latestReadingAt: Date?
     @State private var sessionRows: [SessionRow] = []
+    /// Coalesces `refreshScopedProbes`: a request that arrives while a read
+    /// is in flight runs once that read lands, so none is lost.
+    @State private var probesInFlight = false
+    @State private var probesPending = false
     /// `lastIncrementalScanAt` as stored. See `refresh`.
     @State private var lastScanAt: String?
     @State private var scanReadInFlight = false
@@ -626,11 +631,11 @@ struct ToolbarFreshness: View {
         if let step = rebuild.step {
             return Display(state: .recent, label: "Updating history…", tooltip: step.detail)
         }
-        let lastUse = [tokens.first?.sampledAt, sessionRows.first?.lastSeenAt].compactMap { $0 }.max()
+        let lastUse = [latestTokenAt, sessionRows.first?.lastSeenAt].compactMap { $0 }.max()
         if sessionActivity(now: now) != .active,
            TokenPoolStatus.shared.isAuthPaused(
             account: UsageScope.shared.limitAccountId,
-            lastReadingAt: rateLimits.first?.sampledAt, lastActivityAt: lastUse, now: now) {
+            lastReadingAt: latestReadingAt, lastActivityAt: lastUse, now: now) {
             return Display(state: .stale, label: AuthPause.label, tooltip: AuthPause.reason)
         }
         return Display(state: freshness(now: now), label: label(now: now), tooltip: tooltip(now: now))
@@ -650,22 +655,59 @@ struct ToolbarFreshness: View {
     /// liveness: with work active and the window scoped to personal, the
     /// toolbar said "● live" over a Now card that said "Nothing running."
     /// Both were reading correctly; they were reading different accounts.
+    ///
+    /// Read off the main thread, like `refresh()`'s row and `NowStrip`'s
+    /// probes. They run on every scan cycle and on every account's poll
+    /// write, and on the main context each of these index seeks waited its
+    /// turn for the store: behind a refit or a big scan, that is a main-thread
+    /// stall in the toolbar of a window that stays open all day (#152's
+    /// class, PACER-19's surface).
     @MainActor
-    private func refreshScopedProbes() {
-        let account = UsageScope.shared.accountId
-        rateLimits = (try? modelContext.fetch(
-            LimitScope.rateLimits(account: UsageScope.shared.limitAccountId, limit: 1))) ?? []
-        tokens = (try? modelContext.fetch(Self.tokenProbe(account: account))) ?? []
-        if let account {
-            sessionRows = ((try? modelContext.fetch(
-                Self.accountSessionProbe(account: account))) ?? []).map(\.sessionRow)
-        } else {
-            sessionRows = ((try? modelContext.fetch(Self.sessionProbe)) ?? []).map(\.sessionRow)
-        }
-        display = currentDisplay()
+    private func refreshScopedProbes() async {
+        guard !probesInFlight else { probesPending = true; return }
+        probesInFlight = true
+        defer { probesInFlight = false }
+        let container = modelContext.container
+        repeat {
+            probesPending = false
+            let account = scope.accountId, limitAccount = scope.limitAccountId
+            let probes = await Task.detached(priority: .userInitiated) {
+                Self.readScopedProbes(container: container, account: account, limitAccount: limitAccount)
+            }.value
+            // Read for a scope the user has since left: drop it. The
+            // `.onChange` that saw the switch asked again, so it runs next.
+            guard account == scope.accountId, limitAccount == scope.limitAccountId else { continue }
+            latestReadingAt = probes.latestReadingAt
+            latestTokenAt = probes.latestTokenAt
+            sessionRows = probes.sessionRows
+            display = currentDisplay()
+        } while probesPending
     }
 
-    private static func tokenProbe(account: String?) -> FetchDescriptor<TokenSample> {
+    private struct ScopedProbes: Sendable {
+        var latestReadingAt: Date?
+        var latestTokenAt: Date?
+        var sessionRows: [SessionRow] = []
+    }
+
+    private nonisolated static func readScopedProbes(
+        container: ModelContainer, account: String?, limitAccount: String?
+    ) -> ScopedProbes {
+        let context = ModelContext(container)
+        var probes = ScopedProbes()
+        probes.latestReadingAt = (try? context.fetch(
+            LimitScope.rateLimits(account: limitAccount, limit: 1)))?.first?.sampledAt
+        probes.latestTokenAt = (try? context.fetch(tokenProbe(account: account)))?.first?.sampledAt
+        if let account {
+            probes.sessionRows = ((try? context.fetch(
+                accountSessionProbe(account: account))) ?? []).map(\.sessionRow)
+        } else {
+            probes.sessionRows = ((try? context.fetch(sessionProbe())) ?? []).map(\.sessionRow)
+        }
+        return probes
+    }
+
+    private nonisolated static func tokenProbe(account: String?) -> FetchDescriptor<TokenSample> {
         var d = FetchDescriptor<TokenSample>(sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
         if let account {
             d.predicate = #Predicate<TokenSample> { $0.accountId == account }
@@ -674,7 +716,7 @@ struct ToolbarFreshness: View {
         return d
     }
 
-    private static func accountSessionProbe(
+    private nonisolated static func accountSessionProbe(
         account: String
     ) -> FetchDescriptor<AccountSessionInfo> {
         var d = FetchDescriptor<AccountSessionInfo>(
@@ -688,11 +730,11 @@ struct ToolbarFreshness: View {
     /// Most-recent session row for the live-activity overlay. Cap to
     /// 1 — same probe pattern as the other two; we only ever read
     /// `firstSeenAt` / `lastSeenAt` from `.first`.
-    private static let sessionProbe: FetchDescriptor<SessionInfo> = {
+    private nonisolated static func sessionProbe() -> FetchDescriptor<SessionInfo> {
         var d = FetchDescriptor<SessionInfo>(sortBy: [SortDescriptor(\.lastSeenAt, order: .reverse)])
         d.fetchLimit = 1
         return d
-    }()
+    }
 
     /// `.active` when the latest SessionInfo's lastSeenAt is within
     /// `LiveSessionActivity.activeThreshold`. We only ever surface
@@ -704,8 +746,8 @@ struct ToolbarFreshness: View {
 
     private var lastActivity: Date? {
         let candidates: [Date?] = [
-            tokens.first?.sampledAt,
-            rateLimits.first?.sampledAt,
+            latestTokenAt,
+            latestReadingAt,
             parseScanMeta(),
         ]
         return candidates.compactMap { $0 }.max()
@@ -800,7 +842,7 @@ struct ToolbarFreshness: View {
         // the pill redraws only when its text changes.
         PillBody(display: display).equatable()
             .onReceive(NotificationCenter.default.publisher(for: .pacerScanCycleDidComplete)) { _ in
-                refreshScopedProbes()
+                Task { await refreshScopedProbes() }
                 // The scan meta moves with every cycle; read it now rather
                 // than at the next minute.
                 Task { await refresh() }
@@ -808,17 +850,19 @@ struct ToolbarFreshness: View {
             // Rate-limit rows arrive from every account's poll; a scan cycle
             // only reports the active login's. Read in `body` so the pill
             // depends on it (#142).
-            .onChange(of: RateLimitWriteSignal.shared.generation) { _, _ in refreshScopedProbes() }
+            .onChange(of: RateLimitWriteSignal.shared.generation) { _, _ in
+                Task { await refreshScopedProbes() }
+            }
             // The probes are scoped, so a scope change invalidates them —
             // otherwise the pill reports the other account's freshness until
             // the next scan cycle happens to fire.
-            .onChange(of: scope.limitAccountId) { _, _ in refreshScopedProbes() }
-            .onChange(of: scope.accountId) { _, _ in refreshScopedProbes() }
+            .onChange(of: scope.limitAccountId) { _, _ in Task { await refreshScopedProbes() } }
+            .onChange(of: scope.accountId) { _, _ in Task { await refreshScopedProbes() } }
             // Read here so the pill depends on it: shown the moment a rebuild
             // starts and gone the moment it ends, not on the next 1 s tick.
             .onChange(of: rebuild.step) { _, _ in display = currentDisplay() }
             .task {
-                refreshScopedProbes()
+                await refreshScopedProbes()
                 await refresh()
                 // `Task.sleep` rather than a `Timer` publisher so the loop is
                 // owned by the view's lifetime — it stops when the window
