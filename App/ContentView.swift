@@ -813,19 +813,30 @@ struct ToolbarFreshness: View {
     /// timestamp without parsing the relative label.
     private func tooltip(now: Date) -> String {
         if sessionActivity(now: now) == .active, let s = sessionRows.first {
-            let f = DateFormatter()
-            f.dateStyle = .none
-            f.timeStyle = .medium
-            return "Claude Code active — last write \(f.string(from: s.lastSeenAt))"
+            return "Claude Code active — last write \(Self.timeFormatter.string(from: s.lastSeenAt))"
         }
         if let last = lastActivity {
-            let f = DateFormatter()
-            f.dateStyle = .short
-            f.timeStyle = .medium
-            return "Last activity: \(f.string(from: last))"
+            return "Last activity: \(Self.dateTimeFormatter.string(from: last))"
         }
         return "No activity yet."
     }
+
+    /// Built once. The tooltip is rebuilt with the pill on every refresh (the
+    /// minute tick, each scan cycle, each poll write), and it built a new
+    /// `DateFormatter` each time, an ICU load, in the always-open toolbar.
+    /// Only ever formats, never reconfigured, so sharing one is safe.
+    private static let timeFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateStyle = .none
+        f.timeStyle = .medium
+        return f
+    }()
+    private static let dateTimeFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateStyle = .short
+        f.timeStyle = .medium
+        return f
+    }()
 
     /// The minimal value the pill actually draws. Computing this on every
     /// `@Query` refresh is cheap (four `fetchLimit`-1 probes + a few string
