@@ -669,15 +669,27 @@ struct ProjectDetailView: View {
     /// `propertiesToFetch` SwiftData would materialize every JSON-blob
     /// column on every row.
     private func refreshKnownProjectPaths() {
-        var desc = FetchDescriptor<ProjectDailyAggregate>()
-        desc.propertiesToFetch = [\ProjectDailyAggregate.projectPath]
-        var set: Set<String> = []
-        for agg in (try? modelContext.fetch(desc)) ?? [] {
-            if agg.projectPath != ProjectDailyAggregate.unknownProjectPath {
-                set.insert(agg.projectPath)
-            }
+        let container = modelContext.container
+        Task {
+            let paths = await Task.detached(priority: .utility) {
+                Self.loadKnownProjectPaths(container: container)
+            }.value
+            knownProjectPathsForBulkMerge = paths
         }
-        knownProjectPathsForBulkMerge = set.sorted()
+    }
+
+    /// Off the main thread, in its own context: the whole project-day table
+    /// is read here, which is too much for the main context. `(unknown)` is
+    /// excluded in the predicate so its rows are never materialized.
+    nonisolated private static func loadKnownProjectPaths(container: ModelContainer) -> [String] {
+        let unknown = ProjectDailyAggregate.unknownProjectPath
+        var desc = FetchDescriptor<ProjectDailyAggregate>(
+            predicate: #Predicate { $0.projectPath != unknown }
+        )
+        desc.propertiesToFetch = [\ProjectDailyAggregate.projectPath]
+        let context = ModelContext(container)
+        let rows = (try? context.fetch(desc)) ?? []
+        return Set(rows.map(\.projectPath)).sorted()
     }
 
     /// Other-project picker for the "Merge this into…" submenu.
