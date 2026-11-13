@@ -370,7 +370,7 @@ public final class NotificationCoordinator {
         // wants a reset notice: clear it (and its mute) before the settings
         // gates. `sweepStaleWindowAlerts` catches the resets this never sees.
         let windowKey = Self.scopedKey(window, account: account)
-        windowDidReset(windowKey: windowKey)
+        await windowDidReset(windowKey: windowKey)
         guard defaults.bool(forKey: PacerSettings.Key.notificationsEnabled) else { return }
         guard defaults.bool(forKey: PacerSettings.Key.notifyOnReset) else { return }
 
@@ -561,7 +561,7 @@ public final class NotificationCoordinator {
         // whether or not the user wants to be told about it. Once per cycle,
         // so a warning posted after the reset is not cleared on the next poll.
         let windowKey = Self.scopedKey(window, account: account)
-        windowDidReset(windowKey: windowKey)
+        await windowDidReset(windowKey: windowKey)
         guard defaults.bool(forKey: PacerSettings.Key.notificationsEnabled),
               defaults.bool(forKey: PacerSettings.Key.notifyGlobalReset) else {
             markNotified(key: cycleKey, in: context)

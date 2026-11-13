@@ -63,8 +63,13 @@ extension NotificationCoordinator {
 
     /// Take a window's alert down and end its mute: the window reset, so
     /// neither is true any more.
-    func windowDidReset(windowKey: String) {
-        Self.removeDelivered([AlertSlot.identifier(windowKey: windowKey)])
+    /// Waits for the removal to finish, off the main thread: both callers
+    /// post the reset notice into the same slot right after, and that post
+    /// must reach the notification daemon after the remove, never before.
+    func windowDidReset(windowKey: String) async {
+        let ids = [AlertSlot.identifier(windowKey: windowKey)]
+        let center = UNUserNotificationCenter.current()
+        await OffMainQueue.notifications.perform { center.removeDeliveredNotifications(withIdentifiers: ids) }
         var mutes = Self.loadMutes()
         if mutes.until[windowKey] != nil {
             mutes.unmute(windowKey)

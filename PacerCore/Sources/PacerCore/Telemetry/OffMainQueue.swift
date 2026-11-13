@@ -20,4 +20,19 @@ public final class OffMainQueue: Sendable {
     public func run(_ work: @escaping @Sendable () -> Void) {
         queue.async(execute: work)
     }
+
+    /// Run `work` on the queue and wait for it to finish, without blocking
+    /// the caller's thread. Use it when what comes next has to land after the
+    /// work. A window's reset removes its delivered alert, then posts the
+    /// reset notice under the same identifier: with a fire-and-forget remove,
+    /// the post could reach the notification daemon first, and the remove
+    /// would then delete the notice just delivered.
+    public func perform(_ work: @escaping @Sendable () -> Void) async {
+        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+            queue.async {
+                work()
+                done.resume()
+            }
+        }
+    }
 }
