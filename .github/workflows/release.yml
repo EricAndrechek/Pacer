@@ -2,11 +2,11 @@ name: Release
 
 # Tag-driven release. Push a `v0.2.0` tag and this workflow builds,
 # signs, notarizes, packages, signs the Sparkle update, builds and proves
-# Sparkle delta updates from the last three releases, publishes the GitHub
+# Sparkle delta updates from the last five releases, publishes the GitHub
 # Release, and updates the appcast on the gh-pages branch.
 #
 # Delta updates have a kill switch that needs no code change: set the
-# repository variable PACER_SPARKLE_DELTAS to `off` (Settings → Secrets and
+# repository variable PACER_SPARKLE_DELTAS to `off` (or `false` or `0`, any case) (Settings → Secrets and
 # variables → Actions → Variables), or pass `deltas: off` to a manual run.
 # A release then ships exactly as it did before deltas: one DMG, one
 # <enclosure>. Undoing deltas already published: docs/releasing.md,
@@ -37,7 +37,7 @@ on:
   # without cutting an actual release. A manual run never publishes a GitHub
   # Release or pushes the appcast (the publish steps run only on a tag push),
   # whatever `dry_run` says. It builds, signs and notarizes, builds the delta
-  # updates from the last three releases to this build and verifies and signs
+  # updates from the last five releases to this build and verifies and signs
   # them strictly (any failure fails the run), and previews the appcast item
   # it would add against a copy of the live feed. From the CLI:
   #   gh workflow run release.yml --ref <branch> -f dry_run=true
@@ -446,7 +446,16 @@ jobs:
         # Kill switch: the PACER_SPARKLE_DELTAS repo variable or the `deltas`
         # input set to `off` skips this step, and with no deltas built the
         # release and appcast steps below do exactly what they did before.
-        if: vars.PACER_SPARKLE_DELTAS != 'off' && github.event.inputs.deltas != 'off'
+        # contains() compares strings case-insensitively: off, OFF, false, 0.
+        if: ${{ !contains(fromJSON('["off","false","0"]'), vars.PACER_SPARKLE_DELTAS) && !contains(fromJSON('["off","false","0"]'), github.event.inputs.deltas) }}
+        # A hang in the download, hdiutil or BinaryDelta must not eat the job
+        # (which also covers the notary wait). Five deltas take about a minute
+        # each. On a tag push a timeout or any other failure of this step is
+        # tolerated, and the release ships without deltas (count and DELTAS_DIR
+        # are then unset, which the later steps read as "none"). A manual run
+        # stays strict.
+        timeout-minutes: 20
+        continue-on-error: ${{ github.event_name == 'push' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
@@ -544,20 +553,23 @@ jobs:
             } > "${notes_file}"
           fi
 
-          # The delta updates go up with the DMG, before the appcast step can
-          # name them, so no client is ever pointed at an asset that is not
-          # there yet.
-          assets=("${DMG_PATH}")
-          if [ "${{ steps.deltas.outputs.count || '0' }}" != 0 ]; then
-            for delta in "${DELTAS_DIR}"/*.delta; do assets+=("${delta}"); done
-          fi
+          # The DMG goes up alone, so the release can never be left a draft by a
+          # delta. The delta updates go up after it and before the appcast step
+          # can name them; a failed upload only costs that delta (the appcast
+          # step lists the release's assets and advertises only deltas that are
+          # there with the right length).
           if gh release view "${tag}" >/dev/null 2>&1; then
-            gh release upload "${tag}" "${assets[@]}" --clobber
+            gh release upload "${tag}" "${DMG_PATH}" --clobber
           else
-            gh release create "${tag}" "${assets[@]}" \
+            gh release create "${tag}" "${DMG_PATH}" \
               --title "Pacer ${version}" \
               --notes-file "${notes_file}" \
               --verify-tag
+          fi
+          if [ "${{ steps.deltas.outputs.count || '0' }}" != 0 ] && [ -n "${DELTAS_DIR:-}" ]; then
+            if ! gh release upload "${tag}" "${DELTAS_DIR}"/*.delta --clobber; then
+              echo "::warning title=Sparkle deltas::uploading the delta updates failed; the release is published and the appcast advertises only the deltas that arrived"
+            fi
           fi
 
       - name: Update appcast on gh-pages
@@ -601,9 +613,20 @@ jobs:
           # asset list goes in too: a delta the feed names must be an asset
           # of this release with exactly the length the feed gives it, or the
           # item is written without deltas (bin/appcast-add-item.py).
+          # The release is already public here, so a failed listing must not
+          # fail the step: retry, then write the item without deltas.
           if [ -s "${DELTAS_DIR:-/nonexistent}/deltas.xml" ]; then
-            gh release view "v${version}" --json assets > "${RUNNER_TEMP}/release-assets.json"
-            item_args+=(--deltas-file "${DELTAS_DIR}/deltas.xml" --release-assets "${RUNNER_TEMP}/release-assets.json")
+            listed=no
+            for attempt in 1 2 3; do
+              if gh release view "v${version}" --json assets > "${RUNNER_TEMP}/release-assets.json" \
+                 && [ -s "${RUNNER_TEMP}/release-assets.json" ]; then listed=yes; break; fi
+              echo "release asset listing failed (attempt ${attempt})"; sleep $((attempt * 5))
+            done
+            if [ "${listed}" = yes ]; then
+              item_args+=(--deltas-file "${DELTAS_DIR}/deltas.xml" --release-assets "${RUNNER_TEMP}/release-assets.json")
+            else
+              echo "::warning title=Sparkle deltas::could not list the release assets; the appcast item is written without delta updates"
+            fi
           fi
 
           # Check out gh-pages (create if absent).

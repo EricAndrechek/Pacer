@@ -158,7 +158,13 @@ gh variable set PACER_SPARKLE_DELTAS --body off -R EricAndrechek/Pacer   # off
 gh variable delete PACER_SPARKLE_DELTAS -R EricAndrechek/Pacer           # back on
 ```
 
-A manual run takes `-f deltas=off` too.
+A manual run takes `-f deltas=off` too. `off`, `false` and `0` all switch them
+off, in any case (`OFF`, `False`).
+
+The delta step is bounded (20 minutes) and, on a tag push, tolerated: a failure
+or timeout there, a failed delta upload, or a failed asset listing at the
+appcast step each leave the release published with the full DMG and an appcast
+item that names only the deltas that really are assets. A manual run is strict.
 
 ### Testing them, publishing nothing
 
