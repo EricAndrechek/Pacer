@@ -22,7 +22,9 @@ bin/ship.sh verify <version>     # health-check a published release any time
 checks the whole chain end to end: the GitHub Release has the DMG asset, the
 live appcast advertises the version, its `<enclosure>` length matches the
 published asset, and — if `uv` is available — the DMG's EdDSA signature
-validates against the app's embedded `SUPublicEDKey`. Run `release` / `wait-ci`
+validates against the app's embedded `SUPublicEDKey`. For every delta update
+the item advertises, it checks the delta is a release asset of its stated
+length and that its signature validates too. Run `release` / `wait-ci`
 backgrounded so nothing has to poll them.
 
 > **Agent note.** A Claude Code skill, [`/ship`](../.claude/skills/ship/SKILL.md),
@@ -60,8 +62,12 @@ The steps `bin/ship.sh` automates, spelled out:
    - Sign the DMG, notarize it (one submission; Apple tickets the app inside
      too) and staple it, then check the app inside assesses as notarized.
    - Sign the Sparkle update with the EdDSA private key.
-   - Publish the DMG as the asset on a GitHub Release named `vX.Y.Z`.
-   - Append the new item to `appcast.xml` on the `gh-pages` branch.
+   - Build a delta update from each of the last five releases, prove each
+     one rebuilds the new app exactly, and sign the ones that pass
+     ([Delta updates](#delta-updates) below).
+   - Publish the DMG and the deltas as assets on a GitHub Release named `vX.Y.Z`.
+   - Append the new item to `appcast.xml` on the `gh-pages` branch, with the
+     deltas in its `<sparkle:deltas>`.
 
    The Homebrew cask (`brew install --cask ericandrechek/tap/pacer`) is not
    touched by this workflow, and Pacer holds no key to the tap.
@@ -79,6 +85,167 @@ The steps `bin/ship.sh` automates, spelled out:
 5. Within ~24h, every installed Pacer instance will see the new
    release on its next launch (or on-demand via Pacer → "Check for
    Updates…"). Sparkle handles the download / replace / relaunch.
+
+## Delta updates
+
+A full update is the whole ~158 MB DMG, and most of it is the bundled forecast
+networks, which rarely change. A Sparkle *delta* is a binary patch from one
+release's app to the next: 0.8.2 → 0.8.3 is 6.5 MB. Sparkle picks the delta
+whose `sparkle:deltaFrom` is the build the Mac has installed, and anyone it
+doesn't fit (an older version, a modified app) gets the full DMG as before.
+
+### How a release builds them
+
+The `Build Sparkle delta updates` step runs
+[`bin/sparkle-deltas.sh`](../bin/sparkle-deltas.sh) after the DMG is notarized.
+For each of the last five published releases it:
+
+1. downloads that release's DMG and copies its app out (read-only mount);
+2. runs `BinaryDelta create` old → new, in the delta format the *old* app's
+   Sparkle can apply (it is the old app's Sparkle that applies it);
+3. **proves it:** `BinaryDelta apply` to a fresh copy of the old app (the same
+   `applyBinaryDelta()` the installer runs: `Autoupdate/SUBinaryDeltaApply.m`),
+   then requires the result to match the new app file for file (path, type,
+   permissions, sha256, symlink targets, extended attributes), to pass
+   `codesign --verify --deep --strict` with the team's signature, and to
+   assess as notarized;
+4. only then signs it with the EdDSA key and checks the signature against
+   the `SUPublicEDKey` inside the *old* app, the key its Sparkle will check
+   it with.
+
+A delta that fails any step is left out with the reason in the log and the
+job summary; the release still ships, with the full DMG for everyone. Passing
+deltas are uploaded with the DMG, and the appcast step
+([`bin/appcast-add-item.py`](../bin/appcast-add-item.py)) only names a delta
+that is an asset of the release at exactly its stated length. If the item
+with deltas would not validate, it writes the item without them.
+
+Why our own check when BinaryDelta checks too: its format 4 tree hash is a
+CRC32, and Sparkle has no fallback for one case (below), so nothing is
+published that we have not applied and validated ourselves.
+
+### What a client does when a delta goes wrong
+
+From Sparkle's source (2.10.1, the version 0.8.1–0.8.3 ship):
+
+- **Delta download fails** (missing asset, network): falls back to the full
+  DMG. `SPUCoreBasedUpdateDriver.m`, `-downloadDriverDidFailToDownloadFileWithError:`
+  → `-fallBackAndDownloadRegularUpdate`.
+- **Delta signature fails, or it does not apply** (the installed app differs
+  from the release it was made from, a hash check fails): the installer
+  reports `SPUArchiveExtractionFailed`, and for a delta the updater falls back
+  to the full DMG. `Autoupdate/AppInstaller.m` `-extractAndInstallUpdate` /
+  `-unarchiverDidFailWithError:` → `SPUInstallerDriver.m` →
+  `SPUCoreBasedUpdateDriver.m` `-installerDidFailToApplyDeltaUpdate`.
+- **Delta applies, but the app it built fails validation** (its code
+  signature): **no fallback.** `AppInstaller.m` exits with "Update validation
+  was a failure" and the update fails, on every check, for every Mac on that
+  version, until the delta is removed from the appcast. This is the case
+  step 3 above exists for: we apply every delta and run the same codesign
+  check before publishing. If it ever happens anyway, roll back (below).
+- A Mac whose Sparkle.framework was altered (an architecture or localizations
+  stripped) skips the delta up front: the enclosure's
+  `sparkle:deltaFromSparkleExecutableSize` / `sparkle:deltaFromSparkleLocales`
+  (`SUAppcastDriver.m`, `-preferredUpdateForRegularAppcastItem:`).
+
+### Turning them off
+
+No code change: set the repository variable, and the next release ships as it
+did before deltas (one DMG, one `<enclosure>`):
+
+```sh
+gh variable set PACER_SPARKLE_DELTAS --body off -R EricAndrechek/Pacer   # off
+gh variable delete PACER_SPARKLE_DELTAS -R EricAndrechek/Pacer           # back on
+```
+
+A manual run takes `-f deltas=off` too.
+
+### Testing them, publishing nothing
+
+**In CI, with the real keys.** A manual run of the Release workflow never
+publishes (the release and appcast steps only run on a tag push). On a manual
+run the delta step is strict: deltas from the last five releases to the
+run's build must all build, apply, match, pass codesign and notarization
+assessment, and sign and verify against the old apps' keys, or the run
+fails. A last step adds the item to a copy of the live appcast with the same
+script, applies the undo to it, and requires the delta-less item back byte
+for byte; the item is in the job summary.
+
+```sh
+gh workflow run release.yml --ref <branch> -f dry_run=true
+gh run watch "$(gh run list --workflow=Release --limit 1 --json databaseId --jq '.[0].databaseId')"
+```
+
+**On a Mac, with a throwaway key.** The release key is never needed and never
+read: `sparkle-eddsa.swift keygen` makes a test key outside the Keychain.
+
+```sh
+T="$(mktemp -d)"
+swift bin/sparkle-eddsa.swift keygen "$T/test.key"
+gh release download v0.8.3 -R EricAndrechek/Pacer --pattern 'Pacer-0.8.3.dmg' --dir "$T"
+bin/sparkle-deltas.sh --new "$T/Pacer-0.8.3.dmg" --out "$T/out" --from 0.8.2,0.8.1 \
+  --key-file "$T/test.key" --public-key "$(swift bin/sparkle-eddsa.swift pubkey "$T/test.key")" \
+  --strict          # add --sparkle-bin <dir> if Sparkle isn't resolved under build/ or Build/
+cat "$T/out/summary.md" "$T/out/deltas.xml"
+rm -rf "$T"
+```
+
+It never launches an app and nothing appears on screen. There is no
+on-machine end-to-end run of a Sparkle client: any Sparkle client updating a
+copy of Pacer keeps its state in Pacer's own defaults domain
+(`com.ericandrechek.pacer`, `SUHost.m -initWithBundle:`), shares the running
+app's installer service name (`SPUInstallerDriver.m`), and touches the
+installed copy so LaunchServices notices it (`SUFileManager.m`), which can
+register a second Pacer, widget included, beside the real one. Launching an
+old Pacer to update itself would open the shared store and the dashboard. A
+client run belongs on a disposable machine.
+
+### Rolling back delta updates
+
+In order of how fast they act. None of them needs a new build.
+
+1. **Stop new releases from carrying deltas:** set `PACER_SPARKLE_DELTAS=off`
+   (above).
+2. **Take a release's deltas out of the live appcast.** Clients read the feed
+   on every check, so this is the real undo. Do it when no Release run is in
+   progress (`gh run list --workflow=Release --limit 1`), because it pushes to
+   the same branch the appcast step does. The script refuses to write unless
+   the only change is the removed `<sparkle:deltas>` blocks: every item and
+   full `<enclosure>` stays byte for byte.
+
+   ```sh
+   git fetch origin gh-pages
+   GHP="$(mktemp -d)/gh-pages"
+   git worktree add --detach "$GHP" origin/gh-pages
+   bin/appcast-drop-deltas.sh 0.8.4 "$GHP/appcast.xml"      # or: all
+   git -C "$GHP" diff                                      # review: only <sparkle:deltas> lines go
+   git -C "$GHP" commit -am "appcast: drop delta updates for 0.8.4"
+   git -C "$GHP" push origin HEAD:gh-pages                 # the publish; needs the owner's go
+   git worktree remove "$GHP"
+   ```
+
+   Then confirm what clients get. Pages serves the commit within a minute or
+   two, and its CDN may hold the old feed for up to ten minutes more:
+
+   ```sh
+   curl -fsSL https://ericandrechek.github.io/Pacer/appcast.xml | grep -c '<sparkle:deltas>'
+   bin/ship.sh verify 0.8.4                                # "no delta updates in this item"
+   ```
+
+3. **Optionally delete the delta assets**, after step 2 is live:
+
+   ```sh
+   gh release view v0.8.4 --json assets --jq '.assets[].name' | grep '\.delta$'
+   gh release delete-asset v0.8.4 Pacer-0.8.4-from-0.8.3.delta --yes
+   ```
+
+   Deleting them *before* the feed changes also works as an emergency stop,
+   because a delta that fails to download falls back to the full DMG
+   (above). It leaves the feed naming missing files, so follow it with step 2.
+
+A delta can only reach Macs on the release it was made from, and a failed
+one falls back to the full DMG in every case but the one above. The full
+`<enclosure>` of each release is never touched by any of this.
 
 ## One-time setup
 
@@ -235,9 +402,10 @@ Before tagging the first real release, manually run the workflow with
 1. Actions → Release → Run workflow.
 2. Set `dry_run` to `true`. Click Run.
 
-This exercises every step (signing, notarization, DMG, Sparkle sign)
-*except* publishing the GitHub Release and pushing to gh-pages, so a
-broken secret surfaces without polluting the release feed.
+This exercises every step (signing, notarization, DMG, Sparkle sign,
+delta updates, strictly) *except* publishing the GitHub Release and pushing
+to gh-pages, so a broken secret surfaces without polluting the release feed.
+A manual run never publishes, whatever `dry_run` says.
 
 When it goes green, you're ready to tag.
 
@@ -268,6 +436,13 @@ When it goes green, you're ready to tag.
   what's installed. Sparkle compares `CFBundleVersion` (which the
   workflow stamps with a unix timestamp), so version comparisons
   are strictly monotonic per release run.
+- **`no delta from X` warning on a release** — that delta failed a check and
+  was left out (the reason is in the log and the job summary); Macs on X get
+  the full DMG. Nothing to fix for the release itself. A warning that the
+  script exited non-zero means no deltas at all for that release.
+- **Macs on one version stuck failing to update after a release** — check
+  Sentry/PostHog update outcomes for that version, then roll back that
+  release's deltas ([Rolling back delta updates](#rolling-back-delta-updates)).
 - **`SUPublicEDKey` mismatch after rotating the keypair** — clients
   installed against the old public key will refuse the new signature
   and you'll have to publish a one-off "manual download" build to
@@ -280,4 +455,7 @@ When it goes green, you're ready to tag.
   `cancel-in-progress: false` — if two tags land back-to-back they
   serialize cleanly instead of one stomping the other's appcast push.
 - `appcast.xml` only ever grows. If you publish a bad release, tag a
-  new patch and let users update past it; don't try to delete items.
+  new patch and let users update past it; don't try to delete items. The
+  one sanctioned edit is removing a release's `<sparkle:deltas>` block with
+  `bin/appcast-drop-deltas.sh`, which leaves every item and full
+  `<enclosure>` as it was.

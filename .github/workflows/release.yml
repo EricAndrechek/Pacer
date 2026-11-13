@@ -1,8 +1,16 @@
 name: Release
 
 # Tag-driven release. Push a `v0.2.0` tag and this workflow builds,
-# signs, notarizes, packages, signs the Sparkle update, publishes the
-# GitHub Release, and updates the appcast on the gh-pages branch.
+# signs, notarizes, packages, signs the Sparkle update, builds and proves
+# Sparkle delta updates from the last three releases, publishes the GitHub
+# Release, and updates the appcast on the gh-pages branch.
+#
+# Delta updates have a kill switch that needs no code change: set the
+# repository variable PACER_SPARKLE_DELTAS to `off` (Settings → Secrets and
+# variables → Actions → Variables), or pass `deltas: off` to a manual run.
+# A release then ships exactly as it did before deltas: one DMG, one
+# <enclosure>. Undoing deltas already published: docs/releasing.md,
+# "Rolling back delta updates".
 #
 # Required secrets (configure under Settings → Secrets and variables →
 # Actions). See docs/releasing.md for the exact value formats and
@@ -26,15 +34,23 @@ on:
     tags:
       - "v*.*.*"
   # Manual fire-from-the-UI path, useful for verifying the workflow
-  # without cutting an actual release. With `dry_run: true` the workflow
-  # builds + signs + notarizes but does NOT publish a GitHub Release
-  # or push the appcast.
+  # without cutting an actual release. A manual run never publishes a GitHub
+  # Release or pushes the appcast (the publish steps run only on a tag push),
+  # whatever `dry_run` says. It builds, signs and notarizes, builds the delta
+  # updates from the last three releases to this build and verifies and signs
+  # them strictly (any failure fails the run), and previews the appcast item
+  # it would add against a copy of the live feed. From the CLI:
+  #   gh workflow run release.yml --ref <branch> -f dry_run=true
   workflow_dispatch:
     inputs:
       dry_run:
         description: "Skip GitHub Release + appcast publish (build + sign + notarize only)"
         required: false
         default: "false"
+      deltas:
+        description: "Build Sparkle delta updates: on or off (the PACER_SPARKLE_DELTAS repo variable can also turn them off)"
+        required: false
+        default: "on"
 
 # Avoid two release runs racing each other if a tag and a manual dispatch
 # fire simultaneously.
@@ -425,6 +441,57 @@ jobs:
           SIZE="$(stat -f%z "${DMG_PATH}")"
           echo "size=${SIZE}" >> "${GITHUB_OUTPUT}"
 
+      - name: Build Sparkle delta updates
+        id: deltas
+        # Kill switch: the PACER_SPARKLE_DELTAS repo variable or the `deltas`
+        # input set to `off` skips this step, and with no deltas built the
+        # release and appcast steps below do exactly what they did before.
+        if: vars.PACER_SPARKLE_DELTAS != 'off' && github.event.inputs.deltas != 'off'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+        # bin/sparkle-deltas.sh diffs each of the last five releases' apps
+        # (from their published DMGs) against the app in the DMG just
+        # notarized, applies every delta to a fresh copy of the old app and
+        # requires the result to match the new app file for file, pass
+        # codesign --deep --strict and assess as notarized, and only then signs
+        # it and checks the signature against the old app's SUPublicEDKey.
+        #
+        # On a tag push a failure costs only the delta: the release ships with
+        # the full DMG, as before, and a warning says why. A manual run is the
+        # test of all this, so there it is strict and any failure fails the run.
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          SIGN_UPDATE="$(find build/SourcePackages -path '*/Sparkle/bin/sign_update' -not -path '*old_dsa_scripts*' | head -1)"
+          KEY_FILE="${RUNNER_TEMP}/sparkle.key"
+          echo "${SPARKLE_ED_PRIVATE_KEY}" > "${KEY_FILE}"
+          DELTAS_DIR="${RUNNER_TEMP}/deltas"
+
+          args=(--new "${DMG_PATH}" --out "${DELTAS_DIR}" --version "${version}" --key-file "${KEY_FILE}")
+          if [ -n "${SIGN_UPDATE}" ]; then args+=(--sparkle-bin "$(dirname "${SIGN_UPDATE}")"); fi
+          strict=no
+          if [ "${GITHUB_EVENT_NAME}" != push ]; then args+=(--strict); strict=yes; fi
+
+          rc=0
+          bin/sparkle-deltas.sh "${args[@]}" || rc=$?
+          if [ "${rc}" != 0 ]; then
+            if [ "${strict}" = yes ]; then
+              echo "::error title=Sparkle deltas::bin/sparkle-deltas.sh exited ${rc}; see the log above"
+              exit 1
+            fi
+            echo "::warning title=Sparkle deltas::bin/sparkle-deltas.sh exited ${rc}; releasing without delta updates"
+            rm -rf "${DELTAS_DIR}"
+          fi
+
+          count=0
+          if [ -s "${DELTAS_DIR}/deltas.xml" ]; then
+            count="$(find "${DELTAS_DIR}" -maxdepth 1 -name '*.delta' | wc -l | tr -d ' ')"
+          fi
+          echo "count=${count}" >> "${GITHUB_OUTPUT}"
+          echo "DELTAS_DIR=${DELTAS_DIR}" >> "${GITHUB_ENV}"
+          echo "Delta updates ready to publish: ${count}"
+
       - name: Publish GitHub Release
         if: github.event_name == 'push' && github.event.inputs.dry_run != 'true'
         env:
@@ -477,10 +544,17 @@ jobs:
             } > "${notes_file}"
           fi
 
+          # The delta updates go up with the DMG, before the appcast step can
+          # name them, so no client is ever pointed at an asset that is not
+          # there yet.
+          assets=("${DMG_PATH}")
+          if [ "${{ steps.deltas.outputs.count || '0' }}" != 0 ]; then
+            for delta in "${DELTAS_DIR}"/*.delta; do assets+=("${delta}"); done
+          fi
           if gh release view "${tag}" >/dev/null 2>&1; then
-            gh release upload "${tag}" "${DMG_PATH}" --clobber
+            gh release upload "${tag}" "${assets[@]}" --clobber
           else
-            gh release create "${tag}" "${DMG_PATH}" \
+            gh release create "${tag}" "${assets[@]}" \
               --title "Pacer ${version}" \
               --notes-file "${notes_file}" \
               --verify-tag
@@ -512,34 +586,25 @@ jobs:
           # "what's new" pane). Defensive: any failure leaves the
           # description empty rather than breaking appcast generation — a
           # missing "what's new" is cosmetic, a malformed appcast is not.
-          DESCRIPTION_BLOCK=""
+          item_args=(--version "${version}" --build "${build}" --pubdate "${pubdate}"
+                     --url "${dmg_url}" --length "${size}" --signature "${signature}")
           if body="$(gh release view "v${version}" --json body -q .body 2>/dev/null)" && [ -n "${body}" ]; then
             printf '%s' "${body}" > "${RUNNER_TEMP}/notes.md"
             if notes_html="$(gh api --method POST /markdown -f mode=gfm -F text=@"${RUNNER_TEMP}/notes.md" 2>/dev/null)" \
                && [ -n "${notes_html}" ]; then
-              DESCRIPTION_BLOCK="<description><![CDATA[${notes_html}]]></description>"
+              printf '%s' "${notes_html}" > "${RUNNER_TEMP}/notes.html"
+              item_args+=(--description-file "${RUNNER_TEMP}/notes.html")
             fi
           fi
 
-          # Build the <item> entry for this release. Sparkle is tolerant
-          # of HTML-encoded vs raw attributes; we use the raw form that
-          # `sign_update` already produced.
-          ITEM_FILE="${RUNNER_TEMP}/item.xml"
-          cat > "${ITEM_FILE}" <<EOF
-              <item>
-                  <title>Version ${version}</title>
-                  ${DESCRIPTION_BLOCK}
-                  <pubDate>${pubdate}</pubDate>
-                  <sparkle:version>${build}</sparkle:version>
-                  <sparkle:shortVersionString>${version}</sparkle:shortVersionString>
-                  <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-                  <enclosure
-                      url="${dmg_url}"
-                      length="${size}"
-                      type="application/octet-stream"
-                      ${signature} />
-              </item>
-          EOF
+          # Delta updates, when the delta step built any. The release's own
+          # asset list goes in too: a delta the feed names must be an asset
+          # of this release with exactly the length the feed gives it, or the
+          # item is written without deltas (bin/appcast-add-item.py).
+          if [ -s "${DELTAS_DIR:-/nonexistent}/deltas.xml" ]; then
+            gh release view "v${version}" --json assets > "${RUNNER_TEMP}/release-assets.json"
+            item_args+=(--deltas-file "${DELTAS_DIR}/deltas.xml" --release-assets "${RUNNER_TEMP}/release-assets.json")
+          fi
 
           # Check out gh-pages (create if absent).
           worktree="${RUNNER_TEMP}/gh-pages"
@@ -569,18 +634,12 @@ jobs:
           HEADER
           fi
 
-          # Insert the new item right before the closing </channel>.
-          # sed -i'' is GNU-vs-BSD safe with a temp suffix.
-          python3 - "${appcast}" "${ITEM_FILE}" <<'PY'
-          import sys, pathlib
-          appcast = pathlib.Path(sys.argv[1])
-          item = pathlib.Path(sys.argv[2]).read_text()
-          xml = appcast.read_text()
-          if "</channel>" not in xml:
-              raise SystemExit(f"appcast missing </channel>: {appcast}")
-          xml = xml.replace("</channel>", item + "        </channel>", 1)
-          appcast.write_text(xml)
-          PY
+          # Insert the new item right before the closing </channel>. The
+          # script writes the item exactly as the inline template here used
+          # to, checks the whole feed still parses with the new item intact,
+          # and falls back to the item without deltas rather than write a
+          # feed that fails that check.
+          python3 -I "${GITHUB_WORKSPACE}/bin/appcast-add-item.py" --appcast "${appcast}" "${item_args[@]}"
 
           # The curated, dated price history rides along: the app refreshes it
           # from beside the appcast (CuratedPriceHistory.remoteURL) and falls
@@ -596,6 +655,66 @@ jobs:
                 commit -m "appcast: ${version}"
             git push origin gh-pages
           )
+
+      - name: Preview the appcast (dry run)
+        # Runs exactly when the two publish steps above do not. Adds this
+        # build's item to a COPY of the live feed with the same script the
+        # appcast step uses, as if the deltas were already uploaded, and then
+        # applies the undo (bin/appcast-drop-deltas.sh) to that copy and
+        # requires the result to equal the item rendered without deltas. The
+        # live feed and gh-pages are only read.
+        if: "!(github.event_name == 'push' && github.event.inputs.dry_run != 'true')"
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          build="${{ steps.stamp.outputs.build }}"
+          signature='${{ steps.sparkle.outputs.signature }}'
+          size='${{ steps.sparkle.outputs.size }}'
+          pubdate="$(LC_TIME=en_US.UTF-8 date -u +"%a, %d %b %Y %H:%M:%S +0000")"
+          dmg_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${version}/${DMG_NAME}"
+          P="${RUNNER_TEMP}/appcast-preview"
+          mkdir -p "${P}"
+          curl -fsSL -o "${P}/live.xml" https://ericandrechek.github.io/Pacer/appcast.xml
+
+          item_args=(--version "${version}" --build "${build}" --pubdate "${pubdate}"
+                     --url "${dmg_url}" --length "${size}" --signature "${signature}")
+          python3 -I bin/appcast-add-item.py --appcast "${P}/live.xml" --out "${P}/plain.xml" "${item_args[@]}"
+
+          if [ -s "${DELTAS_DIR:-/nonexistent}/deltas.xml" ]; then
+            # The asset list the release would have: the DMG and the deltas.
+            python3 -I - "${P}/assets.json" "${DMG_PATH}" "${DELTAS_DIR}"/*.delta <<'PY'
+          import json, os, sys
+          json.dump({"assets": [{"name": os.path.basename(f), "size": os.path.getsize(f)} for f in sys.argv[2:]]},
+                    open(sys.argv[1], "w"))
+          PY
+            python3 -I bin/appcast-add-item.py --appcast "${P}/live.xml" --out "${P}/with-deltas.xml" "${item_args[@]}" \
+              --deltas-file "${DELTAS_DIR}/deltas.xml" --release-assets "${P}/assets.json" | tee "${P}/add.log"
+            grep -q "deltas_in_appcast=${{ steps.deltas.outputs.count || '0' }}$" "${P}/add.log" \
+              || { echo "::error::the previewed item does not carry every delta built"; exit 1; }
+
+            bin/appcast-drop-deltas.sh "${version}" "${P}/with-deltas.xml" "${P}/dropped.xml"
+            cmp "${P}/dropped.xml" "${P}/plain.xml" \
+              || { echo "::error::dropping the deltas did not give back the plain item"; exit 1; }
+            echo "Undo checked: dropping ${version}'s deltas gives back the item without them, byte for byte."
+            preview="${P}/with-deltas.xml"
+          else
+            echo "No delta updates were built; the item is the plain one."
+            preview="${P}/plain.xml"
+          fi
+
+          {
+            echo "### Appcast item this run would add (not published)"
+            echo
+            echo '```xml'
+            python3 -I - "${preview}" "${version}" "${build}" <<'PY'
+          import re, sys
+          text = open(sys.argv[1]).read()
+          items = re.findall(r"<item>.*?</item>", text, re.S)
+          mine = [i for i in items if f">{sys.argv[2]}<" in i and f">{sys.argv[3]}<" in i]
+          print(mine[-1] if mine else "(item not found)")
+          PY
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Clean up ephemeral keychain
         if: always()
