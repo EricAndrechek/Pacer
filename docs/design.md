@@ -16,7 +16,7 @@ SwiftData container in an App Group.
 ├── Contents/Library/LaunchServices/
 │   └── PacerDaemon                             Background helper (polling, IPC, notifications)
 ├── Contents/PlugIns/PacerWidgets.appex         WidgetKit extension
-└── Contents/Helpers/pacertap                   Optional statusline tap binary
+└── (planned: `pacer statusline`, a CLI subcommand, #202)
 
 App Group: YZXWMJ5VBY.com.ericandrechek.pacer
 ├── pacer.sqlite                                SwiftData container (shared by all targets)
@@ -48,7 +48,7 @@ Single Xcode workspace, generated from `project.yml` via XcodeGen.
 | --- | --- | --- |
 | `Pacer` | macOS App | SwiftUI window + `MenuBarExtra`. Reads from SwiftData. Renders Charts. |
 | `PacerDaemon` | CLI tool (LaunchAgent) | Owns the data pipeline — polls JSONL/OAuth/stats-cache, runs IPC server, fires notifications. |
-| `pacertap` | CLI tool | Tiny binary CC invokes per statusline tick. Reads stdin JSON, posts to UDS, optionally pipes through to user's existing statusline. |
+| `pacer statusline` (planned, #202) | `pacer` CLI subcommand | Invoked by CC per statusline tick. Reads stdin JSON, posts to UDS, optionally pipes through to user's existing statusline. |
 | `PacerWidgets` | Widget Extension | Desktop / Notification Center / Control widgets. Reads SwiftData. |
 | `PacerCore` | Swift package | All shared types, SwiftData models, parsers, pricing, IPC schema. Imported by every target. |
 
@@ -72,7 +72,14 @@ lower fill gaps.
 
 ### Tier 2 — Statusline (optional polish/convenience)
 
-- `pacertap` binary, invoked by Claude Code per refresh tick when user
+> **Status (2026-11-13, #202):** not built. The owner's decision is to make it a
+> subcommand of the `pacer` CLI, `pacer statusline`, not a separate helper
+> binary (it was once called `pacertap`). Pacer no longer has a daemon, so it
+> would hand each reading to the running app through the local API or the App
+> Group instead of the UDS described below. The opt-in, chaining and
+> watch-and-notify rules still apply.
+
+- `pacer statusline` binary, invoked by Claude Code per refresh tick when user
   opts in.
 - Reads JSON from stdin, posts to daemon's UDS.
 - Optionally chains through to user's existing statusline by passing
@@ -95,12 +102,12 @@ lower fill gaps.
   binary disappears from `statusLine.command`, fire a notification —
   user can re-enable in one click. Never silent re-inject.
 
-**`pacertap` CLI shapes** (settings.json `command` value):
+**`pacer statusline` shapes** (settings.json `command` value):
 ```
-pacertap                                          # tap only, emits minimal Pacer status
-pacertap ~/.claude/claudestatus_go                # chain to existing statusline
-pacertap ccstatusline --visual-burn-rate emoji    # chain with downstream's flags
-pacertap --debug -- /weird/path                   # `--` separates pacertap flags from chain
+pacer statusline                                          # tap only, emits minimal Pacer status
+pacer statusline ~/.claude/claudestatus_go                # chain to existing statusline
+pacer statusline ccstatusline --visual-burn-rate emoji    # chain with downstream's flags
+pacer statusline --debug -- /weird/path                   # `--` separates its flags from the chain
 ```
 Implementation: read stdin once, post to UDS, then if `argv[1:]` is
 non-empty, fork+exec it with the original stdin piped in and proxy its
@@ -262,8 +269,8 @@ claude-hud, ccusage statusline, user's own scripts all want
    explicit per-write user confirmation.
 2. **Auto-detect existing statusline** during onboarding. If
    `statusLine.command` is already set, Pacer pre-fills the chained
-   command in the proposed write: `pacertap <existing-command>`. Result
-   chains: Claude Code → `pacertap` → existing statusline. Both render.
+   command in the proposed write: `pacer statusline <existing-command>`. Result
+   chains: Claude Code → `pacer statusline` → existing statusline. Both render.
    Both get data.
 3. **Preview before write.** Onboarding shows the diff to `settings.json`
    before applying.
@@ -274,9 +281,9 @@ claude-hud, ccusage statusline, user's own scripts all want
 5. **Disable anytime** from Pacer's Settings → restores the previous
    `statusLine` value.
 
-`pacertap` is intentionally tiny — single file, no UI dependencies, fast
-startup. Optionally symlinked into `~/.local/bin/pacertap` so the
-config line is just `"command": "pacertap ..."`.
+`pacer statusline` is intentionally tiny — single file, no UI dependencies, fast
+startup. Optionally symlinked into `~/.local/bin/pacer statusline` so the
+config line is just `"command": "pacer statusline ..."`.
 
 ## IPC protocol
 
@@ -401,7 +408,7 @@ isn't running.
 - MenuBarExtra
 - LaunchAgent background polling
 - Notifications at thresholds
-- `pacertap` statusline binary with chain-mode and watch/notify
+- `pacer statusline` statusline binary with chain-mode and watch/notify
 - Widget extension (small + medium)
 - IPC server with `current`/`daily`/`weekly`/`monthly`/`session`/`blocks`/`subscribe`
 - Sparkle auto-update
@@ -428,7 +435,7 @@ Eight milestones, each ending with something testable end-to-end.
 3. **Daemon + JSONL scanner** — LaunchAgent registration via
    `SMAppService.agent`, FSEventStream + 60s backstop, full historical
    scan on first run, populate SwiftData.
-4. **Statusline binary** — `pacertap`, reads stdin, writes via daemon UDS,
+4. **Statusline binary** — `pacer statusline`, reads stdin, writes via daemon UDS,
    chain-mode via positional `argv[1:]`, watch+notify in daemon.
    *Reasonable to defer to v1.1 if v1 scope tightens.*
 5. **OAuth + Keychain** — `SecItemCopyMatching` direct access, polling
