@@ -11,6 +11,10 @@
 # don't pollute that single-line stdout contract.
 set -euo pipefail
 
+# This user's processes only: with fast user switching, another account's
+# Pacer, widget extension or relauncher is not ours to stop or count.
+ME="$(id -u)"
+
 # $-anchored so only the actual GUI binary matches, not e.g. a
 # `tail -F .../Pacer.log` shell line that happened to mention the path.
 APP_PATH_REGEX='/Pacer\.app/Contents/MacOS/Pacer$'
@@ -30,13 +34,13 @@ APP_PATH_REGEX='/Pacer\.app/Contents/MacOS/Pacer$'
 # invariant actually hold. Always runs, even when the host GUI is not:
 # the appex can outlive the app.
 WIDGET_PATH_REGEX='/PacerWidgets\.appex/Contents/MacOS/PacerWidgets$'
-if pgrep -f "${WIDGET_PATH_REGEX}" >/dev/null 2>&1; then
+if pgrep -U "${ME}" -f "${WIDGET_PATH_REGEX}" >/dev/null 2>&1; then
     echo "    Terminating PacerWidgets extension (forces relaunch from new bundle)" >&2
-    pkill -TERM -f "${WIDGET_PATH_REGEX}" 2>/dev/null || true
+    pkill -TERM -U "${ME}" -f "${WIDGET_PATH_REGEX}" 2>/dev/null || true
     sleep 1
     # Belt-and-suspenders: a wedged extension that ignored SIGTERM would
     # otherwise survive into the new bundle. SIGKILL is safe here.
-    pkill -KILL -f "${WIDGET_PATH_REGEX}" 2>/dev/null || true
+    pkill -KILL -U "${ME}" -f "${WIDGET_PATH_REGEX}" 2>/dev/null || true
 fi
 
 # The crash relauncher (#412) goes first, before the app is asked to quit.
@@ -49,18 +53,18 @@ fi
 # Always runs, even when the app is not: a relauncher can be in its back-off
 # wait after a crash, about to relaunch.
 stopped_relauncher=0
-if pgrep -x PacerRelauncher >/dev/null 2>&1; then
+if pgrep -U "${ME}" -x PacerRelauncher >/dev/null 2>&1; then
     stopped_relauncher=1
     echo "    Stopping the crash relauncher (so nothing relaunches mid-install)" >&2
-    pkill -TERM -x PacerRelauncher 2>/dev/null || true
+    pkill -TERM -U "${ME}" -x PacerRelauncher 2>/dev/null || true
     for _ in 1 2 3 4 5 6 7 8 9 10; do
-        pgrep -x PacerRelauncher >/dev/null 2>&1 || break
+        pgrep -U "${ME}" -x PacerRelauncher >/dev/null 2>&1 || break
         sleep 0.2
     done
-    pkill -KILL -x PacerRelauncher 2>/dev/null || true
+    pkill -KILL -U "${ME}" -x PacerRelauncher 2>/dev/null || true
 fi
 
-if ! pgrep -f "${APP_PATH_REGEX}" >/dev/null 2>&1; then
+if ! pgrep -U "${ME}" -f "${APP_PATH_REGEX}" >/dev/null 2>&1; then
     # Not running, but a relauncher was waiting to bring it back after a
     # crash. We just cancelled that relaunch, so say "was running": the
     # install then reopens the new build instead of leaving Pacer closed.
@@ -82,13 +86,13 @@ osascript \
 # the process table. Two seconds is a generous allowance.
 for _ in 1 2; do
     sleep 1
-    if ! pgrep -f "${APP_PATH_REGEX}" >/dev/null 2>&1; then
+    if ! pgrep -U "${ME}" -f "${APP_PATH_REGEX}" >/dev/null 2>&1; then
         echo 1
         exit 0
     fi
 done
 
 echo "    GUI did not exit after AppleScript quit; sending SIGKILL" >&2
-pkill -KILL -f "${APP_PATH_REGEX}" 2>/dev/null || true
+pkill -KILL -U "${ME}" -f "${APP_PATH_REGEX}" 2>/dev/null || true
 sleep 1
 echo 1
