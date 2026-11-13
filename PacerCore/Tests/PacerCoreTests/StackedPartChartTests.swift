@@ -310,6 +310,49 @@ struct StackedPartChartTests {
         #expect(two.title("2026-01-01").contains("2026"))
     }
 
+    /// The heading a fresh formatter gives, i.e. what the chart computed per
+    /// body pass before titles were built once (PACER-1E).
+    private func reference(_ template: String, _ ymd: String) -> String {
+        let parse = DateFormatter()
+        parse.locale = Locale(identifier: "en_US_POSIX")
+        parse.calendar = Calendar(identifier: .gregorian)
+        parse.timeZone = .current
+        parse.dateFormat = "yyyy-MM-dd"
+        let f = DateFormatter()
+        f.locale = .current
+        f.timeZone = .current
+        f.setLocalizedDateFormatFromTemplate(template)
+        return f.string(from: parse.date(from: ymd)!)
+    }
+
+    @Test func precomputedTitlesMatchAFreshFormatterAcrossAYearBoundary() {
+        let days = ["2025-12-31", "2026-01-01"]
+        let day = PacerChartXAxis(kind: .day, ids: days)
+        #expect(day.title("2025-12-31") == reference("EEE MMM d yyyy", "2025-12-31"))
+        #expect(day.title("2026-01-01") == reference("EEE MMM d yyyy", "2026-01-01"))
+        let same = PacerChartXAxis(kind: .day, ids: ["2026-10-20"])
+        #expect(same.title("2026-10-20") == reference("EEE MMM d", "2026-10-20"))
+        let months = PacerChartXAxis(kind: .month, ids: ["2025-12", "2026-01"])
+        #expect(months.title("2025-12") == reference("MMMM yyyy", "2025-12-01"))
+        #expect(months.title("2026-01") == reference("MMMM yyyy", "2026-01-01"))
+    }
+
+    @Test func hourTitlesAndLabelsArePrecomputed() {
+        let axis = PacerChartXAxis(kind: .hour, ids: PacerChartBucket.allHourKeys)
+        let expected = pacerHour(PacerChartXAxis.referenceDate(hour: 14), style: .regular)
+        #expect(axis.title("14") == expected)
+        let label = pacerHour(PacerChartXAxis.referenceDate(hour: 6), style: .compact)
+        #expect(axis.labelIfMarked("06") == label)
+        #expect(axis.labelIfMarked("07") == nil)
+    }
+
+    @Test func anIdOutsideTheBucketsIsNeverParsedInTheBody() {
+        // `title` is a dictionary lookup: an id the axis was not built with
+        // reads as itself, even one that would parse as a date.
+        let axis = PacerChartXAxis(kind: .day, ids: ["2026-10-20"])
+        #expect(axis.title("2026-10-21") == "2026-10-21")
+    }
+
     // MARK: Hover placement
 
     private let bounds = CGRect(x: 0, y: 0, width: 800, height: 220)

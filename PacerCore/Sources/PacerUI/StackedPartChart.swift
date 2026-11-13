@@ -228,6 +228,8 @@ public struct PacerChartBucketBuilder: Sendable {
 public struct PacerStackedPartChart: View {
     private let buckets: [PacerChartBucket]
     private let kind: PacerChartBucketKind
+    /// Built in `init`, not `body`: `body` re-runs on every hover.
+    private let axis: PacerChartXAxis
     private let height: CGFloat
     private let annotating: Int
     private let onTap: ((String) -> Void)?
@@ -250,6 +252,7 @@ public struct PacerStackedPartChart: View {
     ) {
         self.buckets = buckets
         self.kind = kind
+        self.axis = PacerChartXAxis(kind: kind, ids: buckets.map(\.id))
         self.height = height
         self.annotating = annotating
         self.onTap = onTap
@@ -279,7 +282,7 @@ public struct PacerStackedPartChart: View {
     nonisolated static let segmentGap: Double = 2.5
 
     public var body: some View {
-        let axis = PacerChartXAxis(kind: kind, ids: buckets.map(\.id))
+        let axis = self.axis
         let labelled = Self.annotatedIDs(buckets, top: annotating)
         let cap = Self.barCap(kind)
         let width = PacerSparseBars.width(count: buckets.count, cap: cap)
@@ -550,6 +553,12 @@ struct PacerChartXAxis {
     /// Whether the buckets cross a year boundary, so day headings and month
     /// labels carry the year.
     private let straddlesYear: Bool
+    /// Every bar's hover heading and every marked tick's label, formatted
+    /// once here. A formatter call per bar per body pass cost over 2 s when
+    /// ICU loaded its date symbols on a starved Mac (PACER-1E, PACER-1D); the
+    /// body, which re-runs on every hover, only looks these up.
+    private let titles: [String: String]
+    private let labels: [String: String]
 
     init(kind: PacerChartBucketKind, ids: [String]) {
         self.kind = kind
@@ -571,6 +580,13 @@ struct PacerChartXAxis {
             straddlesYear = straddles
         }
         marked = Set(values)
+        // Locals, so the closures capture no half-built `self`.
+        let sy = straddlesYear, da = dateAxis, vals = values
+        titles = Dictionary(ids.map { ($0, Self.makeTitle($0, kind: kind, straddlesYear: sy)) },
+                            uniquingKeysWith: { first, _ in first })
+        labels = Dictionary(vals.compactMap { id in
+            Self.makeLabel(id, kind: kind, dateAxis: da, straddlesYear: sy).map { (id, $0) }
+        }, uniquingKeysWith: { first, _ in first })
     }
 
     /// A dozen months all fit; past that, every k-th, anchored on the newest.
@@ -584,6 +600,11 @@ struct PacerChartXAxis {
     /// The axis label for `id` when it is marked, `nil` otherwise.
     func labelIfMarked(_ id: String) -> String? {
         guard marked.contains(id) else { return nil }
+        return labels[id] ?? id
+    }
+
+    private static func makeLabel(_ id: String, kind: PacerChartBucketKind, dateAxis: PacerDateAxis?,
+                                  straddlesYear: Bool) -> String? {
         switch kind {
         case .day: return dateAxis?.label(id) ?? id
         case .hour: return Int(id).map { pacerHour(Self.referenceDate(hour: $0), style: .compact) } ?? id
@@ -591,8 +612,13 @@ struct PacerChartXAxis {
         }
     }
 
-    /// The hover card's heading: "Tue, Oct 21", "2 PM", "October 2026".
+    /// The hover card's heading: "Tue, Oct 21", "2 PM", "October 2026". A
+    /// lookup; an id that was not one of the chart's buckets reads as itself.
     func title(_ id: String) -> String {
+        titles[id] ?? id
+    }
+
+    private static func makeTitle(_ id: String, kind: PacerChartBucketKind, straddlesYear: Bool) -> String {
         switch kind {
         case .day:
             guard let date = Formats.ymd.date(from: id) else { return id }
