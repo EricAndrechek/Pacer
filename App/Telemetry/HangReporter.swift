@@ -46,8 +46,13 @@ enum HangReporter {
             // Every thread's stack, once, for both the send and the log. The
             // log line is written for every hang, sent or not: Sentry's daily
             // cap leaves most hangs with no stack anywhere otherwise.
-            let threads = SentryDependencyContainer.sharedInstance().threadInspector
-                .getCurrentThreadsWithStackTrace()
+            // Only while the SDK runs: with crash reports off, in a diagnostic
+            // launch or with PACER_TELEMETRY=off it was never started, and its
+            // internals are not something to reach into mid-hang. The line is
+            // then written without frames.
+            let threads = SentrySDK.isEnabled
+                ? SentryDependencyContainer.sharedInstance().threadInspector.getCurrentThreadsWithStackTrace()
+                : []
             // Displays asleep: counted, not sent (`HangReportPolicy`). The marker
             // and log line stay, so a real force-quit is still reported.
             if TelemetryController.crashAllowed, HangReportPolicy.admit() { capture(hang, threads: threads) }
