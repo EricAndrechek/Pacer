@@ -60,7 +60,7 @@ counters (`data.*`, `oauth.*`, `cred.*`, `telemetry.*`, `main_thread.*`,
 - Not sent while a debugger is attached.
 `beforeSend` budgets errors, hangs, crashes and MetricKit (`TelemetryBudget.kind`). Transactions also pass through it, spend nothing there, and are budgeted in `tracesSampler`.
 The check-in also runs when the Sentry release differs from `pacer.telemetry.checkin.lastRelease`, with `checkin.reason` = `day`/`version`. A `version` check-in omits `cli.*`, `widget.timeline_ms`, `widget_inventory` `refreshes.*` and `forecast.*`. Count Macs by unique users.
-`Telemetry.problem`: a fixed message, with string/bool attributes as tags and numbers as extra; crash toggle and `.error` cap. First use is "Store prepare failed": `error.domain`, `error.code`, `error.underlying_*`, `store.before`, extra `elapsed_ms`.
+`Telemetry.problem`: a fixed message, with string/bool attributes as tags and numbers as extra; crash toggle and `.error` cap. First use is "Store prepare failed": `error.domain`, `error.code`, `error.underlying_*`, `store.before`, extra `elapsed_ms`. Second is the data canary's "Session totals disagree with Claude Code" (see "Data canary" below).
 
 ## Crash relaunch (since 0.9.1, #412)
 `PacerRelauncher` brings Pacer back after it exits without quitting (AGENTS.md, "Relaunch after a crash"). Three health counters (not usage: Sentry metrics, and `counter.*` in PostHog's `daily_checkin`), no ids, no paths:
@@ -69,6 +69,16 @@ The check-in also runs when the Sentry release differs from `pacer.telemetry.che
 - `crash_relaunch.unavailable`: normal launches that could not start the relauncher (missing from the build, or the spawn failed), so ran unprotected.
 
 The first two are kept in the app's defaults (`crashRelaunch.unreported.*`) until a check-in sends them (`CrashRelaunch.moveCountsToTelemetry`, just before `TelemetryCounters.drain`), not added to the in-memory tally at launch: in a crash loop no process lives to its check-in. The crash itself still arrives the usual way, from SentryCrash at the relaunched launch, which is now seconds after the crash rather than whenever someone reopens Pacer. A relaunch counts as a manual launch in `lifecycle.launches_manual` and as unclean in `lifecycle.unclean`, like any launch after a crash.
+
+## Data canary (since 0.9.2, #353)
+`DataCanary` compares Claude Code's own totals for each project's latest session (`.claude.json`: `lastTotal*Tokens`, `lastModelUsage`, `lastStartTime`, `lastDuration`) with Pacer's `SessionInfo` for that session, once ten minutes after launch and then once per local day, off the main actor. It judges only sessions that finished at least 15 minutes ago, that Pacer has read to the end of every transcript, whose counters cover exactly that session, that began within the last 7 days and have at least 20k output tokens; each session once. Output is judged both ways (Claude Code's output on every model but Haiku, which runs its own untranscribed housekeeping, against all of Pacer's); input and cache only for Pacer holding more than Claude Code counted. It would have caught the 09-23 subagent-output loss within a day.
+
+Three health counters (not usage: Sentry metrics, and `counter.*` in PostHog's `daily_checkin`), no ids, no paths:
+- `data.canary.runs`: runs that read at least one Claude Code config.
+- `data.canary.checked`: sessions judged.
+- `data.canary.mismatched`: judged sessions with a token kind more than 2% off.
+
+On a mismatch, `Telemetry.problem("Session totals disagree with Claude Code")`, at most one per token kind and ratio band per run (crash toggle, `.error` cap), so one upstream defect is one Sentry issue. Tags only: `canary.kind` (`input`, `output`, `cache_read`, `cache_write`); `canary.ratio_band`, Claude Code's number over Pacer's (`<0.5`, `0.5-0.9`, `0.9-0.98`, `0.98-1.02`, `1.02-1.1`, `>1.1`; above 1 is Pacer under-counting); `canary.cc_version`, the Claude Code version that wrote the session's latest turns (`other` unless plain dotted digits, `unknown` if none). Never a token count, an exact ratio, a path, a project or a session id. The local log (`[DataCanary]`) carries the exact ratios and the first eight characters of each session id.
 
 ## PostHog
 

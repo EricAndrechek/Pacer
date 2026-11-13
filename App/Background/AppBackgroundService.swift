@@ -118,6 +118,8 @@ final class AppBackgroundService {
     private var historyPruneTask: Task<Void, Never>?
     /// The once-a-day spend → meter fit (#317). See `startSpendMeterFitTask`.
     private var spendMeterFitTask: Task<Void, Never>?
+    /// Claude Code's own session totals against Pacer's, daily (#353).
+    private lazy var dataCanary = DataCanaryScheduler(container: container)
     /// Opt-in local HTTP server (JSON snapshot + Prometheus + SSE) for
     /// third-party integrations. Created here, owned for the process lifetime;
     /// `applyAPIServerConfig()` starts/stops it per the user's preference.
@@ -214,6 +216,7 @@ final class AppBackgroundService {
         startPricingRefreshTask()
         startHistoryPruneTask()
         startSpendMeterFitTask()
+        dataCanary.start()
         installAPISettingsObserver()
         installAPIScopeObserver()
         refreshClaudeSkillIfInstalled()
@@ -254,6 +257,7 @@ final class AppBackgroundService {
         historyPruneTask = nil
         spendMeterFitTask?.cancel()
         spendMeterFitTask = nil
+        dataCanary.stop()
         httpServer.stop()
         if let observer = apiSettingsObserver {
             NotificationCenter.default.removeObserver(observer)
