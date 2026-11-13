@@ -748,6 +748,7 @@ public actor OAuthPoller: TokenPoolTesting {
                                       subscriptionType: account.subscriptionType)
                 : trimmed
             try? context.save()
+            AccountWriteSignal.post(from: self)
         }
         await publishStatus()
     }
@@ -1090,6 +1091,7 @@ public actor OAuthPoller: TokenPoolTesting {
                     Log.write("OAuthPoller", "could not save accounts from the switcher's roster: \(error)")
                     return []
                 }
+                AccountWriteSignal.post(from: self)
             }
             return made
         }
@@ -2211,6 +2213,9 @@ public actor OAuthPoller: TokenPoolTesting {
             }
             do {
                 try context.save()
+                // The row's cached readings and plan, which the window's
+                // title reads (`AccountList`).
+                AccountWriteSignal.post(from: self)
                 // Every account's rows, not only the active one's: the pace
                 // chart and menu draw all of them. See `RateLimitWriteSignal`.
                 let written = captured.sampledAt
@@ -2394,7 +2399,10 @@ public actor OAuthPoller: TokenPoolTesting {
                 }
             }
             if context.hasChanges {
-                do { try context.save() } catch {
+                do {
+                    try context.save()
+                    AccountWriteSignal.post(from: self)
+                } catch {
                     Log.write("OAuthPoller", "could not save the active account: \(error)")
                 }
             }
