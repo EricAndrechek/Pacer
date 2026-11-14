@@ -21,6 +21,15 @@ import Foundation
 /// - the process's whole life, from `lastStartTime` for `lastDuration`. A
 ///   session that a long-lived process resumed, or one it ran after other
 ///   work, is not like for like; `SessionTotalsCanary.eligibility` tells.
+/// - **not** what came before a `/clear`. `/clear` saves the outgoing
+///   session's counters under its own id, then resets them and the start
+///   time for the new one (2.1.325's `/clear` does both). A real 2.1.312
+///   session begun by `/clear`, 2.5 min after the previous session's last
+///   turn in the same process, had `lastStartTime` 0.3 s *after* the
+///   `/clear` line, and matched its own transcripts (output 1.010, cache
+///   writes 1.001) where the previous session's turns would have made its
+///   output 1.66. So a session begun by `/clear` is like for like, and is
+///   judged like any other: it is not a reason to skip.
 ///
 /// The project key (a path) is read and dropped: nothing here keeps it.
 public struct ClaudeSessionTotals: Sendable, Equatable {

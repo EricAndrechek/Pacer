@@ -92,6 +92,8 @@ public enum SessionTotalsCanary {
         /// The longest the saving process may have run before the session's
         /// first turn. Longer, and the counters likely hold other work first
         /// (another session, a `/resume`), so they are not this session's.
+        /// A `/clear` is not such work: it resets the counters and the start
+        /// time, so the lead-in counts from the clear (`ClaudeSessionTotals`).
         public var maxLeadIn: TimeInterval
         /// Slack for the two clocks: Claude Code's `Date.now()` and the
         /// transcript's timestamps, written by the same process.
