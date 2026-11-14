@@ -45,7 +45,9 @@ final class PacerAPISnapshotRefresher: @unchecked Sendable {
     /// Backstop cadence for state that changes without an event.
     static let interval: TimeInterval = 15
     // Spacing between builds is `PacerSnapshotSpacing`: at least 2 s after the
-    // last build *ended*, and 3x that build's duration when it was slow.
+    // last build *ended*, 3x that build's duration when it was slow, and never
+    // more than 60 s. Builds are timed on its awake clock, which stops while
+    // the Mac sleeps, so a build the Mac slept through does not read as slow.
     /// A timer tick this soon after a build started skips: that build already
     /// did the tick's job.
     static let timerSkipWindow: TimeInterval = 5
@@ -220,7 +222,7 @@ final class PacerAPISnapshotRefresher: @unchecked Sendable {
             if urgent { pendingUrgent = true }
             guard !inFlight else { return nil }
             inFlight = true
-            return urgent ? 0 : delayBeforeNextBuild(now: Date())
+            return urgent ? 0 : delayBeforeNextBuild(now: PacerSnapshotSpacing.awakeNow())
         }
         if let delay { schedule(after: delay) }
     }
@@ -255,8 +257,8 @@ final class PacerAPISnapshotRefresher: @unchecked Sendable {
         if !recent { trigger() }
     }
 
-    /// Must hold `lock`.
-    private func delayBeforeNextBuild(now: Date) -> TimeInterval {
+    /// Must hold `lock`. `now` is awake seconds.
+    private func delayBeforeNextBuild(now: TimeInterval) -> TimeInterval {
         spacing.delay(now: now)
     }
 
@@ -282,10 +284,12 @@ final class PacerAPISnapshotRefresher: @unchecked Sendable {
         }
         guard let job else { return }
 
-        let startedAt = Date()
-        let result = Result { try PacerAPISnapshot.build(now: startedAt) }
-        let endedAt = Date()
-        let elapsed = endedAt.timeIntervalSince(startedAt)
+        // Timed on the awake clock: a build the Mac slept through took
+        // seconds of work, not the night, and must not earn a night's rest.
+        let startedAt = PacerSnapshotSpacing.awakeNow()
+        let result = Result { try PacerAPISnapshot.build(now: Date()) }
+        let endedAt = PacerSnapshotSpacing.awakeNow()
+        let elapsed = endedAt - startedAt
         // Every build reads the window's turns and every account's rollups
         // into a throwaway context; rate-limited, so a quiet machine isn't
         // walking its heap every 15 s (#337).
@@ -319,7 +323,7 @@ final class PacerAPISnapshotRefresher: @unchecked Sendable {
             }
             var next: TimeInterval?
             if running && pending {
-                next = pendingUrgent ? 0 : delayBeforeNextBuild(now: Date())
+                next = pendingUrgent ? 0 : delayBeforeNextBuild(now: PacerSnapshotSpacing.awakeNow())
             } else {
                 inFlight = false
             }
