@@ -50,6 +50,9 @@ struct ProjectDetailView: View {
     /// re-read every project-day row on each store save while the modal
     /// was open, and the menu rebuilt its list from it on every render.
     @State private var knownProjectPathsForBulkMerge: [String] = []
+    /// Bumped by each `refreshKnownProjectPaths`, so only the newest load's
+    /// answer is kept (see there).
+    @State private var knownPathsGeneration = 0
     /// Whether the project's folder is on disk, from an off-main check
     /// (a stale mount can block `stat` for seconds). nil until it answers:
     /// the header shows the probe's state meanwhile, never "missing".
@@ -668,12 +671,20 @@ struct ProjectDetailView: View {
     /// (no folder behind it). Only `projectPath` is fetched; without
     /// `propertiesToFetch` SwiftData would materialize every JSON-blob
     /// column on every row.
+    ///
+    /// Loads overlap (one on appear, one per re-attributing scan cycle) and
+    /// finish in any order, so each checks it is still the newest before it
+    /// lands: an older load finishing last would put back the paths from
+    /// before a merge.
     private func refreshKnownProjectPaths() {
         let container = modelContext.container
+        let generation = knownPathsGeneration &+ 1
+        knownPathsGeneration = generation
         Task {
             let paths = await Task.detached(priority: .utility) {
                 Self.loadKnownProjectPaths(container: container)
             }.value
+            guard generation == knownPathsGeneration else { return }
             knownProjectPathsForBulkMerge = paths
         }
     }

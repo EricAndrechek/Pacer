@@ -66,9 +66,13 @@ import Foundation
 /// publish over a newer one, and a caller that arrives while one runs and
 /// only needed *a* recent read (the first load, `refreshIfDue`, a miss the
 /// running refresh has since found) takes its result instead of repeating
-/// it. The scan asks this about every turn it attributes; those lookups take
-/// only `lock`, so a slow listing (a large or remote home folder, Settings'
-/// forced refresh) never holds them up.
+/// it. The scan asks this about every turn it attributes. A session already
+/// known costs only `lock`, so a slow listing (a large or remote home
+/// folder, Settings' forced refresh) does not hold those up. A miss does
+/// wait: a Desktop turn whose session has no record yet (at most once per
+/// session per `missRefreshInterval`), like the first read of all, takes
+/// `refreshing`, so it runs a refresh or waits out the one running. The scan
+/// makes those calls on its own actor, never on main.
 public final class DesktopSessionDirectory: @unchecked Sendable {
     /// The process's reader: every install `DesktopInstallDiscovery` finds
     /// (#295), which is none in a test process.
