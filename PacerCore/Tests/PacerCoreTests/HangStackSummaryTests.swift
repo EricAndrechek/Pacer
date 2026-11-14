@@ -1,3 +1,4 @@
+import Darwin
 import Testing
 @testable import PacerCore
 
@@ -17,7 +18,16 @@ struct HangStackSummaryTests {
     }
 
     @Test func unnamedFramesFallBackToTheirAddress() {
+        // 0x1abc is in no loaded image, so it stays an address.
         #expect(HangStackSummary.format(frames: [("a", nil), (nil, "0x1abc"), ("  ", nil)]) == "? < 0x1abc < a")
+    }
+
+    @Test func anAddressInsideALoadedImageIsNamedWithoutItsPath() {
+        // A libc function's own address: dladdr names its image and symbol.
+        let address = unsafeBitCast(strlen as @convention(c) (UnsafePointer<CChar>) -> Int, to: UInt.self)
+        let named = HangStackSummary.locate("0x" + String(address, radix: 16))
+        #expect(named.contains("strlen"))
+        #expect(!named.contains("/"))
     }
 
     @Test func longNamesAreClippedAndAnEmptyStackIsNil() {
