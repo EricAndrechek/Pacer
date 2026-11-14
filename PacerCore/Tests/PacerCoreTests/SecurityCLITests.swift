@@ -62,6 +62,37 @@ struct SecurityCLITests {
         #expect(Self.run("exit 7").0 == .failure(.status(7)))
     }
 
+    /// The drains used to be blocks on `DispatchQueue.global`. With that pool
+    /// at its thread limit, as the parallel test suite held it for minutes,
+    /// neither started before the deadline and a healthy read reported
+    /// `.accessDenied`. Each drain now has a thread of its own.
+    @Test("reads while GCD's global pool has no thread to spare")
+    func saturatedGlobalPool() throws {
+        // Far more blocked work than GCD will give threads to (64 at most for
+        // the global queues), so nothing else queued there runs until the
+        // `defer` lets it go. Held for a fraction of a second.
+        let parked = 512
+        let release = DispatchSemaphore(value: 0)
+        let started = DispatchSemaphore(value: 0)
+        for _ in 0..<parked {
+            DispatchQueue.global(qos: .userInitiated).async {
+                started.signal()
+                release.wait()
+            }
+        }
+        defer { for _ in 0..<parked { release.signal() } }
+        // Until the pool stops taking more.
+        while started.wait(timeout: .now() + 0.1) == .success {}
+        let probe = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .userInitiated).async { probe.signal() }
+        #expect(probe.wait(timeout: .now() + 0.05) == .timedOut,
+                "the global pool still had a thread free, so this proves nothing")
+
+        let (result, elapsed) = Self.run("printf secret", timeout: 2)
+        #expect(try result.get() == Data("secret".utf8))
+        #expect(elapsed < 2, "took \(elapsed) s")
+    }
+
     @Test("a binary that cannot be launched is a spawn failure")
     func spawnFailure() {
         let result = SecurityCLI.run([], executable: URL(fileURLWithPath: "/nonexistent/security"))

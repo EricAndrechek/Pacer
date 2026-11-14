@@ -51,6 +51,15 @@ enum SecurityCLI {
     /// exit, and the call sat out the whole timeout and came back as
     /// `.accessDenied`, a read that never prompted reported as a refusal.
     /// `PipeDrain` reads each to end-of-file on its own thread from launch.
+    /// A `Thread`, not GCD's global pool: with that pool at its thread limit
+    /// (it was, for minutes, under the parallel test suite) neither read
+    /// started before the deadline, and a healthy read came back as
+    /// `.accessDenied`, which `ParkedCredentialStore` latches for the session.
+    ///
+    /// On every path but a timeout both reads have reached end-of-file when
+    /// this returns, so their threads are ending too. After a timeout they end
+    /// once the terminated child's pipes close; only a descendant that keeps
+    /// a pipe open forever keeps one alive.
     ///
     /// The timeout covers the exit *and* both reads: a descendant still
     /// holding a pipe open after the child exits cannot hold the caller
@@ -112,11 +121,18 @@ enum SecurityCLI {
     }
 }
 
-/// Reads one pipe to end-of-file on a background thread, from the moment it
+/// Reads one pipe to end-of-file on a thread of its own, from the moment it
 /// is made, so the child never blocks on a full pipe. `wait(until:)` hands
 /// over what was read, once; it returns nil if end-of-file has not come by
 /// the deadline, and the read then finishes, unobserved, when the pipe
-/// closes.
+/// closes. The thread ends with the read.
+///
+/// Its own `Thread` rather than a block on `DispatchQueue.global`: a global
+/// queue only runs the block when the pool has a thread to give it, and a
+/// pool held at its limit by blocked work (the parallel test suite did that
+/// for minutes) left both reads unstarted past the 5 s deadline. A thread
+/// is made for this read whatever the pool is doing, and costs one thread
+/// for the few milliseconds a `security` run takes.
 final class PipeDrain: @unchecked Sendable {
     private let done = DispatchSemaphore(value: 0)
     /// Written once on the reader thread before `done` is signalled; read
@@ -124,10 +140,13 @@ final class PipeDrain: @unchecked Sendable {
     private var data = Data()
 
     init(_ handle: FileHandle) {
-        DispatchQueue.global(qos: .userInitiated).async { [self] in
+        let reader = Thread { [self] in
             data = (try? handle.readToEnd()) ?? Data()
             done.signal()
         }
+        reader.name = "PipeDrain"
+        reader.qualityOfService = .userInitiated
+        reader.start()
     }
 
     /// Everything the pipe carried, or nil if it is still open at
