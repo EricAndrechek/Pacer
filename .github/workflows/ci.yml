@@ -48,6 +48,11 @@ jobs:
         if: matrix.os == 'macos-15'
         run: make lint-hangs
 
+      # The release script's schema matcher against its fixtures (#415).
+      - name: ship.sh self-test
+        if: matrix.os == 'macos-15'
+        run: bin/ship.sh self-test
+
       - name: Show toolchain
         run: |
           xcodebuild -version

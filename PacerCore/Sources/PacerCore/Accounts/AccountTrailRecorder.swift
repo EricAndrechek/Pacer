@@ -515,7 +515,7 @@ public final class AccountTrailRecorder {
             account.organizationName = org
             changed = true
         }
-        if changed { try? context.save() }
+        if changed { saveAccountRows() }
     }
 
     /// Borrow labels from an external switcher for accounts we have never
@@ -564,7 +564,14 @@ public final class AccountTrailRecorder {
             account.switcherSlot = slot
             changed = true
         }
-        if changed { try? context.save() }
+        if changed { saveAccountRows() }
+    }
+
+    /// Save label or slot changes, then say so (`AccountWriteSignal`): the
+    /// window's account menu reads `Account` only when told.
+    private func saveAccountRows() {
+        try? context.save()
+        AccountWriteSignal.post(from: self)
     }
 
     private func account(id: String) -> Account? {

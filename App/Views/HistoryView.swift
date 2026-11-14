@@ -146,6 +146,7 @@ private struct LifetimeSummaryContent: View {
         self.since = range.since
         self.scopeAccountId = scopeAccountId
         let acct = scopeAccountId ?? UsageScope.noAccountSentinel
+        let noDate = UsageScope.noDateSentinel
         if let since = range.since {
             let cutoffString = TokenSample.formatDate(since)
             _globalAggregates = Query(
@@ -165,9 +166,11 @@ private struct LifetimeSummaryContent: View {
             // "lifetime since YYYY-MM-DD" without it. Acceptable
             // because (a) .all is opt-in, and (b) it's still cached
             // behind a scan-meta tick so the walk runs once per cycle.
-            _globalAggregates = Query(
-                sort: \DailyAggregate.date, order: .reverse
-            )
+            _globalAggregates = scopeAccountId == nil
+                ? Query(sort: \DailyAggregate.date, order: .reverse)
+                : Query(
+                    filter: #Predicate<DailyAggregate> { $0.date == noDate },
+                    sort: \DailyAggregate.date, order: .reverse)
             _scopedAggregates = Query(
                 filter: #Predicate<AccountDailyAggregate> { $0.accountId == acct },
                 sort: \AccountDailyAggregate.date, order: .reverse
@@ -511,6 +514,7 @@ private struct TopDaysContent: View {
         self.onDayTap = onDayTap
         self.onSort = onSort
         let acct = scopeAccountId ?? UsageScope.noAccountSentinel
+        let noDate = UsageScope.noDateSentinel
         if let since = range.since {
             let cutoffString = TokenSample.formatDate(since)
             _globalAggregates = Query(
@@ -526,9 +530,12 @@ private struct TopDaysContent: View {
                 order: .reverse
             )
         } else {
-            _globalAggregates = Query(
-                sort: \DailyAggregate.date, order: .reverse
-            )
+            // Scoped to one account, the global table is unread: match nothing.
+            _globalAggregates = scopeAccountId == nil
+                ? Query(sort: \DailyAggregate.date, order: .reverse)
+                : Query(
+                    filter: #Predicate<DailyAggregate> { $0.date == noDate },
+                    sort: \DailyAggregate.date, order: .reverse)
             _scopedAggregates = Query(
                 filter: #Predicate<AccountDailyAggregate> { $0.accountId == acct },
                 sort: \AccountDailyAggregate.date, order: .reverse

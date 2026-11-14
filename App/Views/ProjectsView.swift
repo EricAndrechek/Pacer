@@ -294,6 +294,17 @@ private struct ProjectsContent: View {
     /// from the search debounce, whose closure holds an older copy of this
     /// view, still ranks by the sort on screen.
     @State private var builtTopSort: PacerUsageSort
+    /// Whether each project's folder is still on disk, from the last
+    /// off-main check (`existenceTask`). A project not in here yet is treated
+    /// as present, so the first frame never flashes "missing".
+    @State private var existsByPath: [String: Bool] = [:]
+    /// The project paths the rows were built from (sorted): half of the
+    /// existence task's key, so a new project gets checked.
+    @State private var existencePaths: [String] = []
+    /// Bumped on every scan tick: the other half of the key. A folder can
+    /// vanish or appear without any row changing, so the paths alone would
+    /// leave a stale answer.
+    @State private var existenceTick = 0
     @State private var debouncedSearch: String = ""
     @State private var searchDebounceTask: Task<Void, Never>?
     /// Candidate canonical paths for the "Merge into…" submenu. Used
@@ -375,6 +386,7 @@ private struct ProjectsContent: View {
         self.onManageCollections = onManageCollections
         self.onEditCollection = onEditCollection
         let acct = scopeAccountId ?? UsageScope.noAccountSentinel
+        let noDate = UsageScope.noDateSentinel
         if let cutoffString {
             _globalAggregates = Query(
                 filter: #Predicate<ProjectDailyAggregate> { $0.date >= cutoffString }
@@ -385,7 +397,11 @@ private struct ProjectsContent: View {
                 }
             )
         } else {
-            _globalAggregates = Query()
+            // Scoped to one account, the global table is unread: match nothing
+            // rather than keep the whole table live on every save.
+            _globalAggregates = scopeAccountId == nil
+                ? Query()
+                : Query(filter: #Predicate<ProjectDailyAggregate> { $0.date == noDate })
             _scopedAggregates = Query(
                 filter: #Predicate<AccountProjectDailyAggregate> { $0.accountId == acct }
             )
@@ -481,6 +497,8 @@ private struct ProjectsContent: View {
     private func refreshAllRows() {
         let rows = computeAllRowsSync()
         cachedAllRows = rows
+        let paths = rows.map(\.path).sorted()
+        if paths != existencePaths { existencePaths = paths }
         firstRenderMemo = FirstRenderMemo()
         // Pre-build the merge-candidate list once. Each row's context
         // menu used to do `allRows.filter { $0.path != row.path && ... }`
@@ -559,13 +577,11 @@ private struct ProjectsContent: View {
         // path set, folded into the cached row.
         let names = pacerDisambiguatedNames(Array(byProject.keys))
         let metaByPath = Dictionary(projectMetas.map { ($0.projectPath, $0) }, uniquingKeysWith: { a, _ in a })
-        let fm = FileManager.default
         let unsorted = byProject.map { (key, a) in
-            // Per-row fs check folded into the cache build so scroll
-            // and hover passes don't trigger syscalls. The cost is
-            // one `fileExists` per project (~50 typical) per scan
-            // tick, well under a millisecond total.
-            let exists = fm.fileExists(atPath: key)
+            // Existence comes from `existsByPath`, filled off the main
+            // thread: a stale network or removable mount can block `stat`
+            // for seconds, and this runs on main every scan tick.
+            let exists = existsByPath[key] ?? true
             let status = projectStatusBadgeState(
                 for: key, probesByPath: probeByPath, existsOnDisk: exists
             )
@@ -707,6 +723,10 @@ private struct ProjectsContent: View {
         // and chart re-renders no longer trigger the O(aggregates)
         // bucket+sort pipeline.
         .modifier(RefreshTriggers(owner: self))
+        // Read here, in the body, so a new answer from the existence check
+        // redraws this view, and the refresh runs with the inputs on screen
+        // now (the collection, the search), not the ones the check began with.
+        .onChange(of: existsByPath) { _, _ in refreshAllRows() }
         .onChange(of: searchText) { _, newValue in
             searchDebounceTask?.cancel()
             searchDebounceTask = Task { @MainActor in
@@ -727,6 +747,19 @@ private struct ProjectsContent: View {
     struct RefreshTriggers: ViewModifier {
         let owner: ProjectsContent
         func body(content: Content) -> some View { owner.refreshTriggerModifiers(content) }
+    }
+
+    struct ExistenceKey: Equatable {
+        let paths: [String]
+        let tick: Int
+    }
+
+    /// One `fileExists` per path. Never call on the main thread.
+    nonisolated static func existence(of paths: [String]) -> [String: Bool] {
+        let fm = FileManager.default
+        var out: [String: Bool] = [:]
+        for p in paths { out[p] = fm.fileExists(atPath: p) }
+        return out
     }
 
     /// Changes whenever a collection changes in any way the rows, chips or
@@ -751,7 +784,27 @@ private struct ProjectsContent: View {
     fileprivate func refreshTriggerModifiers(_ base: some View) -> some View {
         base
             .onAppear { refreshAllRows() }
-            .onChange(of: scanMeta.first?.value) { _, _ in refreshAllRows() }
+            .onChange(of: scanMeta.first?.value) { _, _ in
+                refreshAllRows()
+                existenceTick &+= 1
+            }
+            // Folder existence, off the main thread. Keyed on every input
+            // that changes the answer: the paths shown and the scan tick.
+            //
+            // The task only stores the answer. It holds the view value it
+            // started with, so refreshing the rows from here read that value's
+            // inputs: a collection picked during the check came back as the
+            // old one's rows until the next scan. The rows follow
+            // `existsByPath` from the body instead (`.onChange` there).
+            .task(id: ExistenceKey(paths: existencePaths, tick: existenceTick)) {
+                let paths = existencePaths
+                guard !paths.isEmpty else { return }
+                let found = await Task.detached(priority: .utility) {
+                    Self.existence(of: paths)
+                }.value
+                guard !Task.isCancelled, found != existsByPath else { return }
+                existsByPath = found
+            }
             // The scope is a refresh trigger like any other. Without it the
             // cache holds the previous account's numbers until the *next scan
             // cycle* happens to fire — on an idle machine seven to ten seconds,

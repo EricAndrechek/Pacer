@@ -220,6 +220,7 @@ private struct ModelsContent: View {
         self.rangeBinding = rangeBinding
         self.onSelectDay = onSelectDay
         let acct = scopeAccountId ?? UsageScope.noAccountSentinel
+        let noDate = UsageScope.noDateSentinel
         if let since = range.since {
             let cutoffString = TokenSample.formatDate(since)
             _globalAggregates = Query(
@@ -233,7 +234,12 @@ private struct ModelsContent: View {
                 sort: \AccountDailyAggregate.date
             )
         } else {
-            _globalAggregates = Query(sort: \DailyAggregate.date)
+            // Scoped to one account, the global table is unread: match nothing.
+            _globalAggregates = scopeAccountId == nil
+                ? Query(sort: \DailyAggregate.date)
+                : Query(
+                    filter: #Predicate<DailyAggregate> { $0.date == noDate },
+                    sort: \DailyAggregate.date)
             _scopedAggregates = Query(
                 filter: #Predicate<AccountDailyAggregate> { $0.accountId == acct },
                 sort: \AccountDailyAggregate.date)
