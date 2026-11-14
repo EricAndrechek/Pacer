@@ -723,6 +723,10 @@ private struct ProjectsContent: View {
         // and chart re-renders no longer trigger the O(aggregates)
         // bucket+sort pipeline.
         .modifier(RefreshTriggers(owner: self))
+        // Read here, in the body, so a new answer from the existence check
+        // redraws this view, and the refresh runs with the inputs on screen
+        // now (the collection, the search), not the ones the check began with.
+        .onChange(of: existsByPath) { _, _ in refreshAllRows() }
         .onChange(of: searchText) { _, newValue in
             searchDebounceTask?.cancel()
             searchDebounceTask = Task { @MainActor in
@@ -786,6 +790,12 @@ private struct ProjectsContent: View {
             }
             // Folder existence, off the main thread. Keyed on every input
             // that changes the answer: the paths shown and the scan tick.
+            //
+            // The task only stores the answer. It holds the view value it
+            // started with, so refreshing the rows from here read that value's
+            // inputs: a collection picked during the check came back as the
+            // old one's rows until the next scan. The rows follow
+            // `existsByPath` from the body instead (`.onChange` there).
             .task(id: ExistenceKey(paths: existencePaths, tick: existenceTick)) {
                 let paths = existencePaths
                 guard !paths.isEmpty else { return }
@@ -794,7 +804,6 @@ private struct ProjectsContent: View {
                 }.value
                 guard !Task.isCancelled, found != existsByPath else { return }
                 existsByPath = found
-                refreshAllRows()
             }
             // The scope is a refresh trigger like any other. Without it the
             // cache holds the previous account's numbers until the *next scan
