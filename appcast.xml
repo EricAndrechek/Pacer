@@ -1586,5 +1586,82 @@ colour, which had quietly flattened every stacked view.</p>]]></description>
                 sparkle:edSignature="60JQrUFveDdB7ykCt9aH3uXj8lnqvEIn0S/IZ52jX4yaHKpeBGtdE5DL/K5AILqxcQ33Z6M8qvXsBWkiuu5bBg==" />
         </sparkle:deltas>
     </item>
+            <item>
+        <title>Version 0.9.2</title>
+        <description><![CDATA[<p>Fewer freezes, especially on a busy Mac, and a daily check that Pacer's numbers still match Claude Code's own.</p>
+<p><strong>If Pacer only runs in your menu bar and you're on 0.8:</strong> quit it and reopen it once so this update installs. After that, updates install by themselves while you're not using Pacer.</p>
+<h2>Smoother</h2>
+<ul>
+<li>The window and its toolbar no longer redo their work every time Pacer saves.</li>
+<li>Project pages check whether a project's folder still exists in the background, so a slow or disconnected drive can't freeze them.</li>
+<li>Looking up your other logins and Claude Desktop sessions no longer holds Pacer up while it reads the keychain or the disk.</li>
+<li>Recording a freeze no longer causes another one.</li>
+<li>When your Mac is short of memory, Pacer refreshes its local API and its forecasts less often, so it doesn't push out the memory it's using.</li>
+<li>Freezes are written to Pacer's log with where they happened, so the ones that remain can be found.</li>
+</ul>
+<h2>A daily accuracy check</h2>
+<p>Once a day, Pacer compares its totals for your most recent Claude Code sessions with Claude Code's own. From late September to late October, a Claude Code bug left subagent output out of its transcripts, and nothing noticed for weeks. Pacer would now catch that within a day. If the totals ever disagree, Pacer reports only which kind of token, roughly by how much, and the Claude Code version.</p>
+<h2>Coming from 0.8?</h2>
+<p>This release also brings 0.9.0 and 0.9.1:</p>
+<ul>
+<li>Updates download only what changed, a few megabytes instead of about 160 MB.</li>
+<li>If Pacer crashes, it reopens itself in the background about 10 seconds later.</li>
+<li>Updating no longer rewrites your usage history.</li>
+</ul>
+<h2>Privacy</h2>
+<p>The accuracy check sends only the token kind, a rough size of the difference, and the Claude Code version: never counts, sessions or projects. No other new kinds of data are sent. Pacer never sends prompts, projects, files, accounts or costs.</p>
+<p><strong>Your data is untouched.</strong> Coming from 0.8, Pacer upgrades it in seconds on first launch. After that, an older version of Pacer can't open it, so this one can't be downgraded.</p>]]></description>
+        <pubDate>Mon, 16 Nov 2026 15:14:42 +0000</pubDate>
+        <sparkle:version>1794840834</sparkle:version>
+        <sparkle:shortVersionString>0.9.2</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.2/Pacer-0.9.2.dmg"
+            length="159264786"
+            type="application/octet-stream"
+            sparkle:edSignature="PesP5nQ3JNhvvoEYJDj4FQVym73DZGIDJA90WUf1oBhlG+I3FR1OdnT7HD723U6uBJfOlPk3W0ApB5Ern6VKBQ==" />
+        <sparkle:deltas>
+            <enclosure
+                url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.2/Pacer-0.9.2-from-0.9.1.delta"
+                sparkle:deltaFrom="1794605188"
+                length="5605238"
+                type="application/octet-stream"
+                sparkle:deltaFromSparkleExecutableSize="976432"
+                sparkle:deltaFromSparkleLocales="ar,ca,cs,da,de,el,es"
+                sparkle:edSignature="hdFs2orvdAuEJVR1X1FZma8TeEQSULgZsbPMHLgjgjDaQ7qvLYMY8IokMmQroC4xPHwbsxv1V6hvpJ7BoR7aAw==" />
+            <enclosure
+                url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.2/Pacer-0.9.2-from-0.9.0.delta"
+                sparkle:deltaFrom="1794528744"
+                length="6354002"
+                type="application/octet-stream"
+                sparkle:deltaFromSparkleExecutableSize="976432"
+                sparkle:deltaFromSparkleLocales="ar,ca,cs,da,de,el,es"
+                sparkle:edSignature="x4tRYdjy0ewYAoYTnaU6a/IEcjukwKWtUM8mBqExXVL3l8Y6GyM/Ozcb4gy20v1x5Oh5f8MwRojIEyLGwMTECA==" />
+            <enclosure
+                url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.2/Pacer-0.9.2-from-0.8.3.delta"
+                sparkle:deltaFrom="1794413280"
+                length="7352606"
+                type="application/octet-stream"
+                sparkle:deltaFromSparkleExecutableSize="976432"
+                sparkle:deltaFromSparkleLocales="ar,ca,cs,da,de,el,es"
+                sparkle:edSignature="jcpJ9WcnNwT8XNM/scKF3eL/+7lJEL0KopVOXX/S/fYcytZQhG+Dtx5c0GdqI85WEQVH9ExMyqAxnn6zSVj4Ag==" />
+            <enclosure
+                url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.2/Pacer-0.9.2-from-0.8.2.delta"
+                sparkle:deltaFrom="1793828065"
+                length="8761118"
+                type="application/octet-stream"
+                sparkle:deltaFromSparkleExecutableSize="976432"
+                sparkle:deltaFromSparkleLocales="ar,ca,cs,da,de,el,es"
+                sparkle:edSignature="bnM5w32q8prUf+4UJpzmFfbhv9pOVs8bgJXMb5PJcn4z41uOZJjLazo+Muo0bDW8ap6fjheR8ZfBLinjWiZsCw==" />
+            <enclosure
+                url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.2/Pacer-0.9.2-from-0.8.1.delta"
+                sparkle:deltaFrom="1793656792"
+                length="9351890"
+                type="application/octet-stream"
+                sparkle:deltaFromSparkleExecutableSize="976432"
+                sparkle:deltaFromSparkleLocales="ar,ca,cs,da,de,el,es"
+                sparkle:edSignature="HXzDNKd7yrsKEr/WwyExbcGb6w5R9PrlQi4vmkefm9EWnGV1lmsCkI18ct9G6HSv5GhGpOrNwBsuz6MyhVAbDg==" />
+        </sparkle:deltas>
+    </item>
         </channel>
 </rss>
