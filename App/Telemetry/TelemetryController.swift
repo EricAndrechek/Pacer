@@ -64,9 +64,12 @@ final class TelemetryController {
                               heartbeat: HangReporter.heartbeat, startsBusy: true,
                               handler: HangReporter.handle)
         tagScope()
-        syncPostHogLink()
+        syncPostHogLink(on: Self.analyticsAllowed)
         if Self.performanceAllowed { startSession() }
         observe()
+        // The budget's saved counts, read now off main rather than by the
+        // first send, which may be the main thread's.
+        Task.detached(priority: .utility) { TelemetryBudget.shared.preload() }
         Log.write("Telemetry", "started · \(Self.environment) · crash=\(Self.crashAllowed) performance=\(Self.performanceAllowed) usage=\(Self.analyticsAllowed)")
     }
 
@@ -115,8 +118,7 @@ final class TelemetryController {
     /// are run through the scrubber, whose long-token rule needed an
     /// exemption for this URL (which it now has, tested, in case the link is
     /// ever quoted anywhere that is scrubbed).
-    private func syncPostHogLink() {
-        let on = Self.analyticsAllowed
+    private func syncPostHogLink(on: Bool) {
         guard on != postHogLinked else { return }
         postHogLinked = on
         if on, let id = AnalyticsIdentity.installId(in: URL(fileURLWithPath: Self.cacheDirectory)) {
@@ -282,11 +284,31 @@ final class TelemetryController {
         observers.append(NotificationCenter.default.addObserver(
             forName: UserDefaults.didChangeNotification, object: store, queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated {
-                self?.syncSessionWithToggle()
-                self?.syncPostHogLink()
-            }
+            MainActor.assumeIsolated { self?.togglesMayHaveChanged() }
         })
+    }
+
+    /// Any write to the App Group defaults lands here (the send budget writes
+    /// every ten seconds or so), and reading the toggles can be a synchronous
+    /// round trip to `cfprefsd`: done on main, it hung the app (Sentry
+    /// PACER-1S). So the toggles are read off main, and main only acts on
+    /// what changed. A write during a read asks for one more read, so the last
+    /// change is never missed.
+    private var toggleRead: (pending: Bool, again: Bool) = (false, false)
+    private func togglesMayHaveChanged() {
+        guard !toggleRead.pending else { toggleRead.again = true; return }
+        toggleRead = (true, false)
+        Task { [weak self] in
+            let (performance, usage) = await Task.detached(priority: .utility) {
+                (Self.performanceAllowed, Self.analyticsAllowed)
+            }.value
+            guard let self else { return }
+            self.syncSessionWithToggle(on: performance)
+            self.syncPostHogLink(on: usage)
+            let again = self.toggleRead.again
+            self.toggleRead = (false, false)
+            if again { self.togglesMayHaveChanged() }
+        }
     }
 
     private func trackDay() {
@@ -303,8 +325,7 @@ final class TelemetryController {
         }
     }
 
-    private func syncSessionWithToggle() {
-        let on = Self.performanceAllowed
+    private func syncSessionWithToggle(on: Bool) {
         if on, sessionDay == nil {
             startSession()
         } else if !on, sessionDay != nil {
