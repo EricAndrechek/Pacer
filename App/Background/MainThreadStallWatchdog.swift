@@ -82,10 +82,16 @@ final class MainThreadStallWatchdog {
                 // Busy (working) vs waiting (a lock or throttled), in thirds.
                 let busy = stall.wall > 0 ? stall.cpu / stall.wall : 0
                 let cpuBucket = busy >= 0.66 ? "busy" : busy >= 0.33 ? "mixed" : "waiting"
-                Telemetry.distribution("main_thread.stall_ms", stall.wall * 1000, unit: .millisecond,
-                                       attributes: ["cpu": .string(cpuBucket),
-                                                    "pressure": .string(MemoryPressure.shared.level.name)])
-                Telemetry.breadcrumb("stall", "\(Int(stall.wall * 1000)) ms")
+                let pressure = MemoryPressure.shared.level.name
+                let ms = stall.wall * 1000
+                // Sent off main: a send runs the SDK's hooks and the send
+                // budget, and recording a stall on main once caused the next
+                // one (Sentry PACER-1R).
+                DispatchQueue.global(qos: .utility).async {
+                    Telemetry.distribution("main_thread.stall_ms", ms, unit: .millisecond,
+                                           attributes: ["cpu": .string(cpuBucket), "pressure": .string(pressure)])
+                    Telemetry.breadcrumb("stall", "\(Int(ms)) ms")
+                }
             } else {
                 TelemetryCounters.add("main_thread.stall_100ms")
             }

@@ -168,6 +168,7 @@ public final class TelemetryBudget: @unchecked Sendable {  // UserDefaults is th
     private let now: @Sendable () -> Date
     private let persistInterval: TimeInterval
     private let state: Mutex<State>
+    private let persistQueue = DispatchQueue(label: "pacer.telemetry-budget.persist", qos: .utility)
 
     /// The app's one budget. Release limits until `useLimits` says otherwise.
     public static let shared = TelemetryBudget(store: PacerPreferences.store, limits: .release)
@@ -197,7 +198,7 @@ public final class TelemetryBudget: @unchecked Sendable {  // UserDefaults is th
             let due = now().timeIntervalSince(s.lastPersist) >= persistInterval
             return (true, rare || due)
         }
-        if persist { flush() }
+        if persist { save(waiting: false) }
         if !allowed {
             TelemetryCounters.add("telemetry.capped.\(kind.rawValue)")
             if let name { TelemetryCounters.add("telemetry.capped.\(kind.rawValue).\(name)") }
@@ -224,7 +225,7 @@ public final class TelemetryBudget: @unchecked Sendable {  // UserDefaults is th
             s.dirty = true
             return (true, now().timeIntervalSince(s.lastPersist) >= persistInterval)
         }
-        if persist { flush() }
+        if persist { save(waiting: false) }
         if !allowed {
             TelemetryCounters.add("telemetry.capped.analytics")
             TelemetryCounters.add("telemetry.capped.analytics.\(name)")
@@ -252,15 +253,37 @@ public final class TelemetryBudget: @unchecked Sendable {  // UserDefaults is th
     }
 
     /// Writes the counts now. Called on quit and by the throttle.
-    public func flush() {
+    /// Writes what is unsaved, and returns once it is on disk: quit, and the
+    /// CLI, which exits right after.
+    public func flush() { save(waiting: true) }
+
+    /// Returns once every write queued so far is on disk (tests).
+    func waitForPendingWrites() { persistQueue.sync {} }
+
+    /// Loads the saved day's counts now, off the main thread, instead of on
+    /// whichever thread asks first (the first send can be the main thread's).
+    public func preload() { state.withLock { roll(&$0) } }
+
+    /// The counts go to the App Group defaults on a queue of their own. A
+    /// `UserDefaults` write is a synchronous XPC round trip to `cfprefsd`,
+    /// and a send is often made on the main thread: the stall watchdog's own
+    /// metric reached here from main, so recording one stall caused another
+    /// (Sentry PACER-1R). The queue keeps writes in order, so a waiting
+    /// flush lands after every earlier one.
+    private func save(waiting: Bool) {
         let snapshot = state.withLock { s -> (Int, [String: Int])? in
             guard s.dirty else { return nil }
             s.dirty = false
             s.lastPersist = now()
             return (s.day, s.counts)
         }
-        guard let (day, counts) = snapshot else { return }
-        store.set(["day": day, "counts": counts], forKey: Self.defaultsKey)
+        // UserDefaults is documented thread-safe; the SDK just doesn't mark it Sendable.
+        nonisolated(unsafe) let store = self.store
+        let write: @Sendable () -> Void = {
+            guard let (day, counts) = snapshot else { return }
+            store.set(["day": day, "counts": counts], forKey: Self.defaultsKey)
+        }
+        if waiting { persistQueue.sync(execute: write) } else if snapshot != nil { persistQueue.async(execute: write) }
     }
 
     /// UTC day number; loads the persisted counts the first time and starts a

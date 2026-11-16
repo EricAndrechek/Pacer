@@ -51,6 +51,7 @@ struct TelemetryBudgetTests {
         let (first, store, clock) = try make(limits)
         #expect(first.take(.crash))
         #expect(first.take(.crash))
+        first.waitForPendingWrites()   // the write is off the caller's thread
         let (second, _, _) = try make(limits, store: store, clock: clock)
         #expect(!second.take(.crash))
         clock.advance(86_400)
@@ -65,6 +66,7 @@ struct TelemetryBudgetTests {
         let (first, store, clock) = try make(limits)
         #expect(first.take(.metric, name: "a"))   // first write is due
         #expect(first.take(.metric, name: "a"))   // within the interval: memory only
+        first.waitForPendingWrites()
         let (stale, _, _) = try make(limits, store: store, clock: clock)
         #expect(stale.used(.metric, name: "a") == 1)
         first.flush()
