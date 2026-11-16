@@ -98,10 +98,10 @@ struct SettingsView: View {
         .onChange(of: switcherEnabled) { _, _ in
             // A toggle is the user asking to try now, failure or not.
             Task {
-                // Off the main thread: the store's lock is held for the whole
-                // of a discovery, which lists the keychain and runs `security`
-                // per changed item (up to 5 s each), so taking it here froze
-                // Settings for as long as a discovery in flight took.
+                // `resetFailures()` takes only the store's state lock, which
+                // is never held across a discovery's keychain listing or its
+                // `security` runs, so it returns at once. Detached all the
+                // same: main takes no lock it does not have to.
                 await Task.detached(priority: .userInitiated) {
                     ParkedCredentialStore.shared.resetFailures()
                 }.value

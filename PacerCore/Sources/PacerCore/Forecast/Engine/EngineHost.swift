@@ -79,10 +79,20 @@ public final class EngineHost {
     /// Until a refit or an activation has said which login is active, the
     /// store's own flag answers, the same one the all-accounts engine reads
     /// to decide it should not fit rate limits, so the two can't disagree.
+    /// It is read once, at launch, off the main thread
+    /// (`seedActiveAccountFromStore`), not here: this getter runs on main
+    /// for every card and alert that asks, and it used to fetch the flag on
+    /// the main context, which at launch waits behind the scan's saves (the
+    /// PACER-19 class, #413). Until that read lands, which is milliseconds,
+    /// asks go to the all-accounts engine, as they do on a store with no
+    /// account; the seed then re-routes them.
     public var rateLimitEngine: UsageIntelligenceEngine {
-        if activeAccountId == nil { activeAccountId = Account.activeId(in: container.mainContext) }
-        return activeAccountId.map { engine(for: .account($0)) } ?? global
+        activeAccountId.map { engine(for: .account($0)) } ?? global
     }
+
+    /// The launch read of the store's active flag, kept so a test can wait
+    /// for it.
+    private(set) var activeSeed: Task<Void, Never>?
 
     nonisolated(unsafe) private var activationObserver: NSObjectProtocol?
     private let pressure: MemoryPressure
@@ -94,6 +104,29 @@ public final class EngineHost {
         _ = engine(for: .allAccounts)
         observeActivations()
         listenForPressure()
+        seedActiveAccountFromStore()
+    }
+
+    /// Read which account the store marks active, off the main thread, and
+    /// route rate-limit asks to it unless a refit or an activation has
+    /// already said (theirs is newer than this read can be).
+    @discardableResult
+    func seedActiveAccountFromStore() -> Task<Void, Never> {
+        let container = container
+        let task = Task.detached(priority: .userInitiated) { [weak self] in
+            guard let id = Account.activeId(in: ModelContext(container)) else { return }
+            await self?.adoptStoredActiveAccount(id)
+        }
+        activeSeed = task
+        return task
+    }
+
+    private func adoptStoredActiveAccount(_ id: String) {
+        guard activeAccountId == nil else { return }
+        activeAccountId = id
+        // Anything that asked before this landed got the all-accounts
+        // engine's answer: ask again.
+        NotificationCenter.default.post(name: .pacerEngineDidRecompute, object: nil)
     }
 
     private func listenForPressure() {
@@ -150,6 +183,10 @@ public final class EngineHost {
     /// engine silently rendered no forecast at all, and the README's headline
     /// screenshot lost its projections, its at-reset chips and its
     /// pace-vs-normal chip.
+    ///
+    /// `activeAccountId` is the caller's word for it. The store's flag is not
+    /// read in the background as the app's host does: a render must not race
+    /// that read, so a caller whose fixture has an active account passes it.
     public init(container: ModelContainer, preseeded: [EngineScope: UsageIntelligenceEngine],
                 activeAccountId: String? = nil, pressure: MemoryPressure = .shared) {
         self.container = container

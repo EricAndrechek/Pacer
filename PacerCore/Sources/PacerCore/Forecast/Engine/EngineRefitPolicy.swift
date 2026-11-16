@@ -28,6 +28,31 @@ public enum EngineRefitPolicy {
         }
     }
 
+    /// A refit that paged in more than this (about a fifth of the mapped
+    /// networks) was reading its weights back from disk: the Mac had evicted them.
+    public static let heavyPageinBytes: UInt64 = 100_000_000
+    /// The longest a heavy page-in stretches the floor to.
+    public static let heavyFloorCap: TimeInterval = 3600
+
+    /// `floor(base:pressure:)`, doubled (to at most an hour) when the last refit
+    /// paged in a lot and the Mac is still short of memory. Refits that page in
+    /// 373-489 MB every 20 minutes kept evicting the main thread's own pages;
+    /// each one costs more than the one before when the weights have to come
+    /// back from disk, so a Mac in that state gets fewer of them. Bounded, like
+    /// every deferral here: it still refits at least hourly.
+    public static func floor(base: TimeInterval, pressure: MemoryPressure.Level,
+                             lastPageinBytes: UInt64) -> TimeInterval {
+        let plain = floor(base: base, pressure: pressure)
+        guard pressure >= .warning, lastPageinBytes > heavyPageinBytes else { return plain }
+        let doubled = min(plain * 2, heavyFloorCap)
+        // Under warning, stay inside the five-hour arena line's lifetime, as
+        // `floor(base:pressure:)` does: a longer floor blanks the line a person
+        // is reading between refits. Critical has already given that up.
+        guard pressure == .warning else { return max(plain, doubled) }
+        let fiveHourLine = ArenaLiveCache.maxAge(duration: 5 * 3600) - 60
+        return max(plain, min(doubled, fiveHourLine))
+    }
+
     /// Which of a window's arena models (the pick first) to make this refit.
     /// Under pressure only the pick, the one line a person is reading; at
     /// critical none, and the cached lines age out into the engine's own models.

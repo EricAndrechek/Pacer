@@ -166,7 +166,10 @@ public final class Account {
     /// The switcher's slot first when there is one — someone who types
     /// `cswap switch 2` should find account 2 second in Pacer's menu too.
     /// Otherwise the active login leads, then by id for stability.
-    public static func listOrder(_ lhs: Account, _ rhs: Account) -> Bool {
+    ///
+    /// Generic so a value standing in for a row (`AccountListEntry`) lists in
+    /// exactly the row's order, from this one definition.
+    public static func listOrder<A: AccountListOrdering>(_ lhs: A, _ rhs: A) -> Bool {
         switch (lhs.switcherSlot, rhs.switcherSlot) {
         case let (l?, r?) where l != r: return l < r
         case (nil, _?): return false
@@ -249,3 +252,12 @@ public final class Account {
         return "Primary account"
     }
 }
+
+/// What `Account.listOrder` sorts on.
+public protocol AccountListOrdering {
+    var id: String { get }
+    var isActive: Bool { get }
+    var switcherSlot: Int? { get }
+}
+
+extension Account: AccountListOrdering {}

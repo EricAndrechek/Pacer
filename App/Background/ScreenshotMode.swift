@@ -1863,6 +1863,9 @@ extension ScreenshotMode {
             try ctx.save()
             RateLimitWriteSignal.shared.seed(from: ctx)
             log("seeded synthetic usage")
+            // The real window's title and account menu read the fixture's
+            // accounts through `AccountList`, which reads on this.
+            AccountWriteSignal.post()
         } catch {
             log("⚠️ seed save failed: \(error)")
         }

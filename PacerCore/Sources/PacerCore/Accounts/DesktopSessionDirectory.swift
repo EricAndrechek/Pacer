@@ -57,8 +57,22 @@ import Foundation
 /// **One reader per process, shared by reference** (`shared`): the scan
 /// attributes turns from it and the HTTP API binds sessions to it (#211), and
 /// two copies would each list the folder and could disagree. Every member is
-/// safe from any thread; a read that has to touch the disk does so under the
-/// lock, which only ever guards a directory listing and any new small files.
+/// safe from any thread.
+///
+/// **No lock is held across the disk.** A refresh copies what it carries
+/// from the last one (`RecordIndex`) under `lock`, discovers installs and
+/// lists and reads the folders without it, and publishes the result under
+/// it again. Refreshes are serialised by `refreshing`, so no refresh can
+/// publish over a newer one, and a caller that arrives while one runs and
+/// only needed *a* recent read (the first load, `refreshIfDue`, a miss the
+/// running refresh has since found) takes its result instead of repeating
+/// it. The scan asks this about every turn it attributes. A session already
+/// known costs only `lock`, so a slow listing (a large or remote home
+/// folder, Settings' forced refresh) does not hold those up. A miss does
+/// wait: a Desktop turn whose session has no record yet (at most once per
+/// session per `missRefreshInterval`), like the first read of all, takes
+/// `refreshing`, so it runs a refresh or waits out the one running. The scan
+/// makes those calls on its own actor, never on main.
 public final class DesktopSessionDirectory: @unchecked Sendable {
     /// The process's reader: every install `DesktopInstallDiscovery` finds
     /// (#295), which is none in a test process.
@@ -89,40 +103,60 @@ public final class DesktopSessionDirectory: @unchecked Sendable {
     static let agentSessionsFolder = "local-agent-mode-sessions"
 
     private let discover: @Sendable () -> [DesktopInstall]
+    /// Guards every field below. Held only to read them or publish a
+    /// refresh, never across discovery or the disk.
     private let lock = NSLock()
-    // Everything below is guarded by `lock`.
+    /// Serialises refreshes. The only lock held across I/O, and only a
+    /// refresh, or a caller about to run one, ever takes it. Always taken
+    /// before `lock`, never while holding it.
+    private let refreshing = NSLock()
+
+    // Written only by a refresh, which holds `refreshing`.
     private var installList: [DesktopInstall] = []
     private var lastDiscovery: Date?
-    /// `sessionId` → `Account.id` per install, keyed by `DesktopInstall.id`.
-    /// Two installs are two directories, so a session is keyed by both.
-    private var recordedByInstall: [String: [String: String]] = [:]
+    /// What the record files have said so far; see `RecordIndex`.
+    private var records = RecordIndex()
     /// The merge of every install's records: a session whose installs agree
     /// on its account. Two installs naming different accounts for one session
     /// is not a guess Pacer can make, so that session has none.
     private var accountsBySession: [String: String] = [:]
-    /// Agent-mode `.claude` roots (by `ResolvedRoot.root.path`) → the org they
-    /// belong to.
-    private var agentRootAccounts: [String: String] = [:]
     /// The roots Desktop adds to the scan, ready to scan, in a stable order:
     /// every agent-mode session's, and each install's own `CLAUDE_CONFIG_DIR`.
     private var rootList: [ClaudePathResolver.ResolvedRoot] = []
-    /// Record files that yielded a session. Others are read again, since a
-    /// record can be written before its `cliSessionId` is.
-    private var readFiles: Set<String> = []
-    /// Record files that yielded no session, by modification date: read again
-    /// only once they change, so one empty record does not cost a whole-file
-    /// parse on every listing.
-    private var emptyFiles: [String: Date] = [:]
+    /// Set once a refresh has published, so the first read waits for one.
+    private var loaded = false
+    /// When the last refresh started.
+    private var lastRefresh: Date?
+
+    // Also written by readers.
     /// Sessions that gained an account since `drainDiscovered`.
     private var discovered: [String: String] = [:]
     /// When each unrecorded session last caused a read.
     private var lastMissRead: [String: Date] = [:]
-    /// Each record's newest activity (#245): its `lastActivityAt`, else its
-    /// modification date, with the modification date it was read at, so a
-    /// record is read again only once Desktop has rewritten it.
-    private var recordActivity: [String: (install: String, org: String, at: Date, modified: Date?)] = [:]
-    private var lastRefresh: Date?
-    private var loaded = false
+
+    /// Everything a refresh carries to the next, so that it reads each record
+    /// once. A refresh works on its own copy, outside `lock`, and publishes
+    /// it whole.
+    fileprivate struct RecordIndex {
+        /// `sessionId` → `Account.id` per install, keyed by
+        /// `DesktopInstall.id`. Two installs are two directories, so a
+        /// session is keyed by both.
+        var recordedByInstall: [String: [String: String]] = [:]
+        /// Agent-mode `.claude` roots (by `ResolvedRoot.root.path`) → the org
+        /// they belong to.
+        var agentRootAccounts: [String: String] = [:]
+        /// Record files that yielded a session. Others are read again, since
+        /// a record can be written before its `cliSessionId` is.
+        var readFiles: Set<String> = []
+        /// Record files that yielded no session, by modification date: read
+        /// again only once they change, so one empty record does not cost a
+        /// whole-file parse on every listing.
+        var emptyFiles: [String: Date] = [:]
+        /// Each record's newest activity (#245): its `lastActivityAt`, else
+        /// its modification date, with the modification date it was read at,
+        /// so a record is read again only once Desktop has rewritten it.
+        var recordActivity: [String: (install: String, org: String, at: Date, modified: Date?)] = [:]
+    }
 
     /// A reader of whatever `discover` returns, asked again at most every
     /// `discoveryInterval`.
@@ -143,43 +177,44 @@ public final class DesktopSessionDirectory: @unchecked Sendable {
 
     /// The installs this reader covers, as of the last read.
     public var installs: [DesktopInstall] {
-        lock.withLock {
-            loadIfNeededLocked()
-            return installList
-        }
+        loadIfNeeded()
+        return lock.withLock { installList }
     }
 
     /// Every recorded session and its account, as of the last read.
     public var accounts: [String: String] {
-        lock.withLock {
-            loadIfNeededLocked()
-            return accountsBySession
-        }
+        loadIfNeeded()
+        return lock.withLock { accountsBySession }
     }
 
     /// The account Desktop recorded for `sessionId`, without reading anything
     /// new.
     public func recordedAccount(forSession sessionId: String?) -> String? {
         guard let sessionId else { return nil }
-        return lock.withLock {
-            loadIfNeededLocked()
-            return accountsBySession[sessionId]
-        }
+        loadIfNeeded()
+        return lock.withLock { accountsBySession[sessionId] }
     }
 
     /// The account for a session Desktop's Claude Code wrote, reading any new
     /// records first when it is not known yet.
     public func accountForDesktopSession(_ sessionId: String?, now: Date = Date()) -> String? {
         guard let sessionId else { return nil }
-        return lock.withLock {
-            loadIfNeededLocked()
-            if let known = accountsBySession[sessionId] { return known }
+        loadIfNeeded()
+        let read = lock.withLock { () -> Bool in
+            if accountsBySession[sessionId] != nil { return false }
             if let last = lastMissRead[sessionId],
-               now.timeIntervalSince(last) < Self.missRefreshInterval { return nil }
+               now.timeIntervalSince(last) < Self.missRefreshInterval { return false }
             lastMissRead[sessionId] = now
-            refreshLocked()
-            return accountsBySession[sessionId]
+            return true
         }
+        if read {
+            refreshing.withLock {
+                // A refresh that finished while this waited may have found it.
+                guard lock.withLock({ accountsBySession[sessionId] }) == nil else { return }
+                refreshAndPublish(now: Date(), forceDiscovery: false)
+            }
+        }
+        return lock.withLock { accountsBySession[sessionId] }
     }
 
     /// The org an agent-mode root belongs to, for a turn read from it, or nil
@@ -187,20 +222,16 @@ public final class DesktopSessionDirectory: @unchecked Sendable {
     /// roots this reader listed.
     public func account(forAgentRoot rootPath: String?) -> String? {
         guard let rootPath else { return nil }
-        return lock.withLock {
-            loadIfNeededLocked()
-            return agentRootAccounts[rootPath]
-        }
+        loadIfNeeded()
+        return lock.withLock { records.agentRootAccounts[rootPath] }
     }
 
     /// Every root Desktop adds to the scan, as of the last read: each
     /// agent-mode session's `.claude` (with `agentProjectPath` as its fixed
     /// project), and each install's own `CLAUDE_CONFIG_DIR` when it has one.
     public var scanRoots: [ClaudePathResolver.ResolvedRoot] {
-        lock.withLock {
-            loadIfNeededLocked()
-            return rootList
-        }
+        loadIfNeeded()
+        return lock.withLock { rootList }
     }
 
     /// The agent-mode folders worth watching: every session root sits under
@@ -223,8 +254,8 @@ public final class DesktopSessionDirectory: @unchecked Sendable {
     /// Sessions that gained an account since the last call: what the caller
     /// re-stamps history for. On the first call that is every recorded session.
     public func drainDiscovered() -> [String: String] {
-        lock.withLock {
-            loadIfNeededLocked()
+        loadIfNeeded()
+        return lock.withLock {
             defer { discovered.removeAll() }
             return discovered
         }
@@ -233,10 +264,7 @@ public final class DesktopSessionDirectory: @unchecked Sendable {
     /// Look for installs again, read every record not read before, and list
     /// the agent-mode roots again.
     public func refresh() {
-        lock.withLock {
-            lastDiscovery = nil
-            refreshLocked()
-        }
+        refreshing.withLock { refreshAndPublish(now: Date(), forceDiscovery: true) }
     }
 
     /// `refresh` without the forced discovery, at most every `interval`: what
@@ -244,9 +272,15 @@ public final class DesktopSessionDirectory: @unchecked Sendable {
     /// cycle runs every few seconds while anything is writing, and a record
     /// listing is a stat per record, so this bounds it.
     public func refreshIfDue(interval: TimeInterval = 30, now: Date = Date()) {
-        lock.withLock {
-            guard lastRefresh.map({ now.timeIntervalSince($0) >= interval }) ?? true else { return }
-            refreshLocked(now: now)
+        func due() -> Bool {
+            lock.withLock { lastRefresh.map { now.timeIntervalSince($0) >= interval } ?? true }
+        }
+        // A refresh already running set `lastRefresh` when it started, so
+        // this returns at once rather than queueing behind it.
+        guard due() else { return }
+        refreshing.withLock {
+            guard due() else { return }
+            refreshAndPublish(now: now, forceDiscovery: false)
         }
     }
 
@@ -255,153 +289,81 @@ public final class DesktopSessionDirectory: @unchecked Sendable {
     /// `lastActivityAt`. The evidence that a Desktop install is active on an
     /// account (#245). Desktop chat writes no record, so it is not in here.
     public var activity: [String: [String: Date]] {
-        lock.withLock {
-            loadIfNeededLocked()
-            var out: [String: [String: Date]] = [:]
-            for entry in recordActivity.values
-            where entry.at > (out[entry.install]?[entry.org] ?? .distantPast) {
-                out[entry.install, default: [:]][entry.org] = entry.at
-            }
-            return out
-        }
-    }
-
-    private func loadIfNeededLocked() {
-        guard !loaded else { return }
-        loaded = true
-        refreshLocked()
-    }
-
-    private func refreshLocked(now: Date = Date()) {
-        lastRefresh = now
-        if lastDiscovery.map({ now.timeIntervalSince($0) >= Self.discoveryInterval }) ?? true {
-            lastDiscovery = now
-            installList = discover()
-        }
-        let fm = FileManager.default
-        var roots: [ClaudePathResolver.ResolvedRoot] = []
-        for install in installList {
-            let data = install.dataDirectory
-            for (org, folder) in Self.orgFolders(
-                in: data.appendingPathComponent(Self.codeSessionsFolder), fm) {
-                readRecordsLocked(in: folder, accountId: org, install: install.id, fm)
-            }
-            for (org, folder) in Self.orgFolders(
-                in: data.appendingPathComponent(Self.agentSessionsFolder), fm,
-                userMustBeUUID: true) {
-                // The ordinary sessions, and the long-lived agent one level
-                // down. Both keep a record beside a folder of the same name.
-                for parent in [folder, folder.appendingPathComponent("agent")] {
-                    readRecordsLocked(in: parent, accountId: org, install: install.id, fm)
-                    roots += agentRootsLocked(in: parent, accountId: org, install: install.id, fm)
-                }
-            }
-            // The install's Claude Code writes here rather than `~/.claude`.
-            // Its turns are Desktop's, attributed by the install's records
-            // like any other Desktop session: one install can hold logins
-            // for several accounts, so the root cannot name one.
-            if let config = install.configDirectory {
-                let projects = config.appendingPathComponent("projects").canonicalPathURL
-                if Self.isDirectory(projects, fm) {
-                    roots.append(.init(root: config, projectsDirectory: projects))
-                }
-            }
-        }
-        var seen = Set<String>()
-        rootList = roots.filter { seen.insert($0.root.path).inserted }
-            .sorted { $0.root.path < $1.root.path }
-        mergeLocked()
-    }
-
-    /// Every record file directly inside `folder`.
-    private func readRecordsLocked(
-        in folder: URL, accountId: String, install: String, _ fm: FileManager
-    ) {
-        let files = (try? fm.contentsOfDirectory(
-            at: folder, includingPropertiesForKeys: nil,
-            options: [.skipsHiddenFiles])) ?? []
-        for file in files where file.pathExtension == "json"
-            && file.lastPathComponent.hasPrefix("local_") {
-            let path = file.path
-            let modified = (try? file.resourceValues(
-                forKeys: [.contentModificationDateKey]))?.contentModificationDate
-            if recordActivity[path]?.modified != modified {
-                let at = Self.lastActivityAt(in: file) ?? modified
-                recordActivity[path] = at.map { (install, accountId, $0, modified) }
-            }
-            guard !readFiles.contains(path) else { continue }
-            if let seen = emptyFiles[path], seen == modified { continue }
-            guard let sessionId = Self.cliSessionId(in: file) else {
-                emptyFiles[path] = modified
-                continue
-            }
-            emptyFiles[path] = nil
-            readFiles.insert(path)
-            recordedByInstall[install, default: [:]][sessionId] = accountId
-        }
-    }
-
-    /// The `.claude` roots of the agent-mode sessions directly inside
-    /// `folder`, recording each one's org and the sessions its transcripts
-    /// name. Their records are read separately; this covers a session whose
-    /// record is gone.
-    private func agentRootsLocked(
-        in folder: URL, accountId: String, install: String, _ fm: FileManager
-    ) -> [ClaudePathResolver.ResolvedRoot] {
-        let sessions = (try? fm.contentsOfDirectory(
-            at: folder, includingPropertiesForKeys: [.isDirectoryKey],
-            options: [.skipsHiddenFiles])) ?? []
-        var out: [ClaudePathResolver.ResolvedRoot] = []
-        for session in sessions where session.lastPathComponent.hasPrefix("local_") {
-            let config = session.appendingPathComponent(".claude").canonicalPathURL
-            let projects = config.appendingPathComponent("projects").canonicalPathURL
-            guard Self.isDirectory(projects, fm) else { continue }
-            let root = ClaudePathResolver.ResolvedRoot(
-                root: config, projectsDirectory: projects,
-                fixedProjectPath: Self.agentProjectPath)
-            agentRootAccounts[config.path] = accountId
-            out.append(root)
-            // `<projects>/<project>/<session>.jsonl`: the file name is the
-            // session id, which is what history is re-stamped by.
-            for project in (try? fm.contentsOfDirectory(
-                at: projects, includingPropertiesForKeys: nil,
-                options: [.skipsHiddenFiles])) ?? [] {
-                for transcript in (try? fm.contentsOfDirectory(
-                    at: project, includingPropertiesForKeys: nil,
-                    options: [.skipsHiddenFiles])) ?? []
-                where transcript.pathExtension == "jsonl" {
-                    let id = transcript.deletingPathExtension().lastPathComponent
-                    guard UUID(uuidString: id) != nil else { continue }
-                    recordedByInstall[install, default: [:]][id] = accountId
-                }
-            }
+        loadIfNeeded()
+        let entries = lock.withLock { records.recordActivity }
+        var out: [String: [String: Date]] = [:]
+        for entry in entries.values
+        where entry.at > (out[entry.install]?[entry.org] ?? .distantPast) {
+            out[entry.install, default: [:]][entry.org] = entry.at
         }
         return out
     }
 
-    /// Fold every install's records into `accountsBySession`, noting what
-    /// gained an account.
-    private func mergeLocked() {
+    /// The first read of anything runs the first refresh. A read that arrives
+    /// while it runs waits for it, on `refreshing`, and then uses it.
+    private func loadIfNeeded() {
+        if lock.withLock({ loaded }) { return }
+        refreshing.withLock {
+            guard !lock.withLock({ loaded }) else { return }
+            refreshAndPublish(now: Date(), forceDiscovery: false)
+        }
+    }
+
+    /// One refresh: copy, read, publish. The caller holds `refreshing`, so
+    /// nothing else writes the refresh-owned fields between the copy and the
+    /// publish, and what this computes against the copy is still exact when
+    /// it lands.
+    private func refreshAndPublish(now: Date, forceDiscovery: Bool) {
+        let (listed, carried, known, discoverNow) = lock.withLock {
+            lastRefresh = now
+            let due = forceDiscovery
+                || (lastDiscovery.map { now.timeIntervalSince($0) >= Self.discoveryInterval } ?? true)
+            if due { lastDiscovery = now }
+            return (installList, records, accountsBySession, due)
+        }
+
+        // Everything that touches the disk or the process list, unlocked.
+        let installs = discoverNow ? discover() : listed
+        var index = carried
+        let roots = index.read(installs: installs, FileManager.default)
+        let (merged, gained) = Self.merge(index.recordedByInstall, over: known)
+
+        lock.withLock {
+            installList = installs
+            records = index
+            rootList = roots
+            accountsBySession = merged
+            for (session, org) in gained {
+                discovered[session] = org
+                lastMissRead[session] = nil
+            }
+            loaded = true
+        }
+    }
+
+    /// Fold every install's records into one session → account map, and say
+    /// which sessions gained an account (or changed it) against `known`.
+    private static func merge(
+        _ recordedByInstall: [String: [String: String]], over known: [String: String]
+    ) -> (merged: [String: String], gained: [String: String]) {
         var orgs: [String: Set<String>] = [:]
         for records in recordedByInstall.values {
             for (session, org) in records { orgs[session, default: []].insert(org) }
         }
         var merged: [String: String] = [:]
+        var gained: [String: String] = [:]
         for (session, set) in orgs {
             guard set.count == 1, let org = set.first else {
-                if accountsBySession[session] != nil {
+                if known[session] != nil {
                     Log.write("DesktopSessionDirectory",
                               "a session is recorded under \(set.count) accounts by different installs; leaving it unattributed")
                 }
                 continue
             }
             merged[session] = org
-            if accountsBySession[session] != org {
-                discovered[session] = org
-                lastMissRead[session] = nil
-            }
+            if known[session] != org { gained[session] = org }
         }
-        accountsBySession = merged
+        return (merged, gained)
     }
 
     /// `<root>/<user>/<org>` folders whose `<org>` is an org id. The folder
@@ -409,7 +371,7 @@ public final class DesktopSessionDirectory: @unchecked Sendable {
     /// of folder and says nothing. Agent mode keeps a `skills-plugin` folder
     /// at the user level whose children are org ids too, so there the user
     /// level must be an id as well.
-    private static func orgFolders(
+    fileprivate static func orgFolders(
         in root: URL, _ fm: FileManager, userMustBeUUID: Bool = false
     ) -> [(String, URL)] {
         var out: [(String, URL)] = []
@@ -433,7 +395,7 @@ public final class DesktopSessionDirectory: @unchecked Sendable {
         }
     }
 
-    private static func isDirectory(_ url: URL, _ fm: FileManager) -> Bool {
+    fileprivate static func isDirectory(_ url: URL, _ fm: FileManager) -> Bool {
         var isDir: ObjCBool = false
         return fm.fileExists(atPath: url.path, isDirectory: &isDir) && isDir.boolValue
     }
@@ -503,4 +465,112 @@ public final class DesktopSessionDirectory: @unchecked Sendable {
 
     /// Enough for the handful of short fields Desktop writes first.
     static let headBytes = 4096
+}
+
+extension DesktopSessionDirectory.RecordIndex {
+    /// List every install's record folders, read the records not read
+    /// before, and return the roots Desktop adds to the scan. All of a
+    /// refresh's disk work, on the refresh's own copy, outside the lock.
+    mutating func read(
+        installs: [DesktopInstall], _ fm: FileManager
+    ) -> [ClaudePathResolver.ResolvedRoot] {
+        typealias D = DesktopSessionDirectory
+        var roots: [ClaudePathResolver.ResolvedRoot] = []
+        for install in installs {
+            let data = install.dataDirectory
+            for (org, folder) in D.orgFolders(
+                in: data.appendingPathComponent(D.codeSessionsFolder), fm) {
+                readRecords(in: folder, accountId: org, install: install.id, fm)
+            }
+            for (org, folder) in D.orgFolders(
+                in: data.appendingPathComponent(D.agentSessionsFolder), fm,
+                userMustBeUUID: true) {
+                // The ordinary sessions, and the long-lived agent one level
+                // down. Both keep a record beside a folder of the same name.
+                for parent in [folder, folder.appendingPathComponent("agent")] {
+                    readRecords(in: parent, accountId: org, install: install.id, fm)
+                    roots += agentRoots(in: parent, accountId: org, install: install.id, fm)
+                }
+            }
+            // The install's Claude Code writes here rather than `~/.claude`.
+            // Its turns are Desktop's, attributed by the install's records
+            // like any other Desktop session: one install can hold logins
+            // for several accounts, so the root cannot name one.
+            if let config = install.configDirectory {
+                let projects = config.appendingPathComponent("projects").canonicalPathURL
+                if D.isDirectory(projects, fm) {
+                    roots.append(.init(root: config, projectsDirectory: projects))
+                }
+            }
+        }
+        var seen = Set<String>()
+        return roots.filter { seen.insert($0.root.path).inserted }
+            .sorted { $0.root.path < $1.root.path }
+    }
+
+    /// Every record file directly inside `folder`.
+    private mutating func readRecords(
+        in folder: URL, accountId: String, install: String, _ fm: FileManager
+    ) {
+        let files = (try? fm.contentsOfDirectory(
+            at: folder, includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles])) ?? []
+        for file in files where file.pathExtension == "json"
+            && file.lastPathComponent.hasPrefix("local_") {
+            let path = file.path
+            let modified = (try? file.resourceValues(
+                forKeys: [.contentModificationDateKey]))?.contentModificationDate
+            if recordActivity[path]?.modified != modified {
+                let at = DesktopSessionDirectory.lastActivityAt(in: file) ?? modified
+                recordActivity[path] = at.map { (install, accountId, $0, modified) }
+            }
+            guard !readFiles.contains(path) else { continue }
+            if let seen = emptyFiles[path], seen == modified { continue }
+            guard let sessionId = DesktopSessionDirectory.cliSessionId(in: file) else {
+                emptyFiles[path] = modified
+                continue
+            }
+            emptyFiles[path] = nil
+            readFiles.insert(path)
+            recordedByInstall[install, default: [:]][sessionId] = accountId
+        }
+    }
+
+    /// The `.claude` roots of the agent-mode sessions directly inside
+    /// `folder`, recording each one's org and the sessions its transcripts
+    /// name. Their records are read separately; this covers a session whose
+    /// record is gone.
+    private mutating func agentRoots(
+        in folder: URL, accountId: String, install: String, _ fm: FileManager
+    ) -> [ClaudePathResolver.ResolvedRoot] {
+        let sessions = (try? fm.contentsOfDirectory(
+            at: folder, includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles])) ?? []
+        var out: [ClaudePathResolver.ResolvedRoot] = []
+        for session in sessions where session.lastPathComponent.hasPrefix("local_") {
+            let config = session.appendingPathComponent(".claude").canonicalPathURL
+            let projects = config.appendingPathComponent("projects").canonicalPathURL
+            guard DesktopSessionDirectory.isDirectory(projects, fm) else { continue }
+            let root = ClaudePathResolver.ResolvedRoot(
+                root: config, projectsDirectory: projects,
+                fixedProjectPath: DesktopSessionDirectory.agentProjectPath)
+            agentRootAccounts[config.path] = accountId
+            out.append(root)
+            // `<projects>/<project>/<session>.jsonl`: the file name is the
+            // session id, which is what history is re-stamped by.
+            for project in (try? fm.contentsOfDirectory(
+                at: projects, includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles])) ?? [] {
+                for transcript in (try? fm.contentsOfDirectory(
+                    at: project, includingPropertiesForKeys: nil,
+                    options: [.skipsHiddenFiles])) ?? []
+                where transcript.pathExtension == "jsonl" {
+                    let id = transcript.deletingPathExtension().lastPathComponent
+                    guard UUID(uuidString: id) != nil else { continue }
+                    recordedByInstall[install, default: [:]][id] = accountId
+                }
+            }
+        }
+        return out
+    }
 }

@@ -1,5 +1,4 @@
 import SwiftUI
-import SwiftData
 import PacerCore
 import PacerUI
 
@@ -13,16 +12,29 @@ import PacerUI
 /// the control was treating the symptom.
 ///
 /// Renders nothing with one account.
+///
+/// Its accounts come from `AccountList`, not a `@Query`: a toolbar item is
+/// mounted for as long as the window is open, and a `@Query` here laid the
+/// toolbar out again after a main-thread fetch on every save of the store
+/// (#413). The list changes only when a label, the signed-in marker, a
+/// switcher slot or the set of accounts does; a poll's new readings leave
+/// this alone.
 struct AccountScopeControl: View {
-    // lint:allow query-always-mounted known debt: toolbar item, re-renders on every save; moving it needs every Account writer to signal (proposed issue)
-    @Query(AccountScopeControl.accountsDescriptor) private var accounts: [Account]
+    @State private var accountList = AccountList.shared
     @State private var scope = UsageScope.shared
 
-    private static let accountsDescriptor: FetchDescriptor<Account> = {
-        FetchDescriptor<Account>(sortBy: [SortDescriptor(\.lastSeenAt, order: .reverse)])
-    }()
-
     var body: some View {
+        // Read here, by value, so this body is what depends on them; the
+        // menu's closures get the values (AGENTS.md, "SwiftUI state and data
+        // flow").
+        let accounts = accountList.accounts
+        // Plain. An earlier version squeezed the signed-in login in here as
+        // "All · on eric" and it read as noise in window chrome — the toolbar
+        // says what you are *looking at*, which is the only thing this control
+        // changes. Which account is signed in belongs where you go to pick one
+        // (the menu below) and on the pace card, where it changes what the
+        // numbers mean.
+        let label = accountList.entry(id: scope.accountId)?.label ?? "All accounts"
         if accounts.count > 1 {
             Menu {
                 Picker("Account", selection: binding) {
@@ -52,16 +64,5 @@ struct AccountScopeControl: View {
 
     private var binding: Binding<String?> {
         Binding(get: { scope.accountId }, set: { scope.select($0) })
-    }
-
-    /// Plain. An earlier version squeezed the signed-in login in here as
-    /// "All · on eric" and it read as noise in window chrome — the toolbar
-    /// says what you are *looking at*, which is the only thing this control
-    /// changes. Which account is signed in belongs where you go to pick one
-    /// (the menu below) and on the pace card, where it changes what the
-    /// numbers mean.
-    private var label: String {
-        guard let id = scope.accountId else { return "All accounts" }
-        return accounts.first { $0.id == id }?.label ?? "All accounts"
     }
 }

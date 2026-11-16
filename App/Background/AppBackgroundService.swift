@@ -80,6 +80,9 @@ final class AppBackgroundService {
     private var engineRefitCount = 0
     private var engineRefitTotalMs = 0
     private var lastEngineRecomputeAt: Date?
+    /// What the last refit paged in; a heavy one lengthens the next floor while
+    /// the Mac is short of memory (`EngineRefitPolicy.floor(…lastPageinBytes:)`).
+    private var lastRefitPageinBytes: UInt64 = 0
     /// A refit is running. A Mac in dark wake polls, passes the floor and starts
     /// another while the last is still parked on the engines, and one production
     /// Mac woke to six stacked refits finishing together (#389).
@@ -118,6 +121,8 @@ final class AppBackgroundService {
     private var historyPruneTask: Task<Void, Never>?
     /// The once-a-day spend → meter fit (#317). See `startSpendMeterFitTask`.
     private var spendMeterFitTask: Task<Void, Never>?
+    /// Claude Code's own session totals against Pacer's, daily (#353).
+    private lazy var dataCanary = DataCanaryScheduler(container: container)
     /// Opt-in local HTTP server (JSON snapshot + Prometheus + SSE) for
     /// third-party integrations. Created here, owned for the process lifetime;
     /// `applyAPIServerConfig()` starts/stops it per the user's preference.
@@ -147,10 +152,13 @@ final class AppBackgroundService {
         arenaGate = gate
         gate.armSafetyNet()
         gate.mark(.store)
-        RateLimitWriteSignal.shared.seed(from: container.mainContext)
+        RateLimitWriteSignal.shared.seedInBackground(from: container)
         // The live meter every surface reads (#318), rebuilt on each reading
         // and each scan cycle that wrote turns.
         LiveMeterBoard.shared.start(container: container)
+        // The window's title and account menu (#413), read before the window
+        // asks for them so neither draws empty for a frame.
+        AccountList.shared.start(container: container)
 
         let costMode = PacerPreferences.costMode()
         Log.write("AppBackground", "starting; cost mode: \(costMode)")
@@ -214,6 +222,7 @@ final class AppBackgroundService {
         startPricingRefreshTask()
         startHistoryPruneTask()
         startSpendMeterFitTask()
+        dataCanary.start()
         installAPISettingsObserver()
         installAPIScopeObserver()
         refreshClaudeSkillIfInstalled()
@@ -254,6 +263,7 @@ final class AppBackgroundService {
         historyPruneTask = nil
         spendMeterFitTask?.cancel()
         spendMeterFitTask = nil
+        dataCanary.stop()
         httpServer.stop()
         if let observer = apiSettingsObserver {
             NotificationCenter.default.removeObserver(observer)
@@ -790,7 +800,8 @@ final class AppBackgroundService {
         let base = rateLimitsChanged
             ? Self.engineRecomputeMinInterval
             : Self.engineRecomputeIdleInterval
-        let floor = EngineRefitPolicy.floor(base: base, pressure: MemoryPressure.shared.level)
+        let floor = EngineRefitPolicy.floor(base: base, pressure: MemoryPressure.shared.level,
+                                            lastPageinBytes: lastRefitPageinBytes)
         if !force, let last = lastEngineRecomputeAt, now.timeIntervalSince(last) < floor {
             if now.timeIntervalSince(last) >= base { TelemetryCounters.add("engine.refit.deferred_pressure") }
             return false
@@ -859,6 +870,7 @@ final class AppBackgroundService {
             }
         }.value
         let reading = meter.finish()
+        lastRefitPageinBytes = reading.activity.pageinBytes
         // Awake time: a refit the Mac slept through took no time at all. Wall
         // time made this metric's p95 39 minutes on one production Mac (#389).
         let refitMs = reading.awakeMilliseconds

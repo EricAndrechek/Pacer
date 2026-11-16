@@ -29,6 +29,9 @@ struct ParkedCredentialStoreTests {
             get { lock.lock(); defer { lock.unlock() }; return _value }
             set { lock.lock(); _value = newValue; lock.unlock() }
         }
+        func mutate(_ change: (inout T) -> Void) {
+            lock.lock(); change(&_value); lock.unlock()
+        }
     }
 
     private static func blob(_ token: String, expires: Date = Date().addingTimeInterval(3600)) -> Data {
@@ -155,6 +158,129 @@ struct ParkedCredentialStoreTests {
         #expect(store.switcherStatus() == .init(saved: 2, usable: 0, failure: nil))
         _ = store.credentials()
         #expect(store.switcherStatus() == .init(saved: 2, usable: 1, failure: nil))
+    }
+
+    // MARK: - Locking (#413)
+    //
+    // A discovery lists the keychain and runs `security` per changed item, up
+    // to 5 s each. It used to hold the store's lock for all of that, so
+    // Settings' status and its "try now" reset waited on it.
+
+    /// A `read` that announces itself and then waits to be let go: a
+    /// `security` run in flight, for as long as the test wants.
+    private final class HeldRead: @unchecked Sendable {
+        let entered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        func hold() { entered.signal(); release.wait() }
+    }
+
+    /// Runs `body` on another thread and says whether it finished in time.
+    /// The caller always lets any held read go afterwards, so a regression
+    /// fails the test instead of hanging it.
+    /// Each step on a thread of its own, not `DispatchQueue.global()`: these
+    /// tests hold a thread on purpose, and in the full parallel suite GCD's
+    /// global pool is often at its thread limit, so a queued block did not
+    /// start for minutes and every wait timed out (r092). A `Thread` always
+    /// starts.
+    private static func onThread(_ body: @escaping @Sendable () -> Void) {
+        let thread = Thread { body() }
+        thread.start()
+    }
+
+    private static func finishes(within seconds: TimeInterval, _ body: @escaping @Sendable () -> Void) -> Bool {
+        let done = DispatchSemaphore(value: 0)
+        Self.onThread { body(); done.signal() }
+        return done.wait(timeout: .now() + seconds) == .success
+    }
+
+    @Test("status and reset do not wait for a discovery's reads")
+    func settingsDoesNotWaitForReads() {
+        let held = HeldRead()
+        let store = ParkedCredentialStore(
+            listItems: { [Self.item("claude-swap", "account-1-a@example.com", 100)] },
+            read: { _ in held.hold(); return .data(Self.blob("tok")) },
+            switcherEnabled: { true })
+        let discovery = DispatchSemaphore(value: 0)
+        Self.onThread { _ = store.credentials(); discovery.signal() }
+        #expect(held.entered.wait(timeout: .now() + 5) == .success)
+
+        let quick = Self.finishes(within: 5) {
+            _ = store.switcherStatus()
+            store.resetFailures()
+        }
+        held.release.signal()
+        #expect(quick, "Settings waited for a security run in flight")
+        #expect(discovery.wait(timeout: .now() + 5) == .success)
+        #expect(store.switcherStatus().usable == 1)
+    }
+
+    /// The user turns the setting off and on (a reset, then a discovery)
+    /// while a read that is about to fail is still out. That failure predates
+    /// the request to retry, so it must not latch over it.
+    @Test("a reset while a failing read is out is still a retry")
+    func resetDuringAFailingRead() {
+        let held = HeldRead()
+        let reads = Reads()
+        let fail = Box(true)
+        let store = ParkedCredentialStore(
+            listItems: { [Self.item("claude-swap", "account-1-a@example.com", 100)] },
+            read: { item in
+                reads.note(item)
+                guard fail.value else { return .data(Self.blob("tok")) }
+                held.hold()
+                return .failed("access denied")
+            },
+            switcherEnabled: { true })
+        let discovery = DispatchSemaphore(value: 0)
+        Self.onThread { _ = store.credentials(); discovery.signal() }
+        #expect(held.entered.wait(timeout: .now() + 5) == .success)
+
+        let reset = Self.finishes(within: 5) { store.resetFailures() }
+        fail.value = false
+        held.release.signal()
+        #expect(reset)
+        #expect(discovery.wait(timeout: .now() + 5) == .success)
+
+        #expect(store.switcherStatus().failure == nil)
+        #expect(store.credentials().map(\.accessToken) == ["tok"])
+        #expect(reads.count == 2)
+    }
+
+    /// Without a reset in between, the same failure latches as before.
+    @Test("a failure with no reset in between still latches")
+    func failureLatchesAcrossTheMerge() {
+        let reads = Reads()
+        let store = ParkedCredentialStore(
+            listItems: { [Self.item("claude-swap", "account-1-a@example.com", 100)] },
+            read: { item in reads.note(item); return .failed("access denied") },
+            switcherEnabled: { true })
+        _ = store.credentials()
+        _ = store.credentials()
+        #expect(reads.count == 1)
+        #expect(store.switcherStatus().failure == "access denied")
+    }
+
+    /// Two discoveries at once must not both read a changed item: on a
+    /// keychain that prompts, that is two prompts.
+    @Test("discoveries at once read a changed item once")
+    func concurrentDiscoveriesReadOnce() {
+        let reads = Reads()
+        let store = ParkedCredentialStore(
+            listItems: { [Self.item("claude-swap", "account-1-a@example.com", 100),
+                          Self.item("Claude Code-credentials-1a2b3c4d", "me", 100)] },
+            read: { item in
+                reads.note(item)
+                Thread.sleep(forTimeInterval: 0.05)
+                return .data(Self.blob("tok-\(item.service)"))
+            },
+            switcherEnabled: { true })
+        let counts = Box<[Int]>([])
+        DispatchQueue.concurrentPerform(iterations: 4) { _ in
+            let n = store.credentials().count
+            counts.mutate { $0.append(n) }
+        }
+        #expect(counts.value == [2, 2, 2, 2])
+        #expect(reads.count == 2)
     }
 
     @Test("the setting is on unless it has been turned off")

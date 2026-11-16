@@ -195,3 +195,179 @@ struct AccountPlanEventTests {
         #expect(a.rateLimitTier == Self.max20)
     }
 }
+
+// MARK: - Decided on the poller (#413)
+
+/// The poller used to read an account's plan events inside `MainActor.run` on
+/// every poll. It now decides in memory (`AccountPlanState`), loaded once per
+/// account on its own actor. Same rule, so the same history.
+@Suite("Account plan state")
+struct AccountPlanStateTests {
+
+    typealias T = AccountPlanEventTests
+    struct Report { let sub: String?; let tier: String?; let at: Date; let by: String? }
+
+    /// The rule's hard cases, as sequences of reports.
+    static let scenarios: [[Report]] = {
+        let m5 = T.max5, m20 = T.max20, t0 = T.t0, day = T.day, minute = T.minute
+        var flap: [Report] = [Report(sub: "max", tier: m5, at: t0, by: "keychain")]
+        for i in 0..<(3 * 24 * 60) {
+            flap.append(Report(sub: "max", tier: i % 2 == 0 ? m20 : m5,
+                               at: t0 + 30 * day + Double(i) * minute, by: i % 2 == 0 ? "keychain" : "desktop"))
+        }
+        return [
+            [Report(sub: "max", tier: m5, at: t0, by: "keychain")],
+            (0..<50).map { Report(sub: "max", tier: m5, at: t0 + Double($0) * minute, by: nil) },
+            [Report(sub: "pro", tier: "default_claude_ai", at: t0, by: nil),
+             Report(sub: "max", tier: m20, at: t0 + 10 * day, by: nil)],
+            [Report(sub: "max", tier: m5, at: t0, by: nil),
+             Report(sub: nil, tier: m20, at: t0 + day, by: nil),
+             Report(sub: nil, tier: nil, at: t0 + 2 * day, by: nil)],
+            [Report(sub: "max", tier: m5, at: t0, by: nil),
+             Report(sub: "max", tier: m20, at: t0 + day, by: nil),
+             Report(sub: "max", tier: m5, at: t0 + day + 3600, by: nil),
+             Report(sub: "max", tier: m5, at: t0 + 2 * day + 3600, by: nil)],
+            flap,
+        ]
+    }()
+
+    private static func rows(_ events: [AccountPlanEvent]) -> [AccountPlanState.Event] {
+        events.map(AccountPlanState.Event.init)
+    }
+
+    @Test("in memory, the same events as the rule against the store")
+    func sameHistoryAsTheStore() throws {
+        for (n, reports) in Self.scenarios.enumerated() {
+            let context = try T.context()
+            let a = T.account(context)
+            for r in reports {
+                a.observePlan(subscriptionType: r.sub, rateLimitTier: r.tier, at: r.at, reportedBy: r.by, in: context)
+            }
+            let stored = try Self.rows(T.events(context))
+
+            var state = AccountPlanState(subscriptionType: nil, rateLimitTier: nil, events: [])
+            var decided: [AccountPlanState.Event] = []
+            for r in reports {
+                if let event = state.observe(subscriptionType: r.sub, rateLimitTier: r.tier,
+                                             at: r.at, reportedBy: r.by)?.event {
+                    decided.append(event)
+                }
+            }
+            #expect(decided == stored, "scenario \(n)")
+            #expect(state.subscriptionType == a.subscriptionType && state.rateLimitTier == a.rateLimitTier,
+                    "scenario \(n)")
+            #expect(state.events == Array(stored.reversed().prefix(AccountPlanState.kept)), "scenario \(n)")
+        }
+    }
+
+    @Test("a change says whether the plan moved, an omitted field keeps its value")
+    func changeReportsThePlanMoving() {
+        var state = AccountPlanState(subscriptionType: "max", rateLimitTier: T.max5, events: [])
+        let first = state.observe(subscriptionType: "max", rateLimitTier: T.max5, at: T.t0)
+        #expect(first?.planChanged == false)
+        #expect(first?.event?.kind == AccountPlanEvent.kindFirst)
+        let same = state.observe(subscriptionType: nil, rateLimitTier: T.max5, at: T.t0 + T.day)
+        #expect(same?.planChanged == false && same?.event == nil)
+        let moved = state.observe(subscriptionType: nil, rateLimitTier: T.max20, at: T.t0 + 2 * T.day)
+        #expect(moved?.planChanged == true)
+        #expect(moved?.subscriptionType == "max" && moved?.rateLimitTier == T.max20)
+        #expect(state.observe(subscriptionType: nil, rateLimitTier: nil, at: T.t0 + 3 * T.day) == nil)
+    }
+
+    @Test("loads the row's pair and its newest events, newest first")
+    func loadsFromTheStore() throws {
+        let context = try T.context()
+        _ = T.account(context, sub: "max", tier: T.max20)
+        for i in 0..<12 {
+            context.insert(AccountPlanEvent(accountId: "acct-a", observedAt: T.t0 + Double(i) * T.day,
+                                            kind: AccountPlanEvent.kindChange, subscriptionType: "max",
+                                            rateLimitTier: i % 2 == 0 ? T.max5 : T.max20))
+        }
+        context.insert(AccountPlanEvent(accountId: "acct-b", observedAt: T.t0 + 99 * T.day,
+                                        kind: AccountPlanEvent.kindFirst, subscriptionType: "pro",
+                                        rateLimitTier: nil))
+        try context.save()
+
+        let state = AccountPlanState.load(accountId: "acct-a", in: context)
+        #expect(state.subscriptionType == "max" && state.rateLimitTier == T.max20)
+        #expect(state.recordsEvents)
+        #expect(state.events.count == AccountPlanState.kept)
+        #expect(state.events.map(\.observedAt) == (4..<12).reversed().map { T.t0 + Double($0) * T.day })
+
+        let unknown = AccountPlanState.load(accountId: "acct-new", in: context)
+        #expect(unknown == AccountPlanState(subscriptionType: nil, rateLimitTier: nil, events: []))
+    }
+
+    @Test("a store without the event table moves the pair and records nothing")
+    func noTableNoEvents() throws {
+        let context = ModelContext(try ModelContainer(
+            for: Account.self, configurations: ModelConfiguration(isStoredInMemoryOnly: true)))
+        _ = T.account(context, sub: "pro", tier: nil)
+        try context.save()
+        var state = AccountPlanState.load(accountId: "acct-a", in: context)
+        #expect(!state.recordsEvents)
+        let change = state.observe(subscriptionType: "max", rateLimitTier: T.max20, at: T.t0)
+        #expect(change?.event == nil && change?.planChanged == true)
+    }
+
+    /// End to end: the first poll loads the state on the poller, the second
+    /// decides in memory, and the event lands in the save the poll signals.
+    @Test("the poller decides the plan itself and signals the save that holds it")
+    func thePollerDecides() async throws {
+        let container = try ModelContainer(
+            for: Schema(PacerStore.allModelTypes),
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true))
+        let blob = try JSONSerialization.data(withJSONObject: ["claudeAiOauth": [
+            "accessToken": "tok",
+            "expiresAt": Int64(Date().addingTimeInterval(3600).timeIntervalSince1970) * 1000,
+            "subscriptionType": "max",
+            "rateLimitTier": T.max20,
+        ]])
+        let client = OAuthClient(
+            keychain: KeychainOAuth(rawReader: { .success(blob) }),
+            transport: { _ in
+                try HTTPOutcome.success(jsonBody: #"{"seven_day":{"utilization":10}}"#,
+                                        headers: ["anthropic-organization-id": "orgP"]).materialize()
+            },
+            desktopEnabled: { false })
+        let poller = OAuthPoller(client: client, container: container, configuration: .init(), clock: TestClock())
+        let atPost = PlanAtPost(sender: poller) {
+            let context = ModelContext(container)
+            let events = (try? AccountPlanEvent.history(for: "orgP", in: context)) ?? []
+            let tier = (try? context.fetch(FetchDescriptor<Account>(
+                predicate: #Predicate { $0.id == "orgP" })))?.first?.rateLimitTier
+            return "\(events.count) \(tier ?? "-")"
+        }
+
+        #expect(await poller.planStateForTesting("orgP") == nil)
+        _ = await poller.runOnce()
+        let loaded = try #require(await poller.planStateForTesting("orgP"))
+        #expect(loaded.rateLimitTier == T.max20 && loaded.events.map(\.kind) == [AccountPlanEvent.kindFirst])
+        _ = await poller.runOnce()
+        #expect(await poller.planStateForTesting("orgP") == loaded, "an unchanged poll changes nothing")
+
+        #expect(atPost.seen.contains("1 \(T.max20)"), "the event and the tier were in the store when the poll signalled")
+        let stored = try await MainActor.run { try AccountPlanEvent.history(for: "orgP", in: ModelContext(container)).count }
+        #expect(stored == 1)
+    }
+}
+
+/// What a fresh read said at each `AccountWriteSignal` post from `sender`.
+private final class PlanAtPost: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [String] = []
+    private var observer: (any NSObjectProtocol)?
+
+    init(sender: AnyObject, read: @escaping @Sendable () -> String) {
+        observer = NotificationCenter.default.addObserver(
+            forName: AccountWriteSignal.name, object: sender, queue: nil
+        ) { [weak self] _ in
+            let value = read()
+            self?.lock.withLock { self?.values.append(value) }
+        }
+    }
+
+    deinit { if let observer { NotificationCenter.default.removeObserver(observer) } }
+
+    var seen: [String] { lock.withLock { values } }
+}

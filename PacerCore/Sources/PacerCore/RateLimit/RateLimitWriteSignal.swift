@@ -14,7 +14,8 @@ import SwiftData
 /// in those getters than in anything else. This changes only when rows land.
 ///
 /// Written by `OAuthPoller` after each save that inserted rows (the only writer
-/// of either table), seeded once from the store at launch.
+/// of either table), seeded once from the store at launch, off the main thread
+/// (`seedInBackground(from:)`).
 @MainActor
 @Observable
 public final class RateLimitWriteSignal {
@@ -73,16 +74,43 @@ public final class RateLimitWriteSignal {
     }
 
     /// The newest row already in the store, so the first reload after launch
-    /// is keyed to real data rather than `nil`.
+    /// is keyed to real data rather than `nil`. What the app calls.
+    ///
+    /// The two fetches run on a detached task in a context of their own, and
+    /// only the result hops back to the main actor. They used to run on the
+    /// main context during launch, which is when the scan's first saves hold
+    /// the store's coordinator: a one-row fetch on main waited behind them
+    /// (the PACER-19 class, #413). A write the poller notes before the seed
+    /// lands is not lost: `note` only ever moves `generation` forward and
+    /// `newest` up, and the seed names no account, so it can only cause a
+    /// reload, never hide one.
+    @discardableResult
+    public func seedInBackground(from container: ModelContainer) -> Task<Void, Never> {
+        Task.detached(priority: .utility) { [self] in
+            let newest = Self.newestSampledAt(in: ModelContext(container))
+            await MainActor.run { note(newest) }
+        }
+    }
+
+    /// `seedInBackground` on the caller's context, synchronously: for headless
+    /// renders (`ScreenshotMode`), which seed from a context holding fixture
+    /// rows they have not saved and then draw at once. Not for the app.
     public func seed(from context: ModelContext) {
+        note(Self.newestSampledAt(in: context))
+    }
+
+    /// The newest `sampledAt` across both rate-limit tables. One row from
+    /// each, by `sampledAt`, which both index.
+    nonisolated static func newestSampledAt(in context: ModelContext) -> Date? {
         var fixed = FetchDescriptor<RateLimitSample>(
             sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
         fixed.fetchLimit = 1
         var scoped = FetchDescriptor<UsageLimitSample>(
             sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
         scoped.fetchLimit = 1
-        note((try? context.fetch(fixed))?.first?.sampledAt)
-        note((try? context.fetch(scoped))?.first?.sampledAt)
+        let dates = [(try? context.fetch(fixed))?.first?.sampledAt,
+                     (try? context.fetch(scoped))?.first?.sampledAt].compactMap { $0 }
+        return dates.max()
     }
 }
 

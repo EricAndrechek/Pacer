@@ -37,41 +37,80 @@ enum SecurityCLI {
         return run(args)
     }
 
+    /// The binary every keychain read shells out to.
+    static let securityExecutable = URL(fileURLWithPath: "/usr/bin/security")
+
     /// One-shot invocation with a 5-second timeout — a safety net for the
     /// pathological "locked keychain prompts modally" case so a bad
     /// keychain state can't wedge a caller (e.g. the poller actor) forever.
-    static func run(_ args: [String]) -> Result<Data, Failure> {
+    ///
+    /// **Both pipes are read while the process runs.** They used to be
+    /// drained only after it exited, and a pipe holds 64 KB: an item, or a
+    /// `security` diagnostic, bigger than that filled it, `security` blocked
+    /// in `write(2)` waiting for a reader that was itself waiting for the
+    /// exit, and the call sat out the whole timeout and came back as
+    /// `.accessDenied`, a read that never prompted reported as a refusal.
+    /// `PipeDrain` reads each to end-of-file on its own thread from launch.
+    /// A `Thread`, not GCD's global pool: with that pool at its thread limit
+    /// (it was, for minutes, under the parallel test suite) neither read
+    /// started before the deadline, and a healthy read came back as
+    /// `.accessDenied`, which `ParkedCredentialStore` latches for the session.
+    ///
+    /// On every path but a timeout both reads have reached end-of-file when
+    /// this returns, so their threads are ending too. After a timeout they end
+    /// once the terminated child's pipes close; only a descendant that keeps
+    /// a pipe open forever keeps one alive.
+    ///
+    /// The timeout covers the exit *and* both reads: a descendant still
+    /// holding a pipe open after the child exits cannot hold the caller
+    /// past it either. On a timeout the child gets `terminate()` (SIGTERM).
+    /// The app installs a no-op SIGTERM handler for its own shutdown, but a
+    /// caught signal's handler is reset to the default across `exec`, so the
+    /// child still dies of it.
+    ///
+    /// `executable` and `timeout` are test seams: a fake that writes past
+    /// the pipe's capacity, or never exits (`SecurityCLITests`).
+    static func run(
+        _ args: [String],
+        executable: URL = securityExecutable,
+        timeout: TimeInterval = 5
+    ) -> Result<Data, Failure> {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        process.executableURL = executable
         process.arguments = args
         let stdout = Pipe()
         let stderr = Pipe()
         process.standardOutput = stdout
         process.standardError = stderr
+        // Set before `run()`, so an exit that comes first is not missed.
+        let exited = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in exited.signal() }
 
         do {
             try process.run()
         } catch {
             return .failure(.spawn(OSStatus((error as NSError).code)))
         }
+        let deadline = DispatchTime.now() + timeout
+        // `Process` closes the parent's copies of the write ends at launch,
+        // so each read ends when the child (and anything it handed the pipe
+        // to) does.
+        let output = PipeDrain(stdout.fileHandleForReading)
+        let errors = PipeDrain(stderr.fileHandleForReading)
 
-        let group = DispatchGroup()
-        group.enter()
-        DispatchQueue.global(qos: .userInitiated).async {
-            process.waitUntilExit()
-            group.leave()
-        }
-        if group.wait(timeout: .now() + 5) == .timedOut {
-            process.terminate()
-            // Drain so the kernel doesn't hold the pipes open.
-            _ = try? stdout.fileHandleForReading.readToEnd()
-            _ = try? stderr.fileHandleForReading.readToEnd()
+        guard exited.wait(timeout: deadline) == .success,
+              let data = output.wait(until: deadline),
+              errors.wait(until: deadline) != nil
+        else {
+            if process.isRunning { process.terminate() }
+            // The drains finish on their own threads once the pipes close;
+            // nothing waits for them past this point.
             return .failure(.accessDenied)
         }
 
         switch process.terminationStatus {
         case 0:
-            return .success((try? stdout.fileHandleForReading.readToEnd()) ?? Data())
+            return .success(data)
         case 44:
             return .failure(.notFound)
         case 36, 51, 128:
@@ -79,5 +118,40 @@ enum SecurityCLI {
         case let status:
             return .failure(.status(OSStatus(status)))
         }
+    }
+}
+
+/// Reads one pipe to end-of-file on a thread of its own, from the moment it
+/// is made, so the child never blocks on a full pipe. `wait(until:)` hands
+/// over what was read, once; it returns nil if end-of-file has not come by
+/// the deadline, and the read then finishes, unobserved, when the pipe
+/// closes. The thread ends with the read.
+///
+/// Its own `Thread` rather than a block on `DispatchQueue.global`: a global
+/// queue only runs the block when the pool has a thread to give it, and a
+/// pool held at its limit by blocked work (the parallel test suite did that
+/// for minutes) left both reads unstarted past the 5 s deadline. A thread
+/// is made for this read whatever the pool is doing, and costs one thread
+/// for the few milliseconds a `security` run takes.
+final class PipeDrain: @unchecked Sendable {
+    private let done = DispatchSemaphore(value: 0)
+    /// Written once on the reader thread before `done` is signalled; read
+    /// only after a successful wait on it, which orders the two.
+    private var data = Data()
+
+    init(_ handle: FileHandle) {
+        let reader = Thread { [self] in
+            data = (try? handle.readToEnd()) ?? Data()
+            done.signal()
+        }
+        reader.name = "PipeDrain"
+        reader.qualityOfService = .userInitiated
+        reader.start()
+    }
+
+    /// Everything the pipe carried, or nil if it is still open at
+    /// `deadline`. Call at most once.
+    func wait(until deadline: DispatchTime) -> Data? {
+        done.wait(timeout: deadline) == .success ? data : nil
     }
 }

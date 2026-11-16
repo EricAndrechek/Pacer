@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import PacerCore
 
-/// Per-forecast wall time of the simulation ports, at the app's 200 paths,
+/// Per-forecast time of the simulation ports, at the app's 200 paths,
 /// on the fixture cases and on a synthetic 120-day history (one account,
 /// readings every minute while a five-hour window runs, every ten minutes
 /// otherwise, the weekly meter every ten minutes, spend in 5-minute rows).
@@ -10,6 +10,8 @@ import Testing
 /// memo), which is what a backfill pays at each cut. Printed, and held
 /// under a loose ceiling that catches a pathology, not a regression of a
 /// few milliseconds (debug builds are several times slower than the app's).
+/// The ceiling holds thread CPU time, not wall time (`cost`), so it does not
+/// move with whatever else is running.
 @Suite struct SimulationTimingTests {
     #if DEBUG
     static let ceilingMs = 5_000.0
@@ -17,10 +19,34 @@ import Testing
     static let ceilingMs = 100.0
     #endif
 
+    /// Wall time of `f`, in ms. For printing; the ceiling holds `cost`.
     static func ms(_ f: () throws -> Void) rethrows -> Double {
         let t0 = DispatchTime.now().uptimeNanoseconds
         try f()
         return Double(DispatchTime.now().uptimeNanoseconds - t0) / 1e6
+    }
+
+    /// What a forecast costs, in ms: `cpu` is the calling thread's CPU time,
+    /// `wall` the elapsed time, printed for reference.
+    struct Cost { var cpu: Double; var wall: Double }
+
+    /// Times `f` by the calling thread's CPU time, which is what the ceiling
+    /// holds. The simulation forecasts are synchronous and single-threaded,
+    /// so that is all of their work, and unlike wall time it does not grow
+    /// while the thread waits for a core. `swift test` runs every suite in
+    /// parallel, and timed by wall clock the 120-day cold maximum read
+    /// 4.75–5.04 s against the 5 s Debug ceiling depending on what else was
+    /// running beside it (#413): a load measurement, not a pathology.
+    static func cost(_ f: () throws -> Void) rethrows -> Cost {
+        let c0 = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID)
+        let t0 = DispatchTime.now().uptimeNanoseconds
+        try f()
+        return Cost(cpu: Double(clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID) - c0) / 1e6,
+                    wall: Double(DispatchTime.now().uptimeNanoseconds - t0) / 1e6)
+    }
+
+    static func stats(_ xs: [Cost]) -> String {
+        "cpu \(stats(xs.map(\.cpu))) / wall \(stats(xs.map(\.wall)))"
     }
 
     static func stats(_ xs: [Double]) -> String {
@@ -32,15 +58,15 @@ import Testing
         let runner = { SimulationPoolTests.runner() }
         for (model, file) in [(G208FableBurst.name, "cases-spend"), (G208FableBurst.name, "cases"),
                               (G207OpusLimit.name, "cases"), (G207OpusLimit.name, "cases-spend")] {
-            var times: [Double] = []
+            var times: [Cost] = []
             for c in try ArenaFixtures.cases(file).cases {
                 guard let spec = ArenaRegistry.spec(model), spec.targets.contains(ArenaTarget(rawValue: c.request.target)!)
                 else { continue }
                 let h = ArenaFixtures.history(c), req = ArenaFixtures.request(c)
-                times.append(try Self.ms { _ = try runner().forecast(model: model, history: h, request: req) })
+                times.append(try Self.cost { _ = try runner().forecast(model: model, history: h, request: req) })
             }
             print("timing \(model) on \(file): \(Self.stats(times))")
-            #expect(times.allSatisfy { $0 < Self.ceilingMs })
+            #expect(times.allSatisfy { $0.cpu < Self.ceilingMs })
         }
     }
 
@@ -66,20 +92,20 @@ import Testing
             (G207OpusPool.name, [.meterFiveHour, .meterSevenDay]),
         ]
         for (model, targets) in models {
-            var cold: [Double] = [], warm: [Double] = []
+            var cold: [Cost] = [], warm: [Cost] = []
             for t in cuts {
                 let h = ArenaHistory(store: store, now: t, accounts: [acct])
                 let req = ArenaRunner.request(history: h, targets: targets)
                 #expect(!req.targets.isEmpty)
-                cold.append(try Self.ms { _ = try SimulationPoolTests.runner().forecast(model: model, history: h, request: req) })
+                cold.append(try Self.cost { _ = try SimulationPoolTests.runner().forecast(model: model, history: h, request: req) })
                 // The same cut again with a fresh runner: what every other
                 // model run on this cut, and the live refit, pays once the
                 // cut's memo holds the derived tables.
-                warm.append(try Self.ms { _ = try SimulationPoolTests.runner().forecast(model: model, history: h, request: req) })
+                warm.append(try Self.cost { _ = try SimulationPoolTests.runner().forecast(model: model, history: h, request: req) })
             }
             let what = targets.map(\.rawValue).sorted().joined(separator: "+")
             print("timing \(model) [\(what)] on 120 days: cold \(Self.stats(cold)); memo warm \(Self.stats(warm))")
-            #expect(cold.allSatisfy { $0 < Self.ceilingMs })
+            #expect(cold.allSatisfy { $0.cpu < Self.ceilingMs })
         }
         let n5 = store.meters[ArenaMeterID(account: acct, windowKind: "five_hour")]?.count ?? 0
         let n7 = store.meters[ArenaMeterID(account: acct, windowKind: "seven_day")]?.count ?? 0

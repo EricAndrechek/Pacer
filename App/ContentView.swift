@@ -82,49 +82,51 @@ struct ContentView: View {
     /// account in it, the newest eight rows can be one login's and the
     /// subtitle then reports the wrong account's pacing. Two rows of cached
     /// latest-readings answer the question exactly, and cost nothing.
-    // lint:allow query-always-mounted known debt: a handful of rows, but it re-fetches and re-runs the shell body on every save; moving it needs every Account writer to signal (proposed issue)
-    @Query private var accounts: [Account]
+    ///
+    /// Through `AccountList`, not a `@Query`: this view is the window shell,
+    /// mounted for as long as the window is open, and a `@Query` here re-ran
+    /// its body after a main-thread fetch on every save of the store (#413).
+    /// The list is read off the main thread when an account is written, and
+    /// changes only when something this title shows did.
+    @State private var accountList = AccountList.shared
     @State private var scope = UsageScope.shared
+    @Environment(\.modelContext) private var modelContext
 
     /// Composed window subtitle — "5h 23% • 7d 41%". When dragged to
     /// the Dock or Cmd+Tab'd, macOS shows the title bar text; with
     /// this in place the user gets at-a-glance pacing without
     /// surfacing the dashboard.
+    ///
+    /// Reads the list, the scope and the live meter, all from `body` (this
+    /// is called there), so a change to any of them retitles the window.
     private var windowSubtitle: String {
-        Self.windowSubtitle(for: scopedAccount,
-                            live: scopedAccount.flatMap { LiveMeterBoard.shared.values[$0.id] } ?? [:])
+        guard let account = accountList.limitAccount(scope.limitAccountId) else { return "" }
+        return Self.windowSubtitle(for: accountList.readings[account.id],
+                                   live: LiveMeterBoard.shared.values[account.id] ?? [:])
     }
 
     /// Each window at its live value (#318), from the account's cached
     /// latest readings: "5h 42.6% • 7d 12%", a reading whole and an estimate
     /// with its decimal (`PacerMeterFormat`). `live` is read in `body`
     /// (through `windowSubtitle`), so a new value retitles the window.
-    private static func windowSubtitle(for account: Account?, live: [String: LiveMeterValue]) -> String {
-        guard let account else { return "" }
+    private static func windowSubtitle(for readings: AccountLatestReadings?,
+                                       live: [String: LiveMeterValue]) -> String {
+        guard let readings else { return "" }
         let now = Date()
         func shown(_ key: String, _ pct: Double?, _ resets: Date?) -> String? {
             guard let pct else { return nil }
-            // `latestPolledAt` is the poll's `sampledAt`, the instant the
-            // live value's reading carries too.
-            let reading = MeterReading(at: account.latestPolledAt ?? .distantPast, percent: pct, resetsAt: resets)
+            // `polledAt` is the poll's `sampledAt`, the instant the live
+            // value's reading carries too.
+            let reading = MeterReading(at: readings.polledAt ?? .distantPast, percent: pct, resetsAt: resets)
             return LiveMeterReadout(reading: reading, live: live[key], now: now).text
         }
         let parts: [String?] = [
-            shown(RateLimitWindowName.fiveHour, account.latestFiveHourPct, account.latestFiveHourResetsAt)
+            shown(RateLimitWindowName.fiveHour, readings.fiveHourPct, readings.fiveHourResetsAt)
                 .map { "5h \($0)" },
-            shown(RateLimitWindowName.sevenDay, account.latestSevenDayPct, account.latestSevenDayResetsAt)
+            shown(RateLimitWindowName.sevenDay, readings.sevenDayPct, readings.sevenDayResetsAt)
                 .map { "7d \($0)" }
         ]
         return parts.compactMap { $0 }.joined(separator: " • ")
-    }
-
-    /// The account the window is showing limits for: the picked scope, else
-    /// the active login — and on a single-account install, the only one.
-    private var scopedAccount: Account? {
-        if let id = scope.limitAccountId, let match = accounts.first(where: { $0.id == id }) {
-            return match
-        }
-        return accounts.first { $0.isActive } ?? accounts.first
     }
 
     /// The freshness readout, wearing the toolbar's own capsule and no other.
@@ -250,6 +252,9 @@ struct ContentView: View {
             }
             // The tab the window opened on (onChange misses the restored one).
             AnalyticsUsage.shared.tabShown(selectionRaw)
+            // The store this window shows: the app's (already started at
+            // launch, so a no-op) or a screenshot run's fixture.
+            accountList.start(container: modelContext.container)
         }
     }
 

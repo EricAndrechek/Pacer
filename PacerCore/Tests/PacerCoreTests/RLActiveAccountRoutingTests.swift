@@ -107,3 +107,60 @@ struct RLActiveAccountRoutingTests {
         #expect(UsageIntelligenceEngine.fitsRateLimits(scope: .account(Self.work), activeAccountId: Self.work))
     }
 }
+
+/// The app's host learns the active account from the store off the main
+/// thread (#413): `rateLimitEngine` used to fetch it on the main context on
+/// first ask, which at launch waits behind the scan's saves.
+@Suite("Rate-limit routing: the active account read at launch")
+@MainActor
+struct RLActiveAccountSeedTests {
+
+    @Test func theStoresActiveAccountIsReadOffMainAndRoutesAsks() async throws {
+        let container = try RLActiveAccountRoutingTests.seededContainer()
+        // Preseeded: no activation observer on the shared NotificationCenter,
+        // where other suites post real activations. The seed is the app
+        // host's own, called directly.
+        let host = EngineHost(container: container,
+                              preseeded: [.allAccounts: UsageIntelligenceEngine(modelContainer: container)])
+        #expect(host.activeAccountId == nil)
+        #expect(host.rateLimitEngine === host.global)
+
+        await host.seedActiveAccountFromStore().value
+        #expect(host.activeAccountId == RLActiveAccountRoutingTests.work)
+        #expect(host.rateLimitEngine === host.engine(for: .account(RLActiveAccountRoutingTests.work)))
+    }
+
+    /// A refit or an activation that has already named the login is newer
+    /// than anything the launch read can say.
+    @Test func theSeedNeverOverridesANewerAnswer() async throws {
+        let container = try RLActiveAccountRoutingTests.seededContainer()
+        let host = EngineHost(container: container,
+                              preseeded: [.allAccounts: UsageIntelligenceEngine(modelContainer: container)])
+        let seed = host.seedActiveAccountFromStore()
+        host.keepFitted(accounts: [RLActiveAccountRoutingTests.work, RLActiveAccountRoutingTests.home],
+                        active: RLActiveAccountRoutingTests.home)
+        await seed.value
+        #expect(host.activeAccountId == RLActiveAccountRoutingTests.home)
+    }
+
+    @Test func withNoActiveAccountTheSeedLeavesTheAllAccountsEngine() async throws {
+        let container = try RLActiveAccountRoutingTests.seededContainer(withAccounts: false)
+        let host = EngineHost(container: container,
+                              preseeded: [.allAccounts: UsageIntelligenceEngine(modelContainer: container)])
+        await host.seedActiveAccountFromStore().value
+        #expect(host.activeAccountId == nil)
+        #expect(host.rateLimitEngine === host.global)
+    }
+
+    /// The app's host starts the read itself.
+    @Test func theAppsHostSeedsItself() async throws {
+        let container = try RLActiveAccountRoutingTests.seededContainer()
+        let host = EngineHost(container: container)
+        await host.activeSeed?.value
+        // An activation posted by a parallel suite may have re-routed it, so
+        // only "something named it" is certain here.
+        #expect(host.activeSeed != nil)
+        #expect(host.activeAccountId != nil)
+        await host.warmUpsFinished()
+    }
+}

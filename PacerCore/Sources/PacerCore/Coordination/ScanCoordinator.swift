@@ -448,6 +448,10 @@ public final class ScanCoordinator {
     /// The login this process last saw, so account-following reacts to a
     /// change rather than re-asserting the same answer every cycle.
     private var lastObservedLoginAccount: String?
+    /// `Account` rows this cycle created and has not yet saved; the cycle's
+    /// save says so (`AccountWriteSignal`). Survives a cycle that throws
+    /// before its save, so the next save still says it.
+    private var accountRowsUnannounced = false
     /// The keychain credential's account, published by the poller and read
     /// by the attribution trail. Shared by reference so the scan never hops
     /// onto the poller's actor to read it.
@@ -2449,6 +2453,10 @@ public final class ScanCoordinator {
         if context.hasChanges {
             try context.save()
         }
+        if accountRowsUnannounced {
+            accountRowsUnannounced = false
+            AccountWriteSignal.post(from: self)
+        }
         // After the save, so the login the marker names is in the store (#343).
         configuration.loginMarker.publish(recorder.trail().currentDefaultLogin)
         // Only now: the rebuilt rollups are committed, so the marks are spent.
@@ -2655,6 +2663,7 @@ public final class ScanCoordinator {
         for id in accountIds {
             let seed = Account.Seed(id: Account.key(forOrg: id), organizationId: id)
             if Account.ensure(seed, in: context).created {
+                accountRowsUnannounced = true
                 log("accounts: \(id.prefix(4)) first seen as Claude Desktop's account")
             }
         }

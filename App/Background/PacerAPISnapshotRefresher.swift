@@ -26,17 +26,18 @@ import PacerCore
 ///   a change is announced once, by whichever arrives first — the poller,
 ///   unless the main actor is idle. A real change (not a re-assertion of the
 ///   same id) pushes an SSE `account` event at once and makes the rebuild
-///   *urgent*: it skips the spacing between builds and is broadcast, so a
-///   stream client hears "the login moved" and then gets the new login's
-///   snapshot (#192);
+///   *urgent*: it skips the spacing between builds (a build waiting out its
+///   rest is cancelled and one starts now) and is broadcast, so a stream
+///   client hears "the login moved" and then gets the new login's snapshot
+///   (#192);
 /// - a 15 s timer, for what changes with no event at all: a session ageing
 ///   out of "active", the day rolling over, an engine export going stale.
 ///
-/// **Coalesced.** At most one build in flight; any number of triggers during
-/// it become exactly one more build after it. A burst of notifications
-/// arriving together (a poll lands, then the scan cycle it caused) is one
-/// rebuild, not three, and a store stall produces one stuck build rather than
-/// a pile of them.
+/// **Coalesced.** At most one build running and at most one scheduled; any
+/// number of triggers during either become exactly one more build. A burst
+/// of notifications arriving together (a poll lands, then the scan cycle it
+/// caused) is one rebuild, not three, and a store stall produces one stuck
+/// build rather than a pile of them. `PacerSnapshotBuildPlan` is the policy.
 ///
 /// **A failed build keeps the previous snapshot.** Stale is the whole point:
 /// it beats a 503, and its age is on every answer.
@@ -44,10 +45,10 @@ final class PacerAPISnapshotRefresher: @unchecked Sendable {
 
     /// Backstop cadence for state that changes without an event.
     static let interval: TimeInterval = 15
-    /// Least time between the starts of two builds. A trigger that lands just
-    /// after one finished waits out the rest of this rather than starting a
-    /// second pass over the same rows.
-    static let minimumSpacing: TimeInterval = 2
+    // Spacing between builds is `PacerSnapshotSpacing`: at least 2 s after the
+    // last build *ended*, 3x that build's duration when it was slow, and never
+    // more than 60 s. Builds are timed on its awake clock, which stops while
+    // the Mac sleeps, so a build the Mac slept through does not read as slow.
     /// A timer tick this soon after a build started skips: that build already
     /// did the tick's job.
     static let timerSkipWindow: TimeInterval = 5
@@ -68,11 +69,11 @@ final class PacerAPISnapshotRefresher: @unchecked Sendable {
     /// Bumped by every start and stop, so a build that straddles one cannot
     /// land a snapshot read before it.
     private var generation: UInt64 = 0
-    private var inFlight = false
-    private var pending = false
+    /// Running, scheduled, requested, urgent, and the spacing between builds.
+    private var plan = PacerSnapshotBuildPlan()
+    /// The timer of `plan.scheduled`, so an urgent request can cancel it.
+    private var scheduledBuild: DispatchWorkItem?
     private var pendingBroadcast = false
-    /// The next build follows an account change: no spacing before it.
-    private var pendingUrgent = false
     private var onAccountChange: (@Sendable (PacerAccountChange) -> Void)?
     private var onClientsChange: (@Sendable (PacerClientsChange) -> Void)?
     /// Shared by the poller's announcement and the `UsageScope` watch.
@@ -108,7 +109,12 @@ final class PacerAPISnapshotRefresher: @unchecked Sendable {
         // on the poster's thread rather than hopping anywhere.
         let newObservers = [
             center.addObserver(forName: .pacerScanCycleDidComplete, object: nil, queue: nil) {
-                [weak self] _ in self?.trigger()
+                [weak self] _ in
+                // Under memory pressure a scan cycle does not rebuild: the
+                // 15 s timer is the only thing that does.
+                guard PacerSnapshotSpacing.scanRequestMayBuild(pressure: MemoryPressure.shared.level)
+                else { return }
+                self?.trigger()
             },
             center.addObserver(forName: .pacerEngineDidRecompute, object: nil, queue: nil) {
                 [weak self] _ in self?.trigger(broadcast: true)
@@ -173,9 +179,11 @@ final class PacerAPISnapshotRefresher: @unchecked Sendable {
         let (oldObservers, oldTimer, oldWatch) = lock.withLock {
             running = false
             generation &+= 1
-            pending = false
+            // Drops the requests and the scheduled build, and starts the
+            // spacing over; a running build still finishes.
+            if plan.reset() != nil { scheduledBuild?.cancel() }
+            scheduledBuild = nil
             pendingBroadcast = false
-            pendingUrgent = false
             onBroadcast = nil
             onAccountChange = nil
             onClientsChange = nil
@@ -205,19 +213,16 @@ final class PacerAPISnapshotRefresher: @unchecked Sendable {
     ///
     /// `urgent` skips the spacing between builds — for an account change,
     /// where the snapshot every subscriber holds just became the wrong
-    /// login's. It still never runs two builds at once: one in flight is
-    /// followed immediately by the urgent one rather than after the gap.
+    /// login's. A build waiting out its rest is cancelled and one starts now.
+    /// It still never runs two builds at once: one running is followed
+    /// immediately by the urgent one rather than after the gap.
     func trigger(broadcast: Bool = false, urgent: Bool = false) {
-        let delay: TimeInterval? = lock.withLock {
+        let next: (item: DispatchWorkItem, delay: TimeInterval)? = lock.withLock {
             guard running else { return nil }
-            pending = true
             if broadcast { pendingBroadcast = true }
-            if urgent { pendingUrgent = true }
-            guard !inFlight else { return nil }
-            inFlight = true
-            return urgent ? 0 : delayBeforeNextBuild(now: Date())
+            return perform(plan.request(urgent: urgent, now: PacerSnapshotSpacing.awakeNow()))
         }
-        if let delay { schedule(after: delay) }
+        if let next { buildQueue.asyncAfter(deadline: .now() + next.delay, execute: next.item) }
     }
 
     /// An active-login value, from the poller or the `UsageScope` watch.
@@ -250,37 +255,41 @@ final class PacerAPISnapshotRefresher: @unchecked Sendable {
         if !recent { trigger() }
     }
 
-    /// Must hold `lock`.
-    private func delayBeforeNextBuild(now: Date) -> TimeInterval {
-        guard let lastStartedAt else { return 0 }
-        return max(0, Self.minimumSpacing - now.timeIntervalSince(lastStartedAt))
-    }
-
-    private func schedule(after delay: TimeInterval) {
-        buildQueue.asyncAfter(deadline: .now() + delay) { [weak self] in self?.runBuild() }
+    /// Carry out a plan step: cancel the build it replaces and make the timer
+    /// item for the one it schedules, which the caller hands to the build
+    /// queue once it has let go of `lock`. Must hold `lock`.
+    private func perform(_ step: PacerSnapshotBuildPlan.Step) -> (item: DispatchWorkItem, delay: TimeInterval)? {
+        guard case let .schedule(token, delay, replacing) = step else { return nil }
+        // A cancel that comes too late (the item already started) is harmless:
+        // `plan.begin` turns away a token it no longer holds.
+        if replacing != nil { scheduledBuild?.cancel() }
+        let item = DispatchWorkItem { [weak self] in self?.runBuild(token: token) }
+        scheduledBuild = item
+        return (item, delay)
     }
 
     // MARK: - Build (on `buildQueue`)
 
-    private func runBuild() {
+    private func runBuild(token: UInt64) {
         let job: (generation: UInt64, broadcast: Bool, urgent: Bool)? = lock.withLock {
-            guard running, pending else {
-                inFlight = false
-                return nil
-            }
-            pending = false
+            // Only the plan's scheduled build runs. A stop dropped it, or an
+            // urgent request replaced it, if the token is not the plan's.
+            let urgent = running ? plan.begin(token: token) : nil
+            if plan.scheduled == nil { scheduledBuild = nil }
+            guard let urgent else { return nil }
             let broadcast = pendingBroadcast
             pendingBroadcast = false
-            let urgent = pendingUrgent
-            pendingUrgent = false
             lastStartedAt = Date()
             return (generation, broadcast, urgent)
         }
         guard let job else { return }
 
-        let startedAt = Date()
-        let result = Result { try PacerAPISnapshot.build(now: startedAt) }
-        let elapsed = Date().timeIntervalSince(startedAt)
+        // Timed on the awake clock: a build the Mac slept through took
+        // seconds of work, not the night, and must not earn a night's rest.
+        let startedAt = PacerSnapshotSpacing.awakeNow()
+        let result = Result { try PacerAPISnapshot.build(now: Date()) }
+        let endedAt = PacerSnapshotSpacing.awakeNow()
+        let elapsed = endedAt - startedAt
         // Every build reads the window's turns and every account's rollups
         // into a throwaway context; rate-limited, so a quiet machine isn't
         // walking its heap every 15 s (#337).
@@ -289,7 +298,7 @@ final class PacerAPISnapshotRefresher: @unchecked Sendable {
         typealias Outcome = (wanted: Bool, first: Bool,
                              broadcast: PacerAPISnapshot?,
                              handler: (@Sendable (PacerAPISnapshot) -> Void)?,
-                             next: TimeInterval?)
+                             next: (item: DispatchWorkItem, delay: TimeInterval)?)
         let outcome: Outcome = lock.withLock {
             // A stop or restart while this was building: its rows may predate
             // whatever the user changed, so it is dropped rather than served.
@@ -311,12 +320,10 @@ final class PacerAPISnapshotRefresher: @unchecked Sendable {
                 broadcast = cache.current
                 if broadcast == nil { pendingBroadcast = true }
             }
-            var next: TimeInterval?
-            if running && pending {
-                next = pendingUrgent ? 0 : delayBeforeNextBuild(now: Date())
-            } else {
-                inFlight = false
-            }
+            // Anything requested while this ran is one build after it: at once
+            // if it was urgent, otherwise after this build's rest.
+            let next = perform(plan.finish(startedAt: startedAt, endedAt: endedAt,
+                                           now: PacerSnapshotSpacing.awakeNow(), proceed: running))
             return (wanted, first, broadcast, onBroadcast, next)
         }
 
@@ -347,6 +354,8 @@ final class PacerAPISnapshotRefresher: @unchecked Sendable {
         if let snapshot = outcome.broadcast, let handler = outcome.handler {
             handler(snapshot)
         }
-        if let next = outcome.next { schedule(after: next) }
+        if let next = outcome.next {
+            buildQueue.asyncAfter(deadline: .now() + next.delay, execute: next.item)
+        }
     }
 }
