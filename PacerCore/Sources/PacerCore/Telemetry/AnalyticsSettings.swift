@@ -25,7 +25,7 @@ public enum AnalyticsSettings {
         /// `all` when empty, else `one`: the account scope, whose value is an
         /// account id and is never sent.
         case presence
-        /// Menu bar chips: the built-in ones, sorted and `+`-joined, or
+        /// Menu bar chips: the built-in ones, sorted and `,`-joined, or
         /// `hidden` when there are none (the bar item is removed).
         case chips
     }
@@ -146,6 +146,6 @@ public enum AnalyticsSettings {
         let scoped = chips.count - builtIn.count
         var parts = builtIn
         if scoped > 0 { parts.append("scoped") }
-        return parts.joined(separator: "+")
+        return parts.joined(separator: ",")
     }
 }

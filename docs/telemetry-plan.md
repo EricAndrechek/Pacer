@@ -138,7 +138,7 @@ list become `other`, free strings are tokenized (`[a-z0-9_.:+-]`).
 
 **Person properties** (`$set`) on `app_launched` and `daily_checkin`:
 `version`, `build.config`, `macos`, `menu_bar.shown`, `menu_bar.chips`
-(built-in chips `+`-joined, `scoped` for any per-model chip, `hidden`),
+(built-in chips `,`-joined, `scoped` for any per-model chip, `hidden`),
 `menu_bar.icon_style`, `menu_bar.icon_driver` (window kind),
 `toggles.crash_reports`, `toggles.performance`, `toggles.usage_data`; on
 `daily_checkin` also `accounts.count`, `accounts.plans`, `install.age_days`,

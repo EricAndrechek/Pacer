@@ -281,7 +281,7 @@ struct AnalyticsMappingTests {
         #expect(find("setting", "cost_mode")?.properties["value"] == .string("calculate"))
         let hour = try #require(find("setting", "notifications_daily_summary_hour"))
         #expect(hour.properties["value"] == nil)
-        #expect(find("setting", "menu_bar_chips")?.properties["value"] == .string("five_hour_pct+icon+scoped"))
+        #expect(find("setting", "menu_bar_chips")?.properties["value"] == .string("five_hour_pct,icon,scoped"))
         let range = try #require(find("control", "range"))
         #expect(range.name == "control_changed" && range.properties["card"] == .string("history"))
         #expect(range.properties["value"] == .string("30d"))
