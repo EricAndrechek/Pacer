@@ -113,7 +113,7 @@ test:  ## Run the PacerCore unit + ground-truth tests.
 	@# domain is removed), so they are swept here, whatever the result (#336).
 	@# The full output goes to a log, and a failing run names its failing tests:
 	@# `tail -3` alone said "N issues" and nothing about which (2026-11-17).
-	@log="$${TMPDIR:-/tmp/}pacer-make-test.log"; cd PacerCore && PACER_ISOLATED_DEFAULTS=1 swift test >"$$log" 2>&1; \
+	@mkdir -p PacerCore/.build; log="$(CURDIR)/PacerCore/.build/make-test.log"; cd PacerCore && PACER_ISOLATED_DEFAULTS=1 swift test >"$$log" 2>&1; \
 		status=$$?; tail -3 "$$log"; \
 		if [ $$status -ne 0 ]; then echo "--- failing tests (full log: $$log)"; \
 			grep -E "✘ Test .*(recorded an issue|failed after)|error: -\[|Test Case .* failed" "$$log" | head -40; fi; \

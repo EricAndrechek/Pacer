@@ -38,6 +38,11 @@ struct TelemetryScrubberTests {
         #expect(scrub("Authorization: Bearer abc.def-ghi_123") == "Authorization: <redacted>")
         #expect(scrub("key sk-ant-oat01-AbCdEf123456 used") == "key <redacted> used")
         #expect(scrub("ghp_0123456789abcdefABCDEF") == "<redacted>")
+        // Prefixed tokens are caught by their prefix, digits or not: the
+        // long-run rule now needs a digit, so these must not rely on it.
+        #expect(scrub("ghu_abcdefghijklmnopQRSTUV") == "<redacted>")
+        #expect(scrub("ghr_abcdefghijklmnopQRSTUV") == "<redacted>")
+        #expect(scrub("token xoxb-abcdefghijklmnop here") == "token <redacted> here")
         #expect(scrub("github_pat_11ABCDEFG0123456789") == "<redacted>")
     }
 

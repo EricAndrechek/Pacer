@@ -17,13 +17,15 @@ public enum DisplaySleepState {
     /// and a main thread already stuck when someone wakes the screen can't
     /// receive it, so the flag would hold back exactly the hang they are
     /// watching. No online display (lid closed, no external screen) counts as
-    /// asleep.
+    /// asleep. A display list CoreGraphics can't give counts as awake: the
+    /// dashboard holds its refreshes on this answer (#407), and an unclear
+    /// answer must never be the one that leaves a visible window stale.
     public static func allDisplaysAsleepNow() -> Bool {
         var count: UInt32 = 0
-        guard CGGetOnlineDisplayList(0, nil, &count) == .success else { return isAsleep }
+        guard CGGetOnlineDisplayList(0, nil, &count) == .success else { return false }
         guard count > 0 else { return true }
         var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
-        guard CGGetOnlineDisplayList(count, &ids, &count) == .success else { return isAsleep }
+        guard CGGetOnlineDisplayList(count, &ids, &count) == .success else { return false }
         return ids.prefix(Int(count)).allSatisfy { CGDisplayIsAsleep($0) != 0 }
     }
 }
