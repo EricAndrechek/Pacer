@@ -34,7 +34,7 @@ Tests: `TelemetryConsentTests`.
 - the check-in snapshot's usage fields: `settings.*`, `clients.*`,
   `accounts.*`, `usage.*` (peak bands, hit/forecast flags, models used, token
   magnitude), `widgets.*`, `lifecycle.*`, `env.*` beyond macOS and model,
-  `install.*`, `models.present`, `counter.*`;
+  `install.*`, `models.present` (ids with the `@revision` cut to 12 characters: a full 40-hex revision is redacted by the scrubber), `counter.*`;
 - the usage counters as Sentry metrics: `ui.*` (tabs, menu, window, modal,
   report problem, alert clicks; not `ui.click.delay.*`), `intent.*`,
   `api.route.*` (`CounterRouting.isUsage`).
@@ -298,7 +298,7 @@ Debug is `#if DEBUG` (`build.config` debug).
   `PacerAppDelegate` (`:92`, `:138`, `:317`, `:379`); telemetry gates on `.normal`.
 - Not in the widget (sandboxed, no network entitlement) and not in the CLI process except the
   feedback send, which attaches the app's install ID read from the shared `cacheDirectoryPath`.
-- Debug builds (`make install`) report as environment `development`, release `pacer@dev`; release
+- Debug builds (`make install`) report as environment `development`, release `com.ericandrechek.pacer@dev+<CFBundleVersion>` (the per-build timestamp, so each dev build is its own release and issues can resolve and regress); release
   builds as `production`, `com.ericandrechek.pacer@<version>+<build>`.
 - DSN lives in `project.yml` as an Info.plist value (`PacerSentryDSN`); empty disables telemetry
   (forks building from source blank it).
