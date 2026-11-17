@@ -11,7 +11,7 @@ struct UpdateInstallPolicyTests {
     /// touching anything of Pacer's: the user who never quits it.
     private func menuBarOnly() -> P.Signals {
         P.Signals(sinceReady: 30, sinceUsed: 3 * 86400, userIdle: 2,
-                  pacerActive: false, menuOpen: false, otherWindowOpen: false,
+                  pacerActive: false, menuOpen: false, otherWindowOpen: false, editingText: false,
                   dashboardOpen: false, storeOpening: false)
     }
 
@@ -52,7 +52,7 @@ struct UpdateInstallPolicyTests {
         #expect(P.decide(s) == .install(.overdue))
     }
 
-    @Test("an open menu or a migrating store blocks even when held past the ceiling and away")
+    @Test("an open menu, a migrating store or edited text blocks even when held past the ceiling and away")
     func hardBlocks() {
         var base = dashboardOnAMonitor()
         base.sinceReady = 30 * 86400
@@ -63,6 +63,8 @@ struct UpdateInstallPolicyTests {
         #expect(P.decide(s) == .wait(.menuOpen))
         s = base; s.storeOpening = true
         #expect(P.decide(s) == .wait(.storeOpening))
+        s = base; s.editingText = true
+        #expect(P.decide(s) == .wait(.editingText))
 
         // And for the menu-bar-only case, which otherwise installs at once.
         var m = menuBarOnly(); m.menuOpen = true
@@ -137,6 +139,51 @@ struct UpdateInstallPolicyTests {
         #expect(P.ceiling > P.maxWait)
     }
 
+    @Test("text being edited blocks, before and after the ceiling, present or away")
+    func editingTextAlwaysBlocks() {
+        // A half-typed Settings field: Settings is a dashboard tab, so the only
+        // window is the dashboard and Pacer may well be the active app.
+        for sinceReady: TimeInterval in [30, P.maxWait, P.ceiling - 1, P.ceiling, 30 * 86400] {
+            for userIdle: TimeInterval in [0, P.userAwayAfter - 1, P.userAwayAfter, 86400] {
+                for active in [false, true] {
+                    var d = dashboardOnAMonitor()
+                    d.sinceReady = sinceReady; d.userIdle = userIdle; d.pacerActive = active
+                    d.editingText = true
+                    #expect(P.decide(d) == .wait(.editingText))
+
+                    // A sheet left up past the ceiling: the reader says editing.
+                    var w = d; w.otherWindowOpen = true
+                    #expect(P.decide(w) == .wait(.editingText))
+
+                    var m = menuBarOnly()
+                    m.sinceReady = sinceReady; m.userIdle = userIdle; m.pacerActive = active
+                    m.editingText = true
+                    #expect(P.decide(m) == .wait(.editingText))
+                }
+            }
+        }
+    }
+
+    @Test("with nothing being edited, an idle Mac installs exactly as before")
+    func noEditingIdleInstalls() {
+        var d = dashboardOnAMonitor()
+        d.editingText = false
+        d.userIdle = P.userAwayAfter
+        #expect(P.decide(d) == .install(.userAway))
+        d.pacerActive = true
+        #expect(P.decide(d) == .install(.userAway))
+        #expect(P.decide(menuBarOnly()) == .install(.noWindow))
+
+        var w = menuBarOnly()
+        w.otherWindowOpen = true
+        w.userIdle = P.userAwayAfter
+        w.sinceReady = P.ceiling
+        #expect(P.decide(w) == .install(.heldTooLong))
+
+        // The fixture is the "not editing" case every earlier test assumed.
+        #expect(menuBarOnly().editingText == false)
+    }
+
     @Test("Pacer used or launched a moment ago waits out the quiet period, dashboard or not")
     func recentlyUsed() {
         var s = menuBarOnly()
@@ -167,11 +214,13 @@ struct UpdateInstallPolicyTests {
     @Test("the hard blocks are checked in a fixed order, the store first")
     func blockOrder() {
         var s = menuBarOnly()
-        s.storeOpening = true; s.menuOpen = true; s.pacerActive = true; s.otherWindowOpen = true
+        s.storeOpening = true; s.menuOpen = true; s.editingText = true; s.pacerActive = true; s.otherWindowOpen = true
         #expect(P.decide(s) == .wait(.storeOpening))
         s.storeOpening = false
         #expect(P.decide(s) == .wait(.menuOpen))
         s.menuOpen = false
+        #expect(P.decide(s) == .wait(.editingText))
+        s.editingText = false
         #expect(P.decide(s) == .wait(.inUse))
         s.userIdle = P.userAwayAfter
         #expect(P.decide(s) == .wait(.windowOpen))

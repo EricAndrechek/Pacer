@@ -18,10 +18,10 @@ import Foundation
 /// What it guards against is someone noticing. A relaunch with no window open
 /// shows nothing but the menu-bar item blinking; one with the dashboard open
 /// puts the dashboard back where it was, but someone may be reading it, so that
-/// waits for nobody to be at the Mac. Two things are never interrupted however
-/// long the update has waited: an open menu and a store that is still
-/// migrating. Pacer in use and a second window or sheet (it may hold typing a
-/// relaunch would lose) block too, but only while someone is at the Mac, and
+/// waits for nobody to be at the Mac. Three things are never interrupted
+/// however long the update has waited: an open menu, a store that is still
+/// migrating, and text being edited (a relaunch would lose it). Pacer in use
+/// and a second window block too, but only while someone is at the Mac, and
 /// only for `ceiling`.
 ///
 /// Why those two give way: while an update is held Sparkle runs no check at
@@ -47,6 +47,12 @@ public enum UpdateInstallPolicy {
         public var menuOpen: Bool
         /// A window other than the dashboard, a sheet, or a modal panel is up.
         public var otherWindowOpen: Bool
+        /// Something may hold text a relaunch would lose: a text field or
+        /// editable text view is some window's first responder (Settings is a
+        /// tab of the dashboard, so its fields are not a second window), or a
+        /// sheet or modal panel is up, whose contents the app cannot inspect.
+        /// When in doubt the reader says true.
+        public var editingText: Bool
         /// The dashboard is open, minimised, or behind a hidden Pacer: a
         /// relaunch brings it back on screen.
         public var dashboardOpen: Bool
@@ -56,9 +62,10 @@ public enum UpdateInstallPolicy {
 
         public init(sinceReady: TimeInterval, sinceUsed: TimeInterval, userIdle: TimeInterval,
                     pacerActive: Bool, menuOpen: Bool, otherWindowOpen: Bool,
-                    dashboardOpen: Bool, storeOpening: Bool) {
+                    editingText: Bool, dashboardOpen: Bool, storeOpening: Bool) {
             self.sinceReady = sinceReady; self.sinceUsed = sinceUsed; self.userIdle = userIdle
             self.pacerActive = pacerActive; self.menuOpen = menuOpen; self.otherWindowOpen = otherWindowOpen
+            self.editingText = editingText
             self.dashboardOpen = dashboardOpen; self.storeOpening = storeOpening
         }
     }
@@ -83,6 +90,7 @@ public enum UpdateInstallPolicy {
     public enum WaitReason: String, Sendable, Equatable {
         case storeOpening = "store opening"
         case menuOpen = "menu open"
+        case editingText = "editing text"
         case inUse = "in use"
         case windowOpen = "window open"
         case recentlyUsed = "recently used"
@@ -98,7 +106,7 @@ public enum UpdateInstallPolicy {
     /// bounds how far behind the feed a waiting update can fall. A Mac that is
     /// left alone for ten minutes in a day never reaches it.
     public static let maxWait: TimeInterval = 24 * 3600
-    /// After this, only an open menu or a migrating store keeps a held update
+    /// After this, only an open menu, a migrating store or text being edited keeps a held update
     /// from installing, once nobody has touched the Mac for `userAwayAfter`:
     /// not Pacer being active, not a forgotten second window, not the quiet
     /// period. Three days, so it only ever catches a hold the rules above
@@ -109,6 +117,9 @@ public enum UpdateInstallPolicy {
         // Never, however long the update has waited.
         if s.storeOpening { return .wait(.storeOpening) }
         if s.menuOpen { return .wait(.menuOpen) }
+        // Unattended or not: what someone typed is theirs until they submit
+        // it. The ceiling below does not reach past this.
+        if s.editingText { return .wait(.editingText) }
         let away = s.userIdle >= userAwayAfter
         if s.sinceReady >= ceiling, away { return .install(.heldTooLong) }
         // Active is in use only while someone is there to use it: an active

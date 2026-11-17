@@ -160,11 +160,29 @@ final class UpdateInstallScheduler {
         install?()
     }
 
+    /// A window's first responder is somewhere typing goes: the field editor
+    /// of an editable text field (an `NSTextView` with `isFieldEditor`; a
+    /// selectable label's field editor is not editable), an editable
+    /// text view, or an editable text field before its field editor takes
+    /// over. A SwiftUI `TextField` is backed by the same AppKit field editor.
+    /// Per window, not only the key one: the field editor stays first
+    /// responder of a window that has lost key status, with its text unsent.
+    /// A pointer check per visible window, once a minute while an update waits.
+    private static func holdsEditableText(_ responder: NSResponder?) -> Bool {
+        if let text = responder as? NSText { return text.isEditable }
+        if let field = responder as? NSTextField { return field.isEditable }
+        return false
+    }
+
     private func signals(now: Date, readyAt: Date) -> UpdateInstallPolicy.Signals {
         var dashboardOnScreen = false
         var otherWindowOpen = NSApp.modalWindow != nil
+        // A sheet or modal panel's contents can't be told apart from a form
+        // half filled in, so either counts as editing.
+        var editingText = NSApp.modalWindow != nil
         for window in NSApp.windows where window.isVisible {
-            if window.attachedSheet != nil { otherWindowOpen = true }
+            if window.attachedSheet != nil { otherWindowOpen = true; editingText = true }
+            if Self.holdsEditableText(window.firstResponder) { editingText = true }
             if MainWindowPlacement.isDashboard(window) {
                 dashboardOnScreen = true
             } else if window.canBecomeMain, !(window is NSPanel) {
@@ -186,6 +204,7 @@ final class UpdateInstallScheduler {
             // from begin/end notifications, so it cannot stick.
             menuOpen: RunLoop.current.currentMode == .eventTracking,
             otherWindowOpen: otherWindowOpen,
+            editingText: editingText,
             // `wasOpen` is what the relaunch restores (MainWindowPlacement),
             // so a minimised or hidden dashboard counts: it comes back on
             // screen.
