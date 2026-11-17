@@ -1029,11 +1029,18 @@ public actor UsageIntelligenceEngine {
         // from the window's duration so it's identical for the fixed 5h/7d
         // blocks and correct for any scoped window.
         let lookback: TimeInterval = WindowSpec.isWeeklyScale(duration: rf.duration) ? 24 * 3600 : 90 * 60
+        // Only the readings since the last gap in coverage (#421): across a
+        // gap the climb is known and its timing is not, and the weekly 24 h
+        // reach would spread a jump that landed in one poll across the day.
+        // This is also the slope `pacer gate` falls back on when the recent
+        // burn has no rate yet. The window's 0% at `cycleStart`
+        // (`PartialCycle`) is cut the same way when the first poll came more
+        // than `maxGap` after it.
         let cutoff = max(current.cycleStart, f.now.addingTimeInterval(-lookback))
-        let recent = current.samples.filter { $0.at >= cutoff }
+        let recent = ReadingCoverage.continuousRun(current.samples.filter { $0.at >= cutoff }, at: \.at)
         var slope = 0.0
         if let first = recent.first, let last = recent.last,
-           last.at.timeIntervalSince(first.at) >= 5 * 60 {
+           last.at.timeIntervalSince(first.at) >= ReadingCoverage.minRateSpan {
             slope = (last.usedPercentage - first.usedPercentage)
                 / (last.at.timeIntervalSince(first.at) / 3600)
         }

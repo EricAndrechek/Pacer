@@ -209,6 +209,30 @@ struct EngineSelfEvalTests {
         #expect(abs(outlook!.slopePercentPerHour) < 1)
     }
 
+    /// The descriptive slope reads only the readings since the last gap in
+    /// coverage (#421). A weekly window at 20% from 20 to 12 hours ago, then
+    /// nothing for eleven hours, then 30% an hour ago and 31% for the last
+    /// half hour. Across the whole 24 h lookback that is 20 → 31 over 20
+    /// hours, 0.55%/h, spreading a jump nobody watched over the day; since
+    /// the gap it is 30 → 31 over the hour, 1.0%/h.
+    @Test func burnOutlookSlopeDoesNotReachAcrossAGap() {
+        let reset = Self.now.addingTimeInterval(3 * 86400)
+        var rate: [EngineFeatures.RateRow] = []
+        for minutesAgo in stride(from: 20 * 60, through: 12 * 60, by: -10) {
+            rate.append(.init(window: "seven_day", at: Self.now.addingTimeInterval(-Double(minutesAgo) * 60),
+                              usedPercentage: 20, resetsAt: reset))
+        }
+        for minutesAgo in stride(from: 60, through: 0, by: -10) {
+            rate.append(.init(window: "seven_day", at: Self.now.addingTimeInterval(-Double(minutesAgo) * 60),
+                              usedPercentage: minutesAgo > 30 ? 30 : 31, resetsAt: reset))
+        }
+        let f = EngineFeatures.build(now: Self.now, calendar: Self.utc, daily: [], hourly: [],
+                                     rate: rate, lastArrivalAt: nil)
+        let outlook = UsageIntelligenceEngine.burnOutlook(f, UsageIntelligenceEngine.makeFit(f), windowKey: "seven_day")
+        #expect(outlook != nil)
+        #expect(abs((outlook?.slopePercentPerHour ?? -1) - 1.0) < 1e-9)
+    }
+
     @Test func trajectoriesSpanNowToResetAndFlagSelection() {
         let f = steepFiveHourFeatures()
         let fit = UsageIntelligenceEngine.makeFit(f)
