@@ -27,7 +27,8 @@ import Testing
 /// #421 reads the descriptive slope only since the last gap in coverage
 /// (`ReadingCoverage.maxGap`, 30 minutes). This 7-day fixture is read every
 /// 6 hours, so every pair of its readings is a gap and the slope has no
-/// continuous run to measure: 0 where it was 0.3667, and nothing else moved.
+/// continuous run to measure: unknown (`-`, nil) where it was 0.3667, and
+/// nothing else moved.
 struct EngineWindowGoldenTests {
 
     static let utc = Calendar(identifier: .gregorian).with(timeZone: TimeZone(identifier: "UTC")!)
@@ -115,7 +116,7 @@ struct EngineWindowGoldenTests {
     cycles obs=6 over90=0 hit100=0
     cal[pooled] n=6 q10=-0.6000 q50=-0.6000 q90=-0.6000
     outlook value=61.6000 i80=nil i50=nil conf=medium support=6 method=rl-recent-rate note=-
-    burn used=30.8000 slope=0.0000 cross=nil early=nil late=nil anchor=0.0000 method=recent-rate
+    burn used=30.8000 slope=- cross=nil early=nil late=nil anchor=0.0000 method=recent-rate
     traj n=7 selected=recent-rate pts=25 cross=nil last=61.6000
     """
 
