@@ -160,11 +160,35 @@ final class UpdateInstallScheduler {
         install?()
     }
 
+    /// A window's first responder holds text someone has changed since it
+    /// took focus (`UpdateInstallPolicy.isEditing`). Typing into any text
+    /// field, SwiftUI's included, goes to the window's field editor, an
+    /// `NSTextView`; its undo manager records each edit, and an IME
+    /// composition shows as marked text before it does. Focus alone is not
+    /// editing. Per window, not only the key one: the field editor stays first
+    /// responder of a window that has lost key status, with its text unsent.
+    /// A few property reads per visible window, once a minute while an update
+    /// waits.
+    private static func holdsEditedText(_ responder: NSResponder?) -> Bool {
+        // An `NSTextField` that is itself first responder has not handed
+        // typing to its field editor yet, so nothing has been typed into it.
+        guard let text = responder as? NSTextView else { return false }
+        return UpdateInstallPolicy.isEditing(.init(
+            editable: text.isEditable,
+            allowsUndo: text.allowsUndo,
+            canUndo: text.undoManager?.canUndo ?? false,
+            hasMarkedText: text.hasMarkedText()))
+    }
+
     private func signals(now: Date, readyAt: Date) -> UpdateInstallPolicy.Signals {
         var dashboardOnScreen = false
         var otherWindowOpen = NSApp.modalWindow != nil
+        // A sheet or modal panel's contents can't be told apart from a form
+        // half filled in, so either counts as editing.
+        var editingText = NSApp.modalWindow != nil
         for window in NSApp.windows where window.isVisible {
-            if window.attachedSheet != nil { otherWindowOpen = true }
+            if window.attachedSheet != nil { otherWindowOpen = true; editingText = true }
+            if Self.holdsEditedText(window.firstResponder) { editingText = true }
             if MainWindowPlacement.isDashboard(window) {
                 dashboardOnScreen = true
             } else if window.canBecomeMain, !(window is NSPanel) {
@@ -186,6 +210,7 @@ final class UpdateInstallScheduler {
             // from begin/end notifications, so it cannot stick.
             menuOpen: RunLoop.current.currentMode == .eventTracking,
             otherWindowOpen: otherWindowOpen,
+            editingText: editingText,
             // `wasOpen` is what the relaunch restores (MainWindowPlacement),
             // so a minimised or hidden dashboard counts: it comes back on
             // screen.
