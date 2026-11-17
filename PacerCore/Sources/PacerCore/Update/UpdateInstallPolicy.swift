@@ -18,10 +18,17 @@ import Foundation
 /// What it guards against is someone noticing. A relaunch with no window open
 /// shows nothing but the menu-bar item blinking; one with the dashboard open
 /// puts the dashboard back where it was, but someone may be reading it, so that
-/// waits for nobody to be at the Mac. Some things are never interrupted
-/// however long the update has waited: Pacer in use, an open menu, a second
-/// window or a sheet (it may hold typing a relaunch would lose), a store that
-/// is still migrating.
+/// waits for nobody to be at the Mac. Two things are never interrupted however
+/// long the update has waited: an open menu and a store that is still
+/// migrating. Pacer in use and a second window or sheet (it may hold typing a
+/// relaunch would lose) block too, but only while someone is at the Mac, and
+/// only for `ceiling`.
+///
+/// Why those two give way: while an update is held Sparkle runs no check at
+/// all, so a hold that never ends is a Mac that silently stops updating. Being
+/// the active app is not the same as being used: Pacer stays active when the
+/// person in front of it walks away, and an About or Settings window can stay
+/// open for weeks. Both used to block for ever, ahead of `maxWait`.
 public enum UpdateInstallPolicy {
 
     /// What the rule reads. Durations, so the rule has no clock of its own.
@@ -68,6 +75,9 @@ public enum UpdateInstallPolicy {
         case userAway = "user away"
         /// The dashboard has stayed open with someone at the Mac for a day.
         case overdue
+        /// Held for `ceiling` behind a window or an active Pacer, and nobody
+        /// is at the Mac now.
+        case heldTooLong = "held too long"
     }
 
     public enum WaitReason: String, Sendable, Equatable {
@@ -88,12 +98,24 @@ public enum UpdateInstallPolicy {
     /// bounds how far behind the feed a waiting update can fall. A Mac that is
     /// left alone for ten minutes in a day never reaches it.
     public static let maxWait: TimeInterval = 24 * 3600
+    /// After this, only an open menu or a migrating store keeps a held update
+    /// from installing, once nobody has touched the Mac for `userAwayAfter`:
+    /// not Pacer being active, not a forgotten second window, not the quiet
+    /// period. Three days, so it only ever catches a hold the rules above
+    /// would otherwise keep for ever.
+    public static let ceiling: TimeInterval = 72 * 3600
 
     public static func decide(_ s: Signals) -> Decision {
         // Never, however long the update has waited.
         if s.storeOpening { return .wait(.storeOpening) }
         if s.menuOpen { return .wait(.menuOpen) }
-        if s.pacerActive { return .wait(.inUse) }
+        let away = s.userIdle >= userAwayAfter
+        if s.sinceReady >= ceiling, away { return .install(.heldTooLong) }
+        // Active is in use only while someone is there to use it: an active
+        // Pacer nobody has touched for `userAwayAfter` falls through to the
+        // same rules as an inactive one (an open dashboard installs as
+        // `userAway`).
+        if s.pacerActive, !away { return .wait(.inUse) }
         if s.otherWindowOpen { return .wait(.windowOpen) }
         // The overdue case too: someone who was using Pacer a minute ago may
         // still be reading it.

@@ -27,7 +27,7 @@ import Sparkle
 /// `sessionInProgress`), so nothing can resume a stale update and no second
 /// one can stack up behind it. The block installs and relaunches with no UI
 /// (`finishInstallationWithResponse:… displayingUserInterface:NO`).
-/// `UpdateInstallPolicy` says when; `maxWait` bounds the hold, so the feed is
+/// `UpdateInstallPolicy` says when; `maxWait` and `ceiling` bound the hold, so the feed is
 /// never left unread for long. The next launch reads the feed as usual.
 /// If Pacer quits first, Sparkle installs on quit as it always did.
 ///
