@@ -139,6 +139,8 @@ public enum AnalyticsSettings {
         }
     }
 
+    // Comma, not `+`: four chips with `+` run past 40 characters, and the
+    // scrubber's long-run rule once redacted the whole value.
     public static func chipsSummary(_ csv: String) -> String {
         let chips = csv.split(separator: ",").map(String.init)
         if chips.isEmpty { return "hidden" }
