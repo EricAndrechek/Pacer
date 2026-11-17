@@ -160,18 +160,24 @@ final class UpdateInstallScheduler {
         install?()
     }
 
-    /// A window's first responder is somewhere typing goes: the field editor
-    /// of an editable text field (an `NSTextView` with `isFieldEditor`; a
-    /// selectable label's field editor is not editable), an editable
-    /// text view, or an editable text field before its field editor takes
-    /// over. A SwiftUI `TextField` is backed by the same AppKit field editor.
-    /// Per window, not only the key one: the field editor stays first
+    /// A window's first responder holds text someone has changed since it
+    /// took focus (`UpdateInstallPolicy.isEditing`). Typing into any text
+    /// field, SwiftUI's included, goes to the window's field editor, an
+    /// `NSTextView`; its undo manager records each edit, and an IME
+    /// composition shows as marked text before it does. Focus alone is not
+    /// editing. Per window, not only the key one: the field editor stays first
     /// responder of a window that has lost key status, with its text unsent.
-    /// A pointer check per visible window, once a minute while an update waits.
-    private static func holdsEditableText(_ responder: NSResponder?) -> Bool {
-        if let text = responder as? NSText { return text.isEditable }
-        if let field = responder as? NSTextField { return field.isEditable }
-        return false
+    /// A few property reads per visible window, once a minute while an update
+    /// waits.
+    private static func holdsEditedText(_ responder: NSResponder?) -> Bool {
+        // An `NSTextField` that is itself first responder has not handed
+        // typing to its field editor yet, so nothing has been typed into it.
+        guard let text = responder as? NSTextView else { return false }
+        return UpdateInstallPolicy.isEditing(.init(
+            editable: text.isEditable,
+            allowsUndo: text.allowsUndo,
+            canUndo: text.undoManager?.canUndo ?? false,
+            hasMarkedText: text.hasMarkedText()))
     }
 
     private func signals(now: Date, readyAt: Date) -> UpdateInstallPolicy.Signals {
@@ -182,7 +188,7 @@ final class UpdateInstallScheduler {
         var editingText = NSApp.modalWindow != nil
         for window in NSApp.windows where window.isVisible {
             if window.attachedSheet != nil { otherWindowOpen = true; editingText = true }
-            if Self.holdsEditableText(window.firstResponder) { editingText = true }
+            if Self.holdsEditedText(window.firstResponder) { editingText = true }
             if MainWindowPlacement.isDashboard(window) {
                 dashboardOnScreen = true
             } else if window.canBecomeMain, !(window is NSPanel) {

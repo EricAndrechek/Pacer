@@ -47,11 +47,13 @@ public enum UpdateInstallPolicy {
         public var menuOpen: Bool
         /// A window other than the dashboard, a sheet, or a modal panel is up.
         public var otherWindowOpen: Bool
-        /// Something may hold text a relaunch would lose: a text field or
-        /// editable text view is some window's first responder (Settings is a
-        /// tab of the dashboard, so its fields are not a second window), or a
-        /// sheet or modal panel is up, whose contents the app cannot inspect.
-        /// When in doubt the reader says true.
+        /// Something holds text a relaunch would lose: some window's first
+        /// responder is a text field someone has changed since it took focus
+        /// (`isEditing(_:)`; Settings is a tab of the dashboard, so its fields
+        /// are not a second window), or a sheet or modal panel is up, whose
+        /// contents the app cannot inspect. A field that merely has focus does
+        /// not count: the dashboard can stay open on a monitor for weeks with
+        /// the Projects search focused, and that must not hold an update for ever.
         public var editingText: Bool
         /// The dashboard is open, minimised, or behind a hidden Pacer: a
         /// relaunch brings it back on screen.
@@ -112,6 +114,35 @@ public enum UpdateInstallPolicy {
     /// period. Three days, so it only ever catches a hold the rules above
     /// would otherwise keep for ever.
     public static let ceiling: TimeInterval = 72 * 3600
+
+    /// What the app can read from a window's first responder when it is text.
+    public struct FocusedText: Sendable, Equatable {
+        /// Typing would change it (a selectable label's field editor is not).
+        public var editable: Bool
+        /// It records its edits for undo. Without that, `canUndo` says nothing.
+        public var allowsUndo: Bool
+        /// Its undo manager holds an edit: something was typed, pasted or
+        /// deleted since the field took focus.
+        public var canUndo: Bool
+        /// An input-method composition is in progress (Japanese, Chinese,
+        /// Korean, dead keys): typed, not yet committed, and not on the undo
+        /// stack yet.
+        public var hasMarkedText: Bool
+
+        public init(editable: Bool, allowsUndo: Bool, canUndo: Bool, hasMarkedText: Bool) {
+            self.editable = editable; self.allowsUndo = allowsUndo
+            self.canUndo = canUndo; self.hasMarkedText = hasMarkedText
+        }
+    }
+
+    /// Whether focused text counts as being edited. Focus alone does not; an
+    /// edit since focus does. A field that keeps no undo record can't say
+    /// whether it was edited, so it counts.
+    public static func isEditing(_ f: FocusedText) -> Bool {
+        guard f.editable else { return false }
+        if f.hasMarkedText { return true }
+        return f.allowsUndo ? f.canUndo : true
+    }
 
     public static func decide(_ s: Signals) -> Decision {
         // Never, however long the update has waited.

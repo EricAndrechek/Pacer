@@ -164,6 +164,43 @@ struct UpdateInstallPolicyTests {
         }
     }
 
+    @Test("a focused field nobody has changed is not editing; a changed one or a composition is")
+    func focusedVersusEdited() {
+        typealias F = P.FocusedText
+        // Focused, untouched: the Projects search left focused on a monitor.
+        #expect(!P.isEditing(F(editable: true, allowsUndo: true, canUndo: false, hasMarkedText: false)))
+        // Typed into since it took focus.
+        #expect(P.isEditing(F(editable: true, allowsUndo: true, canUndo: true, hasMarkedText: false)))
+        // An IME composition, not on the undo stack yet.
+        #expect(P.isEditing(F(editable: true, allowsUndo: true, canUndo: false, hasMarkedText: true)))
+        // A selectable label's field editor: never editing.
+        #expect(!P.isEditing(F(editable: false, allowsUndo: true, canUndo: true, hasMarkedText: true)))
+        // Keeps no undo record: can't tell, so it counts.
+        #expect(P.isEditing(F(editable: true, allowsUndo: false, canUndo: false, hasMarkedText: false)))
+    }
+
+    @Test("a focused, untouched field with nobody at the Mac installs as before; an edited one blocks either side of the ceiling")
+    func focusedUntouchedInstalls() {
+        let untouched = P.FocusedText(editable: true, allowsUndo: true, canUndo: false, hasMarkedText: false)
+        let edited = P.FocusedText(editable: true, allowsUndo: true, canUndo: true, hasMarkedText: false)
+
+        var d = dashboardOnAMonitor()
+        d.pacerActive = true
+        d.userIdle = P.userAwayAfter
+        d.editingText = P.isEditing(untouched)
+        #expect(P.decide(d) == .install(.userAway))
+        d.sinceReady = P.ceiling
+        #expect(P.decide(d) == .install(.heldTooLong))
+
+        for sinceReady: TimeInterval in [30, P.ceiling - 1, P.ceiling, 30 * 86400] {
+            var e = dashboardOnAMonitor()
+            e.sinceReady = sinceReady
+            e.userIdle = 86400
+            e.editingText = P.isEditing(edited)
+            #expect(P.decide(e) == .wait(.editingText))
+        }
+    }
+
     @Test("with nothing being edited, an idle Mac installs exactly as before")
     func noEditingIdleInstalls() {
         var d = dashboardOnAMonitor()
