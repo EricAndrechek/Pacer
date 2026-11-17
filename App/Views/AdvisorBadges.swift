@@ -126,7 +126,7 @@ struct AdvisorBadges: View {
             Task { await refreshEngineHints() }
         }
         .task { await refreshEngineHints() }
-        .onReceive(NotificationCenter.default.publisher(for: .pacerEngineDidRecompute)) { _ in
+        .onReceive(ViewRefreshGate.shared.engineRecomputes) { _ in
             Task { await refreshEngineHints() }
         }
     }

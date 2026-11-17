@@ -111,7 +111,7 @@ struct ProjectionCompareModal: View {
         } else {
             reading = scopedLatest.map { MeterReading(at: $0.sampledAt, percent: $0.percent, resetsAt: $0.resetsAt) }
         }
-        return reading.map { LiveMeterBoard.shared.readout(account: limitAccountId, window: windowKey, reading: $0) }
+        return reading.map { LiveMeterBoard.shared.dashboardReadout(account: limitAccountId, window: windowKey, reading: $0) }
     }
 
     /// Current-cycle actuals + a synthesized "now" tail, from whichever source
@@ -153,7 +153,7 @@ struct ProjectionCompareModal: View {
         let pace = catchUpPreview ?? ArenaSpeedUp.shared.status.pace
         // Read here, by value, so a poll written by any context reloads the
         // actuals (`RateLimitWriteSignal`).
-        let writes = RateLimitWriteSignal.shared.generation
+        let writes = RateLimitWriteSignal.shared.dashboardGeneration
         // The live number, read here too: when it moves, the fan is re-asked
         // from it (#318).
         let livePercent = readout?.live?.percent
@@ -223,6 +223,7 @@ struct ProjectionCompareModal: View {
             await refresh()
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(60))
+                await ViewRefreshGate.shared.untilAwake()
                 guard !Task.isCancelled else { return }
                 await refreshBoard()
             }
@@ -231,7 +232,7 @@ struct ProjectionCompareModal: View {
         // A new rate is a new time left (`ArenaScoringProgress.eta`), and a
         // speed-up ending means the catch-up may be done: the list again.
         .onChange(of: pace) { _, _ in Task { await refreshBoard() } }
-        .onReceive(NotificationCenter.default.publisher(for: .pacerEngineDidRecompute)) { _ in
+        .onReceive(ViewRefreshGate.shared.engineRecomputes) { _ in
             Task { await refresh() }
         }
     }

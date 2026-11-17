@@ -166,10 +166,12 @@ public final class AccountList {
         if !readings.isEmpty { readings = [:] }
     }
 
-    /// Record a write and read it.
+    /// Record a write and read it: at once while any display is awake, once
+    /// on wake while every display sleeps (`ViewRefreshGate`, #407). Only the
+    /// window shell and its toolbar read this list.
     func noteWrite() {
         generation &+= 1
-        refresh()
+        ViewRefreshGate.shared.offer(.accountList) { [weak self] _ in self?.refresh() }
     }
 
     /// Ask for a read. Coalesced: a request while one runs becomes one more

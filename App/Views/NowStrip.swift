@@ -342,6 +342,9 @@ struct NowStrip: View {
             // closes rather than ticking against a dead view.
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(Self.refreshInterval))
+                // A store read a second, held while every display sleeps
+                // (#407); on wake, one read at once.
+                await ViewRefreshGate.shared.untilAwake()
                 if Task.isCancelled { break }
                 await refresh()
             }
@@ -360,7 +363,7 @@ struct NowStrip: View {
             Task { await SampleCostCache.reload() }
         }
         .task { await refreshEngine() }
-        .onReceive(NotificationCenter.default.publisher(for: .pacerEngineDidRecompute)) { _ in
+        .onReceive(ViewRefreshGate.shared.engineRecomputes) { _ in
             Task { await refreshEngine() }
         }
     }
