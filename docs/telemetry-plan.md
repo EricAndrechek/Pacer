@@ -34,7 +34,7 @@ Tests: `TelemetryConsentTests`.
 - the check-in snapshot's usage fields: `settings.*`, `clients.*`,
   `accounts.*`, `usage.*` (peak bands, hit/forecast flags, models used, token
   magnitude), `widgets.*`, `lifecycle.*`, `env.*` beyond macOS and model,
-  `install.*`, `models.present`, `counter.*`;
+  `install.*`, `models.present` (ids with the `@revision` cut to 12 characters: a full 40-hex revision is redacted by the scrubber), `counter.*`;
 - the usage counters as Sentry metrics: `ui.*` (tabs, menu, window, modal,
   report problem, alert clicks; not `ui.click.delay.*`), `intent.*`,
   `api.route.*` (`CounterRouting.isUsage`).
@@ -52,10 +52,10 @@ counters (`data.*`, `oauth.*`, `cred.*`, `telemetry.*`, `main_thread.*`,
 
 ## Hangs (since 2026-11-05)
 `HangWatch` watches the main run loop. A stretch runs from waking to sleeping or polling. A `.strict` one-shot timer is armed only while a stretch is open, so an idle app has no wakeups. Launch counts as busy from `PacerAppDelegate.init` until the loop first sleeps.
-- Stuck 2 s and still stuck: an `App Hanging` event (mechanism AppHang, all thread stacks, tag `hang.phase` launch/running), under the `.hang` cap and the crash toggle.
+- Stuck 2 s and still stuck: an `App Hanging` event (mechanism AppHang, all thread stacks, tags `hang.phase` launch/running, `hang.displays` asleep/awake, and `mac.*` (`pressure`, `thermal`, `low_power`, `load_per_core`, `compressor_gb`, `swap_gb`, `ram_gb`: the banded `MachineLoad` set, so "Pacer is slow" reads apart from "the Mac is saturated"), under the `.hang` cap and the crash toggle.
 - Not sent while every display is asleep (`DisplaySleepState`, set by `MainThreadStallWatchdog`): macOS slows the process then and nobody is looking, and those events spent the daily hang cap. Counted as `main_thread.hang_displays_asleep`, drained by the daily check-in (non-usage counter, Sentry metric). The marker, log line and `main_thread.hang_ms` are unchanged.
 - Every 5 s while stuck: `hang-in-progress.json` is updated.
-- When it ends: `main_thread.hang_ms` with `ended=recovered`.
+- When it ends: `main_thread.hang_ms` with `ended=recovered` and a `verdict` attribute (asleep/starved/disk/busy/blocked, `WorkVerdict` over the stretch since the event went; omitted if unmeasured). The event itself carries no verdict: it is sent before there is a span to judge.
 - Next launch, if the file is still there: `main_thread.hang_ms` with `ended=terminated` and `version` (a lower bound).
 - Not sent while a debugger is attached.
 `beforeSend` budgets errors, hangs, crashes and MetricKit (`TelemetryBudget.kind`). Transactions also pass through it, spend nothing there, and are budgeted in `tracesSampler`.
@@ -138,7 +138,7 @@ list become `other`, free strings are tokenized (`[a-z0-9_.:+-]`).
 
 **Person properties** (`$set`) on `app_launched` and `daily_checkin`:
 `version`, `build.config`, `macos`, `menu_bar.shown`, `menu_bar.chips`
-(built-in chips `+`-joined, `scoped` for any per-model chip, `hidden`),
+(built-in chips `,`-joined, `scoped` for any per-model chip, `hidden`),
 `menu_bar.icon_style`, `menu_bar.icon_driver` (window kind),
 `toggles.crash_reports`, `toggles.performance`, `toggles.usage_data`; on
 `daily_checkin` also `accounts.count`, `accounts.plans`, `install.age_days`,
@@ -298,7 +298,7 @@ Debug is `#if DEBUG` (`build.config` debug).
   `PacerAppDelegate` (`:92`, `:138`, `:317`, `:379`); telemetry gates on `.normal`.
 - Not in the widget (sandboxed, no network entitlement) and not in the CLI process except the
   feedback send, which attaches the app's install ID read from the shared `cacheDirectoryPath`.
-- Debug builds (`make install`) report as environment `development`, release `pacer@dev`; release
+- Debug builds (`make install`) report as environment `development`, release `com.ericandrechek.pacer@dev+<CFBundleVersion>` (the per-build timestamp, so each dev build is its own release and issues can resolve and regress); release
   builds as `production`, `com.ericandrechek.pacer@<version>+<build>`.
 - DSN lives in `project.yml` as an Info.plist value (`PacerSentryDSN`); empty disables telemetry
   (forks building from source blank it).

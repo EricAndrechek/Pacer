@@ -83,7 +83,9 @@ public enum TelemetryScrubber {
         // pure hex is a key, a hash or a token).
         (#"\b[0-9a-fA-F]{32,}\b"#, "<redacted>"),
         // Long base64-ish runs (tokens, keys). 40+ so ordinary words and
-        // identifiers survive.
-        (#"[A-Za-z0-9+/_-]{40,}={0,2}"#, "<redacted>"),
+        // identifiers survive, and at least one digit in the run: real tokens
+        // always have one, while snake_case settings and long Swift symbol
+        // names often do not. The lookahead stays inside the same run.
+        (#"(?<![A-Za-z0-9+/_-])(?=[A-Za-z0-9+/_-]*\d)[A-Za-z0-9+/_-]{40,}={0,2}"#, "<redacted>"),
     ].map { (try! NSRegularExpression(pattern: $0.0), $0.1) }
 }

@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import PacerCore
+import Synchronization
 // `_spi(Private)` for the two things Sentry's own hang tracker uses to build
 // its event: every thread's stack (`threadInspector`) and the binary images
 // those stacks need for symbolication (`debugImageProvider`). Both are in the
@@ -31,6 +32,12 @@ import PacerCore
 /// while the main thread is responsive.
 enum HangReporter {
 
+    /// Started at `.began`, read at `.ended`: the process's ledger over the
+    /// stuck stretch. The "App Hanging" event goes out at `.began`, before there
+    /// is a span to judge, so the verdict rides the end-of-hang metric and log
+    /// line, not the event's tags. A lock: `HangWatch`'s queue writes it.
+    private static let span = Mutex<WorkMeter?>(nil)
+
     static let threshold: TimeInterval = 2
     static let heartbeat: TimeInterval = 5
 
@@ -43,6 +50,7 @@ enum HangReporter {
         case .began(let hang):
             guard !isBeingTraced else { return }
             writeMarker(for: hang)
+            span.withLock { $0 = WorkMeter() }
             // Every thread's stack, once, for both the send and the log. The
             // log line is written for every hang, sent or not: Sentry's daily
             // cap leaves most hangs with no stack anywhere otherwise.
@@ -57,6 +65,7 @@ enum HangReporter {
             // and log line stay, so a real force-quit is still reported.
             if TelemetryController.crashAllowed, HangReportPolicy.admit() { capture(hang, threads: threads) }
             Log.write("Hang", "main thread stuck \(Int(hang.duration * 1000)) ms and counting (\(phase(hang)))"
+                      + macSuffix(verdict: nil)
                       + (topFrames(of: threads).map { " · top frames: \($0)" } ?? ""))
         case .continuing:
             guard let url = HangMarker.defaultURL(), var marker = HangMarker.read(at: url) else { return }
@@ -65,10 +74,17 @@ enum HangReporter {
         case .ended(let hang):
             if let url = HangMarker.defaultURL() { HangMarker.remove(at: url) }
             let ms = hang.duration * 1000
-            Telemetry.distribution("main_thread.hang_ms", ms, unit: .millisecond,
-                                   attributes: ["phase": .string(phase(hang)), "ended": .string("recovered")])
+            // Only the stretch since `.began` (the first 2 s are not measured),
+            // and omitted if no `.began` reached this process.
+            let verdict = span.withLock { meter -> WorkVerdict? in
+                defer { meter = nil }
+                return meter?.finish().verdict
+            }
+            var attributes: Telemetry.Attributes = ["phase": .string(phase(hang)), "ended": .string("recovered")]
+            if let verdict { attributes["verdict"] = .string(verdict.rawValue) }
+            Telemetry.distribution("main_thread.hang_ms", ms, unit: .millisecond, attributes: attributes)
             Telemetry.breadcrumb("hang", "\(Int(ms)) ms (\(phase(hang)))")
-            Log.write("Hang", "main thread was stuck \(Int(ms)) ms (\(phase(hang)))")
+            Log.write("Hang", "main thread was stuck \(Int(ms)) ms (\(phase(hang)))" + macSuffix(verdict: verdict))
         }
     }
 
@@ -85,6 +101,11 @@ enum HangReporter {
                                             "version": .string(TelemetryScrubber.scrub(marker.version))])
         Telemetry.breadcrumb("hang", "previous run ended while stuck, \(Int(ms)) ms or more (\(phase))")
         Log.write("Hang", "previous run (\(marker.version)) ended while its main thread was stuck, \(Int(ms)) ms or more (\(phase))")
+    }
+
+    private static func macSuffix(verdict: WorkVerdict?) -> String {
+        HangMacState.logSuffix(load: .current(), pressure: MemoryPressure.shared.level,
+                               displaysAsleep: HangReportPolicy.displaysAsleepNow(), verdict: verdict)
     }
 
     private static func phase(_ hang: HangWatch.Hang) -> String { hang.atLaunch ? "launch" : "running" }
@@ -116,7 +137,13 @@ enum HangReporter {
             event.threads = threads
             event.debugMeta = container.debugImageProvider.getDebugImagesFromCacheForThreads(threads: threads)
         }
-        event.tags = ["hang.phase": phase(hang)]
+        // Off the main thread, which is stuck: `MachineLoad` is sysctl and host
+        // calls, `MemoryPressure.level` is behind its own lock, the display state
+        // is a Mutex. Nothing here needs the main actor.
+        var tags = HangMacState.tags(load: .current(), pressure: MemoryPressure.shared.level,
+                                     displaysAsleep: HangReportPolicy.displaysAsleepNow())
+        tags["hang.phase"] = phase(hang)
+        event.tags = tags
         SentrySDK.capture(event: event)
     }
 

@@ -55,3 +55,38 @@ public enum HangReportPolicy {
         return false
     }
 }
+
+/// The Mac's state at the time of a hang, so a report can tell "Pacer is slow"
+/// from "the Mac is saturated". Pure: the caller reads the machine (all of it
+/// safe off the main thread) and passes it in.
+public enum HangMacState {
+    /// Sentry tags are strings. `mac.*` is `MachineLoad.attributes` (banded,
+    /// already approved for telemetry), `hang.displays` is asleep/awake, and
+    /// `hang.verdict` is present only when a span was measured.
+    public static func tags(load: MachineLoad, pressure: MemoryPressure.Level,
+                            displaysAsleep: Bool, verdict: WorkVerdict? = nil,
+                            thermal: ProcessInfo.ThermalState = ProcessInfo.processInfo.thermalState,
+                            lowPower: Bool = ProcessInfo.processInfo.isLowPowerModeEnabled) -> [String: String] {
+        var tags: [String: String] = [:]
+        for (key, value) in load.attributes(pressure: pressure, thermal: thermal, lowPower: lowPower) {
+            switch value {
+            case .string(let s): tags["mac.\(key)"] = s
+            case .int(let i): tags["mac.\(key)"] = String(i)
+            case .double(let d): tags["mac.\(key)"] = String(d)
+            case .bool(let b): tags["mac.\(key)"] = b ? "true" : "false"
+            }
+        }
+        tags["hang.displays"] = displaysAsleep ? "asleep" : "awake"
+        if let verdict { tags["hang.verdict"] = verdict.rawValue }
+        return tags
+    }
+
+    /// ` · load 2_4 · pressure warning · verdict starved · displays awake`
+    public static func logSuffix(load: MachineLoad, pressure: MemoryPressure.Level,
+                                 displaysAsleep: Bool, verdict: WorkVerdict? = nil) -> String {
+        var parts = ["load \(MachineLoad.loadBand(load.loadPerCore))", "pressure \(pressure.name)"]
+        if let verdict { parts.append("verdict \(verdict.rawValue)") }
+        parts.append("displays \(displaysAsleep ? "asleep" : "awake")")
+        return " · " + parts.joined(separator: " · ")
+    }
+}

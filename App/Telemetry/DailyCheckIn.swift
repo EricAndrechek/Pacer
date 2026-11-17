@@ -171,7 +171,7 @@ final class DailyCheckIn {
                     lifecycle: Self.lifecycleAttributes(store: store, launchedAt: launchedAt,
                                                         cpuBefore: cpuBefore,
                                                         loginItemEnabled: loginItemEnabled),
-                    modelsPresent: ArenaWeightStore.presentModelIds().joined(separator: ","),
+                    modelsPresent: ArenaWeightStore.presentModelIds().map(ArenaWeightStore.telemetryId).joined(separator: ","),
                     cpuSeconds: Self.cpuSeconds())
         }.value
         let settings = local.settings
