@@ -52,10 +52,10 @@ counters (`data.*`, `oauth.*`, `cred.*`, `telemetry.*`, `main_thread.*`,
 
 ## Hangs (since 2026-11-05)
 `HangWatch` watches the main run loop. A stretch runs from waking to sleeping or polling. A `.strict` one-shot timer is armed only while a stretch is open, so an idle app has no wakeups. Launch counts as busy from `PacerAppDelegate.init` until the loop first sleeps.
-- Stuck 2 s and still stuck: an `App Hanging` event (mechanism AppHang, all thread stacks, tag `hang.phase` launch/running), under the `.hang` cap and the crash toggle.
+- Stuck 2 s and still stuck: an `App Hanging` event (mechanism AppHang, all thread stacks, tags `hang.phase` launch/running, `hang.displays` asleep/awake, and `mac.*` (`pressure`, `thermal`, `low_power`, `load_per_core`, `compressor_gb`, `swap_gb`, `ram_gb`: the banded `MachineLoad` set, so "Pacer is slow" reads apart from "the Mac is saturated"), under the `.hang` cap and the crash toggle.
 - Not sent while every display is asleep (`DisplaySleepState`, set by `MainThreadStallWatchdog`): macOS slows the process then and nobody is looking, and those events spent the daily hang cap. Counted as `main_thread.hang_displays_asleep`, drained by the daily check-in (non-usage counter, Sentry metric). The marker, log line and `main_thread.hang_ms` are unchanged.
 - Every 5 s while stuck: `hang-in-progress.json` is updated.
-- When it ends: `main_thread.hang_ms` with `ended=recovered`.
+- When it ends: `main_thread.hang_ms` with `ended=recovered` and a `verdict` attribute (asleep/starved/disk/busy/blocked, `WorkVerdict` over the stretch since the event went; omitted if unmeasured). The event itself carries no verdict: it is sent before there is a span to judge.
 - Next launch, if the file is still there: `main_thread.hang_ms` with `ended=terminated` and `version` (a lower bound).
 - Not sent while a debugger is attached.
 `beforeSend` budgets errors, hangs, crashes and MetricKit (`TelemetryBudget.kind`). Transactions also pass through it, spend nothing there, and are budgeted in `tracesSampler`.
