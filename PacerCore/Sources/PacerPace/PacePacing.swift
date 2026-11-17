@@ -47,25 +47,55 @@ enum PacingMode: String, Sendable {
         }
     }
 
-    /// Precedence: `--pacing`, then a `pacer mode` choice for this session
-    /// (the most specific and the most recent), then `PACER_PACING`, which a
-    /// repo sets in `.claude/settings.json` `"env"` or a launch sets for one
-    /// session, then the default: gate-only in a session, informed outside.
+    /// What resolving found: the mode, where it came from, and anything
+    /// unusable it skipped, for one line on stderr.
+    struct Resolution: Equatable, Sendable {
+        let mode: PacingMode
+        let source: Source
+        var warnings: [String] = []
+    }
+
+    /// Precedence: `--pacing`, then `PACER_PACING`, then a `pacer mode`
+    /// choice for this session, then the default: gate-only in a session,
+    /// informed outside.
+    ///
+    /// **The environment outranks the session file** because it is the
+    /// user's setting (a repo's `.claude/settings.json` `"env"`, or a launch
+    /// for one session), and `pacer mode` is a command an agent can run: an
+    /// agent in a repo set to gate-only must not be able to opt itself into
+    /// the numbers. The file only decides when the environment says nothing.
+    ///
+    /// **Nothing unusable fails a run.** A typo in `PACER_PACING`, or a mode
+    /// file someone cut short, used to make every `gate`, `status` and `wait`
+    /// exit 1, outside the 0/10/20/2 contract briefs and `pace-guard.sh`
+    /// depend on. Such a value is skipped with a warning, and the next source
+    /// decides. Only `--pacing`, named on the command itself, is an error.
     static func resolve(flag: String?, environment: [String: String],
-                        sessionFile: String?) throws -> (PacingMode, Source) {
+                        sessionFile: String?) throws -> Resolution {
         if let flag {
             guard let mode = PacingMode(name: flag) else { throw PacingError.unknown(flag, "--pacing") }
-            return (mode, .flag)
+            return Resolution(mode: mode, source: .flag)
         }
-        if let path = sessionFile, let mode = PaceModeFile(path: path).read() {
-            return (mode, .sessionFile)
-        }
+        var warnings: [String] = []
         if let raw = environment["PACER_PACING"], !raw.isEmpty {
-            guard let mode = PacingMode(name: raw) else { throw PacingError.unknown(raw, "PACER_PACING") }
-            return (mode, .environment)
+            if let mode = PacingMode(name: raw) {
+                return Resolution(mode: mode, source: .environment)
+            }
+            warnings.append("PACER_PACING '\(raw)' is not a pacing mode (gate or informed); ignoring it")
+        }
+        if let path = sessionFile {
+            switch PaceModeFile(path: path).read() {
+            case .mode(let mode):
+                return Resolution(mode: mode, source: .sessionFile, warnings: warnings)
+            case .unreadable:
+                warnings.append("the pacing mode file \(path) is unreadable; ignoring it (`pacer mode clear` removes it)")
+            case .absent:
+                break
+            }
         }
         let inSession = !(environment["CLAUDE_CODE_SESSION_ID"] ?? "").isEmpty
-        return inSession ? (.gate, .sessionDefault) : (.informed, .terminalDefault)
+        return Resolution(mode: inSession ? .gate : .informed,
+                          source: inSession ? .sessionDefault : .terminalDefault, warnings: warnings)
     }
 
     enum PacingError: Error, CustomStringConvertible {
@@ -80,7 +110,8 @@ enum PacingMode: String, Sendable {
 }
 
 /// `~/.claude/pace/mode-session-<first 8 of the session id>.json`: the mode a
-/// `pacer mode informed|gate` chose for one Claude Code session. Removed with
+/// `pacer mode informed|gate` chose for one Claude Code session, used only
+/// when `PACER_PACING` is unset. Removed with
 /// `pacer mode clear`, and after a week untouched like the session's state
 /// file (`PaceStateFile.pruneSessionFiles`).
 struct PaceModeFile {
@@ -91,13 +122,21 @@ struct PaceModeFile {
         return "\(home)/.claude/pace/mode-session-\(tag).json"
     }
 
-    func read() -> PacingMode? {
-        guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
+    enum Contents: Equatable {
+        case absent
+        case mode(PacingMode)
+        /// There, but not a mode this can read: cut short, edited, or not ours.
+        case unreadable
+    }
+
+    func read() -> Contents {
+        guard FileManager.default.fileExists(atPath: path) else { return .absent }
+        guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { return .unreadable }
         for line in text.split(separator: "\n") where line.contains("\"mode\"") {
             let fields = line.split(separator: "\"", omittingEmptySubsequences: false)
-            if fields.count >= 4 { return PacingMode(name: String(fields[3])) }
+            if fields.count >= 4, let mode = PacingMode(name: String(fields[3])) { return .mode(mode) }
         }
-        return nil
+        return .unreadable
     }
 
     func write(_ mode: PacingMode, now: Date) -> Bool {

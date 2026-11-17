@@ -334,7 +334,8 @@ gap_warn_due() {
   [ "$DRY" = 1 ] || [ $(( $1 - missing_since )) -ge "$GAP_WARN_SECS" ]
 }
 last_status=0; hold_since=0; hold_said=0; hold_burn=0; rsv_err=0
-# The accounts the last decision pass would switch to, for the heartbeat below.
+# The accounts this loop's decision pass would switch to, for the heartbeat
+# below; empty when the pass did not run.
 hb_targets=""
 # Pacer's heartbeat contract (Skills/pacer/reference.md, "Rotation"): every loop,
 # the active account, whether we hold, and the targets with room, so a paused
@@ -346,7 +347,11 @@ HEARTBEAT=${PACE_ROTATION:-$HOME/.claude/pace/rotation.json}
 write_heartbeat() {
   [ "$DRY" = 1 ] && [ -z "${PACE_ROTATION:-}" ] && return 0
   local t list="" holding=false
-  for t in $hb_targets; do list+="${list:+, }\"$t\""; done
+  # No pass this loop (inside MIN_SWITCH_GAP, right after a switch): no
+  # targets. The last pass's list was judged from the login just left and may
+  # name the one now active, so repeating it let a paused `pacer wait` hold
+  # its grace for a switch that was not coming.
+  [ "$hb_pass" = 1 ] && for t in $hb_targets; do list+="${list:+, }\"$t\""; done
   [ "$hold_said" = 1 ] && holding=true
   mkdir -p "$(dirname "$HEARTBEAT")" 2>/dev/null || return 0
   printf '{"v": 1, "updatedAt": "%s", "active": "%s", "holding": %s, "targets": [%s]}\n' \
@@ -497,7 +502,11 @@ while :; do
   # moving away (blocks the expiring and stagger rules, not the limit ones).
   myexp=0
   [ "$myleft" != - ] && [ "$myleft" -le "$EXPIRE_WINDOW" ] && [ $(( at - mine )) -ge "$xneed" ] && myexp=1
-  if [ "$DRY" = 1 ] || [ $(( now - last_switch )) -ge "$MIN_SWITCH_GAP" ]; then
+  # DRY_HONOR_GAP (dry mode only) is for tests: a dry pass otherwise always
+  # decides, which is the point of `dry`.
+  hb_pass=0
+  if { [ "$DRY" = 1 ] && [ -z "${DRY_HONOR_GAP:-}" ]; } || [ $(( now - last_switch )) -ge "$MIN_SWITCH_GAP" ]; then
+    hb_pass=1
     # Every target choice goes through one filter (EXCLUDE, status ok, both
     # readings present, 7d below its ceiling, `need` points of 5h room, not
     # the slot just left) and one ranking (rank_key).

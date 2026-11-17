@@ -310,9 +310,10 @@ public enum Pace {
         report and accounts still answer, under a header saying so.
       - informed (default in a terminal): the numbers, for a session or repo
         whose owner wants agents to plan with them.
-      Precedence: --pacing, then `pacer mode` for this session, then
-      PACER_PACING (per session, or a repo's .claude/settings.json "env"),
-      then the default.
+      Precedence: --pacing, then PACER_PACING (the user's setting: per
+      session, or a repo's .claude/settings.json "env"), then `pacer mode`
+      for this session, then the default. An unusable PACER_PACING or mode
+      file is skipped with a warning on stderr, never an error.
 
     Several logins: a PAUSE says whether a login switch can end it. A running
     account switcher's heartbeat (~/.claude/pace/rotation.json) makes a switch
@@ -345,7 +346,7 @@ public enum Pace {
       mode [gate|informed|clear]
                              print the pacing mode and where it came from, or
                              set it for this Claude Code session (set it only
-                             when the user asks)
+                             when the user asks; PACER_PACING outranks it)
       feedback [--local] "TEXT"
                              report a wrong verdict or a missing flag: saved to
                              ~/.claude/pace/feedback.jsonl and sent to Pacer's
@@ -557,10 +558,14 @@ final class PaceRun {
         }
         if interval < 5 { interval = 5 }
         do {
-            (mode, modeSource) = try PacingMode.resolve(
+            let resolved = try PacingMode.resolve(
                 flag: pacingFlag, environment: env,
                 sessionFile: PaceModeFile.path(home: home, sessionId: env["CLAUDE_CODE_SESSION_ID"]))
+            (mode, modeSource) = (resolved.mode, resolved.source)
+            // On stderr, so a verdict on stdout reads as it always does.
+            for warning in resolved.warnings { io.err("pace: \(warning).\n") }
         } catch {
+            // Only `--pacing`, named on this command, gets here.
             try die("\(error)")
         }
         if !given.contains("margin"), let raw = env["PACE_MARGIN"], !raw.isEmpty {
@@ -1952,14 +1957,20 @@ final class PaceRun {
                 guard PaceModeFile(path: file).write(chosen, now: io.now()) else { try die("could not write \(file)") }
             }
         }
-        let resolved: (PacingMode, PacingMode.Source)
+        let resolved: PacingMode.Resolution
         do {
             resolved = try PacingMode.resolve(flag: nil, environment: env, sessionFile: file)
         } catch {
             try die("\(error)")
         }
-        io.out("pacing: \(resolved.0.title) (\(resolved.1.text))\n")
-        switch resolved.0 {
+        for warning in resolved.warnings { io.err("pace: \(warning).\n") }
+        io.out("pacing: \(resolved.mode.title) (\(resolved.source.text))\n")
+        // A session choice under an explicit PACER_PACING does nothing: the
+        // user's setting wins, by design.
+        if choice != nil, choice != "clear", resolved.source == .environment {
+            io.out("PACER_PACING is set, and it outranks a session's `pacer mode`: the choice is saved but has no effect while it is set.\n")
+        }
+        switch resolved.mode {
         case .gate:
             io.out("Agents get go, pause and resume, and how to wait: no usage numbers. For numbers, `pacer mode informed` (this session) or PACER_PACING=informed (a repo's .claude/settings.json \"env\").\n")
         case .informed:

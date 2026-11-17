@@ -154,15 +154,19 @@ wants agents to plan with them; the gate's GO line then says so, and
 [`planning.md`](planning.md) applies. A terminal (no session) is a person and
 gets the numbers.
 
-The user switches it, most specific first:
+The user switches it; the first of these that is set wins:
 
-- one command: `--pacing gate|informed`;
-- this session: `pacer mode informed` (or `gate`, or `clear`) — **run it only
-  when the user asks**; `pacer mode` alone prints the mode and where it came
-  from;
-- a repo: `"env": {"PACER_PACING": "informed"}` in `.claude/settings.json`
-  (shared) or `.claude/settings.local.json` (personal); a launch:
-  `PACER_PACING=informed claude`.
+1. one command: `--pacing gate|informed`;
+2. `PACER_PACING`, the user's own setting: for a repo,
+   `"env": {"PACER_PACING": "informed"}` in `.claude/settings.json` (shared)
+   or `.claude/settings.local.json` (personal); for one launch,
+   `PACER_PACING=informed claude`;
+3. this session, when `PACER_PACING` is unset: `pacer mode informed` (or
+   `gate`, or `clear`) — **run it only when the user asks**; `pacer mode`
+   alone prints the mode and where it came from.
+
+An unusable value (a typo in `PACER_PACING`, a damaged mode file) is skipped
+with a warning on stderr; it never changes an exit code.
 
 **When the user asks about usage** — how much is left, when it resets, will
 they hit a limit — answer in either mode: `pacer report` (every window for
