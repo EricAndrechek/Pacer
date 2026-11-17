@@ -146,6 +146,13 @@ public enum SpendMeterFitter {
     /// the lab replay tested.
     public static let spanDays = 14
     /// Consecutive readings further apart than this are not a pair.
+    ///
+    /// Longer than `ReadingCoverage.maxGap` (30 minutes) on purpose. That one
+    /// says when a climb can no longer be dated, for rates read off the
+    /// readings alone. A pair here is scored against the spend logged between
+    /// its readings, and the spend says when the climb happened, so a longer
+    /// pair is still evidence for the fit. The hour is this fitter's own
+    /// threshold, kept as it was (#421).
     public static let maxPairGap: TimeInterval = 3600
     /// An hour below this much spend counts as "no local spend" for
     /// `noSpendRiseShare`. The lab's threshold.
