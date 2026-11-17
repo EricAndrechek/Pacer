@@ -164,6 +164,35 @@ struct ClaudeSkillInstallerTests {
         #expect(f.installer.readManifest()?.files[ClaudeSkillInstaller.importFileName] != nil)
     }
 
+    /// The skill as it ships: every file, the two the skill links to
+    /// (`planning.md`, `reference.md`) included, lands and is hashed, and an
+    /// install from before they existed takes them on its next refresh.
+    @Test func theShippedSkillInstallsEveryFileAndAnOlderInstallGainsTheNewOnes() throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("skill-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let shipped = SkillTextTests.skillDirectory
+        let destination = root.appendingPathComponent("home/.claude/skills/pacer")
+
+        // An older Pacer's skill: SKILL.md, pacing.md and pace-guard.sh only.
+        let old = root.appendingPathComponent("old/Skills/pacer")
+        try FileManager.default.createDirectory(at: old, withIntermediateDirectories: true)
+        for name in ["SKILL.md", "pacing.md", "pace-guard.sh"] {
+            try "old \(name)\n".write(to: old.appendingPathComponent(name), atomically: true, encoding: .utf8)
+        }
+        try ClaudeSkillInstaller(source: old, destination: destination, version: "0.9.2 (1)").install()
+
+        let current = ClaudeSkillInstaller(source: shipped, destination: destination, version: "0.9.3 (2)")
+        #expect(current.status().state == .outdated(installed: "0.9.2 (1)"))
+        #expect(try current.refreshIfInstalled())
+        #expect(current.status().state == .upToDate)
+        let files = try #require(current.readManifest()?.files)
+        for name in ["SKILL.md", "pacing.md", "planning.md", "reference.md", "pace-guard.sh"] {
+            #expect(files[name] != nil, "\(name) not in the manifest")
+            let installed = try Data(contentsOf: destination.appendingPathComponent(name))
+            #expect(installed == (try Data(contentsOf: shipped.appendingPathComponent(name))), "\(name) differs")
+        }
+    }
+
     /// A PacerCore-only build has no app bundle to read the skill out of, and
     /// that is a build shape rather than a user-facing failure.
     @Test func aBundleWithoutTheSkillIsUnavailable() throws {

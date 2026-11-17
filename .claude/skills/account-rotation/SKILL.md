@@ -129,6 +129,15 @@ fails, the last figures and cached reset times are used.
 A switch made outside the controller (by hand) is logged as `EXTERNAL` and
 adopted, never fought.
 
+**The heartbeat Pacer reads.** Every loop the controller writes
+`~/.claude/pace/rotation.json` (`PACE_ROTATION` overrides it):
+`{"v": 1, "updatedAt": …, "active": "<id>", "holding": false|true, "targets":
+["<id>", …]}`, the accounts it would switch to now by the bar above. A paused
+session's `pacer gate` then says a switch is coming instead of "resets in 3d",
+and `pacer wait` holds for the switch (`--switch-grace`, 10 min) instead of
+exiting 20 on a weekly window. A heartbeat older than 3 minutes counts as a
+stopped controller. Dry runs never write the live file.
+
 ## Supervising it
 
 Run `watch.sh` with `run_in_background`; its exit is the wake. Relaunch it

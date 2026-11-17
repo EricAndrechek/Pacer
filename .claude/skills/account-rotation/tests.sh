@@ -307,6 +307,25 @@ AUTO=1 API=http://127.0.0.1:$port t "V2 a lower live estimate never lowers a rea
   1 "1:20:200:98:ok 3:20:250:40:ok $SPENT" 'EARLY=0'
 kill "$srv" 2>/dev/null
 
+# --- the heartbeat Pacer reads (Skills/pacer/reference.md, "Rotation") -------------
+# hb NAME REGEX ACTIVE ACCOUNTS: one dry pass writing the heartbeat to a temp file.
+hb() {
+  local d=$T/hb$1 out
+  mkdir -p "$d/state"; echo 'WEEK_MAX=90' >"$d/conf"
+  PATH="$T/bin:$PATH" FAKE_DIR=$T FAKE_ACT=$3 FAKE_ACCTS=$4 ROTATE_CONF=$d/conf ROTATE_STATE=$d/state \
+    PACER_API=http://127.0.0.1:1 BURN_OVERRIDE=45 PACE_ROTATION=$d/rotation.json "$ROT" dry >/dev/null 2>&1
+  out=$(cat "$d/rotation.json" 2>/dev/null)
+  if printf '%s\n' "$out" | grep -qE -- "$2"; then
+    pass=$(( pass + 1 )); printf 'PASS  %-42s %s\n' "heartbeat $1" "$out"
+  else
+    fail=$(( fail + 1 )); printf 'FAIL  %-42s want /%s/, got: %s\n' "heartbeat $1" "$2" "${out:-<none>}"
+  fi
+}
+hb "names the target with room" '"active": "acc1acc0", "holding": false, "targets": \["acc3acc0"\]' \
+  1 "1:94:26:63:ok 3:70:180:77:ok $SPENT"
+hb "holding, no target" '"holding": true, "targets": \[\]' \
+  1 "1:94:26:63:ok 3:89:180:77:ok $SPENT"
+
 if [ -e "$T/switched" ]; then
   fail=$(( fail + 1 )); echo "FAIL  dry mode called cswap switch: $(tr '\n' ' ' <"$T/switched")"
 else

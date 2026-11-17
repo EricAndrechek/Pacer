@@ -334,6 +334,25 @@ gap_warn_due() {
   [ "$DRY" = 1 ] || [ $(( $1 - missing_since )) -ge "$GAP_WARN_SECS" ]
 }
 last_status=0; hold_since=0; hold_said=0; hold_burn=0; rsv_err=0
+# The accounts the last decision pass would switch to, for the heartbeat below.
+hb_targets=""
+# Pacer's heartbeat contract (Skills/pacer/reference.md, "Rotation"): every loop,
+# the active account, whether we hold, and the targets with room, so a paused
+# session's `pacer gate`/`wait` knows a switch is coming instead of treating a
+# weekly limit on this login as days without room. PACE_ROTATION overrides the
+# path; a dry run writes it only to an explicit PACE_ROTATION (tests.sh), never
+# to the live one.
+HEARTBEAT=${PACE_ROTATION:-$HOME/.claude/pace/rotation.json}
+write_heartbeat() {
+  [ "$DRY" = 1 ] && [ -z "${PACE_ROTATION:-}" ] && return 0
+  local t list="" holding=false
+  for t in $hb_targets; do list+="${list:+, }\"$t\""; done
+  [ "$hold_said" = 1 ] && holding=true
+  mkdir -p "$(dirname "$HEARTBEAT")" 2>/dev/null || return 0
+  printf '{"v": 1, "updatedAt": "%s", "active": "%s", "holding": %s, "targets": [%s]}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "$holding" "$list" >"$HEARTBEAT.tmp.$$" \
+    && mv -f "$HEARTBEAT.tmp.$$" "$HEARTBEAT"
+}
 declare -A PREV_STAT=() LEXP_SAID=() BAD_SINCE=() BAD_SAID=() STALE_SAID=()
 # When the active slot last changed (our switch, an adopted external one, or
 # this start), for the stale-login check below. ACTIVE_SINCE_OVERRIDE (dry
@@ -482,7 +501,7 @@ while :; do
     # Every target choice goes through one filter (EXCLUDE, status ok, both
     # readings present, 7d below its ceiling, `need` points of 5h room, not
     # the slot just left) and one ranking (rank_key).
-    best=""; bestkey=""; idle=""; idlekey=""; exp=""; expkey=""; others=""
+    best=""; bestkey=""; idle=""; idlekey=""; exp=""; expkey=""; others=""; qual=""
     for s in "${SLOTS[@]}"; do
       [ "$s" = "$act" ] && continue
       sid=${ID[$s]}; v=$(eff5 "$sid"); w=$(eff7 "$sid"); l5=$(left5 "$sid")
@@ -505,6 +524,7 @@ while :; do
       fi
       others+="$s: ${v}% room ${room}, $(win_desc "$sid"), 7d ${w}%${why:+ [$why]}${thin:+ [$thin]} | "
       [ -n "$why" ] && continue
+      qual+="$sid "
       k=$(rank_key "$sid" "$room")
       if [ -z "$best" ] || [ "$k" -lt "$bestkey" ]; then best=$s; bestkey=$k; bestv=$v; bestroom=$room; fi
       if [ "$v" = 0 ] && [ "$l5" = - ] && [ -z "$thin" ]; then
@@ -521,6 +541,7 @@ while :; do
       fi
     done
     others=${others% | }
+    hb_targets=$qual
     # The reserve: only when the active account is at its 5h limit and no
     # normal account has room. Never chosen by the stagger or expiring rules.
     rsv=""
@@ -636,6 +657,7 @@ while :; do
       STALE_SAID[$s]=1
     done
   fi
+  hb_act=$(active_slot); write_heartbeat "${ID[${hb_act:-$act}]:-$actid}"
   [ "$DRY" = 1 ] && exit 0
   sleep 60
 done

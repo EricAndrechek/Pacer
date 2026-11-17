@@ -107,6 +107,35 @@ struct PaceOtherLoginsTests {
         #expect(!out.contains("other logins"), "\(out)")
     }
 
+    /// "With room" is room to resume onto, the bar `wait` and a rotation
+    /// controller use: a login at 98% of a 99% limit is not one. The old
+    /// rule counted it, and `report` said "2 with room" where one had any.
+    @Test func aLoginJustUnderItsLimitIsNearItNotRoom() throws {
+        let out = try report(Self.active + Self.ultra("acct-u", seven: 0.11) + Self.ultra("acct-n", seven: 0.95))
+        #expect(out.contains("other logins: 1 with room (7d 11%), 1 near its limit\n"), "\(out)")
+    }
+
+    /// The bar scales with the work that would move: at 30%/h on the login
+    /// being left, 20 minutes is 10 points, so 90% of a 98% limit is near.
+    @Test func theBarIsTheLeavingLoginsBurn() throws {
+        let rows = [row("acct-x", "seven_day", 90, resets: "300000")]
+        #expect(PaceOtherLogins(rows: rows)?.withRoom.count == 1)
+        let busy = PaceOtherLogins(rows: rows, leaving: ["seven_day": 30])
+        #expect(busy?.withRoom.isEmpty == true)
+        #expect(busy?.nearLimit.count == 1)
+        #expect(PaceOtherLogins(rows: rows, leaving: ["seven_day": 30], resumeHeadroom: 0)?.withRoom.count == 1)
+    }
+
+    @Test func jsonCountsNearLoginsApart() throws {
+        let box = try PaceSandbox(metrics: Self.active + Self.ultra("acct-n", seven: 0.95))
+        let out = runPace(box, ["json"]).out
+        let object = try #require(JSONSerialization.jsonObject(with: Data(out.utf8)) as? [String: Any])
+        let others = try #require(object["otherAccounts"] as? [String: Any])
+        #expect(others["withRoom"] as? Int == 0)
+        #expect(others["nearLimit"] as? Int == 1)
+        #expect((others["logins"] as? [[String: Any]])?.first?["state"] as? String == "near")
+    }
+
     @Test func aWindowDueToResetIsNotSpent() throws {
         let pr = PaceOtherLogins(rows: [row("acct-x", "five_hour", 99, resets: "0")])
         #expect(pr?.spent.isEmpty == true)
