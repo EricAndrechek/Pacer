@@ -65,28 +65,73 @@ struct PacePacingModeTests {
 
     // MARK: - Which mode
 
-    @Test func theModeComesFromTheFlagThenTheSessionFileThenTheEnvironmentThenTheDefault() throws {
+    @Test func theModeComesFromTheFlagThenTheEnvironmentThenTheSessionFileThenTheDefault() throws {
         let home = "/tmp/pace-home-\(UUID().uuidString)"
         defer { try? FileManager.default.removeItem(atPath: home) }
         let file = try #require(PaceModeFile.path(home: home, sessionId: Self.session))
         let session = ["CLAUDE_CODE_SESSION_ID": Self.session]
+        func resolved(_ flag: String?, _ env: [String: String]) throws -> PacingMode.Resolution {
+            try PacingMode.resolve(flag: flag, environment: env, sessionFile: file)
+        }
 
-        #expect(try PacingMode.resolve(flag: nil, environment: session, sessionFile: file) == (.gate, .sessionDefault))
-        #expect(try PacingMode.resolve(flag: nil, environment: [:], sessionFile: nil) == (.informed, .terminalDefault))
-        let repo = session.merging(["PACER_PACING": "informed"]) { $1 }
-        #expect(try PacingMode.resolve(flag: nil, environment: repo, sessionFile: file) == (.informed, .environment))
+        #expect(try resolved(nil, session) == .init(mode: .gate, source: .sessionDefault))
+        #expect(try PacingMode.resolve(flag: nil, environment: [:], sessionFile: nil)
+                == .init(mode: .informed, source: .terminalDefault))
 
-        #expect(PaceModeFile(path: file).write(.gate, now: Date()))
-        #expect(try PacingMode.resolve(flag: nil, environment: repo, sessionFile: file) == (.gate, .sessionFile))
-        #expect(try PacingMode.resolve(flag: "informed", environment: repo, sessionFile: file) == (.informed, .flag))
+        // The session file decides only while the environment says nothing.
+        #expect(PaceModeFile(path: file).write(.informed, now: Date()))
+        #expect(try resolved(nil, session) == .init(mode: .informed, source: .sessionFile))
+        // A repo set to gate-only keeps an agent's `pacer mode informed` out.
+        let repo = session.merging(["PACER_PACING": "gate"]) { $1 }
+        #expect(try resolved(nil, repo) == .init(mode: .gate, source: .environment))
+        #expect(try resolved("informed", repo) == .init(mode: .informed, source: .flag))
         #expect(throws: (any Error).self) { try PacingMode.resolve(flag: "loud", environment: [:], sessionFile: nil) }
     }
 
-    @Test func aBadPacingValueIsAnError() throws {
+    /// A typo in a repo's settings.json must not take every gate out of its
+    /// exit-code contract: it is skipped, said once on stderr, and the next
+    /// source decides.
+    @Test func aBadPacingValueFallsBackWithAWarning() throws {
+        let box = try PaceSandbox(metrics: Self.fiveFull)
+        let env = Self.inSession(["PACER_PACING": "chatty"])
+        let gate = runPace(box, ["gate", "--model", "opus"], extra: env)
+        #expect(gate.status == 10, "\(gate.out)")
+        #expect(gate.out.contains("pace: PACER_PACING 'chatty' is not a pacing mode (gate or informed); ignoring it.\n"),
+                "\(gate.out)")
+        #expect(gate.out.contains("pace: PAUSE — this login is at its limit"), "the session default, gate-only: \(gate.out)")
+        let status = runPace(box, ["status", "--model", "opus", "--no-refresh"], extra: env)
+        #expect(status.status == 10, "\(status.out)")
+        let wait = runPace(box, ["wait", "--model", "opus"], extra: env, onSleep: { n in
+            if n == 2 { try? box.setMetrics(Self.roomy) }
+        })
+        #expect(wait.status == 0, "\(wait.out)")
+        // In a terminal the default is informed.
+        let terminal = runPace(box, ["gate", "--model", "opus"], extra: ["PACER_PACING": "chatty"])
+        #expect(terminal.status == 0, "\(terminal.out)")
+        #expect(terminal.out.contains("pace: GO — 5h 12%"), "\(terminal.out)")
+        // `--pacing` is named on the command itself, so a bad one is an error.
+        #expect(runPace(box, ["gate", "--pacing", "chatty"]).status == 1)
+    }
+
+    @Test func aDamagedModeFileFallsBackWithAWarning() throws {
         let box = try PaceSandbox(metrics: Self.roomy)
-        let bad = runPace(box, ["gate"], extra: ["PACER_PACING": "chatty"])
-        #expect(bad.status == 1, "\(bad.out)")
-        #expect(bad.out.contains("PACER_PACING 'chatty' is not a pacing mode"), "\(bad.out)")
+        let file = try #require(PaceModeFile.path(home: box.dir.path, sessionId: Self.session))
+        try FileManager.default.createDirectory(atPath: (file as NSString).deletingLastPathComponent,
+                                                withIntermediateDirectories: true)
+        try "{\n  \"mo".write(toFile: file, atomically: true, encoding: .utf8)
+        let gate = runPace(box, ["gate", "--model", "opus"], extra: Self.inSession())
+        #expect(gate.status == 0, "\(gate.out)")
+        #expect(gate.out.contains("is unreadable; ignoring it (`pacer mode clear` removes it)."), "\(gate.out)")
+        #expect(gate.out.contains("pace: GO."), "\(gate.out)")
+    }
+
+    @Test func pacerModeUnderAnExplicitEnvironmentSaysItHasNoEffect() throws {
+        let box = try PaceSandbox(metrics: Self.roomy)
+        let env = Self.inSession(["PACER_PACING": "gate"])
+        let set = runPace(box, ["mode", "informed"], extra: env)
+        #expect(set.out.hasPrefix("pacing: gate-only (PACER_PACING"), "\(set.out)")
+        #expect(set.out.contains("PACER_PACING is set, and it outranks a session's `pacer mode`"), "\(set.out)")
+        #expect(runPace(box, ["gate", "--model", "opus"], extra: env).out.hasPrefix("pace: GO."))
     }
 
     @Test func pacerModeSetsPrintsAndClearsTheSessionsChoice() throws {

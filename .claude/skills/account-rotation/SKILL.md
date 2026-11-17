@@ -135,8 +135,10 @@ adopted, never fought.
 ["<id>", …]}`, the accounts it would switch to now by the bar above. A paused
 session's `pacer gate` then says a switch is coming instead of "resets in 3d",
 and `pacer wait` holds for the switch (`--switch-grace`, 10 min) instead of
-exiting 20 on a weekly window. A heartbeat older than 3 minutes counts as a
-stopped controller. Dry runs never write the live file.
+exiting 20 on a weekly window. Inside `MIN_SWITCH_GAP` after a switch no
+decision pass runs, and the heartbeat carries no targets, so no session waits
+for a second switch that cannot come yet. A heartbeat older than 3 minutes
+counts as a stopped controller. Dry runs never write the live file.
 
 ## Supervising it
 

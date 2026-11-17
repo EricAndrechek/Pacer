@@ -260,7 +260,10 @@ PACE_RUN=fable-wave pacer gate --model fable
   agent-facing output says. Gate-only (the default in a Claude Code session)
   prints go / pause / resume and what ends a pause, no percentages; informed
   (the default in a terminal) prints the numbers. Precedence: the flag, then
-  `pacer mode`, then `PACER_PACING`, then the default.
+  `PACER_PACING` (the user's setting, so an agent's `pacer mode` cannot
+  override a repo's choice), then `pacer mode`, then the default. An unusable
+  `PACER_PACING` or mode file is skipped with a warning on stderr, never an
+  exit 1; only a bad `--pacing` is an error.
 - `--switch-grace S` (default 600): how long `wait` holds a pause whose window
   resets beyond `--max-wait` while a running account switcher has a target with
   room, before it gives up and exits 20.
