@@ -1057,7 +1057,7 @@ final class AppBackgroundService {
                 usedPct: outlook.usedPct,
                 hitRangeEarliest: outlook.projectedFullAtEarliest,
                 hitRangeLatest: outlook.projectedFullAtLatest,
-                capPaceRatio: outlook.slopePercentPerHour / (100.0 / (duration / 3600)),
+                capPaceRatio: outlook.slopePercentPerHour.map { $0 / (100.0 / (duration / 3600)) },
                 context: context
             )
         }
@@ -1127,7 +1127,7 @@ final class AppBackgroundService {
                 hitRangeEarliest: outlook.projectedFullAtEarliest,
                 hitRangeLatest: outlook.projectedFullAtLatest,
                 capPaceRatio: durationHours > 0
-                    ? outlook.slopePercentPerHour / (100.0 / durationHours) : nil,
+                    ? outlook.slopePercentPerHour.map { $0 / (100.0 / durationHours) } : nil,
                 labelOverride: spec.displayName,
                 windowDurationHours: durationHours,
                 context: context

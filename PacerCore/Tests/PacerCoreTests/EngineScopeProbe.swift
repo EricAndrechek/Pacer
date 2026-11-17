@@ -46,7 +46,7 @@ struct EngineScopeProbe {
                 let cycles = await engine.rateLimitCyclesForProbe(spec.key)
                 let name: String = String(spec.key.prefix(26))
                 let selected: String = traj.first(where: { $0.isSelected })?.id ?? "-"
-                let end: String = outlook.map { String(format: "used=%.0f slope=%.2f", $0.usedPct, $0.slopePercentPerHour) } ?? "nil"
+                let end: String = outlook.map { String(format: "used=%.0f slope=%.2f", $0.usedPct, $0.slopePercentPerHour ?? .nan) } ?? "nil"
                 let models: Int = traj.count
                 var line = "  " + name
                 line += " samples=" + String(history)

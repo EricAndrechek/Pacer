@@ -936,7 +936,15 @@ public actor UsageIntelligenceEngine {
         /// Descriptive recent slope (pp/hour) — "what just happened", so the
         /// user can sanity-check the number against their own activity.
         /// First-to-last over a per-window lookback (90 min for 5h, 24 h for 7d).
-        public let slopePercentPerHour: Double
+        ///
+        /// Nil when the readings since the last gap in coverage span less
+        /// than `ReadingCoverage.minRateSpan` (#421): the rate is unknown,
+        /// not 0. A 0 here reached `pacer gate` as a measured burn of zero
+        /// right after a lapsed login came back at 98%, and its safe limit
+        /// went to 99 with no padding instead of the unknown-burn 98; the
+        /// rotation controller took it as 0 instead of assuming a burn; the
+        /// card's chip called the window quiet.
+        public let slopePercentPerHour: Double?
         /// First instant the selected model's projection crosses 100%, strictly
         /// before the reset. nil = the window resets first (or no signal).
         public let projectedFullAt: Date?
@@ -1038,7 +1046,7 @@ public actor UsageIntelligenceEngine {
         // than `maxGap` after it.
         let cutoff = max(current.cycleStart, f.now.addingTimeInterval(-lookback))
         let recent = ReadingCoverage.continuousRun(current.samples.filter { $0.at >= cutoff }, at: \.at)
-        var slope = 0.0
+        var slope: Double?
         if let first = recent.first, let last = recent.last,
            last.at.timeIntervalSince(first.at) >= ReadingCoverage.minRateSpan {
             slope = (last.usedPercentage - first.usedPercentage)
