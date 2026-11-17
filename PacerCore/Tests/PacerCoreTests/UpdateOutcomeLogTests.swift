@@ -24,7 +24,7 @@ struct UpdateOutcomeLogTests {
         let s = suite()
         let detail = UpdateOutcomeLog.errorDetail(domain: "NSURLErrorDomain", code: -1009,
                                                   underlyingDomain: "kCFErrorDomainCFNetwork", underlyingCode: -1)
-        #expect(detail == "error_nsurlerrordomain_-1009/error_kcferrordomaincfnetwork_-1")
+        #expect(detail == "error_nsurlerrordomain_-1009:error_kcferrordomaincfnetwork_-1")
         #expect(UpdateOutcomeLog.errorDetail(domain: "SUSparkleErrorDomain", code: 2001) == "error_sparkle_2001")
         UpdateOutcomeLog.record(.downloadFailed, version: "1.2.3", error: detail, store: s)
         #expect(UpdateOutcomeLog.last(store: s)?.error == detail)
@@ -33,6 +33,55 @@ struct UpdateOutcomeLogTests {
         #expect(UpdateOutcomeLog.last(store: s)?.error == detail)
         UpdateOutcomeLog.record(.found, version: "1.2.4", store: s)
         #expect(UpdateOutcomeLog.last(store: s)?.error == nil)
+    }
+
+    @Test("an end-of-cycle error keeps its underlying error as the detail; no update is not an error")
+    func endOfCycleDetail() {
+        let s = suite()
+        let t = Date(timeIntervalSince1970: 1_800_000_000)
+        // A failed appcast fetch: Sparkle's 2001 around the URL error.
+        UpdateOutcomeLog.recordEndOfCycle(domain: "SUSparkleErrorDomain", code: 2001,
+                                          underlyingDomain: "NSURLErrorDomain", underlyingCode: -1009,
+                                          now: t, store: s)
+        #expect(UpdateOutcomeLog.last(store: s)?.result == "error_sparkle_2001")
+        #expect(UpdateOutcomeLog.last(store: s)?.error == "error_sparkle_2001:error_nsurlerrordomain_-1009")
+
+        // Without an underlying error there is no detail, and no stale one.
+        UpdateOutcomeLog.recordEndOfCycle(domain: "SUSparkleErrorDomain", code: 4005, now: t, store: s)
+        #expect(UpdateOutcomeLog.last(store: s)?.result == "error_sparkle_4005")
+        #expect(UpdateOutcomeLog.last(store: s)?.error == nil)
+
+        UpdateOutcomeLog.recordEndOfCycle(domain: "SUSparkleErrorDomain", code: 1001,
+                                          underlyingDomain: "NSURLErrorDomain", underlyingCode: -1,
+                                          now: t, store: s)
+        #expect(UpdateOutcomeLog.last(store: s)?.result == "no_update")
+        #expect(UpdateOutcomeLog.last(store: s)?.error == nil)
+
+        // Still the end-of-cycle repeat: a fresh download failure keeps its own reason.
+        UpdateOutcomeLog.record(.downloadFailed, version: "0.9.2", error: "error_nsurlerrordomain_-1001", now: t, store: s)
+        UpdateOutcomeLog.recordEndOfCycle(domain: "SUSparkleErrorDomain", code: 2001,
+                                          underlyingDomain: "NSURLErrorDomain", underlyingCode: -1001,
+                                          now: t.addingTimeInterval(5), store: s)
+        #expect(UpdateOutcomeLog.last(store: s)?.result == "download_failed")
+        #expect(UpdateOutcomeLog.last(store: s)?.error == "error_nsurlerrordomain_-1001")
+    }
+
+    @Test("error details survive the telemetry scrubber and the analytics cleaner unchanged")
+    func errorDetailSurvivesScrubbing() {
+        let details = [
+            UpdateOutcomeLog.errorDetail(domain: "SUSparkleErrorDomain", code: 2001,
+                                         underlyingDomain: "NSURLErrorDomain", underlyingCode: -1009),
+            UpdateOutcomeLog.errorDetail(domain: "NSURLErrorDomain", code: -1009,
+                                         underlyingDomain: "kCFErrorDomainCFNetwork", underlyingCode: -1),
+            UpdateOutcomeLog.errorDetail(domain: "SUSparkleErrorDomain", code: 3001,
+                                         underlyingDomain: "NSCocoaErrorDomain", underlyingCode: 260),
+            UpdateOutcomeLog.errorDetail(domain: "NSURLErrorDomain", code: -1100,
+                                         underlyingDomain: "NSPOSIXErrorDomain", underlyingCode: 2),
+        ]
+        for detail in details {
+            #expect(TelemetryScrubber.scrub(detail, home: "/Users/someone") == detail)
+            #expect(AnalyticsPayload.cleanString(detail, home: "/Users/someone") == detail)
+        }
     }
 
     @Test("the last result and version are kept together")

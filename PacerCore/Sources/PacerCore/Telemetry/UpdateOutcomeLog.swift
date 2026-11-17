@@ -14,9 +14,9 @@ public enum UpdateOutcomeLog {
     public static let resultKey = "pacer.telemetry.update.result"
     public static let versionKey = "pacer.telemetry.update.version"
     public static let atKey = "pacer.telemetry.update.at"
-    /// Why a download failed: the error's `error_<domain>_<code>` form, plus
-    /// `/` and the same for its underlying error when it has one. Never a
-    /// description.
+    /// Why a download failed or a cycle ended in an error: the error's
+    /// `error_<domain>_<code>` form, plus `:` and the same for its underlying
+    /// error when it has one. Never a description.
     public static let errorKey = "pacer.telemetry.update.error"
     /// Whether the update being installed is a Sparkle delta (`true`) or a
     /// full download (`false`). Stored only with an install result, so a
@@ -91,13 +91,39 @@ public enum UpdateOutcomeLog {
                endOfCycle: endOfCycle, now: now, store: store)
     }
 
-    /// The reason for a failed download: the error's domain tail and code,
-    /// then its `NSUnderlyingErrorKey` error's, joined by `/`. No description.
+    /// The reason for a failed download or a failed cycle: the error's domain
+    /// tail and code, then its `NSUnderlyingErrorKey` error's, joined by `:`.
+    /// No description.
+    ///
+    /// Not `/`: every string that leaves goes through `TelemetryScrubber`,
+    /// which redacts any 40+ run of `[A-Za-z0-9+/_-]` as a likely token, and
+    /// `error_sparkle_2001/error_nsurlerrordomain_-1009` is 47 such characters.
+    /// It arrived as `<redacted>`. `:` ends the run, and each half stays under
+    /// 40 for every domain and code Sparkle and Foundation use.
     public static func errorDetail(domain: String, code: Int,
                                    underlyingDomain: String? = nil, underlyingCode: Int? = nil) -> String {
         let top = result(forErrorDomain: domain, code: code)
         guard let underlyingDomain, let underlyingCode else { return top }
-        return top + "/" + result(forErrorDomain: underlyingDomain, code: underlyingCode)
+        return top + ":" + result(forErrorDomain: underlyingDomain, code: underlyingCode)
+    }
+
+    /// What Sparkle's "cycle finished" callback reports. `SUNoUpdateError` is
+    /// the "you're up to date" answer, not a failure. Any other error keeps its
+    /// underlying error's domain and code as the detail: Sparkle wraps a failed
+    /// appcast fetch and a failed download in the same `SUDownloadError`
+    /// (2001), and only the underlying `NSURLErrorDomain` code says whether the
+    /// Mac was offline, timed out, or got an HTTP error.
+    public static func recordEndOfCycle(domain: String, code: Int,
+                                        underlyingDomain: String? = nil, underlyingCode: Int? = nil,
+                                        now: Date = Date(), store: UserDefaults = PacerPreferences.store) {
+        if domain == sparkleErrorDomain, code == sparkleNoUpdateCode {
+            record(.noUpdate, endOfCycle: true, now: now, store: store)
+            return
+        }
+        let detail = underlyingDomain != nil && underlyingCode != nil
+            ? errorDetail(domain: domain, code: code, underlyingDomain: underlyingDomain, underlyingCode: underlyingCode)
+            : nil
+        record(result(forErrorDomain: domain, code: code), error: detail, endOfCycle: true, now: now, store: store)
     }
 
     /// What the check-in reports: nil until Sparkle has said anything.
