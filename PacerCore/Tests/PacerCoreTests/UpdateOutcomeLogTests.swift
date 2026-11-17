@@ -84,6 +84,20 @@ struct UpdateOutcomeLogTests {
         }
     }
 
+    @Test("the result's age is reported in whole hours, never negative")
+    func resultAge() {
+        let s = suite()
+        let t = Date(timeIntervalSince1970: 1_800_000_000)
+        #expect(UpdateOutcomeLog.resultAgeHours(now: t, store: s) == nil)
+        UpdateOutcomeLog.record(.found, version: "0.8.3", now: t, store: s)
+        #expect(UpdateOutcomeLog.resultAgeHours(now: t.addingTimeInterval(59 * 60), store: s) == 0)
+        #expect(UpdateOutcomeLog.resultAgeHours(now: t.addingTimeInterval(5 * 86400 + 1800), store: s) == 120)
+        #expect(UpdateOutcomeLog.resultAgeHours(now: t.addingTimeInterval(-7200), store: s) == 0)
+        // A later result restarts the clock.
+        UpdateOutcomeLog.record(.readyToInstall, version: "0.9.2", now: t.addingTimeInterval(86400), store: s)
+        #expect(UpdateOutcomeLog.resultAgeHours(now: t.addingTimeInterval(86400 + 3 * 3600), store: s) == 3)
+    }
+
     @Test("the last result and version are kept together")
     func roundTrip() {
         let s = suite()

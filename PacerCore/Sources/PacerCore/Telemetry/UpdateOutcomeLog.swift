@@ -126,6 +126,17 @@ public enum UpdateOutcomeLog {
         record(result(forErrorDomain: domain, code: code), error: detail, endOfCycle: true, now: now, store: store)
     }
 
+    /// Whole hours since the last result was recorded, for the check-in: nil
+    /// until Sparkle has said anything. `found` or `ready_to_install` that is
+    /// days old is the stuck-update signal; without the age, a result recorded
+    /// a minute ago and one recorded a week ago read the same. A clock that went
+    /// backwards reads 0.
+    public static func resultAgeHours(now: Date = Date(), store: UserDefaults = PacerPreferences.store) -> Int? {
+        guard store.string(forKey: resultKey) != nil,
+              let at = store.object(forKey: atKey) as? Date else { return nil }
+        return max(0, Int(now.timeIntervalSince(at) / 3600))
+    }
+
     /// What the check-in reports: nil until Sparkle has said anything.
     public static func last(store: UserDefaults = PacerPreferences.store) -> (result: String, version: String?, error: String?, delta: Bool?)? {
         guard let result = store.string(forKey: resultKey) else { return nil }

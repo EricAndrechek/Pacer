@@ -350,6 +350,11 @@ final class DailyCheckIn {
         if let update = UpdateOutcomeLog.last(store: store) {
             a["lifecycle.update_result"] = .string(update.result)
             if let version = update.version { a["lifecycle.update_version"] = .string(version) }
+            // How long that result has stood, so "found" a week ago (an update
+            // stuck behind install-on-quit) reads differently from "found" today.
+            if let hours = UpdateOutcomeLog.resultAgeHours(store: store) {
+                a["lifecycle.update_result_hours"] = .int(hours)
+            }
             if let error = update.error { a["lifecycle.update_error"] = .string(error) }
             // Present only with an install result: whether it arrived as a delta.
             if let delta = update.delta { a["lifecycle.update_delta"] = .bool(delta) }
