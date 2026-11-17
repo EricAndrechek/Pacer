@@ -232,7 +232,7 @@ struct PaceChartCard: View {
     /// for a reload. Deliberately **unscoped**: it decides *when* to reload,
     /// not what to show, and any account's poll is a fine reason to top up;
     /// the top-up itself is scoped. See `RateLimitWriteSignal`.
-    private var reloadSignal: UInt64 { RateLimitWriteSignal.shared.generation }
+    private var reloadSignal: UInt64 { RateLimitWriteSignal.shared.dashboardGeneration }
 
     /// Load the two 8-day series. Called on appear and whenever a new
     /// rate-limit sample lands — not on every context change.
@@ -948,7 +948,7 @@ struct PaceChartCard: View {
     /// `body` (through `columns`), so a new live value redraws the card.
     private static func readout(account: String?, key: String, at: Date, percent: Double,
                                 resetsAt: Date?, now: Date) -> LiveMeterReadout {
-        LiveMeterBoard.shared.readout(account: account, window: key,
+        LiveMeterBoard.shared.dashboardReadout(account: account, window: key,
                                       reading: MeterReading(at: at, percent: percent, resetsAt: resetsAt),
                                       now: now)
     }
@@ -1053,7 +1053,7 @@ struct PaceChartCard: View {
         // and handed to the ask as values.
         let liveByAccount: [String: [String: LiveMeterValue]] = Dictionary(
             uniqueKeysWithValues: plan.compactMap { entry in
-                entry.accountId.map { ($0, LiveMeterBoard.shared.values[$0] ?? [:]) }
+                entry.accountId.map { ($0, LiveMeterBoard.shared.dashboardValues[$0] ?? [:]) }
             })
         var nextSelected: [String: WindowProjection] = [:]
         var nextOutlooks: [String: UsageIntelligenceEngine.BurnOutlook] = [:]
@@ -1292,13 +1292,15 @@ struct PaceChartCard: View {
         // missing from anything that captures at a fixed settle. The burst
         // worth collapsing is the notification path below.
         .task(id: windowKey) { await runProjectionRefresh() }
-        .onReceive(NotificationCenter.default.publisher(for: .pacerEngineDidRecompute)) { _ in
+        .onReceive(ViewRefreshGate.shared.engineRecomputes) { _ in
             scheduleProjectionRefresh()
         }
         .onChange(of: liveKey) { _, _ in scheduleProjectionRefresh() }
         .task {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(60))
+                // Held while every display sleeps (#407): on wake, one tick.
+                await ViewRefreshGate.shared.untilAwake()
                 if Task.isCancelled { break }
                 await tick()
             }

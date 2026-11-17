@@ -102,7 +102,7 @@ struct ContentView: View {
     private var windowSubtitle: String {
         guard let account = accountList.limitAccount(scope.limitAccountId) else { return "" }
         return Self.windowSubtitle(for: accountList.readings[account.id],
-                                   live: LiveMeterBoard.shared.values[account.id] ?? [:])
+                                   live: LiveMeterBoard.shared.dashboardValues[account.id] ?? [:])
     }
 
     /// Each window at its live value (#318), from the account's cached
@@ -858,7 +858,7 @@ struct ToolbarFreshness: View {
         // produces an identical `Display` costs nothing below this point:
         // the pill redraws only when its text changes.
         PillBody(display: display).equatable()
-            .onReceive(NotificationCenter.default.publisher(for: .pacerScanCycleDidComplete)) { _ in
+            .onReceive(ViewRefreshGate.shared.scanCycles) { _ in
                 Task { await refreshScopedProbes() }
                 // The scan meta moves with every cycle; read it now rather
                 // than at the next minute.
@@ -867,7 +867,7 @@ struct ToolbarFreshness: View {
             // Rate-limit rows arrive from every account's poll; a scan cycle
             // only reports the active login's. Read in `body` so the pill
             // depends on it (#142).
-            .onChange(of: RateLimitWriteSignal.shared.generation) { _, _ in
+            .onChange(of: RateLimitWriteSignal.shared.dashboardGeneration) { _, _ in
                 Task { await refreshScopedProbes() }
             }
             // The probes are scoped, so a scope change invalidates them —
@@ -889,6 +889,9 @@ struct ToolbarFreshness: View {
                 while !Task.isCancelled {
                     let next = PacerReadAge.nextChange(after: Date())
                     try? await Task.sleep(for: .seconds(max(0.05, next.timeIntervalSinceNow)))
+                    // Held while every display sleeps; on wake, one tick at
+                    // the real time (#407).
+                    await ViewRefreshGate.shared.untilAwake()
                     if Task.isCancelled { break }
                     await refresh(now: max(next, Date()))
                 }

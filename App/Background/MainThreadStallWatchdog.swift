@@ -42,9 +42,15 @@ final class MainThreadStallWatchdog {
     /// regression (#403) that was not one.
     ///
     /// Mirrored into `DisplaySleepState`, which `HangReporter` reads from
-    /// another queue to hold back hang events nobody could feel.
+    /// another queue to hold back hang events nobody could feel, and reported
+    /// to `ViewRefreshGate`, which holds the dashboard's refreshes while every
+    /// display is asleep (#407) once CoreGraphics confirms every online
+    /// display is.
     private var displaysAsleep = false {
-        didSet { DisplaySleepState.set(asleep: displaysAsleep) }
+        didSet {
+            DisplaySleepState.set(asleep: displaysAsleep)
+            ViewRefreshGate.shared.displaysReported(asleep: displaysAsleep)
+        }
     }
     private var sleepObservers: [NSObjectProtocol] = []
 
@@ -66,15 +72,31 @@ final class MainThreadStallWatchdog {
                 MainActor.assumeIsolated { MainThreadStallWatchdog.shared.displaysAsleep = false }
             },
         ]
+        // A display added or removed (an external screen, Sidecar, a screen
+        // sharing session's virtual display) can end "every display asleep"
+        // without a wake notification. Called twice per change; the second,
+        // without `beginConfigurationFlag`, is after it.
+        CGDisplayRegisterReconfigurationCallback({ _, flags, _ in
+            guard !flags.contains(.beginConfigurationFlag) else { return }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { ViewRefreshGate.shared.displaysMayHaveChanged() }
+            }
+        }, nil)
         // `cpu` is the main thread's own CPU time in the stretch. Close to the
         // wall time means it was working; far below means it was waiting (a
         // lock, a fetch blocked on another context's write) or throttled.
         observer = RunLoopStallObserver(runLoop: CFRunLoopGetMain(), threshold: 0.1) { stall in
             // The observer fires on the main run loop, so this is the main actor.
-            let asleep = MainActor.assumeIsolated { MainThreadStallWatchdog.shared.displaysAsleep }
+            let (asleep, holding) = MainActor.assumeIsolated {
+                (MainThreadStallWatchdog.shared.displaysAsleep, ViewRefreshGate.shared.isHolding)
+            }
+            // ` · displays asleep` stays the prefix the asleep rate is counted
+            // by (#407: it should fall towards the awake rate). ` · views live`
+            // marks the rare stretch the system reported sleep but a display
+            // was still on, so the dashboard kept refreshing.
             Log.write("MainThread",
                       "stalled \(Int(stall.wall * 1000))ms (cpu \(Int(stall.cpu * 1000))ms)"
-                        + (asleep ? " · displays asleep" : ""))
+                        + (asleep ? " · displays asleep" + (holding ? "" : " · views live") : ""))
             // The log keeps every stall over 100 ms; telemetry sends only the
             // ones a person would feel (250 ms and up). The rest are one
             // in-memory tally, drained into the daily check-in.

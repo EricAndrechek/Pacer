@@ -46,7 +46,16 @@ public final class LiveMeterBoard {
 
     /// Account → window key → live value. Only accounts and windows that
     /// have one: no fit, a weak fit, or a reading over an hour old have none.
-    public private(set) var values: [String: [String: LiveMeterValue]] = [:]
+    public private(set) var values: [String: [String: LiveMeterValue]] = [:] {
+        didSet { offerToDashboard() }
+    }
+
+    /// `values` as the dashboard window shows them: the same, except that
+    /// while every display is asleep a change is held and copied over once
+    /// on wake (`ViewRefreshGate`, #407). Each publish redraws the pace card's
+    /// charts and retitles the window, and nobody can see either then. The
+    /// menu bar, alerts and the API read `values`, which never waits.
+    public private(set) var dashboardValues: [String: [String: LiveMeterValue]] = [:]
 
     @ObservationIgnored private var container: ModelContainer?
     @ObservationIgnored private var observers: [NSObjectProtocol] = []
@@ -71,6 +80,23 @@ public final class LiveMeterBoard {
     public func readout(account: String?, window: String, reading: MeterReading,
                         now: Date = Date()) -> LiveMeterReadout {
         LiveMeterReadout(reading: reading, live: value(account: account, window: window), now: now)
+    }
+
+    /// `readout` from `dashboardValues`: for views in the dashboard window.
+    public func dashboardReadout(account: String?, window: String, reading: MeterReading,
+                                 now: Date = Date()) -> LiveMeterReadout {
+        let live = account.flatMap { dashboardValues[$0]?[window] }
+        return LiveMeterReadout(reading: reading, live: live, now: now)
+    }
+
+    /// Hand the new `values` to the dashboard now, or on wake. The delivery
+    /// copies whatever `values` is then, so a held run of publishes lands as
+    /// the newest one.
+    private func offerToDashboard() {
+        ViewRefreshGate.shared.offer(.liveMeter) { [weak self] _ in
+            guard let self, self.dashboardValues != self.values else { return }
+            self.dashboardValues = self.values
+        }
     }
 
     // MARK: - Lifecycle

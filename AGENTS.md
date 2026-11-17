@@ -1065,6 +1065,21 @@ Give it a tick: `TimelineView(.everyMinute)` around the text, a minute
 menu dropdown re-reads on every open). Pass the tick's date into a child
 rather than having it call `Date()`, or an unchanged child is skipped.
 
+### Dashboard views take the gated signals; everything else the raw ones
+
+While **every** display is asleep, `ViewRefreshGate` holds the dashboard
+window's refresh signals and delivers each once on wake (#407). That is the
+only paused state: a locked screen, a hidden or unfocused window, another
+monitor, Sidecar all keep updating. A view in the dashboard window reloads on
+`ViewRefreshGate.shared.scanCycles` / `.engineRecomputes`,
+`RateLimitWriteSignal.dashboardGeneration`, `LiveMeterBoard.dashboardValues`
+(`dashboardReadout`), and puts `await ViewRefreshGate.shared.untilAwake()`
+after the sleep in its clock loop. The menu bar, widgets, alerts, the API/CLI
+snapshot and anything in the data path use the raw notification, `generation`
+and `values`, which never wait. Using a raw signal in a dashboard view is never
+wrong, only wasted work while asleep; a gated one outside the window would be a
+stale surface.
+
 ### Long-lived hosts key on every input their `init` captures
 
 The menu bar's views are built once and kept, so a `@Query` predicate built
