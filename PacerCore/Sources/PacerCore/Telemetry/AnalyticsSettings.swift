@@ -25,7 +25,7 @@ public enum AnalyticsSettings {
         /// `all` when empty, else `one`: the account scope, whose value is an
         /// account id and is never sent.
         case presence
-        /// Menu bar chips: the built-in ones, sorted and `+`-joined, or
+        /// Menu bar chips: the built-in ones, sorted and `,`-joined, or
         /// `hidden` when there are none (the bar item is removed).
         case chips
     }
@@ -139,6 +139,8 @@ public enum AnalyticsSettings {
         }
     }
 
+    // Comma, not `+`: four chips with `+` run past 40 characters, and the
+    // scrubber's long-run rule once redacted the whole value.
     public static func chipsSummary(_ csv: String) -> String {
         let chips = csv.split(separator: ",").map(String.init)
         if chips.isEmpty { return "hidden" }
@@ -146,6 +148,6 @@ public enum AnalyticsSettings {
         let scoped = chips.count - builtIn.count
         var parts = builtIn
         if scoped > 0 { parts.append("scoped") }
-        return parts.joined(separator: "+")
+        return parts.joined(separator: ",")
     }
 }

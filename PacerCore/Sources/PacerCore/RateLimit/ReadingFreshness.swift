@@ -26,17 +26,14 @@ public enum ReadingFreshness {
     /// adaptive poller as it slows down and speeds up.
     public static let recentGaps = 12
 
-    /// Readings closer together than this are one poll (#308). An account
-    /// with several tokens is polled through one lane per token, and when
-    /// those lanes come due together (#350) it lands a burst of readings
-    /// seconds apart and then nothing for minutes. Taken one by one,
-    /// six of every seven gaps were 4–7 s, the "usual gap" read as seconds,
-    /// and every ordinary pause between rounds tripped the 3-minute floor: on
-    /// a real store that withheld the active account's weekly lines for
-    /// 10–35 minutes at a time, a dozen times a day. Well under the fastest
-    /// real cadence (the active lane, about a minute), so steady polls never
-    /// merge.
-    public static let pollBurst: TimeInterval = 30
+    /// Readings closer together than this are one poll (#308), the same poll
+    /// `RecentBurn` measures rates over, so it is `ReadingCoverage`'s. Taken
+    /// one by one, six of every seven gaps were 4–7 s (lanes landing
+    /// together, #350), the "usual gap" read as seconds, and every ordinary
+    /// pause between rounds tripped the 3-minute floor: on a real store that
+    /// withheld the active account's weekly lines for 10–35 minutes at a
+    /// time, a dozen times a day.
+    public static let pollBurst: TimeInterval = ReadingCoverage.pollBurst
 
     /// The account's usual poll gap: the median gap between its most recent
     /// polls, or nil with fewer than two. Any order; duplicates (one poll

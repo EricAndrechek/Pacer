@@ -17,8 +17,9 @@ public enum BurnRate {
     public struct Projection: Equatable, Sendable {
         /// Recent slope in percentage points per hour. Negative when the
         /// window's usage is decreasing (just past a reset, or the server's
-        /// rolling window rolled some old usage out).
-        public let slopePercentPerHour: Double
+        /// rolling window rolled some old usage out). Nil when the readings
+        /// cannot support one (`BurnOutlook.slopePercentPerHour`).
+        public let slopePercentPerHour: Double?
         /// When the projection crosses 100%, strictly before the reset
         /// boundary. nil when no pre-reset hit is projected.
         public let projectedFullAt: Date?
@@ -30,7 +31,7 @@ public enum BurnRate {
         public var willHitLimitBeforeReset: Bool { projectedFullAt != nil }
 
         public init(
-            slopePercentPerHour: Double,
+            slopePercentPerHour: Double?,
             projectedFullAt: Date?,
             etaSeconds: TimeInterval?
         ) {

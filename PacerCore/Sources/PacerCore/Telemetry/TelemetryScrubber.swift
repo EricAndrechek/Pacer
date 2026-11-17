@@ -78,12 +78,14 @@ public enum TelemetryScrubber {
         (#"-Users-[A-Za-z0-9._-]+"#, "<project>"),
         (#"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"#, "<email>"),
         (#"(?i)bearer\s+[A-Za-z0-9._~+/=-]+"#, "<redacted>"),
-        (#"\b(?:sk-ant-|sk-|ghp_|gho_|ghs_|github_pat_)[A-Za-z0-9_-]{8,}"#, "<redacted>"),
+        (#"\b(?:sk-ant-|sk-|ghp_|gho_|ghs_|ghu_|ghr_|github_pat_|xox[abpr]-)[A-Za-z0-9_-]{8,}"#, "<redacted>"),
         // Long hex not shaped like a UUID (UUIDs have dashes, so a 32+ run of
         // pure hex is a key, a hash or a token).
         (#"\b[0-9a-fA-F]{32,}\b"#, "<redacted>"),
         // Long base64-ish runs (tokens, keys). 40+ so ordinary words and
-        // identifiers survive.
-        (#"[A-Za-z0-9+/_-]{40,}={0,2}"#, "<redacted>"),
+        // identifiers survive, and at least one digit in the run: real tokens
+        // always have one, while snake_case settings and long Swift symbol
+        // names often do not. The lookahead stays inside the same run.
+        (#"(?<![A-Za-z0-9+/_-])(?=[A-Za-z0-9+/_-]*\d)[A-Za-z0-9+/_-]{40,}={0,2}"#, "<redacted>"),
     ].map { (try! NSRegularExpression(pattern: $0.0), $0.1) }
 }

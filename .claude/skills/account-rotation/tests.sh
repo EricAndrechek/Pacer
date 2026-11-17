@@ -307,6 +307,36 @@ AUTO=1 API=http://127.0.0.1:$port t "V2 a lower live estimate never lowers a rea
   1 "1:20:200:98:ok 3:20:250:40:ok $SPENT" 'EARLY=0'
 kill "$srv" 2>/dev/null
 
+# --- the heartbeat Pacer reads (Skills/pacer/reference.md, "Rotation") -------------
+# hb NAME REGEX ACTIVE ACCOUNTS [LAST_SWITCH_RECORD]: one dry pass writing the
+# heartbeat to a temp file. A last-switch record makes the pass honour
+# MIN_SWITCH_GAP (DRY_HONOR_GAP), as the live loop does.
+hb() {
+  local d=$T/hb${1// /_} out
+  mkdir -p "$d/state"; echo 'WEEK_MAX=90' >"$d/conf"
+  [ -n "${5:-}" ] && printf '%s\n' "$5" >"$d/state/last_switch"
+  PATH="$T/bin:$PATH" FAKE_DIR=$T FAKE_ACT=$3 FAKE_ACCTS=$4 ROTATE_CONF=$d/conf ROTATE_STATE=$d/state \
+    PACER_API=http://127.0.0.1:1 BURN_OVERRIDE=45 PACE_ROTATION=$d/rotation.json \
+    DRY_HONOR_GAP=${5:+1} "$ROT" dry >/dev/null 2>&1
+  out=$(cat "$d/rotation.json" 2>/dev/null)
+  if printf '%s\n' "$out" | grep -qE -- "$2"; then
+    pass=$(( pass + 1 )); printf 'PASS  %-42s %s\n' "heartbeat $1" "$out"
+  else
+    fail=$(( fail + 1 )); printf 'FAIL  %-42s want /%s/, got: %s\n' "heartbeat $1" "$2" "${out:-<none>}"
+  fi
+}
+hb "names the target with room" '"active": "acc1acc0", "holding": false, "targets": \["acc3acc0"\]' \
+  1 "1:94:26:63:ok 3:70:180:77:ok $SPENT"
+hb "holding, no target" '"holding": true, "targets": \[\]' \
+  1 "1:94:26:63:ok 3:89:180:77:ok $SPENT"
+# Just switched 2 → 1: no pass inside MIN_SWITCH_GAP, so no targets, though 3
+# qualifies by its numbers (the first case) and is not the slot just left.
+hb "no targets right after a switch" '"active": "acc1acc0", "holding": false, "targets": \[\]' \
+  1 "1:94:26:63:ok 3:70:180:77:ok $SPENT" "$(( NOW - 60 )) 2 - 0 1"
+# The same record 10 minutes old: the pass runs again and names 3.
+hb "targets again once the gap has passed" '"targets": \["acc3acc0"\]' \
+  1 "1:94:26:63:ok 3:70:180:77:ok $SPENT" "$(( NOW - 600 )) 2 - 0 1"
+
 if [ -e "$T/switched" ]; then
   fail=$(( fail + 1 )); echo "FAIL  dry mode called cswap switch: $(tr '\n' ' ' <"$T/switched")"
 else

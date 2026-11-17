@@ -61,6 +61,11 @@ func runPace(_ box: PaceSandbox, _ args: [String], api: String? = nil,
     env["PACER_API"] = api ?? "file://\(box.dir.path)"
     if !unsetState { env["PACE_STATE"] = box.stateURL.path }
     for (key, value) in extra { env[key] = value }
+    // These tests check what the numbers say, so a session runs informed
+    // unless a test asks for a mode; `PacePacingModeTests` covers gate-only.
+    // An empty PACER_PACING means unset: the session's own default.
+    if !(env["CLAUDE_CODE_SESSION_ID"] ?? "").isEmpty, env["PACER_PACING"] == nil { env["PACER_PACING"] = "informed" }
+    if env["PACER_PACING"] == "" { env["PACER_PACING"] = nil }
     let capture = PaceCapture()
     var sleeps = 0
     let io = PaceIO(

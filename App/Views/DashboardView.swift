@@ -165,7 +165,7 @@ struct RateLimitSourceChip: View {
     /// re-runs, so the fetch that fills them redraws this view (#140).
     var body: some View {
         let key = RefreshKey(account: limitAccountId,
-                             generation: RateLimitWriteSignal.shared.generation)
+                             generation: RateLimitWriteSignal.shared.dashboardGeneration)
         let latest = self.latest, owner = self.owner
         TimelineView(.periodic(from: .now, by: 30)) { _ in
             HStack(spacing: 0) { content(latest: latest, owner: owner) }

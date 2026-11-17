@@ -111,6 +111,16 @@ public enum ArenaWeightStore {
         pinned.keys.filter { localURL(for: $0) != nil }.sorted()
     }
 
+    /// A model id as telemetry sends it: the `@<revision>` cut to its first 12
+    /// characters. A full 40-hex revision looks like a secret to the scrubber,
+    /// which redacts it; 12 still names the revision. The ids themselves are
+    /// unchanged.
+    public static func telemetryId(_ id: String) -> String {
+        guard let at = id.firstIndex(of: "@") else { return id }
+        let revision = id[id.index(after: at)...]
+        return String(id[...at]) + String(revision.prefix(12))
+    }
+
     /// A file is there and has its pinned size (a cheap check that catches a
     /// truncated copy without hashing hundreds of megabytes on every lookup).
     static func isComplete(_ url: URL, id: String) -> Bool {

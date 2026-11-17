@@ -536,9 +536,18 @@ enum PaceFormat {
     static func utcStamp(_ date: Date) -> String { isoFormatter.string(from: date) }
 }
 
-/// The logins other than the one a report is about, split the way the gate
-/// splits a window: spent when any account-wide window is at or over its safe
-/// limit, with room otherwise (#293).
+/// The logins other than the one a report is about, in three kinds (#293):
+/// spent when any account-wide window is at or over its safe limit; near its
+/// limit when one is under it by less than a resume needs; with room
+/// otherwise.
+///
+/// **"With room" is the bar a resume onto that login needs**, not merely
+/// "under the safe limit": `PaceRules.resumeHeadroom`, 20 minutes at the
+/// higher of its own burn and the burn of the login being left (the sessions
+/// move with the work), at least 5 points. Under the old rule a login at 98%
+/// of a 99% limit counted as room, so `report` said "2 with room" when a
+/// rotation controller (and `wait` itself) would accept one. That is the
+/// number an agent read as "capacity", so it has to be the real one.
 ///
 /// Only account-wide windows decide. A per-model cap (Ultra's, or Fable's) is
 /// not the login's capacity, and an Ultra login has no 5-hour window at all,
@@ -555,37 +564,54 @@ struct PaceOtherLogins: Equatable, Sendable {
         let windows: [Window]
         /// The windows over their limit, which is what the login waits on.
         let spent: [Window]
-        var hasRoom: Bool { spent.isEmpty }
+        /// The windows under their limit by less than a resume needs.
+        var near: [Window] = []
+        var hasRoom: Bool { spent.isEmpty && near.isEmpty }
+        var isNear: Bool { spent.isEmpty && !near.isEmpty }
+        var isSpent: Bool { !spent.isEmpty }
         /// When it is usable again: the last of its spent windows to reset.
         var freeIn: Int? { spent.compactMap(\.resetsIn).max() }
         var peak: Double { windows.map { PaceFormat.number($0.percentText) }.max() ?? 0 }
+        var state: String { hasRoom ? "room" : (isNear ? "near" : "spent") }
     }
 
     let logins: [Login]
 
-    /// Nil when `rows` holds no login with an account-wide window.
-    init?(rows: [PaceRow]) {
+    /// Nil when `rows` holds no login with an account-wide window. `leaving`
+    /// is the burn of each window (by identity) on the login being left, so
+    /// a target needs room for the work that would move onto it;
+    /// `resumeHeadroom` is `--resume-headroom` (nil: auto).
+    init?(rows: [PaceRow], leaving: [String: Double] = [:], resumeHeadroom: Int? = nil) {
         var order: [String] = []
         for row in rows where row.model.isEmpty && !order.contains(row.account) { order.append(row.account) }
         logins = order.map { account in
             let own = rows.filter { $0.account == account && $0.model.isEmpty }
             var windows: [Window] = []
             var spent: [Window] = []
+            var near: [Window] = []
             for row in own {
                 let window = Window(label: row.label, percentText: row.percentText, resetsIn: row.resetSeconds)
                 windows.append(window)
                 // A reset already due describes the window that just ended,
                 // as in `PaceRules.evaluate`.
                 if let secs = row.resetsIn, PaceFormat.number(secs) <= 0 { continue }
-                if row.percent >= PaceRules.limit(row, cap: .safe, margin: 0) { spent.append(window) }
+                let limit = PaceRules.limit(row, cap: .safe, margin: 0)
+                if row.percent >= limit {
+                    spent.append(window)
+                } else {
+                    let needed = PaceRules.resumeHeadroom(row, fixed: resumeHeadroom,
+                                                          oldBurn: leaving[row.identity])
+                    if limit - row.percent < Double(needed.points) { near.append(window) }
+                }
             }
-            return Login(account: account, windows: windows, spent: spent)
+            return Login(account: account, windows: windows, spent: spent, near: near)
         }
         if logins.isEmpty { return nil }
     }
 
     var withRoom: [Login] { logins.filter(\.hasRoom) }
-    var spent: [Login] { logins.filter { !$0.hasRoom } }
+    var nearLimit: [Login] { logins.filter(\.isNear) }
+    var spent: [Login] { logins.filter(\.isSpent) }
 
     /// The login with the most room: the lowest peak.
     var best: Login? { withRoom.min { $0.peak < $1.peak } }
@@ -597,11 +623,14 @@ struct PaceOtherLogins: Equatable, Sendable {
         windows.map { "\($0.label) \(PaceFormat.percent($0.percentText))%" }.joined(separator: ", ")
     }
 
-    /// `other logins: 1 with room (7d 4%), 2 spent until Sat`
+    /// `other logins: 1 with room (7d 4%), 1 near its limit, 2 spent until Sat`
     func line(now: Date) -> String {
         var parts: [String] = []
         if let best {
             parts.append("\(withRoom.count) with room (\(Self.text(best.windows)))")
+        }
+        if !nearLimit.isEmpty {
+            parts.append("\(nearLimit.count) near \(nearLimit.count == 1 ? "its" : "their") limit")
         }
         if !spent.isEmpty {
             let when = spentUntil.map { " until " + PaceFormat.until($0, now: now) } ?? ""
@@ -618,14 +647,15 @@ struct PaceOtherLogins: Equatable, Sendable {
     }
 
     /// For `pacer json`: each login with its account-wide windows, and for a
-    /// spent one when it is usable again.
+    /// spent one when it is usable again. `withRoom` counts only logins with
+    /// room to resume onto (the bar above); `nearLimit` the ones short of it.
     var json: String {
         let items = logins.map { login in
-            "{\"account\": \"\(login.account)\", \"state\": \"\(login.hasRoom ? "room" : "spent")\", "
-            + "\"freeInSeconds\": \(login.hasRoom ? "null" : login.freeIn.map(String.init) ?? "null"), "
+            "{\"account\": \"\(login.account)\", \"state\": \"\(login.state)\", "
+            + "\"freeInSeconds\": \(login.isSpent ? login.freeIn.map(String.init) ?? "null" : "null"), "
             + "\"windows\": \(Self.json(login.windows))}"
         }
-        return "{\"withRoom\": \(withRoom.count), \"spent\": \(spent.count), "
+        return "{\"withRoom\": \(withRoom.count), \"nearLimit\": \(nearLimit.count), \"spent\": \(spent.count), "
             + "\"spentUntilSeconds\": \(spentUntil.map(String.init) ?? "null"), "
             + "\"logins\": [" + items.joined(separator: ", ") + "]}"
     }

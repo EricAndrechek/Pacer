@@ -284,12 +284,12 @@ public enum AnalyticsVocabulary {
         known.contains(value) ? value : "other"
     }
 
-    /// Our own identifiers only: lowercased, `[a-z0-9_.:+-]`, at most 80
+    /// Our own identifiers only: lowercased, `[a-z0-9_.:+,-]`, at most 80
     /// characters. Anything else becomes `_`, so a stray path or sentence is
     /// mangled rather than sent (the scrubber runs after this as well).
     public static func token(_ raw: String) -> String {
         let mapped = raw.lowercased().map { c -> Character in
-            c.isASCII && (c.isLetter || c.isNumber || "_.:+-".contains(c)) ? c : "_"
+            c.isASCII && (c.isLetter || c.isNumber || "_.:+,-".contains(c)) ? c : "_"
         }
         let s = String(mapped.prefix(80))
         return s.isEmpty ? "none" : s

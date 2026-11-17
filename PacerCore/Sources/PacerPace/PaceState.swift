@@ -55,6 +55,10 @@ struct PaceStateFile {
         /// the login names another account (#343).
         var login = ""
         var followsLogin = true
+        /// For a pause: whether a login switch can end it (`PaceSwitchOutlook`:
+        /// `expected`, `possible`, `none`), so a gate-only `status` can say
+        /// what to wait for without a percentage.
+        var switchOutlook = ""
     }
 
     /// Written to a temporary file and renamed into place, so a reader never
@@ -89,6 +93,7 @@ struct PaceStateFile {
           "accountFlag": "\(v.accountFlag)",
           "login": "\(v.login)",
           "followsLogin": \(v.followsLogin),
+          "switch": "\(v.switchOutlook)",
           "note": "\(v.note)",
           "updatedAt": "\(PaceFormat.utcStamp(now))"
         }
@@ -126,7 +131,9 @@ struct PaceStateFile {
         let dir = (path as NSString).deletingLastPathComponent
         let fm = FileManager.default
         guard let names = try? fm.contentsOfDirectory(atPath: dir) else { return }
-        for name in names where name.hasPrefix("state-session-") && name.hasSuffix(".json") {
+        // A session's `pacer mode` choice goes with it.
+        for name in names where (name.hasPrefix("state-session-") || name.hasPrefix("mode-session-"))
+            && name.hasSuffix(".json") {
             let file = (dir as NSString).appendingPathComponent(name)
             guard file != path,
                   let modified = (try? fm.attributesOfItem(atPath: file))?[.modificationDate] as? Date,

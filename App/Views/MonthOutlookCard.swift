@@ -132,7 +132,7 @@ struct MonthOutlookCard: View {
                 self.projection = nil
                 await refreshProjection()
             }
-            .onReceive(NotificationCenter.default.publisher(for: .pacerEngineDidRecompute)) { _ in
+            .onReceive(ViewRefreshGate.shared.engineRecomputes) { _ in
                 Task { await refreshProjection() }
             }
     }

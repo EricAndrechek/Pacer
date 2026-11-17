@@ -12,7 +12,7 @@ struct LiveMeterDisplayTests {
     static let now = Date(timeIntervalSince1970: 1_790_000_000)
     static let fiveHours: TimeInterval = 5 * 3600
 
-    static func outlook(slope: Double, used: Double = 50, hitAt: Date? = nil, earliest: Date? = nil,
+    static func outlook(slope: Double?, used: Double = 50, hitAt: Date? = nil, earliest: Date? = nil,
                         latest: Date? = nil, claimable: Bool = false, confirmed: Bool = false)
         -> UsageIntelligenceEngine.BurnOutlook {
         UsageIntelligenceEngine.BurnOutlook(
@@ -34,6 +34,15 @@ struct LiveMeterDisplayTests {
     }
 
     // MARK: - The forecast chip: colour is where the window ends up
+
+    /// No slope is no chip (#421 review). A window just back from a gap has
+    /// no measured rate; read as 0 it was called quiet, "holds until reset",
+    /// at the moment nobody had seen it move. At the limit it still says so.
+    @Test func aWindowWithNoSlopeHasNoForecastChip() {
+        #expect(Self.chip(Self.outlook(slope: 0, used: 98), end: Self.end(98), used: 98)?.text == "holds until reset")
+        #expect(Self.chip(Self.outlook(slope: nil, used: 98), end: Self.end(98), used: 98) == nil)
+        #expect(Self.chip(Self.outlook(slope: nil, used: 100), end: Self.end(100), used: 100)?.text == "at the limit")
+    }
 
     @Test func theAtResetChipIsColouredByWhereTheWindowEndsUp() throws {
         // 10%/hr on a 5-hour window is half the pace that lands at 100%.

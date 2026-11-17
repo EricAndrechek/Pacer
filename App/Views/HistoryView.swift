@@ -304,7 +304,7 @@ private struct LifetimeSummaryContent: View {
         .onChange(of: scanMeta.first?.value) { _, _ in refreshCounts(force: false) }
         // A merge can fold one project into another without changing how
         // many project-day rows there are, so it re-reads regardless.
-        .onReceive(NotificationCenter.default.publisher(for: .pacerScanCycleDidComplete)) { note in
+        .onReceive(ViewRefreshGate.shared.scanCycles) { note in
             guard let summary = note.object as? ScanCycleSummary,
                   summary.projectAttributionChanged else { return }
             refreshCounts(force: true)

@@ -53,7 +53,7 @@ public extension Notification.Name {
 ///
 /// Use `hasAnyChanges` for the "kick everything" pattern that doesn't
 /// care about the breakdown.
-public struct ScanCycleSummary: Sendable {
+public struct ScanCycleSummary: Sendable, Equatable {
     public let samplesChanged: Bool
     public let rateLimitsChanged: Bool
     public let projectAttributionChanged: Bool
