@@ -80,6 +80,12 @@ Three health counters (not usage: Sentry metrics, and `counter.*` in PostHog's `
 
 On a mismatch, `Telemetry.problem("Session totals disagree with Claude Code")`, at most one per token kind and ratio band per run (crash toggle, `.error` cap), so one upstream defect is one Sentry issue. Tags only: `canary.kind` (`input`, `output`, `cache_read`, `cache_write`); `canary.ratio_band`, Claude Code's number over Pacer's (`<0.5`, `0.5-0.9`, `0.9-0.98`, `0.98-1.02`, `1.02-1.1`, `1.1-1.25`, `1.25-2`, `>2`; above 1 is Pacer under-counting; through 0.9.2 the top band was `>1.1`); `canary.cc_version`, the Claude Code version that wrote the session's latest turns (`other` unless plain dotted digits, `unknown` if none). Never a token count, an exact ratio, a path, a project or a session id. The local log (`[DataCanary]`) carries the exact ratios and the first eight characters of each session id.
 
+## Archive integrity (after 0.9.2, #433)
+The hourly archive check (`ArchiveSync`) counts `data.archive_integrity.ok` / `.mismatch`. On a mismatch it also counts, once per check, which way each gap goes and its order of magnitude (`ArchiveIntegrityGap`; `TelemetryBands.magnitude`, `e0` for 1-9, `e3` for 1,000-9,999), never a count:
+- `data.archive_integrity.rows.<over|under|equal>[.eN]`: the archive's turns against the store's (the hourly rollup's count), for whole days before today; `over` is the archive holding more.
+- `data.archive_integrity.output.<over|under|equal>[.eN]`: the same for output tokens.
+- `data.archive_integrity.rollup_rows.<over|under|equal>[.eN]`: the rollup's count against the store's own samples for those days (an index-only count, taken only on a mismatch), so a rollup that disagrees with its samples, which the reconcile never reads, is told from an archive that is off.
+
 ## PostHog
 
 **Client.** Our own, `App/Telemetry/PostHogClient.swift`: an on-disk queue
