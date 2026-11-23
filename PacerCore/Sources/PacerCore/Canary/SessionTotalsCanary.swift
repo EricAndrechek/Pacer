@@ -34,16 +34,18 @@ import Foundation
 ///
 ///   Above is allowed what the transcripts say Claude Code spent off the
 ///   record, on top of `tolerance`: each compaction (a `compact_boundary`
-///   line; 4.4–7.6k output measured, budgeted 20k) and each "while you were
+///   line; 4.4–7.6k output measured, budgeted 10k) and each "while you were
 ///   away" recap (an `away_summary` line; 80–310 measured, budgeted 500)
 ///   inside the counters' window, plus `desktopTolerance` for a session Claude
 ///   Desktop wrote, which makes calls that leave no line at all (one Desktop
 ///   session: 9.5% over with all 112 requests present; four others exact).
 ///   Measured 2026-11-23 against the counters Claude Code writes into its
 ///   transcripts (`cost-state` lines): of 66 sessions written wholly by
-///   2.1.307+, none crosses that allowance (the flat 2% the canary started
-///   with crossed on 9, Sentry PACER-28); of the 42 sessions with 09-23-era
-///   turns above 1.13, all 42 cross it.
+///   2.1.307+, none crosses that allowance above (the flat 2% the canary
+///   started with crossed on 9, Sentry PACER-28; three more fall below 0.98
+///   only because their counters stop days before their transcripts, which
+///   `spanSkip` rules out); of the 42 sessions with 09-23-era turns above
+///   1.13, all 42 cross it.
 /// - **input, cache reads, cache writes** are judged only below: Pacer holding
 ///   more than Claude Code counted means Pacer counted something twice. Above
 ///   is Claude Code's own calls, and says nothing.
@@ -151,14 +153,18 @@ public enum SessionTotalsCanary {
         public var tolerance: Double
         /// Output above Pacer's allowed per compaction in the window. Measured
         /// 4.4–7.6k per compaction (five sessions with compactions and no
-        /// recaps), ~9.4k implied for one with recaps too.
+        /// recaps), ~9.4k implied for one with recaps too. Not more: in a
+        /// session that compacts 25 times, every 10k of slack per compaction
+        /// is 250k of lost output the check would not see.
         public var compactionOutputAllowance: Int64
         /// Output allowed per recap in the window: 80–310 measured, the median
         /// ~120, a few above 500 only where 2% of the session covered them.
         public var recapOutputAllowance: Int64
         /// Extra output tolerance for a session Claude Desktop wrote: it makes
         /// main-model calls that leave no line (9.5% on one session whose 112
-        /// requests were all present).
+        /// requests were all present). 10 points rather than the 7.5 that
+        /// session needed: one sample, and the request check still covers
+        /// lost requests there.
         public var desktopTolerance: Double
         /// Answered requests Pacer may lack before it is a mismatch. Zero: on
         /// 329 real sessions none was missing.
@@ -168,9 +174,15 @@ public enum SessionTotalsCanary {
         /// any tolerance worth having. Requests are judged at any size, and so
         /// is a session Pacer holds no output for.
         public var minimumOutputTokens: Int64
-        /// The most transcript bytes the canary reads for one session, so a
-        /// daily run stays bounded. Larger sessions are skipped (`tooLarge`).
+        /// The most transcript bytes the canary reads for one session. Larger
+        /// sessions are skipped (`tooLarge`).
         public var maxTranscriptBytes: Int64
+        /// The most transcript bytes one run reads; the rest wait for the next
+        /// run (`overBudget`). The first run after an upgrade finds a week of
+        /// unjudged sessions at once, where a day normally brings a few. 1 GB:
+        /// the reader went through 1,976 MB of real transcripts in 38.7 s (a
+        /// debug build), so about 20 s of one utility thread at most per day.
+        public var maxBytesPerRun: Int64
         /// How long Claude Code's save and every transcript of the session must
         /// have been still.
         public var quietPeriod: TimeInterval
@@ -189,10 +201,10 @@ public enum SessionTotalsCanary {
         /// transcript's timestamps, written by the same process.
         public var clockSlack: TimeInterval
 
-        public init(tolerance: Double = 0.02, compactionOutputAllowance: Int64 = 20_000,
-                    recapOutputAllowance: Int64 = 500, desktopTolerance: Double = 0.08,
+        public init(tolerance: Double = 0.02, compactionOutputAllowance: Int64 = 10_000,
+                    recapOutputAllowance: Int64 = 500, desktopTolerance: Double = 0.10,
                     maxMissingRequests: Int = 0, minimumOutputTokens: Int64 = 20_000,
-                    maxTranscriptBytes: Int64 = 2 << 30,
+                    maxTranscriptBytes: Int64 = 2 << 30, maxBytesPerRun: Int64 = 1 << 30,
                     quietPeriod: TimeInterval = 15 * 60, lookback: TimeInterval = 7 * 86_400,
                     maxLeadIn: TimeInterval = 30 * 60, clockSlack: TimeInterval = 2 * 60) {
             self.tolerance = tolerance
@@ -202,6 +214,7 @@ public enum SessionTotalsCanary {
             self.maxMissingRequests = maxMissingRequests
             self.minimumOutputTokens = minimumOutputTokens
             self.maxTranscriptBytes = maxTranscriptBytes
+            self.maxBytesPerRun = maxBytesPerRun
             self.quietPeriod = quietPeriod
             self.lookback = lookback
             self.maxLeadIn = maxLeadIn
@@ -235,6 +248,8 @@ public enum SessionTotalsCanary {
         case notIngested = "not_ingested"
         /// More transcript than `maxTranscriptBytes` to read.
         case tooLarge = "too_large"
+        /// This run had read `maxBytesPerRun` already: judged on a later run.
+        case overBudget = "over_budget"
         case tooSmall = "too_small"
 
         public static func < (a: SkipReason, b: SkipReason) -> Bool {
@@ -394,9 +409,12 @@ public enum SessionTotalsCanary {
         }
 
         let likeForLike = claude.outputTokensExcludingSmallModel
-        // Main-model calls and no turn of Pacer's: a loss whatever the markers
-        // say, since those only explain calls made around turns.
-        let nothingHeld = pacer.outputTokens == 0 && likeForLike > 0
+        let allowance = outputAllowance(pacerOutput: pacer.outputTokens, evidence: evidence,
+                                        policy: policy)
+        // Main-model output and no turn of Pacer's: a loss at any size, unless
+        // the session's markers explain it (a resume whose rows stayed under
+        // the old session id, then a compaction).
+        let nothingHeld = pacer.outputTokens == 0 && Double(likeForLike) > allowance
         let tokensJudged = judgeTokens
             && (nothingHeld || max(likeForLike, pacer.outputTokens) >= policy.minimumOutputTokens)
         if tokensJudged {
@@ -408,9 +426,7 @@ public enum SessionTotalsCanary {
             ratios[.cacheWrite] = ratio(claude.cacheCreationTokens, pacer.cacheWriteTokens)
 
             let excess = Double(likeForLike - pacer.outputTokens)
-            let allowance = outputAllowance(pacerOutput: pacer.outputTokens, evidence: evidence,
-                                            policy: policy)
-            if nothingHeld || excess > allowance {
+            if excess > allowance {
                 mismatches.append(Mismatch(kind: .output, ratio: outputAbove))
             } else if outputBelow < low {
                 mismatches.append(Mismatch(kind: .output, ratio: outputBelow))

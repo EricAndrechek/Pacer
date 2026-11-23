@@ -58,18 +58,40 @@ public enum TranscriptEvidenceReader {
     private static let subtypeNeedle = Data(#""subtype":""#.utf8)
     private static let desktopNeedle = Data(#""entrypoint":"claude-desktop""#.utf8)
 
-    /// Read `files`, the transcripts of `sessionId`. Markers count only inside
+    /// One transcript and how much of it to read.
+    public struct Part: Sendable, Equatable {
+        public let url: URL
+        /// Bytes to read from the start: the size the canary checked Pacer's
+        /// cursor against. A session resumed since then has more, which Pacer
+        /// may not have read yet; reading it would report Pacer's lag as a
+        /// loss. nil reads to the end.
+        public let upTo: Int64?
+
+        public init(url: URL, upTo: Int64? = nil) {
+            self.url = url
+            self.upTo = upTo
+        }
+    }
+
+    /// Read `parts`, the transcripts of `sessionId`. Markers count only inside
     /// `window` (the counters' span); requests count over the whole session.
     public static func read(
-        files: [URL], sessionId: String, window: ClosedRange<Date>?
+        _ parts: [Part], sessionId: String, window: ClosedRange<Date>?
     ) -> Scan {
         var scan = Scan()
-        for file in files {
-            forEachLine(of: file) { line in
+        for part in parts {
+            forEachLine(of: part.url, upTo: part.upTo) { line in
                 take(line, sessionId: sessionId, window: window, into: &scan)
             }
         }
         return scan
+    }
+
+    /// `read` of whole files.
+    public static func read(
+        files: [URL], sessionId: String, window: ClosedRange<Date>?
+    ) -> Scan {
+        read(files.map { Part(url: $0) }, sessionId: sessionId, window: window)
     }
 
     static func take(_ line: Data, sessionId: String, window: ClosedRange<Date>?,
@@ -105,26 +127,53 @@ public enum TranscriptEvidenceReader {
         }
     }
 
-    /// Every complete line of `url`, a chunk at a time. A trailing line with
-    /// no newline is still being written and is left out, as the scanner
-    /// leaves it.
-    static func forEachLine(of url: URL, _ body: (Data) -> Void) {
+    /// The longest line handed on. Every line the canary decodes is small (a
+    /// request log entry, a marker, a usage line); an assistant line can carry
+    /// megabytes of tool input, and a line that never ends would otherwise
+    /// grow the buffer without bound. Longer lines are skipped whole: a usage
+    /// line lost that way only makes the request check see fewer requests.
+    static let maxLineBytes = 64 << 20
+
+    /// Every complete line of `url` within its first `upTo` bytes, a chunk at
+    /// a time. A trailing line with no newline is still being written and is
+    /// left out, as the scanner leaves it. Each byte is searched for a newline
+    /// once, however many chunks a line spans.
+    static func forEachLine(of url: URL, upTo limit: Int64? = nil,
+                            maxLineBytes: Int = maxLineBytes, chunkBytes: Int = 1 << 20,
+                            _ body: (Data) -> Void) {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return }
         defer { try? handle.close() }
+        var remaining = limit ?? .max
         var pending = Data()
+        var searched = 0          // bytes of `pending` already searched
+        var skipping = false      // inside a line longer than `maxLineBytes`
         // A pool per chunk, as `JSONLScanner` does: reads come back
         // autoreleased and nothing else drains them during one long pass.
-        while autoreleasepool(invoking: { () -> Bool in
-            guard let chunk = try? handle.read(upToCount: 1 << 20), !chunk.isEmpty else {
+        while remaining > 0, autoreleasepool(invoking: { () -> Bool in
+            let want = Int(min(Int64(chunkBytes), remaining))
+            guard let chunk = try? handle.read(upToCount: want), !chunk.isEmpty else {
                 return false
             }
+            remaining -= Int64(chunk.count)
             pending.append(chunk)
             var start = pending.startIndex
-            while let newline = pending[start...].firstIndex(of: 0x0A) {
-                if newline > start { body(Data(pending[start..<newline])) }
+            var from = pending.index(pending.startIndex, offsetBy: searched)
+            while let newline = pending[from...].firstIndex(of: 0x0A) {
+                if skipping {
+                    skipping = false
+                } else if newline > start {
+                    body(Data(pending[start..<newline]))
+                }
                 start = pending.index(after: newline)
+                from = start
             }
             pending.removeSubrange(pending.startIndex..<start)
+            searched = pending.count
+            if pending.count > maxLineBytes {
+                pending = Data()
+                searched = 0
+                skipping = true
+            }
             return true
         }) {}
     }

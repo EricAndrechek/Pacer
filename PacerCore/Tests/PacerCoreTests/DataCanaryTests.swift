@@ -87,12 +87,12 @@ struct DataCanaryComparisonTests {
         #expect(bare.mismatches.map(\.kind) == [.output])
         #expect(bare.mismatches.first?.band == "1.02-1.1")
 
-        // A compaction is allowed 20k: one explains 21k over, not 23k.
+        // A compaction is allowed 10k: with 2%, one explains 11k over, not 13k.
         let one = Canary.TranscriptEvidence(compactions: 1)
         #expect(try #require(Canary.compare(
-            claude: claude(output: 121_000), pacer: pacer(), evidence: one)).matched)
+            claude: claude(output: 111_000), pacer: pacer(), evidence: one)).matched)
         #expect(!(try #require(Canary.compare(
-            claude: claude(output: 123_000), pacer: pacer(), evidence: one)).matched))
+            claude: claude(output: 113_000), pacer: pacer(), evidence: one)).matched))
         // In a small session one compaction is 30% over, and still explained.
         let small = try #require(Canary.compare(
             claude: claude(output: 39_000), pacer: pacer(output: 30_000), evidence: one))
@@ -121,17 +121,24 @@ struct DataCanaryComparisonTests {
             claude: claude(output: 109_500), pacer: pacer(), evidence: desktop)).matched)
         #expect(!(try #require(Canary.compare(claude: claude(output: 109_500), pacer: pacer())).matched))
         #expect(!(try #require(Canary.compare(
-            claude: claude(output: 111_000), pacer: pacer(), evidence: desktop)).matched))
+            claude: claude(output: 113_000), pacer: pacer(), evidence: desktop)).matched))
     }
 
-    @Test("main-model output with nothing in Pacer is a mismatch at any size, markers or not")
+    @Test("main-model output with nothing in Pacer is a mismatch at any size, unless markers explain it")
     func nothingHeld() throws {
-        // Below the 20k minimum, and with a compaction that would cover it.
-        let result = try #require(Canary.compare(
-            claude: claude(output: 5_000), pacer: pacer(output: 0),
-            evidence: Canary.TranscriptEvidence(compactions: 1)))
+        // Below the 20k minimum, with nothing to explain it.
+        let result = try #require(Canary.compare(claude: claude(output: 5_000), pacer: pacer(output: 0)))
         #expect(result.mismatches.map(\.kind) == [.output])
         #expect(result.mismatches.first?.ratio == .infinity)
+        // A resume whose rows stayed under the old session id, then one
+        // compaction: its output is explained, and the session too small.
+        let compacted = Canary.TranscriptEvidence(compactions: 1)
+        #expect(Canary.compare(claude: claude(output: 5_000), pacer: pacer(output: 0),
+                               evidence: compacted) == nil)
+        // More than the compaction explains.
+        let more = try #require(Canary.compare(
+            claude: claude(output: 12_000), pacer: pacer(output: 0), evidence: compacted))
+        #expect(more.mismatches.map(\.kind) == [.output])
         // Haiku housekeeping alone is not main-model output.
         #expect(Canary.compare(claude: claude(output: 0, haikuOutput: 3_000), pacer: pacer(output: 0)) == nil)
     }
@@ -575,6 +582,53 @@ struct DataCanaryRunTests {
         #expect(report.skipped == [.notIngested: 1, .noSession: 1])
     }
 
+    @Test("a run reads at most its byte budget, always at least one session; the rest wait")
+    func budget() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.home) }
+        let suite = "pacer.tests.dataCanary.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let ledger = DataCanaryLedger(defaults: defaults)
+        let tight = DataCanary.Policy(maxBytesPerRun: 1)
+
+        let report = DataCanary.run(container: fixture.container, sources: fixture.sources,
+                                    alreadyJudged: ledger.judged(now: now), now: now, policy: tight)
+        #expect(report.checked.map(\.sessionId) == [Self.healthy])
+        #expect(report.bytesRead == 400)
+        #expect(report.skipped[.overBudget] == 1)
+        ledger.record(report.checked.map(\.sessionId) + report.unjudgeable, now: now)
+
+        // The deferred one is judged the next day; the first is not read again.
+        let next = DataCanary.run(container: fixture.container, sources: fixture.sources,
+                                  alreadyJudged: ledger.judged(now: now), now: now, policy: tight)
+        #expect(next.checked.map(\.sessionId) == [Self.lossy])
+        #expect(next.alreadyJudged == 1)
+    }
+
+    @Test("a session read and found unjudgeable is recorded, so it is not read again")
+    func unjudgeableRecorded() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.home) }
+        let suite = "pacer.tests.dataCanary.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let ledger = DataCanaryLedger(defaults: defaults)
+        // Too small to judge on tokens, and no requests in these transcripts.
+        let strict = DataCanary.Policy(minimumOutputTokens: 10_000_000)
+
+        let first = DataCanary.run(container: fixture.container, sources: fixture.sources,
+                                   alreadyJudged: ledger.judged(now: now), now: now, policy: strict)
+        #expect(first.checked.isEmpty)
+        #expect(first.unjudgeable == [Self.healthy, Self.lossy])
+        #expect(first.skipped[.tooSmall] == 2)
+        ledger.record(first.checked.map(\.sessionId) + first.unjudgeable, now: now)
+        let second = DataCanary.run(container: fixture.container, sources: fixture.sources,
+                                    alreadyJudged: ledger.judged(now: now), now: now, policy: strict)
+        #expect(second.alreadyJudged == 2)
+        #expect(second.bytesRead == 0)
+    }
+
     @Test("a session judged once is not judged again")
     func ledger() throws {
         let fixture = try makeFixture()
@@ -725,6 +779,62 @@ struct DataCanaryTranscriptEvidenceTests {
         try (Self.answer("q6", message: "D", at: "2026-11-20T10:00:00.000Z", entrypoint: "claude-desktop") + "\n")
             .write(to: desktop, atomically: true, encoding: .utf8)
         #expect(TranscriptEvidenceReader.read(files: [desktop], sessionId: Self.id, window: nil).desktop)
+    }
+
+    @Test("lines split across chunks arrive whole; an over-long line is skipped, not buffered")
+    func lines() throws {
+        let dir = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("lines.jsonl")
+        let long = String(repeating: "x", count: 50)
+        try ["a", "bcdefghijklmnop", long, "q", "", "rs"].joined(separator: "\n").appending("\n")
+            .write(to: url, atomically: true, encoding: .utf8)
+        var seen: [String] = []
+        TranscriptEvidenceReader.forEachLine(of: url, maxLineBytes: 20, chunkBytes: 7) {
+            seen.append(String(decoding: $0, as: UTF8.self))
+        }
+        #expect(seen == ["a", "bcdefghijklmnop", "q", "rs"])
+        // Only the first 20 bytes: "a", "bcdefghijklmnop", and a partial line.
+        seen = []
+        TranscriptEvidenceReader.forEachLine(of: url, upTo: 20, chunkBytes: 7) {
+            seen.append(String(decoding: $0, as: UTF8.self))
+        }
+        #expect(seen == ["a", "bcdefghijklmnop"])
+    }
+
+    @Test("reads only what the cursor was checked against, and leaves a session that grew unjudged")
+    func resumedWhileRead() throws {
+        let dir = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("\(Self.id).jsonl")
+        let t = "2026-11-20T10:00:00.000Z"
+        let checked = Data(([Self.request("q1", at: t), Self.answer("q1", message: "A", at: t)]
+            .joined(separator: "\n") + "\n").utf8)
+        try checked.write(to: url)
+        let found = try #require(try? url.resourceValues(forKeys: [.contentModificationDateKey])
+            .contentModificationDate)
+        let file = DataCanary.TranscriptFile(path: url.path, size: Int64(checked.count), modified: found)
+
+        // Resumed after the check: a new answered request Pacer has not read.
+        let handle = try FileHandle(forWritingTo: url)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data((Self.request("q2", at: t) + "\n"
+            + Self.answer("q2", message: "B", at: t) + "\n").utf8))
+        try handle.close()
+        try FileManager.default.setAttributes([.modificationDate: found.addingTimeInterval(5)],
+                                              ofItemAtPath: url.path)
+
+        let bounded = TranscriptEvidenceReader.read(
+            [.init(url: url, upTo: file.size)], sessionId: Self.id, window: nil)
+        #expect(bounded.answeredKeys == ["m-A:r-A"])
+
+        let container = try ModelContainer(
+            for: TokenSample.self, configurations: ModelConfiguration(isStoredInMemoryOnly: true))
+        let evidence = DataCanary.gatherEvidence(
+            sessionId: Self.id, files: [file], claude: claude(), policy: .standard,
+            context: ModelContext(container))
+        #expect(evidence == nil)
+        #expect(!DataCanary.unchanged(file))
     }
 
     @Test("a run finds an answered request with no row, where the span rules out tokens")

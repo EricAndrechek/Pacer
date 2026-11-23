@@ -49,6 +49,12 @@ public enum DataCanary {
         public var alreadyJudged = 0
         public var checked: [CheckedSession] = []
         public var skipped: [SkipReason: Int] = [:]
+        /// Sessions whose transcripts were read, or found too large to read,
+        /// with nothing to judge: recorded like judged ones, so they are not
+        /// read again every day.
+        public var unjudgeable: [String] = []
+        /// Transcript bytes read this run (`Policy.maxBytesPerRun`).
+        public var bytesRead: Int64 = 0
 
         public var mismatched: [CheckedSession] { checked.filter { !$0.comparison.matched } }
 
@@ -172,17 +178,29 @@ public enum DataCanary {
             // On the final rollup: rows can have arrived since the first read.
             let tokenSkip = SessionTotalsCanary.spanSkip(
                 claude: claude, pacer: pacer, now: now, policy: policy)
-            guard sessionFiles.reduce(Int64(0), { $0 + $1.size }) <= policy.maxTranscriptBytes else {
+            let bytes = sessionFiles.reduce(Int64(0)) { $0 + $1.size }
+            guard bytes <= policy.maxTranscriptBytes else {
                 report.skipped[.tooLarge, default: 0] += 1
+                report.unjudgeable.append(claude.sessionId)
                 continue
             }
-            let evidence = gatherEvidence(
+            // The first session is always read, so a run makes progress.
+            guard report.bytesRead == 0 || report.bytesRead + bytes <= policy.maxBytesPerRun else {
+                report.skipped[.overBudget, default: 0] += 1
+                continue
+            }
+            report.bytesRead += bytes
+            guard let evidence = gatherEvidence(
                 sessionId: claude.sessionId, files: sessionFiles, claude: claude,
-                policy: policy, context: context)
+                policy: policy, context: context) else {
+                report.skipped[.notFinished, default: 0] += 1
+                continue
+            }
             guard let comparison = SessionTotalsCanary.compare(
                 claude: claude, pacer: pacer ?? .nothing(during: claude), evidence: evidence,
                 judgeTokens: tokenSkip == nil, policy: policy) else {
                 report.skipped[tokenSkip ?? .tooSmall, default: 0] += 1
+                report.unjudgeable.append(claude.sessionId)
                 continue
             }
             report.checked.append(CheckedSession(
@@ -193,11 +211,17 @@ public enum DataCanary {
     }
 
     /// The transcripts' evidence for one session, with the request check's
-    /// answer from the store: how many answered requests have no row.
+    /// answer from the store: how many answered requests have no row. nil when
+    /// a transcript changed while it was read: the session was resumed, and
+    /// is judged on a later run.
+    ///
+    /// Each file is read only up to the size its cursor was checked against.
+    /// A resumed session's new turns, past that size, may not be in the store
+    /// yet; reading them would report Pacer's lag as lost requests.
     static func gatherEvidence(
         sessionId: String, files: [TranscriptFile], claude: ClaudeSessionTotals,
         policy: Policy, context: ModelContext
-    ) -> SessionTotalsCanary.TranscriptEvidence {
+    ) -> SessionTotalsCanary.TranscriptEvidence? {
         // A negative duration in a hand-edited or corrupt config must not trap
         // the range; markers are then counted over the whole session.
         var window: ClosedRange<Date>?
@@ -205,7 +229,10 @@ public enum DataCanary {
             window = start.addingTimeInterval(-policy.clockSlack)...saved.addingTimeInterval(policy.clockSlack)
         }
         let scan = TranscriptEvidenceReader.read(
-            files: files.map { URL(fileURLWithPath: $0.path) }, sessionId: sessionId, window: window)
+            files.map { .init(url: URL(fileURLWithPath: $0.path), upTo: $0.size) },
+            sessionId: sessionId, window: window)
+        // Changed while read: the counters may be about to change too.
+        guard files.allSatisfy({ unchanged($0) }) else { return nil }
         let keys = scan.answeredKeys
         return SessionTotalsCanary.TranscriptEvidence(
             answeredRequests: keys.count,
@@ -214,6 +241,16 @@ public enum DataCanary {
             compactions: scan.compactions,
             recaps: scan.recaps,
             desktop: scan.desktop)
+    }
+
+    /// Whether `file` still has the size and modification time it was found
+    /// with.
+    static func unchanged(_ file: TranscriptFile) -> Bool {
+        guard let values = try? URL(fileURLWithPath: file.path).resourceValues(
+                forKeys: [.fileSizeKey, .contentModificationDateKey]),
+              let size = values.fileSize, let modified = values.contentModificationDate
+        else { return false }
+        return Int64(size) == file.size && modified == file.modified
     }
 
     // MARK: - Store reads
