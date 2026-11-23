@@ -15,10 +15,27 @@ import Foundation
 /// wrong (a real install, healthy sessions: cache reads 1.0–1.5×, input 2× to
 /// 1000×, Haiku output 100–2000×). Hence:
 /// - **output** is judged both ways. Above: Claude Code's output on every model
-///   but its small one against all of Pacer's output, which healthy sessions
-///   put at 0.999–1.017. That is the direction the 09-23 defect went (6.9× on a
-///   2.1.306 session of the same install). Below: all of Claude Code's output
-///   against all of Pacer's.
+///   but its small one against all of Pacer's output. That is the direction the
+///   09-23 defect went (6.9× on a 2.1.306 session of the same install). Below:
+///   all of Claude Code's output against all of Pacer's.
+///
+///   Above is judged loosely: more than `outputAboveTolerance` *and* at least
+///   `outputAboveMinimumGap` tokens, because Claude Code also makes calls on
+///   the main model whose output reaches no transcript: a compaction (it
+///   leaves a `compact_boundary` line and no usage; ~4–8k output each), a
+///   "while you were away" recap (an `away_summary` line; ~110 each), and
+///   others that leave nothing at all. Claude Code's own request log
+///   (`api-request` lines) lists exactly the requests the transcript holds
+///   usage for; these calls are not in it either. Measured 2026-11-23 against
+///   the counters Claude Code writes into its transcripts (`cost-state`
+///   lines) on one install: 39 sessions written wholly by 2.1.307+ ran
+///   1.000–1.095. 14 of the 15 with no compaction or recap ran exactly 1.000;
+///   the 15th, an SDK session, ran 1.095. A session with 15 compactions ran
+///   1.128. Pacer's rows equalled a hand count of the transcripts, so the
+///   excess is not something Pacer dropped. Sessions with the 09-23 defect's
+///   turns ran up to 10.4×: of the 42 above 1.13, 38 were above 1.25, with
+///   gaps of 80k tokens or more. A 2–10% excess (Sentry PACER-28) is these
+///   calls, not a lost transcript.
 /// - **input, cache reads, cache writes** are judged only below: Pacer holding
 ///   more than Claude Code counted means Pacer counted something twice. Above
 ///   is Claude Code's own calls, and says nothing.
@@ -75,8 +92,16 @@ public enum SessionTotalsCanary {
     }
 
     public struct Policy: Sendable, Equatable {
-        /// A ratio this far from 1 is a mismatch.
+        /// A ratio this far from 1 is a mismatch, except output above 1.
         public var tolerance: Double
+        /// Output above 1 is a mismatch only this far above, and only with a gap
+        /// of at least `outputAboveMinimumGap` tokens: Claude Code's
+        /// untranscribed compactions and recaps put healthy sessions up to ~1.13
+        /// (the type's comment has the measurements).
+        public var outputAboveTolerance: Double
+        /// A few compactions' output. Without it, one compaction in a session
+        /// near `minimumOutputTokens` would cross any ratio worth using.
+        public var outputAboveMinimumGap: Int64
         /// Sessions smaller than this, in output on either side, are not
         /// judged: one compaction or one stray turn moves a small session's
         /// ratio by more than any tolerance worth having.
@@ -99,10 +124,13 @@ public enum SessionTotalsCanary {
         /// transcript's timestamps, written by the same process.
         public var clockSlack: TimeInterval
 
-        public init(tolerance: Double = 0.02, minimumOutputTokens: Int64 = 20_000,
+        public init(tolerance: Double = 0.02, outputAboveTolerance: Double = 0.25,
+                    outputAboveMinimumGap: Int64 = 25_000, minimumOutputTokens: Int64 = 20_000,
                     quietPeriod: TimeInterval = 15 * 60, lookback: TimeInterval = 7 * 86_400,
                     maxLeadIn: TimeInterval = 30 * 60, clockSlack: TimeInterval = 2 * 60) {
             self.tolerance = tolerance
+            self.outputAboveTolerance = outputAboveTolerance
+            self.outputAboveMinimumGap = outputAboveMinimumGap
             self.minimumOutputTokens = minimumOutputTokens
             self.quietPeriod = quietPeriod
             self.lookback = lookback
@@ -266,12 +294,15 @@ public enum SessionTotalsCanary {
         ]
 
         let low = 1 - policy.tolerance
-        let high = 1 + policy.tolerance
+        // Loose above: Claude Code's untranscribed main-model calls (see the
+        // type's comment) must not read as Pacer losing output.
+        let outputHigh = 1 + policy.outputAboveTolerance
+        let outputGap = likeForLike - pacer.outputTokens
         var mismatches: [Mismatch] = []
         for kind in TokenKind.allCases {
             switch kind {
             case .output:
-                if outputAbove > high {
+                if outputAbove > outputHigh, outputGap >= policy.outputAboveMinimumGap {
                     mismatches.append(Mismatch(kind: .output, ratio: outputAbove))
                 } else if outputBelow < low {
                     mismatches.append(Mismatch(kind: .output, ratio: outputBelow))
@@ -295,6 +326,8 @@ public enum SessionTotalsCanary {
     /// A ratio as a band, for telemetry: coarse enough to group one upstream
     /// defect into one issue, fine enough to tell a lost half from a stray
     /// percent. Claude Code over Pacer, so above 1 is Pacer under-counting.
+    /// Output above is only reported past 1.25, so the bands up there tell a
+    /// partial loss (`1.25-2`) from most of a session's output gone (`>2`).
     public static func ratioBand(_ ratio: Double) -> String {
         switch ratio {
         case ..<0.5: return "<0.5"
@@ -302,7 +335,9 @@ public enum SessionTotalsCanary {
         case ..<0.98: return "0.9-0.98"
         case ...1.02: return "0.98-1.02"
         case ...1.1: return "1.02-1.1"
-        default: return ">1.1"
+        case ...1.25: return "1.1-1.25"
+        case ...2: return "1.25-2"
+        default: return ">2"
         }
     }
 }
