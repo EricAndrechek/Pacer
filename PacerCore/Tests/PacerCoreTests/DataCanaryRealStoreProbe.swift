@@ -56,7 +56,8 @@ struct DataCanaryRealStoreProbe {
 
         for (label, policy) in [
             ("standard (7-day lookback)", SessionTotalsCanary.Policy.standard),
-            ("whole history (no lookback)", SessionTotalsCanary.Policy(lookback: 10 * 365 * 86_400)),
+            ("whole history (no lookback)",
+             SessionTotalsCanary.Policy(maxBytesPerRun: .max, lookback: 10 * 365 * 86_400)),
         ] {
             let started = Date()
             let report = DataCanary.run(container: container, sources: sources, now: now,
@@ -64,7 +65,8 @@ struct DataCanaryRealStoreProbe {
             let ms = Int(Date().timeIntervalSince(started) * 1000)
             print("[canary-probe] \(label): \(report.sessions) sessions in the config, "
                   + "\(report.checked.count) judged, \(report.checked.count - report.mismatched.count) match, "
-                  + "\(report.mismatched.count) mismatch; \(ms) ms")
+                  + "\(report.mismatched.count) mismatch; read "
+                  + String(format: "%.1f MB in %d ms", Double(report.bytesRead) / 1_048_576, ms))
             let skipped = report.skipped.sorted { $0.key < $1.key }
                 .map { "\($0.key.rawValue)=\($0.value)" }.joined(separator: " ")
             print("[canary-probe]   skipped: \(skipped.isEmpty ? "none" : skipped)")

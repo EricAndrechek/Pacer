@@ -100,6 +100,9 @@ public extension DataCanary {
         var line = "run: \(report.configFiles) config(s), \(report.sessions) session(s); "
             + "checked \(report.checked.count) (mismatch \(report.mismatched.count)); "
             + "already judged \(report.alreadyJudged); skipped: \(skipped.isEmpty ? "none" : skipped)"
+        if report.bytesRead > 0 {
+            line += String(format: "; read %.1f MB", Double(report.bytesRead) / 1_048_576)
+        }
         if let elapsed { line += String(format: "; %.0f ms", elapsed * 1000) }
         return line
     }
@@ -157,7 +160,7 @@ public extension DataCanary {
         let started = Date()
         let report = run(container: container, sources: sources,
                          alreadyJudged: ledger.judged(now: now), now: now)
-        ledger.record(report.checked.map(\.sessionId), now: now)
+        ledger.record(report.checked.map(\.sessionId) + report.unjudgeable, now: now)
         publish(report, elapsed: Date().timeIntervalSince(started))
         return report
     }
