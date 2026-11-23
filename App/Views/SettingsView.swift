@@ -2521,11 +2521,13 @@ private struct TokenLaneRow: View {
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
             .background(Capsule().fill(info.1.opacity(0.14)))
+            .help(lane.refusedReason ?? "")
     }
 
     private var statusInfo: (String, Color) {
         if let exp = lane.expiresAt, exp < now { return ("expired", .red) }
         if lane.account == .secondary { return ("tracked", .purple) }
+        if lane.refusedReason != nil, let cd = lane.cooldownUntil, cd > now { return ("refused", .red) }
         if let cd = lane.cooldownUntil, cd > now { return ("cooling", .orange) }
         if lane.account == .primary { return ("active", .green) }
         return ("pending", .gray)
