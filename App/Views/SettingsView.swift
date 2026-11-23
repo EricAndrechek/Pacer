@@ -2526,8 +2526,8 @@ private struct TokenLaneRow: View {
 
     private var statusInfo: (String, Color) {
         if let exp = lane.expiresAt, exp < now { return ("expired", .red) }
-        if lane.account == .secondary { return ("tracked", .purple) }
         if lane.refusedReason != nil, let cd = lane.cooldownUntil, cd > now { return ("refused", .red) }
+        if lane.account == .secondary { return ("tracked", .purple) }
         if let cd = lane.cooldownUntil, cd > now { return ("cooling", .orange) }
         if lane.account == .primary { return ("active", .green) }
         return ("pending", .gray)
