@@ -377,3 +377,113 @@ private actor ThinkingCollector {
     }
     func totals() -> ([String: Int?], Int64, Int) { (thinking, output, thinking.count) }
 }
+
+// MARK: - The current transcript shape (Claude Code 2.1.32x–2.1.33x)
+
+/// Hand-computed: a session in the shape Claude Code writes since 2.1.32x,
+/// whose transcript also carries lines that hold token numbers but no usage
+/// of their own: `cost-state` (Claude Code's running per-model counters, which
+/// include its untranscribed calls), `api-request` and `api-request-blob` (its
+/// request log; the blob has a `message`), an `away_summary` recap and a
+/// compaction (`compact_boundary` plus the summary as a user line), neither of
+/// which writes the usage of the call that made it. Only the assistant lines
+/// count, each message once, with its finished copy; the subagent's in its
+/// own file. Investigated for Sentry PACER-28: Pacer matched this hand count
+/// exactly; Claude Code's counters ran higher by the untranscribed calls.
+@Test func scannerCountsOnlyAssistantUsageInTheCurrentTranscriptShape() async throws {
+    let fm = FileManager.default
+    let base = fm.temporaryDirectory.appendingPathComponent("pacer-shape-fixture-\(UUID().uuidString)")
+    let projects = base.appendingPathComponent("projects")
+    let proj = projects.appendingPathComponent("-Users-someone-Code-acme")
+    let subagents = proj.appendingPathComponent("s-acme/subagents")
+    try fm.createDirectory(at: subagents, withIntermediateDirectories: true)
+    defer { try? fm.removeItem(at: base) }
+
+    let current = "claude-opus-5-5"
+    let small = "claude-sonnet-5-5"
+    /// An assistant line as 2.1.330 writes it: thinking in
+    /// `output_tokens_details`, server tool counts, one iteration repeating
+    /// the usage, `fallback_credit`.
+    func assistant(_ ts: String, _ id: String, model: String, stop: String?, input: Int,
+                   output: Int, read: Int, write5m: Int = 0, write1h: Int = 0,
+                   sidechain: Bool = false) -> String {
+        let stopJSON: String = stop.map { "\"\($0)\"" } ?? "null"
+        let write: Int = write5m + write1h
+        let split: String = "{\"ephemeral_5m_input_tokens\":\(write5m),\"ephemeral_1h_input_tokens\":\(write1h)}"
+        let counts: String = "\"input_tokens\":\(input),\"output_tokens\":\(output),"
+            + "\"cache_read_input_tokens\":\(read),\"cache_creation_input_tokens\":\(write)"
+        // Typed pieces, joined: one long `+` chain of interpolated literals
+        // times out Xcode 16's type checker (see IngestParityTests.line).
+        let usage: [String] = [
+            counts,
+            ",\"output_tokens_details\":{\"thinking_tokens\":\(output / 10)}",
+            ",\"server_tool_use\":{\"web_search_requests\":0,\"web_fetch_requests\":0}",
+            ",\"service_tier\":\"standard\",\"cache_creation\":\(split),\"inference_geo\":\"global\"",
+            ",\"iterations\":[{\(counts),\"cache_creation\":\(split),\"type\":\"message\"}]",
+            ",\"speed\":\"standard\",\"fallback_credit\":null",
+        ]
+        let parts: [String] = [
+            "{\"type\":\"assistant\",\"timestamp\":\"\(ts)\",\"requestId\":\"r-\(id)\",",
+            "\"sessionId\":\"s-acme\",\"isSidechain\":\(sidechain),\"cwd\":\"/Users/someone/Code/acme\",",
+            "\"version\":\"2.1.330\",\"message\":{\"id\":\"m-\(id)\",\"model\":\"\(model)\",",
+            "\"role\":\"assistant\",\"stop_reason\":\(stopJSON),\"usage\":{\(usage.joined())}}}",
+        ]
+        return parts.joined()
+    }
+    let main = [
+        "{\"type\":\"api-request\",\"sessionId\":\"s-acme\",\"id\":\"q-1\",\"timestamp\":\"2026-11-20T10:00:00.000Z\",\"version\":\"2.1.330\",\"querySource\":\"repl_main_thread\",\"params\":{\"model\":\"\(current)\",\"max_tokens\":128000}}",
+        "{\"type\":\"api-request-blob\",\"sessionId\":\"s-acme\",\"hash\":\"h1\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"hello\"}]}}",
+        // A: streamed, two mid-stream copies then the finished one.
+        assistant("2026-11-20T10:00:01.000Z", "A", model: current, stop: nil,
+                  input: 2, output: 1, read: 27_150, write1h: 38_067),
+        assistant("2026-11-20T10:00:02.000Z", "A", model: current, stop: nil,
+                  input: 2, output: 1, read: 27_150, write1h: 38_067),
+        assistant("2026-11-20T10:00:04.000Z", "A", model: current, stop: "tool_use",
+                  input: 2, output: 200, read: 27_150, write1h: 38_067),
+        assistant("2026-11-20T10:01:00.000Z", "B", model: current, stop: "end_turn",
+                  input: 1, output: 450, read: 65_217, write1h: 900),
+        // A recap and a compaction: each was a main-model call, and neither
+        // line carries its usage.
+        "{\"type\":\"system\",\"subtype\":\"away_summary\",\"isMeta\":false,\"isSidechain\":false,\"timestamp\":\"2026-11-20T10:05:00.000Z\",\"version\":\"2.1.330\",\"content\":\"Recap.\"}",
+        "{\"type\":\"system\",\"subtype\":\"compact_boundary\",\"level\":\"info\",\"isMeta\":false,\"isSidechain\":false,\"timestamp\":\"2026-11-20T10:06:00.000Z\",\"version\":\"2.1.330\",\"content\":\"Conversation compacted\",\"compactMetadata\":{\"trigger\":\"auto\",\"preTokens\":204577}}",
+        "{\"type\":\"user\",\"isCompactSummary\":true,\"timestamp\":\"2026-11-20T10:06:00.000Z\",\"sessionId\":\"s-acme\",\"message\":{\"role\":\"user\",\"content\":\"Summary.\"}}",
+        // Claude Code's counters, untranscribed calls and all: not usage.
+        "{\"type\":\"cost-state\",\"sessionId\":\"s-acme\",\"totalCostUSD\":6.97,\"startTime\":1794858148280,\"totalDuration\":134483056,\"modelUsage\":{\"\(current)\":{\"inputTokens\":5632,\"outputTokens\":32851,\"thinkingTokens\":11116,\"cacheReadInputTokens\":8587862,\"cacheCreationInputTokens\":570824,\"costUSD\":6.96},\"claude-haiku-5-5\":{\"inputTokens\":10448,\"outputTokens\":2557,\"costUSD\":0.002}}}",
+    ].joined(separator: "\n") + "\n"
+    let subagent = [
+        assistant("2026-11-20T10:02:00.000Z", "C", model: small, stop: "end_turn",
+                  input: 3, output: 120, read: 5_000, write5m: 700, sidechain: true),
+    ].joined(separator: "\n") + "\n"
+    try main.write(to: proj.appendingPathComponent("s-acme.jsonl"), atomically: true, encoding: .utf8)
+    try subagent.write(to: subagents.appendingPathComponent("agent-a1.jsonl"),
+                       atomically: true, encoding: .utf8)
+    let root = ClaudePathResolver.ResolvedRoot(root: base, projectsDirectory: projects)
+
+    let totals = FixtureCollector()
+    let emitted = EntryCollector()
+    _ = try await JSONLScanner().scan(roots: [root]) { entry in
+        await totals.add(entry)
+        await emitted.add(entry)
+    }
+
+    #expect(await emitted.all.count == 3)
+    #expect(Set(await emitted.all.compactMap(\.dedupKey)) == ["m-A:r-A", "m-B:r-B", "m-C:r-C"])
+    #expect(await emitted.all.allSatisfy { $0.sessionId == "s-acme" && $0.isComplete })
+
+    // Main model: A's finished copy and B.
+    let opusDay = await totals.model("2026-11-20", current)
+    #expect(opusDay.inputTokens == 3)                    // 2 + 1
+    #expect(opusDay.outputTokens == 650)                 // 200 + 450, not A's partial 1s
+    #expect(opusDay.cacheReadTokens == 92_367)           // 27,150 + 65,217
+    #expect(opusDay.cacheCreation1hTokens == 38_967)     // 38,067 + 900
+    #expect(opusDay.cacheCreation5mTokens == 0)
+    // The subagent, in its own file.
+    let subDay = await totals.model("2026-11-20", small)
+    #expect(subDay.inputTokens == 3)
+    #expect(subDay.outputTokens == 120)
+    #expect(subDay.cacheReadTokens == 5_000)
+    #expect(subDay.cacheCreation5mTokens == 700)
+    // Nothing from the counters or the request log: no Haiku, no other day.
+    #expect(await totals.models(on: "2026-11-20") == [current, small])
+    #expect(await totals.dates() == ["2026-11-20"])
+}

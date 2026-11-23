@@ -67,19 +67,37 @@ struct DataCanaryComparisonTests {
         #expect(result.ratios[.cacheRead]! > 1)
     }
 
-    @Test("lost subagent output, the 09-23 defect, is an output mismatch above 1.1")
+    @Test("lost subagent output, the 09-23 defect, is an output mismatch above 2")
     func underCount() throws {
         // Claude Code counted 2.3× what the transcripts held.
         let result = try #require(Canary.compare(claude: claude(output: 230_000), pacer: pacer()))
         #expect(result.mismatches == [Canary.Mismatch(kind: .output, ratio: 2.3)])
-        #expect(result.mismatches.first?.band == ">1.1")
+        #expect(result.mismatches.first?.band == ">2")
     }
 
-    @Test("a mild under-count lands in its own band")
-    func mildUnderCount() throws {
-        let result = try #require(Canary.compare(claude: claude(output: 105_000), pacer: pacer()))
-        #expect(result.mismatches.map(\.kind) == [.output])
-        #expect(result.mismatches.first?.band == "1.02-1.1")
+    @Test("Claude Code's untranscribed compactions and recaps do not read as an under-count")
+    func untranscribedMainModelCalls() throws {
+        // Sentry PACER-28's shape: 3.5% more main-model output than any
+        // transcript holds, from "while you were away" recaps; ~13% with
+        // fifteen compactions. Pacer had every transcribed turn.
+        #expect(try #require(Canary.compare(claude: claude(output: 103_500), pacer: pacer())).matched)
+        #expect(try #require(Canary.compare(claude: claude(output: 113_000), pacer: pacer())).matched)
+        #expect(try #require(Canary.compare(claude: claude(output: 125_000), pacer: pacer())).matched)
+        // One compaction in a small session: 30% over, but 9k tokens is one
+        // compaction's output, not a lost transcript.
+        let small = try #require(Canary.compare(claude: claude(output: 39_000), pacer: pacer(output: 30_000)))
+        #expect(small.matched)
+        #expect(small.ratios[.output] == 1.3)
+    }
+
+    @Test("a partial loss past both the ratio and the gap is a mismatch, in its own band")
+    func partialLoss() throws {
+        let result = try #require(Canary.compare(claude: claude(output: 140_000), pacer: pacer()))
+        #expect(result.mismatches == [Canary.Mismatch(kind: .output, ratio: 1.4)])
+        #expect(result.mismatches.first?.band == "1.25-2")
+        // The same ratio with the gap just at the floor still counts.
+        let atFloor = try #require(Canary.compare(claude: claude(output: 87_500), pacer: pacer(output: 62_500)))
+        #expect(atFloor.mismatches.map(\.kind) == [.output])
     }
 
     @Test("within the tolerance is a match, either way")
@@ -158,7 +176,7 @@ struct DataCanaryComparisonTests {
         let result = try #require(Canary.compare(claude: claude(output: 50_000), pacer: pacer(output: 0)))
         #expect(result.mismatches.map(\.kind) == [.output])
         #expect(result.mismatches.first?.ratio == .infinity)
-        #expect(result.mismatches.first?.band == ">1.1")
+        #expect(result.mismatches.first?.band == ">2")
     }
 
     @Test("ratio bands")
@@ -170,8 +188,12 @@ struct DataCanaryComparisonTests {
         #expect(Canary.ratioBand(1.02) == "0.98-1.02")
         #expect(Canary.ratioBand(1.05) == "1.02-1.1")
         #expect(Canary.ratioBand(1.1) == "1.02-1.1")
-        #expect(Canary.ratioBand(2.3) == ">1.1")
-        #expect(Canary.ratioBand(.infinity) == ">1.1")
+        #expect(Canary.ratioBand(1.2) == "1.1-1.25")
+        #expect(Canary.ratioBand(1.25) == "1.1-1.25")
+        #expect(Canary.ratioBand(1.4) == "1.25-2")
+        #expect(Canary.ratioBand(2) == "1.25-2")
+        #expect(Canary.ratioBand(2.3) == ">2")
+        #expect(Canary.ratioBand(.infinity) == ">2")
         #expect(Canary.ratio(0, 0) == 1)
     }
 }
@@ -478,7 +500,7 @@ struct DataCanaryRunTests {
         #expect(report.checked.map(\.sessionId) == [Self.healthy, Self.lossy])
         #expect(report.checked.first?.comparison.matched == true)
         #expect(report.mismatched.map(\.sessionId) == [Self.lossy])
-        #expect(report.mismatched.first?.comparison.mismatches.map(\.band) == [">1.1"])
+        #expect(report.mismatched.first?.comparison.mismatches.map(\.band) == [">2"])
         #expect(report.skipped == [.notIngested: 1, .noSession: 1])
     }
 
@@ -531,7 +553,7 @@ struct DataCanaryReportingTests {
         #expect(problems.count == 3)
         #expect(problems.first == [
             "canary.kind": .string("output"),
-            "canary.ratio_band": .string(">1.1"),
+            "canary.ratio_band": .string(">2"),
             "canary.cc_version": .string("2.1.306"),
         ])
         #expect(problems.allSatisfy { Set($0.keys) == ["canary.kind", "canary.ratio_band", "canary.cc_version"] })
@@ -552,7 +574,7 @@ struct DataCanaryReportingTests {
             [.init(kind: .output, ratio: 2.3)]))
         #expect(line.hasPrefix("session 11111111 cc 2.1.306: "))
         #expect(!line.contains("aaaa-4bbb"))
-        #expect(line.contains("MISMATCH output 2.300 (>1.1)"))
+        #expect(line.contains("MISMATCH output 2.300 (>2)"))
     }
 }
 

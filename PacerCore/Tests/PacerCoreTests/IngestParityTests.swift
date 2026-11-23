@@ -60,6 +60,20 @@ struct IngestParityTests {
         return parts.joined()
     }
 
+    /// Lines Claude Code writes since 2.1.32x that hold token numbers or a
+    /// `message` but no usage of their own: its running per-model counters
+    /// (`cost-state`), its request log (`api-request`, and `api-request-blob`
+    /// with a `message`), a recap and a compaction, whose calls write no usage.
+    /// Neither path may count any of them (Sentry PACER-28).
+    static let noUsageLines: [String] = [
+        "{\"type\":\"api-request\",\"sessionId\":\"s-main\",\"id\":\"q-1\",\"timestamp\":\"2026-03-01T11:31:00.000Z\",\"querySource\":\"repl_main_thread\",\"params\":{\"model\":\"claude-opus-5-5\",\"max_tokens\":128000}}",
+        "{\"type\":\"api-request-blob\",\"sessionId\":\"s-main\",\"hash\":\"h1\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"hello\"}]}}",
+        "{\"type\":\"system\",\"subtype\":\"away_summary\",\"timestamp\":\"2026-03-01T11:32:00.000Z\",\"sessionId\":\"s-main\",\"content\":\"Recap.\"}",
+        "{\"type\":\"system\",\"subtype\":\"compact_boundary\",\"timestamp\":\"2026-03-01T11:33:00.000Z\",\"sessionId\":\"s-main\",\"compactMetadata\":{\"trigger\":\"auto\",\"preTokens\":204577}}",
+        "{\"type\":\"user\",\"isCompactSummary\":true,\"timestamp\":\"2026-03-01T11:33:00.000Z\",\"sessionId\":\"s-main\",\"message\":{\"role\":\"user\",\"content\":\"Summary.\"}}",
+        "{\"type\":\"cost-state\",\"sessionId\":\"s-main\",\"totalCostUSD\":6.97,\"startTime\":1794858148280,\"modelUsage\":{\"claude-opus-5-5\":{\"inputTokens\":5632,\"outputTokens\":32851,\"cacheReadInputTokens\":8587862,\"cacheCreationInputTokens\":570824}}}",
+    ]
+
     /// A two-call response: a Fable attempt, then the Opus fallback.
     static func calls(fable: Int64, opus: Int64) -> String {
         let first: String = "{\"type\":\"message\",\"model\":\"\(Self.fable)\",\"input_tokens\":40,"
@@ -117,7 +131,7 @@ struct IngestParityTests {
             // E: replayed verbatim into the resumed transcript, but for its
             // session: everything ties but the file.
             line("E", "2026-03-01T11:30:00.000Z", output: 77, stop: "end_turn"),
-        ]
+        ] + noUsageLines
         let resumed: [String] = [
             line("I", "2026-03-01T11:00:00Z", output: 10, stop: "end_turn", session: "s-resumed"),
             line("J", "2026-03-01T12:09:00.000+02:00", output: 12, stop: "end_turn", session: "s-resumed"),
