@@ -48,7 +48,7 @@ timeline times, `energy.cpu_seconds`), forecast accuracy, and the health
 counters (`data.*`, `oauth.*`, `cred.*`, `telemetry.*`, `main_thread.*`,
 `api.snapshot_ms.*`, `ui.click.delay.*`, `accounts.*`, `crash_relaunch.*`).
 
-`oauth.lane_dropped_403`: counter of lanes dropped after 3 HTTP 403s in a row on one token (#434), drained by the daily check-in. No ids, bodies or tokens. Non-usage counter, so a Sentry metric. A dropped lane is tried again on a changed token or after 6 h.
+`oauth.lane_parked_403`: counter of lanes parked in place for 6 h after 3 HTTP 403s in a row on one token while another lane of the pool is healthy (#434), drained by the daily check-in. No ids, bodies or tokens (the body is only classified locally). Non-usage counter, so a Sentry metric.
 
 `accounts.login_change.explained` / `accounts.login_change.unexplained`: counters of default-login changes a switcher's own log does / does not account for, drained by the daily check-in. No ids. A healthy machine has near zero unexplained; several a day means the switcher-log parse broke (#382). Non-usage counters, so Sentry metrics.
 

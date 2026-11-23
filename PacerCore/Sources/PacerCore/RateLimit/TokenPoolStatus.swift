@@ -36,6 +36,9 @@ public struct TokenLaneStatus: Sendable, Identifiable, Equatable {
     /// The `Account.id` this lane resolved to (nil until classified), so the
     /// Tokens UI can group lanes under their account.
     public let accountKey: String?
+    /// Set while the lane is parked after repeated HTTP 403s (#434): why, and
+    /// when it is tried again. nil otherwise.
+    public let refusedReason: String?
 
     public init(
         id: String,
@@ -47,7 +50,8 @@ public struct TokenLaneStatus: Sendable, Identifiable, Equatable {
         cooldownUntil: Date?,
         consecutiveFailures: Int,
         priority: Int,
-        accountKey: String? = nil
+        accountKey: String? = nil,
+        refusedReason: String? = nil
     ) {
         self.id = id
         self.source = source
@@ -59,6 +63,7 @@ public struct TokenLaneStatus: Sendable, Identifiable, Equatable {
         self.consecutiveFailures = consecutiveFailures
         self.priority = priority
         self.accountKey = accountKey
+        self.refusedReason = refusedReason
     }
 }
 
