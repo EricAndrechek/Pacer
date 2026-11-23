@@ -368,6 +368,32 @@ import Testing
         #expect(await t.poller.snapshot().laneCount == 2)
     }
 
+    @Test("another account's healthy lane does not license parking this account's only lane (#434)")
+    func otherAccountsLaneDoesNotVouch() async throws {
+        let t = try Self.twoLanes(ForbiddenScript(
+            ["tokA": [.okOrg("orgA"), .status(403)], "tokB": [.okOrg("orgB")]]))
+        for _ in 0..<10 { #expect(await t.poller.runOnce() != .forbiddenParked) }
+        #expect(await t.poller.snapshot().laneCount == 2)
+    }
+
+    @Test("a manual Test that fails keeps a parked lane parked; one that succeeds un-parks it (#434)")
+    func manualTestOfParkedLane() async throws {
+        let t = try Self.twoLanes(ForbiddenScript(["tokA": [.ok, .status(403), .status(403), .status(403), .status(403), .ok], "tokB": [.ok]]))
+        for _ in 0..<7 { _ = await t.poller.runOnce() }
+        let idA = OAuthPoller.laneId("tokA")
+        #expect(await t.poller.snapshot().laneCount == 2)
+        let seen = t.script.count(for: "tokA")
+        // Fails again (403): still parked, so automatic polls still skip it.
+        #expect(await t.poller.testLane(id: idA) == .failure(reason: "Server returned HTTP 403."))
+        for _ in 0..<4 { _ = await t.poller.runOnce() }
+        #expect(t.script.count(for: "tokA") == seen + 1, "only the manual poll reached tokA")
+        // Succeeds: un-parked, so automatic polls reach it again.
+        t.script.set("tokA", [.ok])
+        if case .success = await t.poller.testLane(id: idA) {} else { Issue.record("manual success expected") }
+        for _ in 0..<3 { _ = await t.poller.runOnce() }
+        #expect(t.script.count(for: "tokA") > 1, "un-parked: automatic polls reach tokA again")
+    }
+
     @Test("a lone lane is never parked: with nothing healthy beside it a 403 is not about the token (#434)")
     func singleLaneNeverParks() async throws {
         let t = try Self.twoLanes(ForbiddenScript(["tokA": [.ok, .status(403)]]), second: false)
@@ -1170,12 +1196,13 @@ private final class ForbiddenKeychainBox: @unchecked Sendable {
 
 /// Per-token scripted responses for the 403 tests; the last step repeats.
 private final class ForbiddenScript: @unchecked Sendable {
-    enum Step { case ok, status(Int, body: String = "{}"), transport
+    enum Step { case ok, okOrg(String), status(Int, body: String = "{}"), transport
         static func status(_ c: Int) -> Step { .status(c, body: "{}") } }
     private let lock = NSLock()
-    private let steps: [String: [Step]]
+    private var steps: [String: [Step]]
     private var counts: [String: Int] = [:]
     init(_ steps: [String: [Step]]) { self.steps = steps }
+    func set(_ token: String, _ new: [Step]) { lock.lock(); steps[token] = new; counts[token] = 0; lock.unlock() }
     func count(for token: String) -> Int { lock.lock(); defer { lock.unlock() }; return counts[token] ?? 0 }
     func respond(to auth: String) throws -> (Data, HTTPURLResponse) {
         lock.lock()
@@ -1187,6 +1214,9 @@ private final class ForbiddenScript: @unchecked Sendable {
         lock.unlock()
         switch step {
         case .ok: return try HTTPOutcome.success(jsonBody: #"{"five_hour":{"utilization":1}}"#).materialize()
+        case .okOrg(let org):
+            return try HTTPOutcome.success(jsonBody: #"{"five_hour":{"utilization":1}}"#,
+                                           headers: ["anthropic-organization-id": org]).materialize()
         case .status(let c, let body): return try HTTPOutcome.status(c, body: body).materialize()
         case .transport: throw URLError(.notConnectedToInternet)
         }

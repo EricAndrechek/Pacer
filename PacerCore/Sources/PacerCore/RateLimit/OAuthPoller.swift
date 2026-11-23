@@ -233,6 +233,11 @@ public actor OAuthPoller: TokenPoolTesting {
         /// Parked after repeated 403s: `state.cooldownUntil` is the retry time.
         /// Cleared by the next poll's outcome, so the pill never outlives it.
         var refused403 = false
+        /// When this lane last took a good reading, and when its current 403
+        /// streak began: a lane vouches for the network only if it succeeded
+        /// after the streak started (#434).
+        var lastSuccessAt: Date?
+        var streak403Start: Date?
         /// The account this token resolved to (from a successful poll's
         /// `anthropic-organization-id`); nil until first polled.
         var resolvedOrg: String?
@@ -1689,15 +1694,30 @@ public actor OAuthPoller: TokenPoolTesting {
         // The 403 streak is consecutive: any other outcome ends it (#434), and a
         // lane that is polled again is no longer shown as refused until this
         // poll says so.
+        // A manual Test of a parked lane that fails keeps the park: the 6 h is
+        // not replaced by a cooling that is shorter. A manual success un-parks.
+        if manual, idx < lanes.count, lanes[idx].refused403, case .failure(let e) = result {
+            switch e {
+            case .http(let s, _): return .http(status: s)
+            case .rateLimited(let ra): return .rateLimited(retryAfter: ra)
+            case .transport: return .transport
+            case .responseSchemaMismatch: return .responseSchemaMismatch
+            default: break
+            }
+        }
         if idx < lanes.count {
             lanes[idx].refused403 = false
-            if case .failure(.http(403, _)) = result {} else { lanes[idx].consecutive403 = 0 }
+            if case .failure(.http(403, _)) = result {} else {
+                lanes[idx].consecutive403 = 0
+                lanes[idx].streak403Start = nil
+            }
         }
         switch result {
         case .success(let snapshot):
             lanes[idx].consecutiveFailures = 0
             lanes[idx].consecutive403 = 0
             lanes[idx].refused403 = false
+            lanes[idx].lastSuccessAt = now
             lanes[idx].state.cooldownUntil = nil
             lanes[idx].lastTopPercent = [snapshot.fiveHour?.usedPercentage,
                                          snapshot.sevenDay?.usedPercentage]
@@ -1778,6 +1798,7 @@ public actor OAuthPoller: TokenPoolTesting {
 
         case .failure(.http(let status, let body)):
             if status == 403, !manual {
+                if lanes[idx].consecutive403 == 0 { lanes[idx].streak403Start = now }
                 lanes[idx].consecutive403 += 1
                 if lanes[idx].consecutive403 >= Self.forbidden403ParkAfter, park403(idx, body: body, now: now) {
                     return .forbiddenParked
@@ -1807,15 +1828,23 @@ public actor OAuthPoller: TokenPoolTesting {
     /// region, WAF) or the body is an edge page rather than Anthropic's JSON.
     private func park403(_ idx: Int, body: String, now: Date) -> Bool {
         let kind = Self.forbiddenKind(body: body)
-        let othersHealthy = lanes.enumerated().contains { i, l in
-            i != idx && l.consecutive403 == 0 && l.consecutiveFailures == 0
-                && l.state.lastPolledAt != nil && !l.refused403
+        // Only a lane of the SAME account can say this token, not the network,
+        // is the problem, and only one that took a good reading after this
+        // streak began. That also means a park never takes an account's last
+        // usable lane: a parked lane keeps its `.primary` slot, and a
+        // replacement would wait out the rediscovery interval (#434).
+        let key = lanes[idx].accountKey
+        let since = lanes[idx].streak403Start ?? .distantPast
+        let othersHealthy = key != nil && lanes.enumerated().contains { i, l in
+            i != idx && l.accountKey == key && !l.refused403
+                && l.consecutive403 == 0 && l.consecutiveFailures == 0
+                && (l.lastSuccessAt.map { $0 >= since } ?? false)
         }
         guard kind != .edge, othersHealthy else {
             if lastAllForbiddenLogAt.map({ now.timeIntervalSince($0) >= 3_600 }) ?? true {
                 lastAllForbiddenLogAt = now
                 Log.write("OAuthPoller", "http 403 ×\(lanes[idx].consecutive403) on \(kind.rawValue) body with "
-                    + (kind == .edge ? "an edge-looking response" : "no healthy lane beside it")
+                    + (kind == .edge ? "an edge-looking response" : "no healthy lane of the account beside it")
                     + " — not parking (looks like the network, not the token); lanes=\(lanes.count)")
             }
             return false
