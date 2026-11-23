@@ -42,7 +42,10 @@ struct CredentialTelemetryTests {
         let empty = dir.appendingPathComponent("empty.json")
         try Data().write(to: empty)
         _ = SwitcherUsageCache.read(at: empty)
-        #expect(TelemetryCounters.drain().isEmpty)
+        // Only this test's own keys: TelemetryCounters is process-wide, and a
+        // suite running in parallel can count something else between the two
+        // drains (CI saw `telemetry.capped.metric`, #431).
+        #expect(TelemetryCounters.drain().keys.filter { $0.hasPrefix("cred.") }.isEmpty)
         let bad = dir.appendingPathComponent("bad.json")
         try Data("{\"layout\": 2}".utf8).write(to: bad)
         _ = SwitcherUsageCache.read(at: bad)
