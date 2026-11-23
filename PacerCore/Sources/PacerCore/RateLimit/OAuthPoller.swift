@@ -178,6 +178,9 @@ public actor OAuthPoller: TokenPoolTesting {
         case keychainStatus(OSStatus)
         case tokenExpired
         case unauthorized
+        /// The same token was refused with HTTP 403 `forbidden403DropAfter` polls
+        /// in a row: dropped like a 401, but re-tried after a long backoff (#434).
+        case forbidden
         case rateLimited(retryAfter: TimeInterval?)
         case http(status: Int)
         case transport
@@ -223,6 +226,8 @@ public actor OAuthPoller: TokenPoolTesting {
         let source: CredentialCandidate.Source
         var state: OAuthPollScheduler.LaneState
         var consecutiveFailures: Int
+        /// Polls in a row that got HTTP 403; any other outcome resets it (#434).
+        var consecutive403 = 0
         /// The account this token resolved to (from a successful poll's
         /// `anthropic-organization-id`); nil until first polled.
         var resolvedOrg: String?
@@ -530,6 +535,7 @@ public actor OAuthPoller: TokenPoolTesting {
         if let existing = lanes.first(where: { $0.credential.accessToken == trimmed }) {
             return .alreadyTracked(source: existing.source, fingerprint: Self.laneId(existing.credential.accessToken))
         }
+        dropped403[trimmed] = nil   // the user re-adding a token is a deliberate retry
         // Unknown local expiry — the server 401s when it lapses.
         lanes.append(Lane(
             credential: OAuthCredential(accessToken: trimmed, expiresAt: nil, subscriptionType: nil),
@@ -870,6 +876,7 @@ public actor OAuthPoller: TokenPoolTesting {
         case .secondaryAccount(let org): return .otherAccount(org: org)
         case .rateLimited:               return .failure(reason: "Rate-limited (429). This token is cooling down.")
         case .unauthorized:              return .failure(reason: "Anthropic rejected this token (401).")
+        case .forbidden:                 return .failure(reason: "Anthropic keeps refusing this token (HTTP 403).")
         case .tokenExpired:              return .failure(reason: "This token is expired.")
         case .transport:                 return .failure(reason: "Network error. Check your connection.")
         case .http(let s):               return .failure(reason: "Server returned HTTP \(s).")
@@ -1436,6 +1443,7 @@ public actor OAuthPoller: TokenPoolTesting {
     private func mergeCandidates(_ candidates: [CredentialCandidate]) {
         var known = Set(lanes.map { $0.credential.accessToken })
         for candidate in candidates {
+            if isParkedFor403(candidate.credential.accessToken) { continue }
             guard !known.contains(candidate.credential.accessToken) else {
                 guard candidate.credential.isCurrentStoredShape,
                       let idx = lanes.firstIndex(where: {
@@ -1505,6 +1513,24 @@ public actor OAuthPoller: TokenPoolTesting {
     }
 
     private var lastStalledNoteAt: Date?
+
+    /// A lane's token refused with 403 this many polls in a row is dropped (#434).
+    /// One 403 between successes keeps the ordinary cooling.
+    static let forbidden403DropAfter = 3
+    /// A token dropped for 403 is not offered again by discovery for this long.
+    /// A changed token is a different string, so it is never held back.
+    static let forbidden403Backoff: TimeInterval = 6 * 3600
+    /// Tokens dropped for repeated 403s -> when. In memory: a restart retries once.
+    private var dropped403: [String: Date] = [:]
+
+    private func isParkedFor403(_ token: String) -> Bool {
+        guard let at = dropped403[token] else { return false }
+        if clock.now().timeIntervalSince(at) >= Self.forbidden403Backoff {
+            dropped403[token] = nil
+            return false
+        }
+        return true
+    }
 
     /// After each poll: tally `oauth.lane_stalled` when a lane has gone quiet,
     /// at most once an hour. A loop over a handful of lanes and a counter add;
@@ -1635,6 +1661,7 @@ public actor OAuthPoller: TokenPoolTesting {
         switch result {
         case .success(let snapshot):
             lanes[idx].consecutiveFailures = 0
+            lanes[idx].consecutive403 = 0
             lanes[idx].state.cooldownUntil = nil
             lanes[idx].lastTopPercent = [snapshot.fiveHour?.usedPercentage,
                                          snapshot.sevenDay?.usedPercentage]
@@ -1714,6 +1741,19 @@ public actor OAuthPoller: TokenPoolTesting {
             return .transport
 
         case .failure(.http(let status, _)):
+            // Only the status is read here, never the body (#434). A 403 that
+            // repeats on one token is a refusal, not a blip: park it like a 401.
+            if status == 403 {
+                lanes[idx].consecutive403 += 1
+                if lanes[idx].consecutive403 >= Self.forbidden403DropAfter {
+                    dropped403[lanes[idx].credential.accessToken] = now
+                    lanes.remove(at: idx)
+                    TelemetryCounters.add("oauth.lane_dropped_403")
+                    return .forbidden
+                }
+            } else {
+                lanes[idx].consecutive403 = 0
+            }
             cooldownLane(idx, now: now, retryAfter: nil)
             return .http(status: status)
 
@@ -1837,6 +1877,8 @@ public actor OAuthPoller: TokenPoolTesting {
             return "access token expired — dropped lane; \(lanes)"
         case .unauthorized:
             return "unauthorized (401) — dropped lane; \(lanes)"
+        case .forbidden:
+            return "http 403 ×\(forbidden403DropAfter) — dropped lane; \(lanes)"
         case .rateLimited(let retryAfter):
             let ra = retryAfter.map { "\(Int($0))s" } ?? "nil"
             return "rate-limited (429) retryAfter=\(ra) — lane cooling; \(lanes)"

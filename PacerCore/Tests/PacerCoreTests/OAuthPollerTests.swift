@@ -258,6 +258,76 @@ import Testing
         #expect(await poller.runOnce() == .credentialsNotFound)
     }
 
+    private static let okBody = #"{"five_hour":{"utilization":1}}"#
+
+    /// A poller with a clock the test can move, and a cooldown short enough that
+    /// every `runOnce` sees the lane eligible again.
+    private static func forbiddenPoller(_ outcomes: [HTTPOutcome], client: OAuthClient? = nil)
+        throws -> (OAuthPoller, TestClock) {
+        let clock = TestClock()
+        let poller = OAuthPoller(
+            client: client ?? sequencedClient(outcomes), container: try makeContainer(),
+            configuration: .init(laneCooldownBase: 0, laneCooldownMax: 0), clock: clock)
+        return (poller, clock)
+    }
+
+    @Test("three 403s in a row drop the lane like a 401 (#434)")
+    func forbiddenThreeTimesDropsTheLane() async throws {
+        let (poller, _) = try Self.forbiddenPoller([.status(403)])
+        #expect(await poller.runOnce() == .http(status: 403))
+        #expect(await poller.runOnce() == .http(status: 403))
+        #expect(await poller.runOnce() == .forbidden)
+        #expect(await poller.runOnce() == .credentialsNotFound)
+    }
+
+    @Test("a success between 403s resets the count (#434)")
+    func forbiddenCountIsConsecutive() async throws {
+        let ok = HTTPOutcome.success(jsonBody: Self.okBody)
+        let (poller, _) = try Self.forbiddenPoller([.status(403), .status(403), ok, .status(403), .status(403), ok])
+        for _ in 0..<5 { #expect(await poller.runOnce() != .forbidden) }
+        if case .success = await poller.runOnce() {} else { Issue.record("lane should still be held") }
+    }
+
+    @Test("a lane dropped for 403 stays out for 6 h, and a changed token comes back at once (#434)")
+    func forbiddenLaneReturnsOnTokenChangeOrBackoff() async throws {
+        let box = ForbiddenKeychainBox(token: "tok-a")
+        let kc = KeychainOAuth(rawReader: { .success(Self.keychainBlob(token: box.token)) })
+        let transport: OAuthClient.Transport = { request in
+            let auth = request.value(forHTTPHeaderField: "Authorization") ?? ""
+            return auth.contains("tok-a")
+                ? try HTTPOutcome.status(403).materialize()
+                : try HTTPOutcome.success(jsonBody: Self.okBody).materialize()
+        }
+        let client = OAuthClient(keychain: kc, transport: transport, desktopEnabled: { false })
+        let (poller, clock) = try Self.forbiddenPoller([], client: client)
+        _ = await poller.runOnce(); _ = await poller.runOnce()
+        #expect(await poller.runOnce() == .forbidden)
+
+        // Same token, rediscovered: held back.
+        await poller.setActiveAccount(id: "x")   // forces a rediscovery
+        #expect(await poller.runOnce() == .credentialsNotFound)
+        clock.advance(by: 5 * 3600)
+        #expect(await poller.runOnce() == .credentialsNotFound)
+        // After the backoff it is tried again.
+        clock.advance(by: 2 * 3600)
+        await poller.setActiveAccount(id: "x")
+        #expect(await poller.runOnce() == .http(status: 403))
+
+        // A new token is never held back.
+        box.token = "tok-b"
+        await poller.setActiveAccount(id: "x")
+        // The old token's lane is back too (fresh count), so the new one may take a poll or two.
+        var polledNew = false
+        for _ in 0..<3 { if case .success = await poller.runOnce() { polledNew = true; break } }
+        #expect(polledNew, "a changed token should poll at once")
+    }
+
+    @Test("5xx and transport failures never drop a lane (#434)")
+    func otherFailuresStillOnlyCool() async throws {
+        let (poller, _) = try Self.forbiddenPoller([.status(503)])
+        for _ in 0..<5 { #expect(await poller.runOnce() == .http(status: 503)) }
+    }
+
     /// Two distinct orgs are BOTH tracked — neither dropped — and both write
     /// history, each row stamped with its account.
     ///
@@ -1016,5 +1086,15 @@ private final class LockedBox: @unchecked Sendable {
     var value: Data {
         get { lock.lock(); defer { lock.unlock() }; return stored }
         set { lock.lock(); defer { lock.unlock() }; stored = newValue }
+    }
+}
+
+private final class ForbiddenKeychainBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _token: String
+    init(token: String) { _token = token }
+    var token: String {
+        get { lock.lock(); defer { lock.unlock() }; return _token }
+        set { lock.lock(); _token = newValue; lock.unlock() }
     }
 }
