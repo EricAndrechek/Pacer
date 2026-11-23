@@ -16,7 +16,13 @@ import Foundation
 /// - the store's side being wrong rather than the archive: the check reads the
 ///   store through the hourly rollup, which the reconcile never reads, so a
 ///   rollup that disagrees with its own samples fails the check forever.
-///   `rollup_rows` says whether it does.
+///   `rollup_rows` says whether it does. Not while a scan cycle is part-way
+///   through: a bulk rebuild saves the samples before the rollups, so the
+///   rollup reads short for a while. That check sends `rollup_rows.mid_scan`.
+///
+/// A mismatch only in input or cache tokens shows as `rows.equal` and
+/// `output.equal`: the check compares those too, and these keys don't split
+/// them out.
 ///
 /// Every key is our own enumerable words plus an order of magnitude
 /// (`TelemetryBands.magnitude`): never a count.
@@ -49,17 +55,22 @@ public enum ArchiveIntegrityGap {
     /// - `rows`: the archive's turns against the store's (the rollup's count),
     /// - `output`: the archive's output tokens against the store's,
     /// - `rollup_rows`: the rollup's count against the store's own samples
-    ///   for the same days, when they were counted.
+    ///   for the same days, when they were counted; `rollup_rows.mid_scan`
+    ///   instead when a scan cycle was part-way through.
     public static func counterKeys(
         archivedRows: Int64, storedRows: Int64,
         archivedOutput: Int64, storedOutput: Int64,
-        sampleRows: Int64?
+        sampleRows: Int64?, midScan: Bool = false
     ) -> [String] {
         var keys = [
             key("rows", archivedRows, storedRows),
             key("output", archivedOutput, storedOutput),
         ]
-        if let sampleRows { keys.append(key("rollup_rows", storedRows, sampleRows)) }
+        if midScan {
+            keys.append(prefix + "rollup_rows.mid_scan")
+        } else if let sampleRows {
+            keys.append(key("rollup_rows", storedRows, sampleRows))
+        }
         return keys
     }
 }

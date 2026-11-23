@@ -20,7 +20,8 @@ import Foundation
 ///   suggestion calls, all re-reading the cached context. Compactions and
 ///   recaps add main-model output too, a few percent of a session's (measured
 ///   2026-11-23, `SessionTotalsCanary`). That is why input and cache are judged
-///   in one direction only, and output above only loosely.
+///   in one direction only, and output above allows for what the transcripts'
+///   markers say those calls spent.
 /// - the process's whole life, from `lastStartTime` for `lastDuration`. A
 ///   session that a long-lived process resumed, or one it ran after other
 ///   work, is not like for like; `SessionTotalsCanary.eligibility` tells.
