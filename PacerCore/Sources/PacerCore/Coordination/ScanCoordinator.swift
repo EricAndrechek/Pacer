@@ -1,5 +1,6 @@
 import Foundation
 import SwiftData
+import Synchronization
 
 /// Orchestrates one scan cycle and (in `runForever`) keeps cycling on
 /// FSEvents triggers. Owns no parsing logic — just glues together the
@@ -504,6 +505,13 @@ public final class ScanCoordinator {
     private var rebuildStatusGeneration: UInt64 = 0
     /// This coordinator's key in `HistoryRebuildStatus`.
     nonisolated let rebuildStatusSource = UUID()
+    /// Cycles under way in this process, any coordinator. A cycle awaits its
+    /// bulk rollup workers, which lets other scan-actor work (the archive's
+    /// hourly check, #433) run in the middle of it, after the samples are
+    /// saved and before the rollups catch up.
+    private nonisolated static let cyclesInFlight = Mutex<Int>(0)
+    /// Whether a scan cycle is part-way through, so rollups may lag samples.
+    public nonisolated static var isCycleInFlight: Bool { cyclesInFlight.withLock { $0 > 0 } }
     /// Long-lived persister so its in-memory dedup Set is built once.
     /// Lazily constructed on the first scan cycle so tests that never
     /// scan don't pay the preload cost.
@@ -1634,7 +1642,11 @@ public final class ScanCoordinator {
 
     private func runScanCycleUnserialized() async throws -> ScanReport {
         scanInFlight = true
-        defer { scanInFlight = false }
+        Self.cyclesInFlight.withLock { $0 += 1 }
+        defer {
+            scanInFlight = false
+            Self.cyclesInFlight.withLock { $0 -= 1 }
+        }
         let started = Date()
         var phase = PhaseTimings()
         // Mutable so the closure can advance it after each phase.

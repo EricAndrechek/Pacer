@@ -47,6 +47,30 @@ struct ArchiveIntegrityGapTests {
         #expect(without.count == 2)
     }
 
+    @Test("mid-scan, the rollup is not compared with its samples: it may be catching up")
+    func midScan() {
+        // A bulk rebuild saved the samples; the rollup has not caught up.
+        let keys = ArchiveIntegrityGap.counterKeys(
+            archivedRows: 1_000, storedRows: 900,
+            archivedOutput: 50_000, storedOutput: 45_000, sampleRows: 1_000, midScan: true)
+        #expect(keys == [
+            "data.archive_integrity.rows.over.e2",
+            "data.archive_integrity.output.over.e3",
+            "data.archive_integrity.rollup_rows.mid_scan",
+        ])
+    }
+
+    @Test("a mismatch only in input or cache reads as rows and output equal")
+    func inputOrCacheOnly() {
+        let keys = ArchiveIntegrityGap.counterKeys(
+            archivedRows: 10, storedRows: 10, archivedOutput: 700, storedOutput: 700, sampleRows: 10)
+        #expect(keys == [
+            "data.archive_integrity.rows.equal",
+            "data.archive_integrity.output.equal",
+            "data.archive_integrity.rollup_rows.equal",
+        ])
+    }
+
     @Test("keys carry no number but a magnitude")
     func noCounts() {
         let keys = ArchiveIntegrityGap.counterKeys(
