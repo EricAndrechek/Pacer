@@ -9,7 +9,9 @@
 #
 #   <version|build|all>  0.8.4 (sparkle:shortVersionString), 1794500000
 #                        (sparkle:version), or `all`.
-#   <appcast.xml>        A local file: a gh-pages checkout or a downloaded copy.
+#   <appcast.xml>        A local file: site/public/appcast.xml in a worktree of
+#                        main (the feed's one source, which the site serves),
+#                        or a downloaded copy.
 #   <out.xml>            Write here; without it the input is edited in place.
 #
 # Checks, all before writing anything:
@@ -22,8 +24,10 @@
 #     there are no formatting changes to review;
 #   - with nothing to remove, the output is the input unchanged.
 #
-# It never publishes. Putting the result live is a reviewed gh-pages commit;
-# the commands are in docs/releasing.md under "Rolling back delta updates".
+# It never publishes. Putting the result live is a reviewed commit to main,
+# which the site deploys, then `bin/publish-feeds.sh mirror`, which makes the
+# legacy gh-pages mirror the same bytes. Never edit the mirror on its own. The
+# commands are in docs/releasing.md under "Rolling back delta updates".
 #
 # Exit status: 0 written (or nothing to remove), 1 a check failed (nothing
 # written), 2 bad usage.
@@ -31,7 +35,7 @@
 set -euo pipefail
 
 if [ $# -lt 2 ] || [ $# -gt 3 ]; then
-  sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'
   exit 2
 fi
 

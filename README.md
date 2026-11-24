@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![macOS 15+](https://img.shields.io/badge/macOS-15%2B-black?logo=apple)](https://www.apple.com/macos/)
 [![Latest release](https://img.shields.io/github/v/release/EricAndrechek/Pacer?label=download)](https://github.com/EricAndrechek/Pacer/releases/latest)
-[![Website](https://img.shields.io/badge/website-ericandrechek.github.io%2FPacer-0e9f6e)](https://ericandrechek.github.io/Pacer/)
+[![Website](https://img.shields.io/badge/website-pacer.andrechek.com-0e9f6e)](https://pacer.andrechek.com/)
 
 **Know what Claude Code is costing you — and how close you are to your limits — right from your Mac's menu bar.**
 
@@ -77,8 +77,9 @@ keeps all of your data on your own Mac.
 
 ## Download & install
 
-1. **[Download the latest version →](https://github.com/EricAndrechek/Pacer/releases/latest)**
-   (grab the `Pacer-x.y.z.dmg` file under "Assets").
+1. **[Download the latest version →](https://pacer.andrechek.com/download/)**
+   (or grab the `Pacer-x.y.z.dmg` file under "Assets" on the
+   [latest release](https://github.com/EricAndrechek/Pacer/releases/latest)).
 2. Open the downloaded file and drag **Pacer** into your **Applications** folder.
 3. Launch Pacer. It lives in your **menu bar** — look for the little gauge icon
    up top (there's no Dock icon). Click it to open the dashboard.
@@ -289,9 +290,12 @@ perf-tuning, [screenshot generation](docs/screenshots.md), and release process.
 Pushing a `vX.Y.Z` tag triggers
 [`.github/workflows/release.yml`](.github/workflows/release.yml), which builds,
 signs, notarizes, packages a DMG, signs the Sparkle update, publishes the GitHub
-Release, and updates `appcast.xml` on the `gh-pages` branch. See
-[`docs/releasing.md`](docs/releasing.md) for the secrets and the cut-a-release
-checklist.
+Release, and publishes the update feed: the new item goes into
+[`site/public/appcast.xml`](site/public/appcast.xml) on `main`, which the
+website serves at `https://pacer.andrechek.com/appcast.xml`, and the same
+bytes to the `gh-pages` branch, the legacy mirror that Pacer 0.9.3 and earlier
+read. See [`docs/releasing.md`](docs/releasing.md) for the secrets, the
+cut-a-release checklist and where the feed lives.
 
 ## License
 

@@ -52,10 +52,18 @@ jobs:
         if: matrix.os == 'macos-15'
         run: make lint-hangs
 
-      # The release script's schema matcher against its fixtures (#415).
+      # The release script's schema matcher against its fixtures (#415), and
+      # its offline checks of the update feed.
       - name: ship.sh self-test
         if: matrix.os == 'macos-15'
         run: bin/ship.sh self-test
+
+      # The release workflow's feed publishing, end to end against a throwaway
+      # local remote: site copy on main and gh-pages mirror byte-identical, a
+      # lost push race redone, a re-run idempotent, the mirror switch.
+      - name: publish-feeds.sh self-test
+        if: matrix.os == 'macos-15'
+        run: bin/publish-feeds.sh self-test
 
       - name: Show toolchain
         run: |

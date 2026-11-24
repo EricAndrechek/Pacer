@@ -3,7 +3,16 @@ name: Release
 # Tag-driven release. Push a `v0.2.0` tag and this workflow builds,
 # signs, notarizes, packages, signs the Sparkle update, builds and proves
 # Sparkle delta updates from the last five releases, publishes the GitHub
-# Release, and updates the appcast on the gh-pages branch.
+# Release, and publishes the update feed (bin/publish-feeds.sh): the new item
+# goes into site/public/appcast.xml on main, which Cloudflare Workers Builds
+# deploys to https://pacer.andrechek.com/appcast.xml (what 0.9.4 and later
+# read), and the same bytes go to gh-pages, the legacy mirror that 0.9.3 and
+# earlier read.
+#
+# The legacy mirror has its own switch, also with no code change: the
+# repository variable PACER_LEGACY_PAGES_MIRROR set to `off` (or `false` or
+# `0`, any case) leaves gh-pages frozen as it is, for good: it is never
+# deleted (docs/releasing.md, "The legacy GitHub Pages mirror").
 #
 # Delta updates have a kill switch that needs no code change: set the
 # repository variable PACER_SPARKLE_DELTAS to `off` (or `false` or `0`, any case) (Settings → Secrets and
@@ -59,7 +68,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write   # create releases, push to gh-pages
+  contents: write   # create releases; push the feed to main (site/public/) and gh-pages
   pages: write      # if the user wires up GH Pages publish later
 
 jobs:
@@ -88,8 +97,8 @@ jobs:
         uses: actions/checkout@v5
         with:
           # Need full history so `git describe` against the tag works
-          # for embedding the version into the build (and so we can
-          # push to gh-pages at the end without re-fetching).
+          # for embedding the version into the build (bin/publish-feeds.sh
+          # fetches main and gh-pages afresh before it writes either).
           fetch-depth: 0
 
       - name: Resolve release version
@@ -582,16 +591,23 @@ jobs:
             fi
           fi
 
-      - name: Update appcast on gh-pages
+      - name: Publish the update feed (site on main, legacy gh-pages mirror)
+        id: feeds
         if: github.event_name == 'push' && github.event.inputs.dry_run != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        # Maintain a single appcast.xml at the root of the gh-pages
-        # branch, served from https://ericandrechek.github.io/Pacer/appcast.xml
-        # (the SUFeedURL declared in Info.plist).
-        #
-        # The first run on a repo that has no gh-pages branch yet
-        # bootstraps an empty appcast.xml; subsequent runs append.
+          # The legacy mirror for Macs on 0.9.3 and earlier: on unless the
+          # repository variable says off/false/0 (any case).
+          PACER_LEGACY_PAGES_MIRROR: ${{ vars.PACER_LEGACY_PAGES_MIRROR || 'on' }}
+        # The feed is site/public/appcast.xml on main: the new item is added to
+        # that copy (bin/appcast-add-item.py), the tag's price-history.json is
+        # written beside it, and the commit is pushed to main (a lost race is
+        # redone on the new main). Workers Builds deploys it to
+        # https://pacer.andrechek.com/appcast.xml, the SUFeedURL of 0.9.4 and
+        # later, in a minute or three; `bin/ship.sh verify` waits for that.
+        # Then the same two files, byte for byte, go to the root of gh-pages
+        # (https://ericandrechek.github.io/Pacer/appcast.xml), the SUFeedURL of
+        # 0.9.3 and earlier. All of it: bin/publish-feeds.sh.
         run: |
           set -euo pipefail
           version="${{ steps.version.outputs.version }}"
@@ -639,64 +655,57 @@ jobs:
             fi
           fi
 
-          # Check out gh-pages (create if absent).
-          worktree="${RUNNER_TEMP}/gh-pages"
-          if gh api "repos/${GITHUB_REPOSITORY}/branches/gh-pages" >/dev/null 2>&1; then
-            git worktree add -B gh-pages "${worktree}" origin/gh-pages
-          else
-            # --orphan checks out an unborn branch, so the working tree is
-            # already empty (only the .git link file). Do NOT `rm -rf .* *`
-            # here: the .* glob matches .git and destroys the worktree link,
-            # which made every later git command fail with "not a git
-            # repository" (the v0.1.0 appcast bootstrap hit exactly this).
-            git worktree add --orphan -B gh-pages "${worktree}"
-          fi
+          # The price history rides along: the app refreshes it from beside
+          # the appcast (CuratedPriceHistory.remoteURL) and falls back to the
+          # copy bundled in the release it ships with. Exits non-zero, after
+          # trying both, when either copy did not publish: the run goes red and
+          # the log and the job summary say which.
+          bin/publish-feeds.sh release \
+            --prices "${GITHUB_WORKSPACE}/PacerCore/Sources/PacerCore/Resources/price-history.json" \
+            -- "${item_args[@]}"
 
-          appcast="${worktree}/appcast.xml"
-          if [ ! -f "${appcast}" ]; then
-            cat > "${appcast}" <<'HEADER'
-          <?xml version="1.0" standalone="yes"?>
-          <rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
-              <channel>
-                  <title>Pacer</title>
-                  <link>https://ericandrechek.github.io/Pacer/appcast.xml</link>
-                  <description>Pacer auto-update feed</description>
-                  <language>en</language>
-              </channel>
-          </rss>
-          HEADER
-          fi
-
-          # Insert the new item right before the closing </channel>. The
-          # script writes the item exactly as the inline template here used
-          # to, checks the whole feed still parses with the new item intact,
-          # and falls back to the item without deltas rather than write a
-          # feed that fails that check.
-          python3 -I "${GITHUB_WORKSPACE}/bin/appcast-add-item.py" --appcast "${appcast}" "${item_args[@]}"
-
-          # The curated, dated price history rides along: the app refreshes it
-          # from beside the appcast (CuratedPriceHistory.remoteURL) and falls
-          # back to the copy bundled in the release it ships with.
-          cp "${GITHUB_WORKSPACE}/PacerCore/Sources/PacerCore/Resources/price-history.json" \
-             "${worktree}/price-history.json"
-
-          (
-            cd "${worktree}"
-            git add appcast.xml price-history.json
-            git -c user.name="github-actions[bot]" \
-                -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
-                commit -m "appcast: ${version}"
-            git push origin gh-pages
-          )
+      - name: Wait for the site to serve the new feed
+        # The feed commit is on main; Workers Builds now builds and deploys it
+        # (a minute or three). Until it does, Macs on 0.9.4 and later do not
+        # see this release, so the run is not green until the site serves it.
+        # Each request carries a cache-busting query; static assets ignore it.
+        if: github.event_name == 'push' && github.event.inputs.dry_run != 'true'
+        timeout-minutes: 20
+        env:
+          SITE_COMMIT: ${{ steps.feeds.outputs.site_commit }}
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          url="https://pacer.andrechek.com/appcast.xml"
+          served="${RUNNER_TEMP}/served-appcast.xml"
+          deadline=$(( $(date +%s) + 900 ))
+          n=0
+          while :; do
+            n=$((n + 1))
+            if curl -fsSL --max-time 30 -H 'Cache-Control: no-cache' -o "${served}" "${url}?v=${SITE_COMMIT:-run-${GITHUB_RUN_ID}}-${n}" \
+               && grep -qF ">${version}</sparkle:shortVersionString>" "${served}"; then
+              echo "${url} advertises ${version} (check ${n})."
+              exit 0
+            fi
+            [ "$(date +%s)" -lt "${deadline}" ] || break
+            sleep 20
+          done
+          echo "::error title=Feed not deployed::${url} does not advertise ${version} after 15 minutes, so Macs on 0.9.4 and later do not see this release (0.9.3 and earlier read the gh-pages mirror). In Cloudflare, Workers & Pages → pacer → Deployments: find the build of main ${SITE_COMMIT:-(the feed commit)} and read its log, then retry it there, or start one by hand with \`cf builds create pacer --branch main\`. Then run bin/ship.sh verify ${version}. docs/releasing.md, \"When the site's feed did not update\"."
+          exit 1
 
       - name: Preview the appcast (dry run)
         # Runs exactly when the two publish steps above do not. Adds this
-        # build's item to a COPY of the live feed with the same script the
-        # appcast step uses, as if the deltas were already uploaded, and then
-        # applies the undo (bin/appcast-drop-deltas.sh) to that copy and
-        # requires the result to equal the item rendered without deltas. The
-        # live feed and gh-pages are only read.
+        # build's item to a COPY of the feed (main's site/public/appcast.xml,
+        # the copy a release adds to) with the same script the publish step
+        # uses, as if the deltas were already uploaded, and then applies the
+        # undo (bin/appcast-drop-deltas.sh) to that copy and requires the
+        # result to equal the item rendered without deltas. Then runs the
+        # publish step's own script with --no-push and requires the site copy
+        # and the mirror copy it would push to be byte-identical and to carry
+        # the item. Nothing is pushed: main and gh-pages are only read.
         if: "!(github.event_name == 'push' && github.event.inputs.dry_run != 'true')"
+        env:
+          PACER_LEGACY_PAGES_MIRROR: ${{ vars.PACER_LEGACY_PAGES_MIRROR || 'on' }}
         run: |
           set -euo pipefail
           version="${{ steps.version.outputs.version }}"
@@ -707,7 +716,15 @@ jobs:
           dmg_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${version}/${DMG_NAME}"
           P="${RUNNER_TEMP}/appcast-preview"
           mkdir -p "${P}"
-          curl -fsSL -o "${P}/live.xml" https://ericandrechek.github.io/Pacer/appcast.xml
+          git fetch -q origin +refs/heads/main:refs/remotes/origin/main +refs/heads/gh-pages:refs/remotes/origin/gh-pages
+          # A release adds to main's copy. A branch dispatched before main has
+          # one (the change that moved the feed into site/) previews its own.
+          base=origin/main
+          if ! git cat-file -e origin/main:site/public/appcast.xml 2>/dev/null; then
+            base=HEAD
+            echo "::notice::origin/main has no site/public/appcast.xml yet; previewing against this branch's copy"
+          fi
+          git show "${base}:site/public/appcast.xml" > "${P}/live.xml"
 
           item_args=(--version "${version}" --build "${build}" --pubdate "${pubdate}"
                      --url "${dmg_url}" --length "${size}" --signature "${signature}")
@@ -733,6 +750,26 @@ jobs:
           else
             echo "No delta updates were built; the item is the plain one."
             preview="${P}/plain.xml"
+          fi
+
+          # The publish step's script, end to end, pushing nothing.
+          publish_args=("${item_args[@]}")
+          if [ -s "${DELTAS_DIR:-/nonexistent}/deltas.xml" ]; then
+            publish_args+=(--deltas-file "${DELTAS_DIR}/deltas.xml" --release-assets "${P}/assets.json")
+          fi
+          base_arg=()
+          [ "${base}" = origin/main ] || base_arg=(--base-ref "${base}")
+          bin/publish-feeds.sh release --no-push --work "${P}/publish" ${base_arg[@]+"${base_arg[@]}"} \
+            --prices "${GITHUB_WORKSPACE}/PacerCore/Sources/PacerCore/Resources/price-history.json" \
+            -- "${publish_args[@]}"
+          cmp "${P}/publish/site/site/public/appcast.xml" "${preview}" \
+            || { echo "::error::the publish script's site copy is not the previewed feed"; exit 1; }
+          if [ -d "${P}/publish/gh-pages" ]; then
+            for f in appcast.xml price-history.json; do
+              cmp "${P}/publish/site/site/public/${f}" "${P}/publish/gh-pages/${f}" \
+                || { echo "::error::the site copy and the mirror copy of ${f} would differ"; exit 1; }
+            done
+            echo "Publish dry run: the site copy and the gh-pages mirror would be byte-identical."
           fi
 
           {
