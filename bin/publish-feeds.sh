@@ -13,7 +13,10 @@
 #   mirror  {appcast.xml,price-history.json} at the root of gh-pages, served at
 #           https://ericandrechek.github.io/Pacer/. The legacy mirror: Pacer
 #           0.9.3 and earlier can only read it. Always a byte-for-byte copy of
-#           the site copy. PACER_LEGACY_PAGES_MIRROR turns it off.
+#           the site copy, and only ever of one that passed the site's own
+#           check. PACER_LEGACY_PAGES_MIRROR turns it off, which freezes it for
+#           good: gh-pages is never deleted (docs/releasing.md, "The legacy
+#           GitHub Pages mirror").
 #
 # Usage:
 #   bin/publish-feeds.sh release [options] -- <bin/appcast-add-item.py args>
@@ -23,7 +26,9 @@
 #       that. A push that loses a race (main moved) is redone from the new
 #       main: fetch, regenerate from the new site copy, commit, push, up to
 #       PUBLISH_ATTEMPTS times. Re-running it for a release whose item is
-#       already there adds nothing.
+#       already there adds nothing. Fails closed: when the site's check
+#       (site/scripts/check-feeds.mjs) refuses the new copy, neither main nor
+#       the mirror is touched.
 #       The item args are appcast-add-item.py's, without --appcast and --out:
 #       --version X.Y.Z --build N --pubdate ... --url ... --length N
 #       --signature 'sparkle:edSignature="..."' [--description-file F]
@@ -31,6 +36,9 @@
 #   bin/publish-feeds.sh mirror [options]
 #       Make the mirror a copy of main's site copies (after a hand edit on
 #       main: a pulled release, dropped deltas). Commit + push to gh-pages.
+#       Only once the site already serves main's copies byte for byte (so
+#       the edit deployed), and only copies that pass the site's check and
+#       parse.
 #   bin/publish-feeds.sh status [options]
 #       Are main's site copies and the mirror's byte-identical? Exit 0 yes, 1 no.
 #   bin/publish-feeds.sh self-test
@@ -58,6 +66,9 @@
 #                  gh-pages is left exactly as it is (frozen). Read from the
 #                  repo variable of the same name when unset and `gh` works.
 #   PUBLISH_ATTEMPTS           push attempts per branch (default 5)
+#   PUBLISH_SITE_URL           where `mirror` reads what the site serves
+#                  (default https://pacer.andrechek.com; the self-test points
+#                  it at a file:// directory)
 #   PUBLISH_FEEDS_BEFORE_PUSH  test hook only (self-test): a command run
 #                  before every push attempt, with the branch as $1.
 #
@@ -232,14 +243,45 @@ generate() {
 }
 
 # The site's own deploy check (site/scripts/check-feeds.mjs), before anything
-# reaches main: a copy it refuses would fail every site build from then on.
+# reaches main or the mirror: a copy it refuses would fail every site build
+# from then on. Fails closed without node.
 site_gate() {
   local w="$1"
-  if ! command -v node >/dev/null 2>&1; then
-    warn "node not found: skipping the site's feed check here (Workers Builds still runs it before deploying)"
-    return 0
-  fi
+  command -v node >/dev/null 2>&1 || { err "node is needed to run the site's feed check (site/scripts/check-feeds.mjs)"; return 1; }
   node "$w/site/scripts/check-feeds.mjs" "$w/${SITE_DIR}"
+}
+
+# A second, independent look before anything is mirrored: the appcast parses
+# as XML (ElementTree, as appcast-add-item.py checks it) with an <rss> root and
+# at least one item, and the price history parses as JSON.
+parse_gate() {
+  python3 -I - "$1/${SITE_DIR}/appcast.xml" "$1/${SITE_DIR}/price-history.json" <<'PY'
+import json, sys, xml.etree.ElementTree as ET
+try:
+    root = ET.parse(sys.argv[1]).getroot()
+    assert root.tag == "rss", f"the root element is <{root.tag}>, not <rss>"
+    assert len(list(root.iter("item"))) > 0, "no <item>"
+    json.load(open(sys.argv[2], encoding="utf-8"))
+except Exception as e:
+    print(f"publish-feeds: ERROR: refusing to mirror: {e}", file=sys.stderr); sys.exit(1)
+PY
+}
+
+# Everything the mirror may receive passes both.
+mirror_gate() { site_gate "$1" && parse_gate "$1"; }
+
+# served_matches <site worktree>: the site serves these copies byte for byte.
+served_matches() {
+  local w="$1" f base="${PUBLISH_SITE_URL:-https://pacer.andrechek.com}" got rc=0
+  got="$(mktemp "${WORK}/served.XXXXXX")"
+  for f in "${FILES[@]}"; do
+    if ! curl -fsSL --retry 2 --max-time 30 -H 'Cache-Control: no-cache' -o "$got" "${base}/${f}" 2>/dev/null; then
+      err "could not read ${base}/${f}"; rc=1
+    elif ! cmp -s "$got" "$w/${SITE_DIR}/$f"; then
+      err "${base}/${f} is not main's ${SITE_DIR}/${f}: the change on main has not deployed yet (Cloudflare: Workers & Pages → pacer)"; rc=1
+    fi
+  done
+  return "$rc"
 }
 
 # push_with_retry <worktree> <branch> <regenerate function>
@@ -260,11 +302,11 @@ push_with_retry() {
   return 1
 }
 
-SITE_MSG=""
+SITE_MSG="" GATE_REFUSED=no
 regen_site() {
   local w="$1"
   generate "$w"
-  site_gate "$w" || { err "the site's feed check refused the new copy; main was not changed"; return 1; }
+  site_gate "$w" || { GATE_REFUSED=yes; err "the site's feed check refused the new copy; main was not changed"; return 1; }
   git -C "$w" add -- "${SITE_DIR}/appcast.xml" "${SITE_DIR}/price-history.json" || return 1
   if git -C "$w" diff --cached --quiet; then
     say "main's site copies are already up to date"
@@ -303,6 +345,7 @@ mirror_worktree() {
 publish_mirror() {
   local site="$1" m="$WORK/gh-pages" f
   MIRROR_SRC="$site" MIRROR_MSG="$2"
+  mirror_gate "$site" || { err "refusing to mirror a copy that fails the site's check or does not parse; gh-pages was not changed"; return 1; }
   mirror_worktree "$m" || return 1
   regen_mirror "$m" || return 1
   for f in "${FILES[@]}"; do
@@ -356,7 +399,11 @@ cmd_release() {
   fi
   [ "$site_ok" = yes ] || err "the site copy on main was NOT published: Macs on 0.9.4 and later will not see ${ITEM_VERSION} until it is (docs/releasing.md, \"When the site's feed did not update\")"
 
-  if [ "$mirror" = on ]; then
+  if [ "$GATE_REFUSED" = yes ]; then
+    # Fail closed: a copy the site would not deploy goes nowhere, mirror included.
+    mirror_ok=no
+    err "the gh-pages mirror was NOT published either: the copy failed the site's check (fix it, then re-run)"
+  elif [ "$mirror" = on ]; then
     # The mirror follows the site copy, so tell when it had drifted from it
     # (an edit made on gh-pages only): from here on it is the site copy again.
     local mfile
@@ -374,7 +421,10 @@ cmd_release() {
 
   local f same=yes
   if [ "$mirror" = on ]; then
-    for f in "${FILES[@]}"; do cmp -s "$w/${SITE_DIR}/$f" "$WORK/gh-pages/$f" || same=no; done
+    for f in "${FILES[@]}"; do cmp -s "$w/${SITE_DIR}/$f" "$WORK/gh-pages/$f" 2>/dev/null || same=no; done
+  fi
+  if [ -n "${GITHUB_OUTPUT:-}" ] && [ "$NO_PUSH" != yes ]; then
+    echo "site_commit=$(git -C "$w" rev-parse HEAD)" >> "$GITHUB_OUTPUT"
   fi
   say "site_commit=$(git -C "$w" rev-parse HEAD) site_published=${site_ok}"
   [ "$mirror" = on ] && say "mirror_commit=$(git -C "$WORK/gh-pages" rev-parse HEAD 2>/dev/null || echo none) mirror_published=${mirror_ok} identical=${same}"
@@ -393,6 +443,10 @@ cmd_mirror() {
   g fetch -q "$REMOTE" "+refs/heads/main:refs/remotes/${REMOTE}/main"
   local w="$WORK/site"
   g worktree add -q --detach "$w" "${REMOTE}/main"
+  # Mirror only what has reached clients of the site: a hand edit on main is
+  # live once Workers Builds deployed it, and a copy that never deploys
+  # (refused by the site's check) must not reach 0.9.3 and earlier either.
+  served_matches "$w" || die "the site does not serve main's copies yet; gh-pages was not changed"
   local msg
   msg="appcast: copy of the site feed on main at $(git -C "$w" rev-parse --short HEAD)"
   [ -z "$MESSAGE" ] || msg="$MESSAGE"
@@ -421,40 +475,62 @@ cmd_self_test() {
   ok()  { printf '  ✓ %s\n' "$*"; }
   bad() { printf '  ✗ %s\n' "$*"; fails=$((fails + 1)); }
 
+  # Nothing here may depend on the machine's git config (a CI runner has none:
+  # no init.defaultBranch, no identity; a Mac may sign every commit): every
+  # repository names its branch, every commit its author, and signing is off.
+  # Prove it with GIT_CONFIG_GLOBAL=/dev/null bin/publish-feeds.sh self-test.
+  local G=(-c user.name=self-test -c user.email=self-test@example.com -c commit.gpgsign=false -c tag.gpgsign=false)
+  command -v node >/dev/null 2>&1 || bad "node is needed: the release path runs the site's feed check, and fails closed without it"
+
   # The "remote", built from file contents, not history, so a shallow CI
   # checkout works and nothing is written to this repository: main has HEAD's
   # files the release path uses; gh-pages is the real mirror when this clone
   # has it, else a copy of HEAD's site copies.
-  git init -q --bare "$remote"
+  git init -q --bare --initial-branch=main "$remote"
   local seed="$T/seed" f
   seed_push() {  # seed_push <branch>: commit $seed's files as <branch> on the remote
     git -C "$seed" add -A
-    git -C "$seed" -c user.name=seed -c user.email=seed@example.com commit -q -m "seed $1"
+    git -C "$seed" "${G[@]}" commit -q -m "seed $1"
     git -C "$seed" push -q "$remote" "HEAD:refs/heads/$1"
     rm -rf "$seed"
   }
-  git init -q "$seed"
+  git init -q --initial-branch=main "$seed"
   g archive HEAD -- bin/appcast-add-item.py "${SITE_DIR}" site/scripts \
     PacerCore/Sources/PacerCore/Resources/price-history.json | tar -x -C "$seed"
   seed_push main
-  git init -q "$seed"
+  git init -q --initial-branch=main "$seed"
   if g rev-parse -q --verify origin/gh-pages >/dev/null; then
     g archive origin/gh-pages | tar -x -C "$seed"
   else
     for f in "${FILES[@]}"; do g show "HEAD:${SITE_DIR}/$f" > "$seed/$f"; done
   fi
   seed_push gh-pages
-  git clone -q "$remote" "$clone"
+  git clone -q -b main "$remote" "$clone"
   git -C "$clone" config user.name "self-test"; git -C "$clone" config user.email "self-test@example.com"
+  git -C "$clone" config commit.gpgsign false; git -C "$clone" config tag.gpgsign false
   # The clone runs this script as checked out at HEAD, like the release job.
   cp "$0" "$clone/bin/publish-feeds.sh"
+
+  # What "the site" serves, for `mirror`: a directory standing in for
+  # https://pacer.andrechek.com. serve_main copies main's site copies there,
+  # as a finished deploy would.
+  mkdir -p "$T/served"
+  serve_main() { local f; for f in "${FILES[@]}"; do feed_on main "${SITE_DIR}/$f" > "$T/served/$f"; done; }
+  # push_main <file> <commit message> <command...>: a commit to the remote's
+  # main that rewrites <file> with what <command> prints.
+  push_main() {
+    local file="$1" msg="$2" t; shift 2
+    t="$(mktemp -d "$T/edit.XXXXXX")"
+    git clone -q -b main "$remote" "$t/c" && "$@" > "$t/new" && cp "$t/new" "$t/c/$file" \
+      && git -C "$t/c" add -- "$file" && git -C "$t/c" "${G[@]}" commit -q -m "$msg" && git -C "$t/c" push -q origin HEAD:main
+  }
 
   local sig
   sig="sparkle:edSignature=\"$(printf 'A%.0s' $(seq 1 86))==\""
   local item=(--version 99.0.0 --build 9999999999 --pubdate "Tue, 24 Nov 2026 00:00:00 +0000"
               --url https://github.com/EricAndrechek/Pacer/releases/download/v99.0.0/Pacer-99.0.0.dmg
               --length 123456 --signature "$sig")
-  run() { (cd "$clone" && PUBLISH_BACKOFF=0 "$@") > "$T/log" 2>&1; }
+  run() { (cd "$clone" && PUBLISH_BACKOFF=0 PUBLISH_SITE_URL="file://$T/served" "$@") > "$T/log" 2>&1; }
   feed_on() { git --git-dir="$remote" show "$1:$2"; }
   identical() {
     local f
@@ -464,15 +540,13 @@ cmd_self_test() {
 
   # 1. A release, with main moving under it once (the race the retry is for).
   local hook="if [ \"\$1\" = main ] && [ ! -e '$T/raced' ]; then touch '$T/raced'; \
-    t=\$(mktemp -d); git clone -q '$remote' \"\$t\" && echo race > \"\$t/RACE.txt\" && git -C \"\$t\" add RACE.txt \
-    && git -C \"\$t\" -c user.name=r -c user.email=r@example.com commit -q -m race && git -C \"\$t\" push -q origin HEAD:main; fi"
+    t=\$(mktemp -d); git clone -q -b main '$remote' \"\$t\" && echo race > \"\$t/RACE.txt\" && git -C \"\$t\" add RACE.txt \
+    && git -C \"\$t\" ${G[*]} commit -q -m race && git -C \"\$t\" push -q origin HEAD:main; fi"
   if run env PACER_LEGACY_PAGES_MIRROR=on PUBLISH_FEEDS_BEFORE_PUSH="$hook" bin/publish-feeds.sh release -- "${item[@]}"; then
     ok "release: published"
   else bad "release failed: $(tail -5 "$T/log")"; fi
   grep -q 'refused (attempt 1' "$T/log" && ok "release: a push that lost a race to main was redone" || bad "release: the race was not exercised"
-  if command -v node >/dev/null 2>&1; then
-    grep -q 'check-feeds: appcast.xml ok' "$T/log" && ok "release: the site's feed check passed the new copy before the push" || bad "release: the site's feed check did not run"
-  fi
+  grep -q 'check-feeds: appcast.xml ok' "$T/log" && ok "release: the site's feed check passed the new copy before the push" || bad "release: the site's feed check did not run"
   git --git-dir="$remote" cat-file -e main:RACE.txt 2>/dev/null && ok "release: the racing commit on main was kept" || bad "release: the racing commit was lost"
   [ "$(count main "${SITE_DIR}/appcast.xml")" = 1 ] && ok "release: main's site appcast has the item once" || bad "release: main's site appcast has the item $(count main "${SITE_DIR}/appcast.xml") times"
   identical && ok "release: site copy and mirror are byte-identical" || bad "release: site copy and mirror differ"
@@ -481,6 +555,7 @@ cmd_self_test() {
   git --git-dir="$remote" log -1 --format=%s main | grep -q '^site: publish appcast and price history for 99.0.0$' \
     && ok "release: main's commit names the version" || bad "release: main's commit message: $(git --git-dir="$remote" log -1 --format=%s main)"
   local main_before; main_before="$(git --git-dir="$remote" rev-parse main)"
+  serve_main   # the site deploys 99.0.0
 
   # 2. A re-run of the same release adds nothing and pushes nothing.
   run env PACER_LEGACY_PAGES_MIRROR=on bin/publish-feeds.sh release -- "${item[@]}" \
@@ -497,9 +572,14 @@ cmd_self_test() {
     && ok "mirror off: main published, gh-pages untouched" || bad "mirror off: $(tail -3 "$T/log")"
   run bin/publish-feeds.sh status && bad "status: missed the drift" || ok "status: reports the copies differ"
 
-  # 4. `mirror` brings it back in line.
+  # 4. `mirror` brings it back in line, but only once the site serves main's copy.
+  run env PACER_LEGACY_PAGES_MIRROR=on bin/publish-feeds.sh mirror \
+    && bad "mirror: copied a main the site does not serve yet" \
+    || { [ "$(git --git-dir="$remote" rev-parse gh-pages)" = "$ghp_before" ] && grep -q 'has not deployed yet' "$T/log" \
+         && ok "mirror: refused while the site serves an older copy, gh-pages untouched" || bad "mirror (undeployed): $(tail -3 "$T/log")"; }
+  serve_main
   run env PACER_LEGACY_PAGES_MIRROR=on bin/publish-feeds.sh mirror && identical \
-    && ok "mirror: gh-pages is main's site copy again" || bad "mirror: $(tail -3 "$T/log")"
+    && ok "mirror: once the site serves main's copy, gh-pages is that copy again" || bad "mirror: $(tail -3 "$T/log")"
   run bin/publish-feeds.sh status && ok "status: identical" || bad "status: $(cat "$T/log")"
 
   # 5. --no-push writes both copies and pushes nothing.
@@ -516,22 +596,33 @@ cmd_self_test() {
   run bin/publish-feeds.sh release --base-ref HEAD -- "${item3[@]}" && bad "--base-ref with a push was allowed" \
     || { grep -q 'only goes with --no-push' "$T/log" && ok "--base-ref is refused without --no-push" || bad "--base-ref: $(tail -2 "$T/log")"; }
 
-  # 6. A copy the site's feed check refuses never reaches main; the mirror
-  #    (which 0.9.3 and earlier read) still gets the release, and it fails loudly.
-  if command -v node >/dev/null 2>&1; then
-    main_before="$(git --git-dir="$remote" rev-parse main)"
-    local item4=("${item[@]}"); item4[1]=99.0.3; item4[3]=9999999996
-    item4[7]="https://elsewhere.example/Pacer-99.0.3.dmg"
-    if run env PACER_LEGACY_PAGES_MIRROR=on bin/publish-feeds.sh release -- "${item4[@]}"; then
-      bad "gate: a feed the site would refuse was reported published"
-    elif [ "$(git --git-dir="$remote" rev-parse main)" = "$main_before" ] \
-         && feed_on gh-pages appcast.xml | grep -q '>99.0.3<' && grep -q 'NOT published' "$T/log"; then
-      ok "gate: main untouched, the mirror published, the run fails"
-    else bad "gate: $(tail -5 "$T/log")"; fi
-    run env PACER_LEGACY_PAGES_MIRROR=on bin/publish-feeds.sh mirror >/dev/null || true   # back in line for the next checks
-  fi
+  # 6. Fail closed: a copy the site's feed check refuses reaches neither main
+  #    nor the mirror, and the run fails.
+  main_before="$(git --git-dir="$remote" rev-parse main)"; ghp_before="$(git --git-dir="$remote" rev-parse gh-pages)"
+  local item4=("${item[@]}"); item4[1]=99.0.3; item4[3]=9999999996
+  item4[7]="https://elsewhere.example/Pacer-99.0.3.dmg"
+  if run env PACER_LEGACY_PAGES_MIRROR=on bin/publish-feeds.sh release -- "${item4[@]}"; then
+    bad "gate: a feed the site would refuse was reported published"
+  elif [ "$(git --git-dir="$remote" rev-parse main)" = "$main_before" ] && [ "$(git --git-dir="$remote" rev-parse gh-pages)" = "$ghp_before" ] \
+       && grep -q 'site copy on main was NOT published' "$T/log" && grep -q 'mirror was NOT published' "$T/log"; then
+    ok "gate: main and gh-pages untouched, the run fails"
+  else bad "gate: $(tail -5 "$T/log")"; fi
 
-  # 7. A newer site price history is kept; a broken release one is never published.
+  # 7. `mirror` never copies what the site's check refuses, even when the site
+  #    serves it, nor anything that does not parse.
+  ghp_before="$(git --git-dir="$remote" rev-parse gh-pages)"
+  push_main "${SITE_DIR}/appcast.xml" "a foreign DMG" \
+    sed 's|https://github.com/EricAndrechek/Pacer/releases/download/v99.0.0/Pacer-99.0.0.dmg|https://elsewhere.example/Pacer-99.0.0.dmg|' "$T/served/appcast.xml"
+  serve_main
+  run env PACER_LEGACY_PAGES_MIRROR=on bin/publish-feeds.sh mirror \
+    && bad "mirror: copied a feed the site's check refuses" \
+    || { [ "$(git --git-dir="$remote" rev-parse gh-pages)" = "$ghp_before" ] && grep -q 'refusing to mirror' "$T/log" \
+         && ok "mirror: refuses a copy the site's check refuses, gh-pages untouched" || bad "mirror (gate): $(tail -3 "$T/log")"; }
+  local bad_dir="$T/unparsable"; mkdir -p "$bad_dir/${SITE_DIR}"
+  head -c 3000 "$T/served/appcast.xml" > "$bad_dir/${SITE_DIR}/appcast.xml"; cp "$T/served/price-history.json" "$bad_dir/${SITE_DIR}/"
+  parse_gate "$bad_dir" 2>/dev/null && bad "parse gate: passed a truncated appcast" || ok "parse gate: refuses a truncated appcast"
+
+  # 8. A newer site price history is kept; a broken release one is never published.
   local P="$T/prices"; mkdir -p "$P"
   python3 -I - "$REPO/PacerCore/Sources/PacerCore/Resources/price-history.json" "$P" <<'PY'
 import json, sys
@@ -547,7 +638,7 @@ PY
   [ "$(choose_prices "$REPO/PacerCore/Sources/PacerCore/Resources/price-history.json" "$P/old.json" 2>/dev/null)" = release ] \
     && ok "prices: the release copy replaces an older site copy" || bad "prices: release copy not chosen"
 
-  # 8. The switch reads like PACER_SPARKLE_DELTAS.
+  # 9. The switch reads like PACER_SPARKLE_DELTAS.
   local v want got
   for v in "on|on" "|on" "OFF|off" "false|off" "0|off" "False|off" "yes|on"; do
     want="${v#*|}"; got="$(PACER_LEGACY_PAGES_MIRROR="${v%%|*}" mirror_switch)"
