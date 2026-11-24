@@ -227,6 +227,53 @@ print(f"  ✓ price history decodes, asOf {served.date()} (the release bundles {
 PY
 }
 
+# site_build_conclusion < check-runs JSON (`gh api …/commits/<sha>/check-runs`):
+# the conclusion of the newest "Workers Builds: pacer" run (its status while it
+# is unfinished), or "none".
+site_build_conclusion() {
+  python3 -I -c '
+import json, sys
+try:
+    runs = [r for r in json.load(sys.stdin).get("check_runs", []) if r.get("name") == "Workers Builds: pacer"]
+except Exception:
+    print("unreadable"); sys.exit()
+if not runs:
+    print("none"); sys.exit()
+r = max(runs, key=lambda r: (r.get("started_at") or "", r.get("id") or 0))
+print(r.get("conclusion") or r.get("status") or "unknown")'
+}
+
+# site_build_ok: the site still builds from main. A failed Workers Build leaves
+# the last good deployment serving, so nothing looks wrong until a release's
+# feed commit fails to deploy too; this makes it block the tag instead. Judged
+# on origin/main's HEAD; when Workers Builds did not build that commit (it is
+# outside the watch paths), on the newest commit that is inside them.
+site_build_ok() {
+  local sha c json watched
+  if [ "${SHIP_SKIP_SITE_BUILD_CHECK:-}" = 1 ]; then
+    warn "SKIPPING the Workers Builds check (SHIP_SKIP_SITE_BUILD_CHECK=1): only when Cloudflare reports no check runs and the site serves main (above)"
+    return 0
+  fi
+  sha="$(git rev-parse origin/main 2>/dev/null)" || { bad "no origin/main"; return 1; }
+  json="$(gh api "repos/{owner}/{repo}/commits/${sha}/check-runs?per_page=100" 2>/dev/null || true)"
+  c="$(site_build_conclusion <<<"$json")"
+  case "$c" in
+    none|skipped|neutral)
+      watched="$(git log -1 --format=%H origin/main -- site docs/release-notes docs/screenshots 2>/dev/null || true)"
+      if [ -n "$watched" ] && [ "$watched" != "$sha" ]; then
+        sha="$watched"
+        json="$(gh api "repos/{owner}/{repo}/commits/${sha}/check-runs?per_page=100" 2>/dev/null || true)"
+        c="$(site_build_conclusion <<<"$json")"
+      fi ;;
+  esac
+  case "$c" in
+    success) ok "Workers Builds built main's site (${sha:0:8}): success" ;;
+    queued|in_progress|pending|requested|waiting) bad "Workers Builds is still building main's site (${sha:0:8}): wait for it, then try again"; return 1 ;;
+    none) bad "no Workers Builds check on main's site commit ${sha:0:8}: is the Cloudflare connection working? (Workers & Pages → pacer → Settings → Builds)"; return 1 ;;
+    *) bad "Workers Builds on main's site commit ${sha:0:8}: ${c}. Fix the site build on main before releasing, or this release's feed would never deploy (Cloudflare: Workers & Pages → pacer → Deployments)"; return 1 ;;
+  esac
+}
+
 # The SUFeedURL a build of this checkout reads (project.yml generates Info.plist).
 feed_url_in_project() { grep -E '^[[:space:]]*SUFeedURL:' project.yml | head -1 | sed -E 's/.*SUFeedURL:[[:space:]]*//'; }
 
@@ -305,6 +352,20 @@ PY
   expect fail "a price history older than the release's" check_prices "$T/old-prices.json" PacerCore/Sources/PacerCore/Resources/price-history.json
   expect fail "a price history the app would not decode" check_prices "$T/broken-prices.json" PacerCore/Sources/PacerCore/Resources/price-history.json
 
+  # The Workers Builds check that gates tagging: the newest run decides.
+  local W='"name":"Workers Builds: pacer"'
+  local runs
+  for runs in \
+    "success|{\"check_runs\":[{${W},\"status\":\"completed\",\"conclusion\":\"success\",\"started_at\":\"2026-11-24T10:00:00Z\",\"id\":1}]}" \
+    "failure|{\"check_runs\":[{${W},\"status\":\"completed\",\"conclusion\":\"success\",\"started_at\":\"2026-11-24T10:00:00Z\",\"id\":1},{${W},\"status\":\"completed\",\"conclusion\":\"failure\",\"started_at\":\"2026-11-24T11:00:00Z\",\"id\":2}]}" \
+    "in_progress|{\"check_runs\":[{${W},\"status\":\"in_progress\",\"conclusion\":null,\"started_at\":\"2026-11-24T12:00:00Z\",\"id\":3}]}" \
+    "none|{\"check_runs\":[{\"name\":\"PacerCore tests (macos-15)\",\"status\":\"completed\",\"conclusion\":\"success\"}]}" \
+    "none|{\"check_runs\":[]}" \
+    "unreadable|" ; do
+    [ "$(site_build_conclusion <<<"${runs#*|}")" = "${runs%%|*}" ] && t_ok "Workers Builds check read as ${runs%%|*}" \
+      || t_bad "Workers Builds check: expected ${runs%%|*}, got $(site_build_conclusion <<<"${runs#*|}")"
+  done
+
   local v
   for v in "on|on" "|on" "OFF|off" "false|off" "0|off"; do
     [ "$(PACER_LEGACY_PAGES_MIRROR="${v%%|*}" legacy_mirror)" = "${v#*|}" ] && t_ok "mirror switch '${v%%|*}' is ${v#*|}" \
@@ -350,6 +411,10 @@ assert_releasable() {
   git diff --quiet && git diff --cached --quiet || die "working tree is dirty — commit or stash first"
   git fetch --quiet origin main
   [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] || die "local main is not in sync with origin/main"
+  # Again at the moment of tagging, not only at preflight: the feed must be
+  # live where the release will write it, and the site must still build, or
+  # the release's feed commit would never deploy.
+  cmd_feeds || die "the update feed is not ready for a release (above); fix that first"
 }
 
 # ---- subcommands ---------------------------------------------------------
@@ -404,6 +469,7 @@ cmd_feeds() {
       bad "${url} is not main's site/public/${f}: the last change on main has not deployed (Cloudflare: Workers & Pages → pacer)"; rc=1
     fi
   done
+  site_build_ok || rc=1
   if [ "$(legacy_mirror)" = on ]; then
     if bin/publish-feeds.sh status >/dev/null 2>&1; then ok "the gh-pages mirror holds the same bytes as main (bin/publish-feeds.sh status)"
     else bad "the gh-pages mirror and main's site copies differ: \`bin/publish-feeds.sh mirror\` (after checking which is right)"; rc=1; fi

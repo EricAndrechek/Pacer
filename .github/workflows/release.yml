@@ -11,8 +11,8 @@ name: Release
 #
 # The legacy mirror has its own switch, also with no code change: the
 # repository variable PACER_LEGACY_PAGES_MIRROR set to `off` (or `false` or
-# `0`, any case) leaves gh-pages frozen as it is. Retiring it:
-# docs/releasing.md, "The legacy GitHub Pages mirror".
+# `0`, any case) leaves gh-pages frozen as it is, for good: it is never
+# deleted (docs/releasing.md, "The legacy GitHub Pages mirror").
 #
 # Delta updates have a kill switch that needs no code change: set the
 # repository variable PACER_SPARKLE_DELTAS to `off` (or `false` or `0`, any case) (Settings → Secrets and
@@ -592,6 +592,7 @@ jobs:
           fi
 
       - name: Publish the update feed (site on main, legacy gh-pages mirror)
+        id: feeds
         if: github.event_name == 'push' && github.event.inputs.dry_run != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -662,6 +663,35 @@ jobs:
           bin/publish-feeds.sh release \
             --prices "${GITHUB_WORKSPACE}/PacerCore/Sources/PacerCore/Resources/price-history.json" \
             -- "${item_args[@]}"
+
+      - name: Wait for the site to serve the new feed
+        # The feed commit is on main; Workers Builds now builds and deploys it
+        # (a minute or three). Until it does, Macs on 0.9.4 and later do not
+        # see this release, so the run is not green until the site serves it.
+        # Each request carries a cache-busting query; static assets ignore it.
+        if: github.event_name == 'push' && github.event.inputs.dry_run != 'true'
+        timeout-minutes: 20
+        env:
+          SITE_COMMIT: ${{ steps.feeds.outputs.site_commit }}
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          url="https://pacer.andrechek.com/appcast.xml"
+          served="${RUNNER_TEMP}/served-appcast.xml"
+          deadline=$(( $(date +%s) + 900 ))
+          n=0
+          while :; do
+            n=$((n + 1))
+            if curl -fsSL --max-time 30 -H 'Cache-Control: no-cache' -o "${served}" "${url}?v=${SITE_COMMIT:-run-${GITHUB_RUN_ID}}-${n}" \
+               && grep -qF ">${version}</sparkle:shortVersionString>" "${served}"; then
+              echo "${url} advertises ${version} (check ${n})."
+              exit 0
+            fi
+            [ "$(date +%s)" -lt "${deadline}" ] || break
+            sleep 20
+          done
+          echo "::error title=Feed not deployed::${url} does not advertise ${version} after 15 minutes, so Macs on 0.9.4 and later do not see this release (0.9.3 and earlier read the gh-pages mirror). In Cloudflare, Workers & Pages → pacer → Deployments: find the build of main ${SITE_COMMIT:-(the feed commit)} and read its log, then retry it there, or start one by hand with \`cf builds create pacer --branch main\`. Then run bin/ship.sh verify ${version}. docs/releasing.md, \"When the site's feed did not update\"."
+          exit 1
 
       - name: Preview the appcast (dry run)
         # Runs exactly when the two publish steps above do not. Adds this
