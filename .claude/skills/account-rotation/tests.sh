@@ -337,6 +337,16 @@ hb "no targets right after a switch" '"active": "acc1acc0", "holding": false, "t
 hb "targets again once the gap has passed" '"targets": \["acc3acc0"\]' \
   1 "1:94:26:63:ok 3:70:180:77:ok $SPENT" "$(( NOW - 600 )) 2 - 0 1"
 
+# The loop that switches: its targets were judged before the switch, so they
+# can name the account now active. The heartbeat must leave it out.
+hbw=$(PACE_ROTATION=$T/hbw.json bash -c 'DRY=0; hb_pass=1; hold_said=0; hb_targets="acc3acc0 acc1acc0"; '"$(sed -n '/^HEARTBEAT=/p;/^write_heartbeat()/,/^}/p' "$ROT")"'
+  write_heartbeat acc3acc0; cat "$PACE_ROTATION"')
+if printf '%s\n' "$hbw" | grep -qE '"active": "acc3acc0", "holding": false, "targets": \["acc1acc0"\]'; then
+  pass=$(( pass + 1 )); printf 'PASS  %-42s %s\n' "heartbeat never lists the active account" "$hbw"
+else
+  fail=$(( fail + 1 )); printf 'FAIL  %-42s got: %s\n' "heartbeat never lists the active account" "${hbw:-<none>}"
+fi
+
 if [ -e "$T/switched" ]; then
   fail=$(( fail + 1 )); echo "FAIL  dry mode called cswap switch: $(tr '\n' ' ' <"$T/switched")"
 else
