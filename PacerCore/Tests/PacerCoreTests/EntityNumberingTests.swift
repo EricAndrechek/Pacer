@@ -24,8 +24,9 @@ import Testing
 @Suite("Entity numbering: a new model never renumbers the shipped ones")
 struct EntityNumberingTests {
 
-    /// Every entity a released store holds, with its `Z_ENT` (as of 0.8.3:
-    /// read from a real store's `Z_PRIMARYKEY`).
+    /// Every entity a released store holds, with its `Z_ENT` (as of 0.9.3:
+    /// read from a real store's `Z_PRIMARYKEY`; the `Z00n` models shipped in
+    /// 0.9.0).
     static let shipped: [String: Int] = [
         "Account": 1, "AccountActivation": 2, "AccountDailyAggregate": 3,
         "AccountHourlyAggregate": 4, "AccountProjectDailyAggregate": 5, "AccountSessionInfo": 6,
@@ -36,6 +37,7 @@ struct EntityNumberingTests {
         "ProjectDailyAggregate": 21, "ProjectMeta": 22, "ProjectPathAlias": 23,
         "ProjectPathProbe": 24, "RateLimitSample": 25, "SessionInfo": 26, "SpendMeterFit": 27,
         "TokenLaneMeta": 28, "TokenSample": 29, "UsageLimitSample": 30,
+        "Z001LiveMeterOutcome": 31, "Z002AccountPlanEvent": 32, "Z003PriceCatalogSnapshot": 33,
     ]
 
     /// `Z_NAME → Z_ENT` of a fresh on-disk store with this build's schema.

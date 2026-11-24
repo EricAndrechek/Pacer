@@ -46,8 +46,11 @@ The steps `bin/ship.sh` automates, spelled out:
    `gh workflow run screenshots.yml --ref <branch>` — and land its commit. See
    [`docs/screenshots.md`](screenshots.md).
 2. Decide the version number. Pacer pre-1.0 uses `0.<minor>.<patch>`
-   semver-ish. Breaking changes that need a clean SwiftData reset bump
-   the minor; bug fixes / additive UX bumps the patch.
+   semver-ish. A schema change bumps the minor; bug fixes / additive UX
+   bump the patch. Nothing resets the store: a changed schema is migrated in
+   place on the first launch, from whatever release the Mac had, so a release
+   that touches the schema or a one-time upgrade runs `make upgrade-matrix`
+   first ([Skipped releases](#skipped-releases-the-upgrade-matrix) below).
 3. Tag and push:
 
    ```sh
@@ -85,6 +88,77 @@ The steps `bin/ship.sh` automates, spelled out:
 5. Within ~24h, every installed Pacer instance will see the new
    release on its next launch (or on-demand via Pacer → "Check for
    Updates…"). Sparkle handles the download / replace / relaunch.
+
+## Skipped releases: the upgrade matrix
+
+A Mac that is several releases behind does not step through them. Sparkle
+reads the whole appcast and offers the newest item it may install
+(`SUAppcastDriver.m` `bestItemFromAppcastItems`, 2.10.1): a Mac on 0.9.0 when
+0.9.5 ships downloads 0.9.5 and installs it, once. It takes the delta whose
+`sparkle:deltaFrom` is its own `CFBundleVersion` when the newest release has
+one (the last five releases do), and the full DMG otherwise or if the delta
+fails. The one exception is an update already downloaded and waiting: Sparkle
+resumes that one before it reads the feed again (`SPUUpdater.m`, the
+`resumableUpdate` branch), so that Mac installs it and then, on its next
+check, the newest. 0.8.3 and later install a waiting update at the next idle
+moment (`UpdateInstallScheduler`, within a day, three at most), so the gap is
+hours, not a second update cycle; 0.8.0–0.8.2 hold it until Pacer quits.
+
+So 0.9.0's store meets 0.9.5's code directly, and every migration has to
+compose across any gap:
+
+- **The SwiftData schema.** Core Data's lightweight migration infers one
+  mapping from the model the store recorded to the current one, in one hop;
+  there are no intermediate models. Additive changes (an optional attribute,
+  one with a default, a new `@Model` named to sort last, an `#Index`) compose.
+  A removed, renamed or retyped attribute, or a new mandatory one with no
+  default, needs a `VersionedSchema` + `SchemaMigrationPlan`
+  (`PacerStore.makeModelContainer`).
+- **One-time upgrades** are written as "stored differs from current: bring it
+  to current, then record current" (`ScanCoordinator`'s `current*Version`
+  gates, the archive's catalog-checked columns, the defaults flags), never as
+  "stored is the previous version". The work they do rebuilds to the current
+  rules, so a store several versions back runs each one once.
+
+`make upgrade-matrix` is the evidence, and the gate for any release that
+touches `PacerCore/Sources/PacerCore/Models/`, `PacerStore`, a
+`current*Version` constant, `RawArchive`'s columns, or a defaults migration:
+
+```sh
+mkdir -p /tmp/frozen/projects && cp -c -R ~/.claude/projects/<a few projects> /tmp/frozen/projects/
+make upgrade-matrix CLAUDE=/tmp/frozen          # the last five releases
+make upgrade-matrix CLAUDE=/tmp/frozen TAGS="v0.8.0 v0.9.2"
+make upgrade-matrix CLAUDE=/tmp/frozen STORE=<a copy of a real store>   # e.g. an old backup
+```
+
+For each release tag it builds, once, that release's own store: a detached
+worktree at the tag, its PacerCore and DuckDB importer with
+`UpgradeMatrixProbe`, one full scan of the frozen tree and its raw archive, a
+copy with a generic row in every table the scan left empty, and its model as
+text. Those are cached outside the repo (`CACHE=`, default
+`~/Library/Caches/pacer-upgrade-matrix`), keyed by the tag, the tree and the
+probe. Then, with this tree, through `bin/dev-ingest-harness.sh`:
+
+| Column | Passes when |
+| --- | --- |
+| schema vs HEAD | informational: attributes added; a removed, retyped or new mandatory attribute is a WARN |
+| opened, migrated | the seeded copy opens and migrates (`needs-migration → current`) |
+| preserved | every old table and column is still there, with every row and value, and no entity is renumbered (#387) |
+| totals | after this tree's first launch, `TOTALS` equals a fresh ingest of the same tree by this tree |
+| verify-data | `bin/dev-verify-data.sh` passes on the upgraded store |
+| archive | the archive sync's own integrity verdict is `ok` (old archives gain their new columns) |
+| second launch | no migration, an incremental cycle that inserts nothing, no one-time work again, same totals |
+
+and the first launch's time and bytes written (and the migration's alone).
+`STORE=` adds a row for a real store copy, where "totals" means unchanged by
+the upgrade and an entity renumbering (a store from before 0.8.0, #387) is
+reported but is not a failure: it costs writes, not data.
+Every step is `swift build`/`swift test` under a sandbox profile that denies
+writes to the live App Group container and `~/.claude/projects`; nothing is
+launched. The first run spends two to four minutes per tag building its store
+(a debug build of that tag and one scan) plus one release build of this tree;
+after that, seven tags and a 1.1 GB store copy took about eight minutes.
+Results and per-step logs land in `OUT=` (default `$CACHE/results/<HEAD>`).
 
 ## Delta updates
 

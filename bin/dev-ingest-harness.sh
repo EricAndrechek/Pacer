@@ -28,11 +28,14 @@
 #   PACER_INGEST_ARCHIVE     a copy of `raw-archive.duckdb` (with its .wal), cloned likewise:
 #                            the archive phase then runs too.
 #   PACER_INGEST_CATALOG, PACER_INGEST_DESKTOP_DIRS, PACER_INGEST_FORCE_RESCAN,
-#   PACER_INGEST_FORCE_REBUILD, PACER_INGEST_STEADY_CYCLES, PACER_INGEST_PRIORITY, PACER_INGEST_SAVE_BATCH,
+#   PACER_INGEST_FORCE_REBUILD, PACER_INGEST_OPEN_ONLY, PACER_INGEST_STEADY_CYCLES, PACER_INGEST_PRIORITY, PACER_INGEST_SAVE_BATCH,
 #   PACER_INGEST_CURSOR_ROOT, PACER_INGEST_KEEP_CURSORS: see IngestHarness.swift.
 #   PACER_INGEST_SOURCE      source tree to build (default: this repo), to measure a "before".
 #   PACER_INGEST_CONFIG      release (default: what users run, for the timings) or debug (builds
 #                            several times faster; bytes and totals are the same).
+#   PACER_INGEST_NO_SWIFTPM_SANDBOX=1  pass --disable-sandbox: for a caller that already runs this
+#                            under a sandbox profile (bin/upgrade-matrix.sh), inside which SwiftPM
+#                            cannot apply its own.
 
 set -euo pipefail
 
@@ -84,7 +87,8 @@ DUCKDB="$SRC/Vendor/DuckDB.xcframework/macos-arm64"
 
 if [ ! -f "$DUCKDB/libduckdb.a" ]; then
   echo "no vendored DuckDB (make vendor): running the line parser in PacerCore instead"
-  (cd "$SRC/PacerCore" && /usr/bin/time -l swift test --filter IngestHarness) > "$RUN/log.txt" 2>&1 \
+  (cd "$SRC/PacerCore" && /usr/bin/time -l swift test ${PACER_INGEST_NO_SWIFTPM_SANDBOX:+--disable-sandbox} \
+     --filter IngestHarness) > "$RUN/log.txt" 2>&1 \
     || echo "FAILED — see $RUN/log.txt"
 else
   PKG="$OUT/pkg"
@@ -117,6 +121,7 @@ EOF
   # Release by default, like the shipped app; testable so the harness can read internals.
   CONFIG="${PACER_INGEST_CONFIG:-release}"
   FLAGS=(-c "$CONFIG" -Xswiftc -enable-testing --package-path "$PKG")
+  [ -z "${PACER_INGEST_NO_SWIFTPM_SANDBOX:-}" ] || FLAGS+=(--disable-sandbox)
   echo "building $SRC ($CONFIG)…"
   swift build "${FLAGS[@]}" --build-tests 2>&1 | grep -E "error|Build complete" || true
   /usr/bin/time -l swift test "${FLAGS[@]}" --skip-build --filter IngestHarness > "$RUN/log.txt" 2>&1 \

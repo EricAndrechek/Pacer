@@ -59,6 +59,9 @@ import Testing
 /// stored `scanVersion` / `costRecomputeVersion` first: a release that bumps
 /// one), `PACER_INGEST_STEADY_CYCLES=<n>` (incremental cycles after the
 /// first), `PACER_INGEST_OUT=<dir>` (phases.tsv and a 50 ms writes timeline),
+/// `PACER_INGEST_OPEN_ONLY=1` (stop after the open phase: the migration alone,
+/// so the store left behind can be compared column by column with the copy it
+/// came from, `bin/upgrade-matrix.sh`),
 /// `PACER_INGEST_EXTRA_ENTITY=early|late` (open with one more `@Model`, named
 /// to sort first or last: what a release adding a model costs),
 /// `PACER_INGEST_SAVE_BATCH=<n>` (inserts per save, to compare against the
@@ -155,6 +158,18 @@ struct IngestHarness {
         log("open: schema \(prepared.before.rawValue) → \(prepared.after.rawValue)"
             + (prepared.migrated ? " (migrated)" : ""))
         #expect(prepared.after == .current)
+
+        if env["PACER_INGEST_OPEN_ONLY"] == "1" {
+            meter.stop()
+            for r in phases { log(r.line) }
+            log("open only: stopped after the migration")
+            if let outDir {
+                try (["phase\tseconds\tlogical_bytes\tdisk_bytes\twal_peak_bytes\tstore_bytes_after"]
+                     + phases.map(\.tsv)).joined(separator: "\n").appending("\n")
+                    .write(to: outDir.appendingPathComponent("phases.tsv"), atomically: true, encoding: .utf8)
+            }
+            return
+        }
 
         if env["PACER_INGEST_FORCE_RESCAN"] == "1" || env["PACER_INGEST_FORCE_REBUILD"] == "1" {
             let ctx = ModelContext(container)
