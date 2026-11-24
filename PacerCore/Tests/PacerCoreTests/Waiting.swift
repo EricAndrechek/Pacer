@@ -5,10 +5,13 @@ import Testing
 extension Trait where Self == TimeLimitTrait {
     /// For a suite whose tests wait on background work (the arena's scorer
     /// and live lane, a poller's loop): a test still waiting after this long
-    /// is named in the log as over its time limit, rather than the run
-    /// sitting silent until somebody kills it (#431). Far past the slowest
-    /// pass seen in a full `make test` beside other builders (287 s): it is a
-    /// backstop for a hang, not a deadline for slow work.
+    /// is *named* in the log as over its time limit, where a hang used to
+    /// leave the run silent (#431). It names the hang; it does not end it.
+    /// Swift Testing records the issue and cancels the test, but a body stuck
+    /// on a continuation that never resumes stays stuck, and the run with it
+    /// (CI's PacerCore job, 15 minutes in all, times out first there). Far
+    /// past the slowest such test seen in a loaded full `make test` (287 s):
+    /// a marker for a hang, not a deadline for slow work.
     static var hangBackstop: Self { .timeLimit(.minutes(20)) }
 }
 
