@@ -34,6 +34,16 @@
 #                         reply never comes (the SIGTERM handler, found by the
 #                         on-machine relauncher check). Every call says why its
 #                         context is safe: an AppKit action, or a run-loop block.
+#   store-in-main-hop     A SwiftData context made, or a fetch or save run, inside
+#                         a hop to the main actor (`MainActor.run`,
+#                         `MainActor.assumeIsolated`, `Task { @MainActor … }`,
+#                         `DispatchQueue.main.async`/`asyncAfter`/`sync`): the
+#                         body from the first `{` after the hop, on its line or
+#                         the next, to the brace that closes it.
+#                         Each one can page the store in on the main thread under
+#                         memory pressure: the OAuthPoller's per-poll writes did
+#                         exactly that (PACER-19, #413, #429). Do the work on the
+#                         caller's actor and hop only the finished value.
 #
 # It is a grep, not a compiler: it reads the source line by line and knows
 # nothing about actors. That is the point — it is fast enough for every push
@@ -97,8 +107,34 @@ func f() {
     // lint:allow terminate-call an NSMenu action, called from event handling
     NSApplication.shared.terminate(self)
 }
+func g() async {
+    let n = await MainActor.run {
+        let context = ModelContext(container)
+        return (try? context.fetch(FetchDescriptor<Foo>()))?.count
+    }
+    Task { @MainActor in try? context.save() }
+    let fine = ModelContext(container)
+    await MainActor.run { publish(n) }
+    await MainActor.run {
+        // lint:allow store-in-main-hop the fixture says so
+        try? context.save()
+    }
+}
+func h() async {
+    let k = await MainActor.run(body: { try? context.save() })
+    MainActor.assumeIsolated { _ = ModelContext(container) }
+    DispatchQueue.main.sync { try? context.save() }
+    await MainActor.run
+    {
+        _ = try? context.fetchCount(FetchDescriptor<Foo>())
+    }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+        try? context.save()
+    }
+    let after = try? context.fetch(FetchDescriptor<Foo>())
+}
 SWIFT
-    expected=$'4 formatter-in-body\n8 formatter-in-body\n9 fetch-in-body\n13 formatter-in-body\n17 un-sync\n19 un-sync\n26 main-sync\n27 smappservice-status\n28 allow-without-reason\n28 stderr-write\n31 terminate-call'
+    expected=$'4 formatter-in-body\n8 formatter-in-body\n9 fetch-in-body\n13 formatter-in-body\n17 un-sync\n19 un-sync\n26 main-sync\n27 smappservice-status\n28 allow-without-reason\n28 stderr-write\n31 terminate-call\n37 store-in-main-hop\n38 store-in-main-hop\n40 store-in-main-hop\n49 store-in-main-hop\n50 store-in-main-hop\n51 store-in-main-hop\n51 main-sync\n54 store-in-main-hop\n57 store-in-main-hop'
     actual=$(bin/lint-hang-patterns.sh "$dir/Fixture.swift" 2>/dev/null \
         | sed -nE 's/^[^:]+:([0-9]+): \[([a-z-]+)\].*/\1 \2/p' || true)
     if [[ "$actual" == "$expected" ]]; then
@@ -148,6 +184,16 @@ function code_keep_strings(line,    c) {
     return c
 }
 
+# The start of every main-hop token in `s`, in hs[1..nhs].
+function hop_starts(s,    off, rest) {
+    nhs = 0; off = 0; rest = s
+    while (match(rest, main_hop)) {
+        hs[++nhs] = off + RSTART
+        off += RSTART + RLENGTH - 1
+        rest = substr(s, off + 1)
+    }
+}
+
 function count(s, ch,    n, i) {
     n = 0
     for (i = 1; i <= length(s); i++) if (substr(s, i, 1) == ch) n++
@@ -176,10 +222,13 @@ BEGIN {
     off_main = "OffMainQueue\\.[A-Za-z]+\\.run|Task\\.detached|DispatchQueue\\.global|\\.async[ \t]*[({]|get(Delivered|Pending)[A-Za-z]*[ \t]*[({]"
     formatter = "(DateFormatter|ISO8601DateFormatter|NumberFormatter|RelativeDateTimeFormatter|DateComponentsFormatter|DateIntervalFormatter|ByteCountFormatter|MeasurementFormatter|ListFormatter|PersonNameComponentsFormatter)[ \t]*\\([ \t]*\\)|NSRegularExpression[ \t]*\\(|try!?[ \t]+Regex[ \t]*\\(|\\.date\\(from:"
     builder_open = "(var|func)[^=]*some[ \t]+(View|ChartContent|AxisContent|ToolbarContent|Scene|Commands)[^=]*\\{[ \t]*$"
+    # A hop to the main actor: its body is the first `{` from here on.
+    main_hop = "MainActor\\.(run|assumeIsolated)([ \t]*[({]|[ \t]*$)|DispatchQueue\\.main\\.(async|asyncAfter|sync)([ \t]*[({]|[ \t]*$)|Task(\\.detached)?[ \t]*(\\([^)]*\\))?[ \t]*\\{[ \t]*@MainActor"
+    store_work = "ModelContext[ \t]*\\(|\\.mainContext([^A-Za-z]|$)|\\.(fetch|fetchCount|save)[ \t]*\\("
 }
 
 FNR == 1 {
-    in_block = 0; in_multi = 0; depth = 0; builder_depth = -1; nwrap = 0; prev = ""
+    in_block = 0; in_multi = 0; depth = 0; builder_depth = -1; nwrap = 0; nhop = 0; hop_pending = 0; prev = ""
     mounted = (FILENAME ~ always_mounted)
     is_cli = (FILENAME ~ /^PacerCore\/Sources\/PacerPace\//)
     is_login_wrapper = (FILENAME ~ /LoginItemController\.swift$/)
@@ -239,6 +288,29 @@ FNR == 1 {
         if (c ~ /\.(fetch|fetchCount)[ \t]*\(/ && !allowed("fetch-in-body", raw, prev))
             report("fetch-in-body", "SwiftData fetch inside a view builder runs on every body pass, on the main context. Load it off the main thread on a data-change signal")
     }
+    # store-in-main-hop. A hop opens at the first `{` after its token, on the
+    # same line or the next, and lasts until that brace closes. Walked a
+    # character at a time so `MainActor.run(body: { … })`, a one-line hop and
+    # a brace on the next line all open where the closure does. A line is in
+    # a hop if one was open when it began or opened on it.
+    in_hop = (nhop > 0)
+    hop_starts(c)
+    d = depth; k = 1
+    for (i = 1; i <= length(c); i++) {
+        while (k <= nhs && hs[k] <= i) { hop_pending = 2; k++ }
+        ch = substr(c, i, 1)
+        if (ch == "{") {
+            if (hop_pending) { hop_depth[++nhop] = d; hop_pending = 0; in_hop = 1 }
+            d++
+        } else if (ch == "}") {
+            d--
+            while (nhop > 0 && d <= hop_depth[nhop]) nhop--
+        }
+    }
+    if (hop_pending) hop_pending--
+    if (in_hop && c ~ store_work && !allowed("store-in-main-hop", raw, prev))
+        report("store-in-main-hop", "SwiftData context, fetch or save inside a hop to the main actor: it can page the store in on the main thread (PACER-19, #429). Do it on the caller\047s actor, on a context of its own, and hop only the finished value")
+
     depth += opens - closes
     if (builder_depth >= 0 && depth <= builder_depth) builder_depth = -1
     while (nwrap > 0 && depth <= wrap_depth[nwrap]) nwrap--
