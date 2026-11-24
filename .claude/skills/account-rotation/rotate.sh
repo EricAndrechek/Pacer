@@ -351,7 +351,14 @@ write_heartbeat() {
   # targets. The last pass's list was judged from the login just left and may
   # name the one now active, so repeating it let a paused `pacer wait` hold
   # its grace for a switch that was not coming.
-  [ "$hb_pass" = 1 ] && for t in $hb_targets; do list+="${list:+, }\"$t\""; done
+  if [ "$hb_pass" = 1 ]; then
+    for t in $hb_targets; do
+      # Never the account now active: on the loop that switches, the list was
+      # judged before the switch and names the account just switched to.
+      [ "$t" = "$1" ] && continue
+      list+="${list:+, }\"$t\""
+    done
+  fi
   [ "$hold_said" = 1 ] && holding=true
   mkdir -p "$(dirname "$HEARTBEAT")" 2>/dev/null || return 0
   printf '{"v": 1, "updatedAt": "%s", "active": "%s", "holding": %s, "targets": [%s]}\n' \

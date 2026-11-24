@@ -185,9 +185,13 @@ struct PaceRotation: Equatable, Sendable {
               let at = PaceFormat.isoFormatter.date(from: stamp) else { return nil }
         let age = now.timeIntervalSince(at)
         guard age <= freshFor, age > -freshFor else { return nil }
-        return PaceRotation(updatedAt: at, active: object["active"] as? String ?? "",
+        let active = object["active"] as? String ?? ""
+        // A target that is the active account is not a switch to come: the
+        // controller's list for the loop that switches was judged before it.
+        return PaceRotation(updatedAt: at, active: active,
                             holding: object["holding"] as? Bool ?? false,
-                            targets: (object["targets"] as? [String] ?? []).filter { !$0.isEmpty })
+                            targets: (object["targets"] as? [String] ?? [])
+                                .filter { !$0.isEmpty && !same($0, active) })
     }
 
     /// Targets other than the accounts being judged, matched loosely: the
