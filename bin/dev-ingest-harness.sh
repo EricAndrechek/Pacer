@@ -82,6 +82,22 @@ if [ -n "${PACER_INGEST_CLAUDE_DIR:-}" ]; then
 fi
 export PACER_INGEST_OUT="$RUN" PACER_ISOLATED_DEFAULTS=1
 
+# Each test process leaves a per-process defaults plist behind (`make test`,
+# #336). Only the ones this run's processes made go afterwards: a plist that
+# was already there, or whose process is still running, is somebody else's.
+PREFS="$HOME/Library/Preferences"
+test_prefs() { ls "$PREFS" 2>/dev/null | grep -E '^pacer\.testprocess\.[0-9]+\.plist$' || true; }
+PREFS_BEFORE="$(test_prefs)"
+sweep_test_prefs() {
+  local f pid
+  for f in $(test_prefs); do
+    printf '%s\n' "$PREFS_BEFORE" | grep -qxF "$f" && continue
+    pid="${f#pacer.testprocess.}"; pid="${pid%.plist}"
+    kill -0 "$pid" 2>/dev/null && continue
+    rm -f "$PREFS/$f"
+  done
+}
+
 DUCKDB="$SRC/Vendor/DuckDB.xcframework/macos-arm64"
 [ -f "$DUCKDB/libduckdb.a" ] || DUCKDB="$REPO/Vendor/DuckDB.xcframework/macos-arm64"
 
@@ -136,8 +152,7 @@ EOF
     || echo "FAILED — see $RUN/log.txt"
 fi
 
-# Each test process leaves a per-process defaults plist behind (`make test`, #336).
-rm -f "$HOME"/Library/Preferences/pacer.testprocess.*.plist
+sweep_test_prefs
 grep -E "^\[ingest\]|✘|passed|failed" "$RUN/log.txt" || true
 grep -E "real|maximum resident" "$RUN/log.txt" | tail -2 || true
 echo "log, phases.tsv, writes-timeline.tsv and the run's store: $RUN"
