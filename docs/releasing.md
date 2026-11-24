@@ -19,11 +19,16 @@ bin/ship.sh verify <version>     # health-check a published release any time
 bin/ship.sh feeds                # is the update feed live where a release will write it?
 ```
 
-`preflight` fails unless the update feed is where the release will write it
-and live: the app's `SUFeedURL` is `https://pacer.andrechek.com/appcast.xml`,
-the site serves main's `site/public/appcast.xml` and `price-history.json`
-byte for byte, and, while the [legacy mirror](#the-legacy-github-pages-mirror)
-is on, gh-pages holds the same bytes.
+`preflight`, and `release` again just before it tags, fail unless the update
+feed is where the release will write it and live: the app's `SUFeedURL` is
+`https://pacer.andrechek.com/appcast.xml`, the site serves main's
+`site/public/appcast.xml` and `price-history.json` byte for byte, the newest
+Workers Builds check on `main`'s site commit succeeded (a failed site build
+leaves the old deployment serving, and would also swallow the release's feed
+commit), and, while the [legacy mirror](#the-legacy-github-pages-mirror) is
+on, gh-pages holds the same bytes. `SHIP_SKIP_SITE_BUILD_CHECK=1` skips only
+the Workers Builds check, loudly, for the case where Cloudflare reports no
+check runs at all.
 
 `release` blocks until the workflow finishes and then runs `verify`, which
 checks the whole chain end to end: the GitHub Release has the DMG asset; the
@@ -138,9 +143,16 @@ The `Publish the update feed` step runs `bin/publish-feeds.sh release`
    `site/*`), runs `pnpm build:ci`, and deploys in a minute or three. The
    commit must never carry `[skip ci]`: Workers Builds honours it;
 4. while the mirror is on, the same two files are copied to `gh-pages` and
-   pushed as `appcast: X.Y.Z`;
+   pushed as `appcast: X.Y.Z`, after the site's check and an XML/JSON parse
+   pass on them. If the site's check refused the copy in step 2, the mirror
+   gets nothing either: it fails closed;
 5. the step fails, after trying both, unless both copies were published and
-   are byte-identical. The job summary has a table saying which is where.
+   are byte-identical. The job summary has a table saying which is where;
+6. the next step, `Wait for the site to serve the new feed`, polls
+   `https://pacer.andrechek.com/appcast.xml` (with a cache-busting query) until
+   it advertises the version, and fails the run with an annotation saying what
+   to check after 15 minutes. A green run means 0.9.4+ Macs can see the
+   release.
 
 A re-run for a release already in the feed adds nothing. A manual
 (`workflow_dispatch`) run never publishes: it previews the item against
@@ -175,7 +187,8 @@ mirror still serves 0.9.3 and earlier.
    merge); never hand-edit the live Worker.
 3. No build at all: check the Workers Builds connection and its watch paths
    (`site/*`, `docs/release-notes/*`, `docs/screenshots/*`), then retry the
-   latest `main` build from the dashboard.
+   latest `main` build from the dashboard, or start one by hand:
+   `cf builds create pacer --branch main`.
 4. Then `bin/ship.sh verify X.Y.Z` again.
 
 If the publish step itself failed, its log and job summary say which copy
@@ -214,7 +227,10 @@ bin/publish-feeds.sh status                              # "byte-identical" for 
 
 Workers Builds deploys the `main` commit; check it with `curl -fsSL
 https://pacer.andrechek.com/appcast.xml` (served within a minute of the
-deploy; clients may cache it for a minute, `max-age=60`).
+deploy; clients may cache it for a minute, `max-age=60`). `mirror` refuses to
+run until the site serves `main`'s copies byte for byte, so run it once the
+deploy is done; it also refuses a copy that fails the site's check or does
+not parse.
 
 ### The legacy GitHub Pages mirror
 
@@ -230,26 +246,30 @@ gh variable delete PACER_LEGACY_PAGES_MIRROR -R EricAndrechek/Pacer           # 
 
 A Mac on 0.9.3 updates from the mirror to the newest release there, which reads
 the site's feed from then on, so any mirrored release from 0.9.4 on moves a Mac
-over for good.
+over for good. Only a copy that passed the site's own check is ever mirrored
+(`bin/publish-feeds.sh`: a release fails closed, and `mirror` also waits until
+the site serves the copy).
 
-**Retiring it,** in this order:
+**Retiring it: turn it off and freeze gh-pages. Never delete it.** No count can
+prove that no Pacer below 0.9.4 is left: PostHog only hears from Macs that keep
+usage data on, and a Mac that is rarely switched on still has to come back for
+its update. A frozen mirror costs nothing and keeps moving every straggler
+over; a deleted one strands them for good.
 
-1. Wait until no reporting Mac is below 0.9.4: the app's daily check-in in
-   PostHog, by version, over a few weeks, since a Mac that is rarely on still
-   has to come back for its update.
-2. Turn the mirror off (`PACER_LEGACY_PAGES_MIRROR=off`). gh-pages then stays
-   frozen at the last release it mirrored, which still moves any straggler to
-   the site's feed.
-3. Freeze gh-pages for good: leave it untouched for a while, watching for
-   stragglers.
-4. Delete it: GitHub Pages off in the repository settings, then the branch.
-   Remove the mirror code (`publish_mirror` in `bin/publish-feeds.sh`, the
-   mirror checks in `bin/ship.sh`) in the same change.
+1. Wait until the 0.9.3-and-earlier share of PostHog's daily check-ins is
+   negligible, over several weeks, and the mirror's newest item is a release
+   from 0.9.4 on that is not pulled (so a straggler lands on a build that reads
+   the site).
+2. Turn the mirror off (`PACER_LEGACY_PAGES_MIRROR=off`). gh-pages stays frozen
+   at the last release it mirrored, permanently, and GitHub Pages stays on.
+3. Leave the mirror code in place: `bin/publish-feeds.sh mirror` is still how a
+   pulled release comes out of the frozen copy (below).
 
-While the mirror exists, a pulled release has to come out of it too
-(`bin/publish-feeds.sh mirror` after the edit on `main`), even when it is off:
-run that once with `PACER_LEGACY_PAGES_MIRROR=on` set in the shell, or a frozen
-mirror keeps offering what was pulled.
+A pulled release has to come out of the mirror too (`bin/publish-feeds.sh
+mirror` after the edit on `main` has deployed), even when it is off: run that
+once with `PACER_LEGACY_PAGES_MIRROR=on` set in the shell, or the frozen mirror
+keeps offering what was pulled. Check its newest item is still a release from
+0.9.4 on afterwards.
 
 ## Skipped releases: the upgrade matrix
 
@@ -662,10 +682,10 @@ The workflow's `GITHUB_TOKEN` pushes the release commit to `main`, so `main`
 must accept pushes from `github-actions[bot]`; a branch rule that blocks it
 blocks every release's feed.
 
-**GitHub Pages** serves the legacy mirror until it is retired
-([The legacy GitHub Pages mirror](#the-legacy-github-pages-mirror)): Settings →
-Pages → Deploy from a branch → `gh-pages` / root. It already exists; the
-publish script only starts a `gh-pages` branch if there is none.
+**GitHub Pages** serves the legacy mirror, permanently, frozen once it is
+turned off ([The legacy GitHub Pages mirror](#the-legacy-github-pages-mirror)):
+Settings → Pages → Deploy from a branch → `gh-pages` / root. It already exists;
+the publish script only starts a `gh-pages` branch if there is none.
 
 ### 5. Set the GitHub Actions secrets
 

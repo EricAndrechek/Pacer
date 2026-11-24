@@ -145,7 +145,7 @@ targets:
         # release workflow writes (bin/publish-feeds.sh) and the Cloudflare
         # site serves as a static file. 0.9.3 and earlier read
         # https://ericandrechek.github.io/Pacer/appcast.xml, kept as a
-        # byte-for-byte mirror until no Mac reports a version below 0.9.4
+        # byte-for-byte mirror, frozen but never deleted once it is turned off
         # (docs/releasing.md, "The legacy GitHub Pages mirror"). App/Info.plist
         # must say the same (FeedLocationTests, `bin/ship.sh self-test`).
         SUFeedURL: https://pacer.andrechek.com/appcast.xml

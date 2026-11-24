@@ -7,7 +7,8 @@ and **price history** (`public/price-history.json`): static files the release
 workflow commits to `main` (`bin/publish-feeds.sh`) and Pacer 0.9.4 and later
 read from `https://pacer.andrechek.com/` (`SUFeedURL`,
 `CuratedPriceHistory.remoteURL`). GitHub Pages keeps a byte-for-byte copy for
-0.9.3 and earlier until it is retired ([The update feed](#the-update-feed)).
+0.9.3 and earlier, frozen for good once it is turned off, never deleted
+([The update feed](#the-update-feed)).
 
 | Path | What |
 | --- | --- |
@@ -151,7 +152,9 @@ GitHub secrets. Same setup as room-planner's `docs/DEPLOY.md`.
    (Cloudflare creates the DNS record; none may exist for that name
    beforehand) and IndexNow starts submitting. **Check the domain serves
    `main`'s feed before the next release is tagged**: `bin/ship.sh feeds`
-   (part of `preflight`).
+   (part of `preflight`). Then run `bin/publish-feeds.sh mirror` once: the
+   site's copy names the site in its channel `<link>`, and the mirror takes
+   the same bytes (`feeds` fails until it does).
 4. After it is live: point the GitHub Pages `index.html` at
    `https://pacer.andrechek.com/` (a canonical link and a meta refresh; Pages
    can't send a 301), keeping `appcast.xml` and `price-history.json` there (the
@@ -181,8 +184,9 @@ only an update could move the feed again. So:
   the domain on auto-renew and the account in good standing; `bin/ship.sh
   feeds` checks the domain serves `main`'s copies.
 - 0.9.3 and earlier read the GitHub Pages copy, which every release keeps
-  byte-identical (`PACER_LEGACY_PAGES_MIRROR`) until it is retired
-  (`docs/releasing.md`, "The legacy GitHub Pages mirror").
+  byte-identical while `PACER_LEGACY_PAGES_MIRROR` is on, and which is frozen,
+  never deleted, once it is off (`docs/releasing.md`, "The legacy GitHub
+  Pages mirror").
 
 ### Rollback
 
