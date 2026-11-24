@@ -1,10 +1,14 @@
 name: CI
 
 on:
+  # The website (site/) builds and deploys on Cloudflare Workers Builds, with its own
+  # checks; a change that touches only site/ needs none of the macOS jobs.
   push:
     branches: [main]
+    paths-ignore: ['site/**']
   pull_request:
     branches: [main]
+    paths-ignore: ['site/**']
 
 # Cancel in-flight runs for the same ref on new pushes — saves runner
 # minutes while iterating.
