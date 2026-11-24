@@ -22,6 +22,14 @@ in AGENTS.md still holds — above all **never take over the machine**.
    again.
 3. Run one sweep now.
 
+**API keys** live in the main checkout's untracked `.env` (git-ignored, mode 600, not
+copied into worktrees): `POSTHOG_PERSONAL_API_KEY` (+ `POSTHOG_HOST`, `POSTHOG_PROJECT_ID`)
+and `SENTRY_AUTH_TOKEN` once added. They are the fallback when an MCP connection is down
+or signed out: `set -a; source .env; set +a`, then the vendor's REST API (PostHog
+`POST /api/projects/$POSTHOG_PROJECT_ID/query/` with a HogQL query; `sentry-cli` or
+Sentry's API). Never print a key, never pass one to a subagent's prompt, and never send
+it anywhere but its vendor.
+
 ## 2 · Sweep ("pacer-owner: sweep")
 
 1. `~/.claude/skills/pacer/pacer gate --model <your model>`. On 10, checkpoint and
