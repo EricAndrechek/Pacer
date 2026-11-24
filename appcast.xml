@@ -1663,5 +1663,84 @@ colour, which had quietly flattened every stacked view.</p>]]></description>
                 sparkle:edSignature="HXzDNKd7yrsKEr/WwyExbcGb6w5R9PrlQi4vmkefm9EWnGV1lmsCkI18ct9G6HSv5GhGpOrNwBsuz6MyhVAbDg==" />
         </sparkle:deltas>
     </item>
+            <item>
+        <title>Version 0.9.3</title>
+        <description><![CDATA[<p>Burn rates that stop spiking after a gap, a dashboard that does less work while your displays sleep, and updates that can't get stuck waiting to install.</p>
+<h2>Rate limits after a gap</h2>
+<p>If Pacer hasn't been reading for a while, because a login lapsed, the Mac was asleep or Pacer was closed, it no longer reports a false burn-rate spike from the first few readings. Rates, and the <code class="notranslate">pacer gate</code> check that uses them, now wait for real readings to measure from.</p>
+<h2>Less work while you're away</h2>
+<p>While every display is asleep, the dashboard holds off its redraws and catches up the moment a screen wakes. Nothing you can see goes stale: the menu bar, widgets, notifications, the local API and the <code class="notranslate">pacer</code> command keep updating as before.</p>
+<h2>Updates that can't get stuck</h2>
+<ul>
+<li>A downloaded update no longer waits forever for a quiet moment. An idle Pacer that's left frontmost, or a Settings window left open, no longer holds it back. An update held for more than 72 hours installs as soon as nobody is at the Mac.</li>
+<li>Installs never interrupt text you're typing.</li>
+</ul>
+<h2>Smoother</h2>
+<ul>
+<li>Quitting no longer hangs. A bug from 0.9.2 could stall Pacer on the way out.</li>
+<li>Checking your accounts' usage does less on the main thread, so the window stays responsive while it polls.</li>
+<li>A login that Anthropic keeps refusing (HTTP 403) is parked for six hours, and Settings marks it "refused", instead of being retried constantly. Nothing is removed, and a token you change is tried straight away.</li>
+</ul>
+<h2>A daily accuracy check, extended</h2>
+<p>Once a day, Pacer now checks every request Claude Code answered against its own records, not just the totals. In the field, Pacer missed nothing. The gap that looked like under-counting came from Claude Code counting some calls it never writes to a transcript, such as "while you were away" recaps and conversation compactions. The check now allows for those.</p>
+<h2>Freeze reports</h2>
+<p>Freeze reports now say how busy the Mac was, its load, memory pressure and so on, so a slow Mac can be told apart from a slow Pacer.</p>
+<h2>The <code class="notranslate">pacer</code> command</h2>
+<p>Inside a Claude Code session, <code class="notranslate">pacer</code> now just says go or pause, and what ends the pause, instead of handing agents usage percentages to plan with. To see the numbers, set <code class="notranslate">PACER_PACING=informed</code> for a session or a repo, or run <code class="notranslate">pacer mode informed</code>. With an account switcher, a pause says when a switch is expected, and <code class="notranslate">pacer wait</code> waits for it. In <code class="notranslate">pacer json</code>, <code class="notranslate">otherAccounts.withRoom</code> now means accounts with real room to resume onto.</p>
+<h2>Privacy</h2>
+<p>No new kinds of data about you are sent. Pacer never sends prompts, projects, files, accounts or costs.</p>
+<p><strong>Your data is untouched.</strong></p>]]></description>
+        <pubDate>Tue, 24 Nov 2026 14:19:55 +0000</pubDate>
+        <sparkle:version>1795528779</sparkle:version>
+        <sparkle:shortVersionString>0.9.3</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.3/Pacer-0.9.3.dmg"
+            length="159548881"
+            type="application/octet-stream"
+            sparkle:edSignature="y5HxNhHk0Bm4n6Vn6SeuOxfoxP+vwoW5lJ6pl56DZQf+8TSiTuPTBFl55SMTkgeeP0OAisDvYCm0ey8cv5m8BQ==" />
+        <sparkle:deltas>
+            <enclosure
+                url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.3/Pacer-0.9.3-from-0.9.2.delta"
+                sparkle:deltaFrom="1794840834"
+                length="5847178"
+                type="application/octet-stream"
+                sparkle:deltaFromSparkleExecutableSize="976432"
+                sparkle:deltaFromSparkleLocales="ar,ca,cs,da,de,el,es"
+                sparkle:edSignature="kVaxIsqa4ANGvOYwWLWShf1Dtzgxnb9fJAbIf3llJzM1EkLJuBQG/JnB2hMDUsI6aVoxRXAYGwon5vTwJdYDAA==" />
+            <enclosure
+                url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.3/Pacer-0.9.3-from-0.9.1.delta"
+                sparkle:deltaFrom="1794605188"
+                length="6643094"
+                type="application/octet-stream"
+                sparkle:deltaFromSparkleExecutableSize="976432"
+                sparkle:deltaFromSparkleLocales="ar,ca,cs,da,de,el,es"
+                sparkle:edSignature="Yvg3DQ9WhZi4Qx6QhSHtBT5MJLZJnBppursYGkcijSszcxtiZOZ6VYACN+OOzOw2DNica+l9KHHa6jg1fPIVCg==" />
+            <enclosure
+                url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.3/Pacer-0.9.3-from-0.9.0.delta"
+                sparkle:deltaFrom="1794528744"
+                length="7114934"
+                type="application/octet-stream"
+                sparkle:deltaFromSparkleExecutableSize="976432"
+                sparkle:deltaFromSparkleLocales="ar,ca,cs,da,de,el,es"
+                sparkle:edSignature="m/h0tIbCTr6je4jxRjcrd+dUBW7iOPQmLtP5C8lgldeC3pNyfpDBu+L20hpLcCvrLWN3uCSr+ZdXVL0OnCbGAg==" />
+            <enclosure
+                url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.3/Pacer-0.9.3-from-0.8.3.delta"
+                sparkle:deltaFrom="1794413280"
+                length="7837882"
+                type="application/octet-stream"
+                sparkle:deltaFromSparkleExecutableSize="976432"
+                sparkle:deltaFromSparkleLocales="ar,ca,cs,da,de,el,es"
+                sparkle:edSignature="C2DWRL27nupRyXb6YD+OUPP6LxOq8uGi2YTCJWZFYgyzRUp3RKsVBs0ao/MaBej3ylToQ7zPI3YKgHCVUB7sCA==" />
+            <enclosure
+                url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.3/Pacer-0.9.3-from-0.8.2.delta"
+                sparkle:deltaFrom="1793828065"
+                length="9063842"
+                type="application/octet-stream"
+                sparkle:deltaFromSparkleExecutableSize="976432"
+                sparkle:deltaFromSparkleLocales="ar,ca,cs,da,de,el,es"
+                sparkle:edSignature="UOJ7PJEa1F6e9lvsCiA6Ya9K2n0s/iD+EtWOjMB4GZ9IHGfY1wD87EicAaNMAdGWX3aavJc49MJoL9bBUxroDQ==" />
+        </sparkle:deltas>
+    </item>
         </channel>
 </rss>
