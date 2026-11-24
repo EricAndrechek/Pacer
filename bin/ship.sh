@@ -140,7 +140,7 @@ cmd_preflight() {
   [ "$synced" = yes ] && ok "in sync with origin/main" || bad "behind/ahead of origin/main"
 
   if [ -z "$bump" ]; then
-    if schema_touched "$cur"; then bump=minor; warn "schema-ish change since ${cur} → suggesting a MINOR bump (data reset)"
+    if schema_touched "$cur"; then bump=minor; warn "schema-ish change since ${cur} → suggesting a MINOR bump (the store migrates on first launch; run make upgrade-matrix)"
     else bump=patch; ok "no schema change since ${cur} → suggesting a PATCH bump"; fi
   fi
   next="$(next_version "$cur" "$bump")"

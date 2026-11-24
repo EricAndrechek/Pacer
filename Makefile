@@ -36,7 +36,7 @@ LEGACY_STORE   := $(HOME)/Library/Group Containers/group.com.ericandrechek.pacer
 # get confused if a file with the same name appears.
 .PHONY: help build vendor fetch-weights prune verify test app install uninstall reinstall \
         logs logs-tail widget-log status open clean-data perf-snapshot screenshots verify-data \
-        verify-archive test-ingest-parity ingest-harness lint-hangs \
+        verify-archive test-ingest-parity ingest-harness upgrade-matrix lint-hangs \
         assign-accounts reassign-account \
         pricing-snapshot
 
@@ -130,6 +130,11 @@ ingest-harness: vendor  ## Rule 8 for a branch, no app launch: ingest CLAUDE=<fr
 	@PACER_INGEST_CLAUDE_DIR="$(CLAUDE)" PACER_INGEST_STORE="$(STORE)" PACER_INGEST_ARCHIVE="$(ARCHIVE)" \
 		PACER_INGEST_CONFIG="$(or $(CONFIG),release)" \
 		bin/dev-ingest-harness.sh "$(or $(OUT),$(TMPDIR)pacer-ingest-harness)"
+
+upgrade-matrix: vendor  ## Skipped releases: open each of the last LAST=5 releases' stores (or TAGS="v0.8.0 …") with this tree in one step; rows, totals, verify-data, archive and a quiet second launch must hold. CLAUDE=<frozen claude dir> required; STORE=<a real store copy> optional; stores cached in CACHE= (outside the repo). No app launch. See bin/upgrade-matrix.sh.
+	@PACER_MATRIX_CLAUDE_DIR="$(CLAUDE)" PACER_MATRIX_TAGS="$(TAGS)" PACER_MATRIX_LAST="$(LAST)" \
+		PACER_MATRIX_CACHE="$(CACHE)" PACER_MATRIX_OUT="$(OUT)" PACER_MATRIX_STORE="$(STORE)" \
+		bin/upgrade-matrix.sh
 
 verify-tooltip:  ## THE ONE SCREEN-TOUCHING CHECK. Takes the cursor for ~4s — only run it with the machine owner's explicit go-ahead, for that run. See AGENTS.md "Never take over the machine".
 	@bin/verify-menubar-tooltip.sh

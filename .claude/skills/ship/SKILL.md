@@ -35,8 +35,15 @@ draft/review chores go to a cheap model.
 ## 1 · The gate — right after `make install` is live
 
 1. `bin/ship.sh preflight` → prints the suggested bump (patch, or **minor** if a
-   `@Model`/schema change is detected — you confirm; minor = a SwiftData reset)
-   and the next version.
+   `@Model`/schema change is detected — you confirm; the store is migrated in
+   place, never reset) and the next version.
+   - `bin/upgrade-matrix.sh --needed`: unless it exits 1 (0 = a change to what
+     opens, migrates, maintains or archives the store, or a `@Model`, version
+     gate or migration anywhere; 2 = it could not tell), run `make
+     upgrade-matrix CLAUDE=<frozen claude dir>` on a clean tree and put its
+     summary table in the PR: Sparkle jumps a Mac straight to the newest
+     release, so each of the last five releases' stores must open under this
+     tree in one step (docs/releasing.md, "Skipped releases").
 2. `bin/ship.sh notes <version>` → previews the **exact** notes CI will publish
    (`--generate-notes`), so what you show matches what ships.
 3. Surface **bump + notes**:
