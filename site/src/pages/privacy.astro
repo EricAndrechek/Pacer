@@ -4,7 +4,10 @@ import Base from '../layouts/Base.astro';
 // The first two paragraphs are README.md's "Privacy" section, word for word:
 // that is the public promise (AGENTS.md "Telemetry"). The rest is sourced from
 // PacerCore/Telemetry/TelemetryConsent.swift, docs/telemetry-plan.md and
-// AGENTS.md, and, for this site, src/components/PostHog.astro and worker/index.ts.
+// AGENTS.md, and, for this site, src/components/PostHog.astro and worker/lib.ts.
+// The browser can't keep the IP from PostHog: posthog-js's `ip` option has no
+// effect (its own warning says so); only a project transformation or "Discard IP
+// data" can, which is why the page says the IP is kept.
 ---
 
 <Base
@@ -97,7 +100,8 @@ import Base from '../layouts/Base.astro';
       <ul>
         <li>
           <strong>No cookies.</strong> The site's analytics (PostHog, the same project as the app) store nothing in your
-          browser. Each page load gets a new random ID, so your visits can't be linked to each other or to the app.
+          browser. Events are not linked by any ID: each page load gets a new random one, and nothing ties it to the
+          app.
         </li>
         <li>
           <strong>What is recorded:</strong> the pages you view, and a few clicks: a download button, copying the
@@ -105,8 +109,8 @@ import Base from '../layouts/Base.astro';
           sends Do Not Track or Global Privacy Control, nothing is recorded, downloads included.
         </li>
         <li>
-          <strong>Your IP address</strong> reaches PostHog with each page view, as it would any server, and gives an
-          approximate location.
+          <strong>Your IP address:</strong> PostHog sees it, like any web request, and uses it for an approximate
+          location. It is kept with the page-view events.
         </li>
         <li>
           <strong>Downloads</strong> through the site are counted once, with your country and the version you got. That

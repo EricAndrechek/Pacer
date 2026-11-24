@@ -1,2 +1,0 @@
-# Nothing in dist/ is private, but keep build leftovers off the CDN.
-*.map

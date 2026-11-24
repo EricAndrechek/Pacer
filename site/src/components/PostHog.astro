@@ -8,7 +8,9 @@
 //   only $pageview and the named events in src/scripts/analytics.ts.
 // - every event carries `surface: 'website'`, so web and app events never mix.
 // PostHog still receives the visitor's IP address with each request, as any
-// server does; the Privacy page says so.
+// server does, and the project keeps it (posthog-js's `ip: false` is a no-op
+// that only logs a warning; dropping it needs a PostHog transformation filtered
+// on surface = website). The Privacy page says so.
 //
 // PUBLIC_POSTHOG_TOKEN overrides the token at build time; set it empty and no
 // script is emitted at all (scripts/csp-hashes.mjs then drops 'unsafe-inline').

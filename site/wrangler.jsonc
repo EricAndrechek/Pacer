@@ -32,6 +32,9 @@
   // branches, served on workers.dev. Top-level settings apply.
   "previews": {},
   "preview_urls": true,
+  // The cutover (with the route above) sets this to false, so the site lives at
+  // one address; previews keep their workers.dev URLs. Until then workers.dev
+  // answers carry X-Robots-Tag: noindex (public/_headers, worker/index.ts).
   "workers_dev": true,
   "observability": {
     "enabled": true,

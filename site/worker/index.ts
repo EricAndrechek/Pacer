@@ -16,9 +16,18 @@ import { MIRRORED, download, mirror } from './lib';
 export default {
   async fetch(request, env, ctx): Promise<Response> {
     const url = new URL(request.url);
-    const type = MIRRORED[url.pathname];
-    if (type) return mirror(request, url.pathname, type, ctx);
-    if (url.pathname === '/download' || url.pathname === '/download/') return download(request, env, ctx);
-    return env.ASSETS.fetch(request);
+    const resource = MIRRORED[url.pathname];
+    const response = resource
+      ? await mirror(request, resource, ctx)
+      : url.pathname === '/download' || url.pathname === '/download/'
+        ? await download(request, env, ctx)
+        : await env.ASSETS.fetch(request);
+    // workers.dev (production's second address and every preview) must stay out
+    // of search results. Static assets get this from public/_headers' host rule;
+    // the Worker's own responses get it here.
+    if (!url.hostname.endsWith('.workers.dev') || response.headers.has('X-Robots-Tag')) return response;
+    const marked = new Response(response.body, response);
+    marked.headers.set('X-Robots-Tag', 'noindex');
+    return marked;
   },
 } satisfies ExportedHandler<Env>;

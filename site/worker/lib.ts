@@ -7,18 +7,14 @@ export const RELEASES_LATEST = 'https://github.com/EricAndrechek/Pacer/releases/
 export const RELEASES_API = 'https://api.github.com/repos/EricAndrechek/Pacer/releases/latest';
 const DMG_PREFIX = 'https://github.com/EricAndrechek/Pacer/releases/download/';
 
-/** Paths mirrored from GitHub Pages, with the content type each is served as. */
-export const MIRRORED: Record<string, string> = {
-  '/appcast.xml': 'application/xml; charset=utf-8',
-  '/price-history.json': 'application/json; charset=utf-8',
-};
-
-/** A cached mirror copy younger than this is served as is. */
+/** A cached copy younger than this is served as is. */
 export const FRESH_SECONDS = 60;
-/** The latest release is looked up at most this often (GitHub's API allows 60 an hour per address). */
+/** The GitHub API fallback is asked at most this often (it allows 60 requests an hour per address). */
 export const RELEASE_FRESH_SECONDS = 300;
 /** An older copy is still served, while a fresh one is fetched in the background, up to this age. */
 export const STALE_SECONDS = 24 * 60 * 60;
+/** No origin request may hold a response longer than this. */
+export const ORIGIN_TIMEOUT_MS = 4000;
 /** What clients (Sparkle, browsers) are told they may cache. */
 const CLIENT_CACHE_CONTROL = `public, max-age=${FRESH_SECONDS}, stale-while-revalidate=300`;
 /** The cache entry records when its bytes were fetched. */
@@ -28,125 +24,178 @@ const MAX_BYTES = 8 * 1024 * 1024;
 /** GitHub's API refuses requests without one. */
 const USER_AGENT = 'pacer.andrechek.com';
 
+/**
+ * Something fetched from an origin and kept at the edge. `valid` decides
+ * whether a 200 is really the file: GitHub Pages answers some failures with an
+ * HTML page, and caching that as the appcast would hand Sparkle garbage for a
+ * day. Anything that fails it is never cached.
+ */
+export interface Resource {
+  url: string;
+  /** The Content-Type it is served with. */
+  type: string;
+  freshSeconds: number;
+  /** The origin's Content-Type must contain this. */
+  originType: RegExp;
+  valid: (body: string) => boolean;
+  headers?: Record<string, string>;
+}
 
+const isJson = (body: string) => {
+  try {
+    JSON.parse(body);
+    return true;
+  } catch {
+    return false;
+  }
+};
 
-function methodNotAllowed(): Response {
-  return new Response('Method not allowed\n', {
-    status: 405,
-    headers: { Allow: 'GET, HEAD', 'Content-Type': 'text/plain; charset=utf-8' },
+export const APPCAST: Resource = {
+  url: ORIGIN + 'appcast.xml',
+  type: 'application/xml; charset=utf-8',
+  freshSeconds: FRESH_SECONDS,
+  originType: /xml/i,
+  valid: (body) => /<rss\b/.test(body),
+};
+
+const PRICE_HISTORY: Resource = {
+  url: ORIGIN + 'price-history.json',
+  type: 'application/json; charset=utf-8',
+  freshSeconds: FRESH_SECONDS,
+  originType: /json/i,
+  valid: isJson,
+};
+
+const RELEASE_API: Resource = {
+  url: RELEASES_API,
+  type: 'application/json; charset=utf-8',
+  freshSeconds: RELEASE_FRESH_SECONDS,
+  originType: /json/i,
+  valid: isJson,
+  headers: { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' },
+};
+
+/** Paths mirrored from GitHub Pages. */
+export const MIRRORED: Record<string, Resource> = {
+  '/appcast.xml': APPCAST,
+  '/price-history.json': PRICE_HISTORY,
+};
+
+function plain(status: number, text: string, extra: Record<string, string> = {}): Response {
+  return new Response(`${text}\n`, {
+    status,
+    headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store', ...extra },
   });
 }
 
+const methodNotAllowed = () => plain(405, 'Method not allowed', { Allow: 'GET, HEAD' });
+
+/** An ETag without its weak marker, for If-None-Match's weak comparison. */
+const opaque = (tag: string) => tag.trim().replace(/^W\//, '');
+
 /** Serve a mirrored file: from the edge cache when fresh, else from GitHub Pages. */
-export async function mirror(request: Request, path: string, type: string, ctx: ExecutionContext): Promise<Response> {
+export async function mirror(request: Request, resource: Resource, ctx: ExecutionContext): Promise<Response> {
   if (request.method !== 'GET' && request.method !== 'HEAD') return methodNotAllowed();
-  const result = await cachedFetch(new URL(path.slice(1), ORIGIN).toString(), type, ctx, FRESH_SECONDS);
+  const result = await cachedFetch(resource, ctx);
   if (!result.ok) return result.response;
 
   const { response } = result;
+  const headers = clientHeaders(response.headers, resource.type, result.state);
   const etag = response.headers.get('ETag');
   const inm = request.headers.get('If-None-Match');
-  if (etag && inm && inm.split(',').some((t) => t.trim() === etag)) {
-    return new Response(null, { status: 304, headers: clientHeaders(response.headers, type, result.state) });
+  if (etag && inm && inm.split(',').some((t) => t.trim() === '*' || opaque(t) === opaque(etag))) {
+    return new Response(null, { status: 304, headers });
   }
-  return new Response(request.method === 'HEAD' ? null : response.body, {
-    status: 200,
-    headers: clientHeaders(response.headers, type, result.state),
-  });
+  return new Response(request.method === 'HEAD' ? null : response.body, { status: 200, headers });
 }
 
 type CacheState = 'HIT' | 'STALE' | 'MISS';
 type Fetched = { ok: true; response: Response; state: CacheState } | { ok: false; response: Response };
 
 /**
- * `url`, from the edge cache or its origin.
+ * `resource`, from the edge cache or its origin.
  *
  * The Cache API does not do stale-while-revalidate itself, so an entry is
  * stored for a day with the time it was fetched, and its age decides: under
  * `freshSeconds` it is served; older, it is served while a background fetch
- * replaces it. An error from the origin is never cached: on a miss it is passed
- * through as it came; with a stale copy on hand, the copy is served.
+ * replaces it. Nothing but a valid copy is ever cached. When the origin fails
+ * (an error status, a timeout, a redirect, the wrong content), a stale copy is
+ * served if there is one, and otherwise a plain-text error: never the
+ * origin's own error page, and never an exception (which Cloudflare would
+ * turn into its 1101 page).
  */
-export async function cachedFetch(
-  url: string,
-  type: string,
-  ctx: ExecutionContext,
-  freshSeconds: number,
-  headers: Record<string, string> = {},
-): Promise<Fetched> {
+export async function cachedFetch(resource: Resource, ctx: ExecutionContext): Promise<Fetched> {
   const cache = caches.default;
-  const key = new Request(url, { method: 'GET' });
-  const init = { headers: { Accept: type, 'User-Agent': USER_AGENT, ...headers } };
+  const key = new Request(resource.url, { method: 'GET' });
   const cached = await cache.match(key);
 
   if (cached) {
     const age = (Date.now() - Number(cached.headers.get(FETCHED_AT) ?? 0)) / 1000;
-    if (age < freshSeconds) return { ok: true, response: cached, state: 'HIT' };
+    if (age < resource.freshSeconds) return { ok: true, response: cached, state: 'HIT' };
     ctx.waitUntil(
-      refresh(cache, key, type, init).catch((err) =>
-        console.error(JSON.stringify({ message: 'refresh failed', url, error: String(err) })),
-      ),
+      fetchValid(resource)
+        .then(async (fresh) => {
+          if (fresh.ok) await cache.put(key, fresh.entry);
+          // else keep serving the stale copy; fetchValid has logged why
+        })
+        .catch((err) => console.error(JSON.stringify({ message: 'cache refresh failed', url: resource.url, error: String(err) }))),
     );
     return { ok: true, response: cached, state: 'STALE' };
   }
 
-  let upstream: Response;
+  const fresh = await fetchValid(resource);
+  if (!fresh.ok) return { ok: false, response: plain(fresh.status, fresh.message) };
+  ctx.waitUntil(
+    cache
+      .put(key, fresh.entry.clone())
+      .catch((err) => console.error(JSON.stringify({ message: 'cache put failed', url: resource.url, error: String(err) }))),
+  );
+  return { ok: true, response: fresh.entry, state: 'MISS' };
+}
+
+type Origin = { ok: true; entry: Response } | { ok: false; status: number; message: string };
+
+/** One origin request, checked and turned into a cache entry. Never throws. */
+export async function fetchValid(resource: Resource): Promise<Origin> {
+  const fail = (status: number, message: string, detail: Record<string, unknown> = {}): Origin => {
+    console.error(JSON.stringify({ message: `origin: ${message}`, url: resource.url, ...detail }));
+    return { ok: false, status, message };
+  };
   try {
-    upstream = await fetch(url, init);
+    const upstream = await fetch(resource.url, {
+      headers: { Accept: resource.type, 'User-Agent': USER_AGENT, ...resource.headers },
+      // A redirect from GitHub Pages is not the file; don't follow it into something else.
+      redirect: 'manual',
+      // The edge copy is this Worker's own (Cache API); the origin is always asked afresh.
+      cache: 'no-store',
+      signal: AbortSignal.timeout(ORIGIN_TIMEOUT_MS),
+    });
+    if (upstream.status === 404) return fail(404, 'Not found at the origin.', { status: 404 });
+    if (upstream.status !== 200) return fail(502, 'The origin did not return the file.', { status: upstream.status });
+    const contentType = upstream.headers.get('Content-Type') ?? '';
+    if (!resource.originType.test(contentType)) {
+      return fail(502, 'The origin returned something other than the file.', { contentType });
+    }
+    if (Number(upstream.headers.get('Content-Length') ?? 0) > MAX_BYTES) return fail(502, 'The origin file is too large.');
+    const body = await upstream.text();
+    if (body.length > MAX_BYTES) return fail(502, 'The origin file is too large.');
+    if (!resource.valid(body)) return fail(502, 'The origin returned something other than the file.', { contentType });
+
+    const headers = new Headers({
+      'Content-Type': resource.type,
+      // Long enough to serve stale; freshness is decided by FETCHED_AT, not by this.
+      'Cache-Control': `public, max-age=${STALE_SECONDS}`,
+      [FETCHED_AT]: String(Date.now()),
+    });
+    for (const name of ['ETag', 'Last-Modified']) {
+      const value = upstream.headers.get(name);
+      if (value) headers.set(name, value);
+    }
+    return { ok: true, entry: new Response(body, { status: 200, headers }) };
   } catch (err) {
-    console.error(JSON.stringify({ message: 'origin fetch failed', url, error: String(err) }));
-    return {
-      ok: false,
-      response: new Response('Could not reach the origin. Try again in a minute.\n', {
-        status: 502,
-        headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' },
-      }),
-    };
+    const timedOut = err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError');
+    return fail(502, timedOut ? 'The origin took too long.' : 'Could not reach the origin.', { error: String(err) });
   }
-  if (!upstream.ok) {
-    console.error(JSON.stringify({ message: 'origin error', url, status: upstream.status }));
-    return { ok: false, response: passThrough(upstream) };
-  }
-  const entry = await toCacheEntry(upstream, type);
-  if (!entry) return { ok: false, response: passThrough(upstream) };
-  ctx.waitUntil(cache.put(key, entry.clone()));
-  return { ok: true, response: entry, state: 'MISS' };
-}
-
-async function refresh(cache: Cache, key: Request, type: string, init: RequestInit): Promise<void> {
-  const upstream = await fetch(key.url, init);
-  if (!upstream.ok) {
-    console.error(JSON.stringify({ message: 'origin error', url: key.url, status: upstream.status }));
-    return; // keep serving the stale copy
-  }
-  const entry = await toCacheEntry(upstream, type);
-  if (entry) await cache.put(key, entry);
-}
-
-/** The upstream body with the headers the cache entry keeps, or null when it is too large. */
-async function toCacheEntry(upstream: Response, type: string): Promise<Response | null> {
-  const declared = Number(upstream.headers.get('Content-Length') ?? 0);
-  if (declared > MAX_BYTES) return null;
-  const body = await upstream.arrayBuffer();
-  if (body.byteLength > MAX_BYTES) return null;
-  const headers = new Headers({
-    'Content-Type': type,
-    // Long enough to serve stale; freshness is decided by FETCHED_AT, not by this.
-    'Cache-Control': `public, max-age=${STALE_SECONDS}`,
-    [FETCHED_AT]: String(Date.now()),
-  });
-  for (const name of ['ETag', 'Last-Modified']) {
-    const value = upstream.headers.get(name);
-    if (value) headers.set(name, value);
-  }
-  return new Response(body, { status: 200, headers });
-}
-
-/** An origin response handed on unchanged, but never cached by anyone. */
-function passThrough(upstream: Response): Response {
-  const headers = new Headers(upstream.headers);
-  headers.set('Cache-Control', 'no-store');
-  return new Response(upstream.body, { status: upstream.status, statusText: upstream.statusText, headers });
 }
 
 function clientHeaders(from: Headers, type: string, state: CacheState): Headers {
@@ -197,21 +246,22 @@ export async function download(request: Request, env: Env, ctx: ExecutionContext
 }
 
 /**
- * The latest release's DMG: from GitHub's releases API (edge-cached), else
- * from the appcast (the same file Sparkle reads), else the latest-release page.
+ * The DMG to hand out: the appcast's newest item first, because the appcast is
+ * what Sparkle offers and pulling a bad release means deleting its item there
+ * (docs/releasing.md, "Pulling a bad release"); GitHub's "latest release" can
+ * still be the pulled one. The releases API only when the appcast can't be
+ * read, then the latest-release page.
  */
 export async function latestRelease(ctx: ExecutionContext): Promise<Latest> {
-  const api = await cachedFetch(RELEASES_API, 'application/vnd.github+json', ctx, RELEASE_FRESH_SECONDS, {
-    'X-GitHub-Api-Version': '2022-11-28',
-  });
-  if (api.ok) {
-    const found = dmgFromRelease(await api.response.json().catch(() => null));
-    if (found) return found;
-  }
-  const appcast = await cachedFetch(ORIGIN + 'appcast.xml', MIRRORED['/appcast.xml']!, ctx, FRESH_SECONDS);
+  const appcast = await cachedFetch(APPCAST, ctx);
   if (appcast.ok) {
     const url = latestDmg(await appcast.response.text());
     if (url) return { url, version: versionOf(url) };
+  }
+  const api = await cachedFetch(RELEASE_API, ctx);
+  if (api.ok) {
+    const found = dmgFromRelease(await api.response.json().catch(() => null));
+    if (found) return found;
   }
   return { url: RELEASES_LATEST, version: null };
 }
@@ -262,12 +312,19 @@ function isBot(request: Request): boolean {
   return !ua || /bot|crawl|spider|slurp|preview|facebookexternalhit|curl|wget|python|httpclient|headless/i.test(ua);
 }
 
+/** The same rule as the browser snippet (src/components/PostHog.astro), so previews are never counted as production. */
+export function environmentOf(hostname: string): 'production' | 'preview' | 'development' {
+  if (hostname === 'pacer.andrechek.com') return 'production';
+  if (hostname.endsWith('.workers.dev')) return 'preview';
+  return 'development';
+}
+
 /**
  * One anonymous PostHog event per download: a fresh random id (so no person
  * profile and nothing to join on), the country Cloudflare already resolved,
- * and the version. The visitor's IP address is never sent: `$ip` is null,
- * and GeoIP is skipped, which would otherwise place every download at the
- * Cloudflare data centre that sent it.
+ * and the version. The visitor's IP address is never sent: the request comes
+ * from this Worker, `$ip` is null, and GeoIP is skipped, which would otherwise
+ * place every download at the Cloudflare data centre that sent it.
  */
 export async function captureDownload(env: Env, request: Request, version: string | null): Promise<void> {
   const token = env.POSTHOG_TOKEN;
@@ -282,6 +339,7 @@ export async function captureDownload(env: Env, request: Request, version: strin
     timestamp: new Date().toISOString(),
     properties: {
       surface: 'website',
+      environment: environmentOf(new URL(request.url).hostname),
       country,
       version,
       $process_person_profile: false,
@@ -294,7 +352,7 @@ export async function captureDownload(env: Env, request: Request, version: strin
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(5000),
+    signal: AbortSignal.timeout(ORIGIN_TIMEOUT_MS),
   });
   if (!response.ok) console.error(JSON.stringify({ message: 'posthog capture rejected', status: response.status }));
 }
