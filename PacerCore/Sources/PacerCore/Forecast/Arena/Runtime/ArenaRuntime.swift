@@ -389,6 +389,9 @@ public actor ArenaRecordScorer {
         var existing: Set<DoneKey>
         /// Keys graded with older inputs: a new grade there replaces a row.
         var stale: Set<DoneKey>
+        /// The cuts of the cycles in depth that have no grade (#424): inside
+        /// a gap in the readings. Done for every model.
+        let ungraded: Set<CutKey>
         /// Each cycle's place in `cycles`, by period key.
         let periodIndex: [String: UInt16]
         /// Turns this window has had in the current phase.
@@ -399,14 +402,18 @@ public actor ArenaRecordScorer {
     /// the registry, the cut in the grading's cuts, the cycle among the
     /// window's completed cycles in depth (`periodIndex`).
     struct DoneKey: Hashable { let model: UInt16; let cut: UInt8; let period: UInt16 }
+    /// One cut of one cycle in depth, every model: `DoneKey` without the model.
+    struct CutKey: Hashable { let cut: UInt8; let period: UInt16 }
 
     nonisolated func doneKey(_ s: Stream, _ model: String, cut: Int, period: String) -> DoneKey? {
         guard let m = modelIndex[model], let p = s.periodIndex[period] else { return nil }
         return DoneKey(model: m, cut: UInt8(cut), period: p)
     }
 
+    /// Graded with current inputs, or a cut with no grade (`Stream.ungraded`).
     nonisolated func isDone(_ s: Stream, _ model: String, cut: Int, period: String) -> Bool {
-        doneKey(s, model, cut: cut, period: period).map { s.existing.contains($0) } ?? false
+        guard let key = doneKey(s, model, cut: cut, period: period) else { return false }
+        return s.existing.contains(key) || s.ungraded.contains(CutKey(cut: key.cut, period: key.period))
     }
 
     /// The two phases of a pass: the cheap models over every cycle in depth,
@@ -876,10 +883,27 @@ public actor ArenaRecordScorer {
             guard !available.isEmpty else { continue }
             let (_, cycles) = BurnTrajectory.segment(samples: samples, duration: window.duration, now: now)
             let cap = window.isWeeklyScale ? config.weeklyCycleCap : config.sessionCycleCap
-            let completed = cycles.filter { $0.resetsAt <= now }.sorted { $0.resetsAt > $1.resetsAt }.prefix(cap)
+            // The cycles with a grade (#424): one whose readings show none
+            // of the cuts has nothing to grade, so it does not take one of
+            // the depth's places. The engine's record has no row for it
+            // either, and its depth counts only cycles with rows.
+            let completed = Array(cycles.filter { $0.resetsAt <= now }.sorted { $0.resetsAt > $1.resetsAt }
+                .lazy.compactMap { c -> (cycle: BurnTrajectory.Cycle, cuts: Set<Double>)? in
+                    let cuts = c.gradedCuts(grading.cuts)
+                    return cuts.isEmpty ? nil : (c, Set(cuts))
+                }
+                .prefix(cap))
             let surface = EngineScope.account(account).qualify(EngineSelfEval.rlSurface(window.key))
             var periodIndex: [String: UInt16] = [:]
-            for (i, c) in completed.enumerated() { periodIndex[EngineSelfEval.periodKeyRL(c.resetsAt)] = UInt16(i) }
+            // The cuts of each cycle in depth its readings do not show: never
+            // graded, so done (`isDone`).
+            var ungraded = Set<CutKey>()
+            for (i, c) in completed.enumerated() {
+                periodIndex[EngineSelfEval.periodKeyRL(c.cycle.resetsAt)] = UInt16(i)
+                for (ci, cf) in grading.cuts.enumerated() where !c.cuts.contains(cf) {
+                    ungraded.insert(CutKey(cut: UInt8(ci), period: UInt16(i)))
+                }
+            }
             let arenaNames = Set(available.map(\.name))
             // Only this grading's rows of the models that can run matter:
             // what is graded, and with which inputs.
@@ -894,11 +918,13 @@ public actor ArenaRecordScorer {
                 Log.write("Arena", "\(window.key) …\(account.suffix(4)): \(stale.count) grade(s) made with older "
                           + "inputs, grading again")
             }
-            let todo = completed.filter { c in
+            let todo = completed.map(\.cycle).filter { c in
                 guard let p = periodIndex[EngineSelfEval.periodKeyRL(c.resetsAt)] else { return false }
                 for m in available {
                     guard let mi = modelIndex[m.name] else { continue }
-                    for ci in grading.cuts.indices where !existing.contains(DoneKey(model: mi, cut: UInt8(ci), period: p)) {
+                    for ci in grading.cuts.indices
+                    where !ungraded.contains(CutKey(cut: UInt8(ci), period: p))
+                        && !existing.contains(DoneKey(model: mi, cut: UInt8(ci), period: p)) {
                         return true
                     }
                 }
@@ -907,7 +933,7 @@ public actor ArenaRecordScorer {
             guard !todo.isEmpty else { continue }
             out.append(Stream(account: account, window: window, binding: binding, models: available, inputs: prints,
                               store: store, surface: surface, cycles: Array(todo), depth: completed.count,
-                              existing: existing, stale: stale, periodIndex: periodIndex))
+                              existing: existing, stale: stale, ungraded: ungraded, periodIndex: periodIndex))
         }
         return out
     }
@@ -926,7 +952,9 @@ public actor ArenaRecordScorer {
         var back = ArenaScoringCrew.Handback(stream: job.stream, account: job.account, surface: job.surface,
                                              cycle: job.cycle)
         let cycle = job.cycle
-        guard let truth = cycle.samples.map(\.usedPercentage).max(), truth > 0 else { return back }
+        // The engine's rule (`newOutcomesRL`, #424): no grade at a cut
+        // inside a gap.
+        guard let truth = cycle.gradedFinal else { return back }
         let duration = cycle.resetsAt.timeIntervalSince(cycle.cycleStart)
         guard duration > 0 else { return back }
         let period = job.period
@@ -937,10 +965,9 @@ public actor ArenaRecordScorer {
             // ending mid-pass takes hold within one (`ArenaBudgetPolicy.scorerQoS`).
             ArenaQoS.apply(budget.scorerQoS)
             let cutNow = cycle.cycleStart.addingTimeInterval(duration * grading.cuts[ci])
-            let seen = cycle.samples.filter { $0.at <= cutNow }
             // The engine's own rule (`newOutcomesRL`), so both are graded on
             // the same cuts.
-            guard seen.count >= 3 else { continue }
+            guard let seen = cycle.gradedReadings(at: cutNow) else { continue }
             let partial = BurnTrajectory.PartialCycle(samples: seen, now: cutNow, cycleStart: cycle.cycleStart,
                                                       resetsAt: cycle.resetsAt)
             let cut = ArenaHistory(store: job.store, now: ArenaCut.millis(cutNow), accounts: [job.account])

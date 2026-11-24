@@ -189,8 +189,9 @@ public actor UsageIntelligenceEngine {
     private var previousGradingRetired = false
     /// Local day of the last prune past the shared depth (`pruneBeyondDepth`).
     private var lastDepthPruneDay: String?
-    /// The background deletes `retirePreviousGrading` and `pruneBeyondDepth`
-    /// started, chained, so tests can wait for them (`settleRecordCleanup`).
+    /// The background deletes `retirePreviousGrading`, `pruneBeyondDepth`
+    /// and `dropUngradedRows` started, chained, so tests and the record pass
+    /// can wait for them (`settleRecordCleanup`).
     private var recordCleanup: Task<Void, Never>?
 
     /// Let go of what the next refit can read again. The scoreboard is the one
@@ -644,7 +645,63 @@ public actor UsageIntelligenceEngine {
         let models = RateLimitRoster.engineIds.sorted().map { "\($0)=\(RateLimitRoster.engineInputs($0))" }
         // v3: rows carry the reading at the cut (#374); every stored cycle's
         // engine rows are graded again to fill it in.
-        return "v3|\(EngineSelfEval.rlBucketVersion)|" + models.joined(separator: ",")
+        // v4: no grade where the readings do not show the meter (#424); the
+        // rows graded there before are taken out (`dropUngradedRows`).
+        return "v4|\(EngineSelfEval.rlBucketVersion)|" + models.joined(separator: ",")
+    }
+
+    /// Take out of the record, in memory and (in the background) the store,
+    /// every model's rows of `window` that have no grade under #424: those at
+    /// a cut inside a gap in the readings (`EngineSelfEval.ungradedBuckets`),
+    /// under the current grading and the previous one. They were graded
+    /// before the rule, at moments nobody read, and they fed selection and
+    /// the bands. Returns how many.
+    ///
+    /// The arena models' rows go too: their grader skips the same cuts
+    /// (`ArenaRecordScorer.Stream.ungraded`), so nothing grades them again.
+    /// One pass of in-memory work over the cached rows, then a delete by key,
+    /// which the pass waits for before it saves its marker.
+    func dropUngradedRows(window: WindowSpec, completed: [BurnTrajectory.Cycle]) -> Int {
+        let gradings = [EngineSelfEval.rlGrading, EngineSelfEval.previousRLGrading]
+        var ungraded: [String: Set<String>] = [:]
+        for c in completed {
+            let buckets = EngineSelfEval.ungradedBuckets(c, gradings: gradings)
+            if !buckets.isEmpty { ungraded[EngineSelfEval.periodKeyRL(c.resetsAt)] = buckets }
+        }
+        guard !ungraded.isEmpty else { return 0 }
+        let surface = EngineSelfEval.rlSurface(window.key)
+        let rows = evalRowsCache ?? fetchEvalRows()
+        var dropped = Set<String>(), stored: [String] = []
+        let qualified = scope.qualify(surface)
+        for row in rows where row.surface == surface {
+            guard ungraded[row.record.periodKey]?.contains(row.record.bucket) == true else { continue }
+            dropped.insert(row.key)
+            stored.append(EngineEvalOutcome.makeKey(surface: qualified, method: row.record.method,
+                                                    bucket: row.record.bucket, periodKey: row.record.periodKey))
+        }
+        guard !dropped.isEmpty else { evalRowsCache = rows; return 0 }
+        evalRowsCache = rows.filter { !dropped.contains($0.key) }
+        let container = modelContainer, keys = stored
+        queueRecordCleanup { _ = Self.deleteRows(container: container, keys: keys) }
+        return dropped.count
+    }
+
+    /// Delete the rows with these stored keys, in a context of its own, a
+    /// few hundred keys a statement (the key is unique, so indexed). Returns
+    /// how many were there.
+    static func deleteRows(container: ModelContainer, keys: [String]) -> Int {
+        let context = ModelContext(container)
+        var removed = 0
+        var start = 0
+        while start < keys.count {
+            let chunk = Array(keys[start..<min(start + 256, keys.count)])
+            start += chunk.count
+            let predicate = #Predicate<EngineEvalOutcome> { chunk.contains($0.key) }
+            removed += (try? context.fetchCount(FetchDescriptor(predicate: predicate))) ?? 0
+            try? context.delete(model: EngineEvalOutcome.self, where: predicate)
+        }
+        try? context.save()
+        return removed
     }
 
     /// Score every completed rate-limit cycle the store holds (the live
@@ -694,12 +751,13 @@ public actor UsageIntelligenceEngine {
                                 key: { "\($0.identity)|\($0.at.timeIntervalSince1970)" }, at: \.at))
         try? await Task.sleep(for: pause)
 
-        var added = 0, cycles = 0, batches = 0
+        var added = 0, cycles = 0, batches = 0, ungraded = 0
         for window in f.windows {
             guard let samples = f.rateLimit[window.key], !samples.isEmpty else { continue }
             let (_, history) = BurnTrajectory.segment(samples: samples, duration: window.duration, now: now)
             let completed = history.filter { $0.resetsAt <= now }.sorted { $0.cycleStart < $1.cycleStart }
             cycles += completed.count
+            ungraded += dropUngradedRows(window: window, completed: completed)
             var start = 0
             while start < completed.count {
                 let range = start..<min(start + batch, completed.count)
@@ -717,6 +775,14 @@ public actor UsageIntelligenceEngine {
             }
         }
 
+        // The marker says this record is done, so it is saved only once the
+        // ungraded rows' delete has committed (`dropUngradedRows` queues it
+        // at background priority). Saved first, a quit, crash or relaunch in
+        // between left those rows for good: the next launch skips the pass.
+        // Quit does not wait for this: the pass runs in a task of its own that
+        // nothing awaits on the way out, and a pass cut short leaves the
+        // marker unsaved, so the next launch runs it again.
+        if ungraded > 0 { await recordCleanup?.value }
         if let marker { marker.value = fingerprint } else {
             modelContext.insert(ClaudeCodeMeta(key: markerKey, value: fingerprint))
         }
@@ -724,7 +790,8 @@ public actor UsageIntelligenceEngine {
         recordBackfill = .done
         let took = SuspendingClock.now - started
         Log.write("Engine", "record backfill \(String((limitAccountId ?? "all").suffix(4))): "
-                  + "+\(added) outcome(s) over \(cycles) cycle(s) in \(batches) batch(es), \(took) awake")
+                  + "+\(added) outcome(s) over \(cycles) cycle(s) in \(batches) batch(es), "
+                  + "\(ungraded) ungraded removed, \(took) awake")
         // Once per engine per record version, so rare. Added only when the pass did work.
         if added > 0 {
             let secs = Double(took.components.seconds) + Double(took.components.attoseconds) / 1e18
@@ -1520,7 +1587,7 @@ public actor UsageIntelligenceEngine {
             var finals: [String: Double] = [:]
             for r in rlRecords[key] ?? [] { finals[r.periodKey] = r.truth }
             for c in history {
-                finals[EngineSelfEval.periodKeyRL(c.resetsAt)] = c.samples.map { $0.usedPercentage }.max() ?? 0
+                finals[EngineSelfEval.periodKeyRL(c.resetsAt)] = c.final
             }
             let over90 = finals.values.filter { $0 >= 90 }.count
             let hit100 = finals.values.filter { $0 >= 100 }.count
@@ -1769,13 +1836,13 @@ public actor UsageIntelligenceEngine {
         // overridden and extended by the record.
         var cases: [String: [Double: (cycleStart: Date, residual: Double)]] = [:]
         for cycle in history {
-            let trueFinal = cycle.samples.map { $0.usedPercentage }.max() ?? 0
-            guard trueFinal > 0 else { continue }
+            // The record's rule (#424): no residual where there is no grade,
+            // at a cut inside a gap.
+            guard let trueFinal = cycle.gradedFinal else { continue }
             let period = EngineSelfEval.periodKeyRL(cycle.resetsAt)
             for cf in cutFractions {
                 let cutNow = cycle.cycleStart.addingTimeInterval(duration * cf)
-                let seen = cycle.samples.filter { $0.at <= cutNow }
-                guard seen.count >= 3 else { continue }
+                guard let seen = cycle.gradedReadings(at: cutNow) else { continue }
                 let partial = BurnTrajectory.PartialCycle(
                     samples: seen, now: cutNow, cycleStart: cycle.cycleStart, resetsAt: cycle.resetsAt)
                 guard let projection = model.fit(partial) else { continue }

@@ -29,6 +29,11 @@ import Testing
 /// 6 hours, so every pair of its readings is a gap and the slope has no
 /// continuous run to measure: unknown (`-`, nil) where it was 0.3667, and
 /// nothing else moved.
+/// #424 grades no cut inside a gap, and the cold backtest reads the same
+/// rule: of its cuts (0.5, 0.6, 0.7) only 0.5 (hour 84) has a reading within
+/// 30 minutes. On that one cut the 7-day pick goes to `linear-recent`, at the
+/// same 61.6 at reset; the five-hour window, read every 15 minutes, is
+/// unchanged.
 struct EngineWindowGoldenTests {
 
     static let utc = Calendar(identifier: .gregorian).with(timeZone: TimeZone(identifier: "UTC")!)
@@ -112,12 +117,12 @@ struct EngineWindowGoldenTests {
     burn used=55.0000 slope=22.0000 cross=nil early=nil late=nil anchor=2.4050 method=saturating
     traj n=7 selected=saturating pts=25 cross=nil last=87.4769
     == seven_day ==
-    selectedId=recent-rate duration=604800.0000 history=6
+    selectedId=linear-recent duration=604800.0000 history=6
     cycles obs=6 over90=0 hit100=0
     cal[pooled] n=6 q10=-0.6000 q50=-0.6000 q90=-0.6000
-    outlook value=61.6000 i80=nil i50=nil conf=medium support=6 method=rl-recent-rate note=-
-    burn used=30.8000 slope=- cross=nil early=nil late=nil anchor=0.0000 method=recent-rate
-    traj n=7 selected=recent-rate pts=25 cross=nil last=61.6000
+    outlook value=61.6000 i80=nil i50=nil conf=medium support=6 method=rl-linear-recent note=-
+    burn used=30.8000 slope=- cross=nil early=nil late=nil anchor=0.0000 method=linear-recent
+    traj n=7 selected=linear-recent pts=25 cross=nil last=61.6000
     """
 
     @Test func fixedWindowsAreByteIdenticalToPreRefactor() {
