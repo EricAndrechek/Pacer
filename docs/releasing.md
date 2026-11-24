@@ -12,20 +12,32 @@ Most of a release is plumbing you shouldn't babysit. [`bin/ship.sh`](../bin/ship
 does the mechanical parts and exits non-zero the moment something's off:
 
 ```sh
-bin/ship.sh preflight            # on main? clean? synced? → suggested next version
+bin/ship.sh preflight            # on main? clean? synced? feed live? → suggested next version
 bin/ship.sh notes <version>      # preview the exact notes CI will publish
 bin/ship.sh release <version>    # tag → watch the Release run → verify (backgroundable)
 bin/ship.sh verify <version>     # health-check a published release any time
+bin/ship.sh feeds                # is the update feed live where a release will write it?
 ```
 
+`preflight` fails unless the update feed is where the release will write it
+and live: the app's `SUFeedURL` is `https://pacer.andrechek.com/appcast.xml`,
+the site serves main's `site/public/appcast.xml` and `price-history.json`
+byte for byte, and, while the [legacy mirror](#the-legacy-github-pages-mirror)
+is on, gh-pages holds the same bytes.
+
 `release` blocks until the workflow finishes and then runs `verify`, which
-checks the whole chain end to end: the GitHub Release has the DMG asset, the
-live appcast advertises the version, its `<enclosure>` length matches the
-published asset, and — if `uv` is available — the DMG's EdDSA signature
-validates against the app's embedded `SUPublicEDKey`. For every delta update
-the item advertises, it checks the delta is a release asset of its stated
-length and that its signature validates too. Run `release` / `wait-ci`
-backgrounded so nothing has to poll them.
+checks the whole chain end to end: the GitHub Release has the DMG asset; the
+site's appcast (`https://pacer.andrechek.com/appcast.xml`, what 0.9.4 and later
+read) advertises the version, waiting up to 15 minutes for Workers Builds to
+deploy it; while the mirror is on, the GitHub Pages copy (what 0.9.3 and
+earlier read) is byte-identical to it, and so is `price-history.json`; the
+price history served decodes and is no older than the release's; the item's
+`<enclosure>` length matches the published asset, and — if `uv` is available —
+the DMG's EdDSA signature validates against the app's embedded
+`SUPublicEDKey`. For every delta update the item advertises, it checks the
+delta is a release asset of its stated length and that its signature
+validates too. Run `release` / `wait-ci` backgrounded so nothing has to poll
+them.
 
 > **Agent note.** A Claude Code skill, [`/ship`](../.claude/skills/ship/SKILL.md),
 > wraps this with the project's release *protocol*: work on branches, install
@@ -69,8 +81,12 @@ The steps `bin/ship.sh` automates, spelled out:
      one rebuilds the new app exactly, and sign the ones that pass
      ([Delta updates](#delta-updates) below).
    - Publish the DMG and the deltas as assets on a GitHub Release named `vX.Y.Z`.
-   - Append the new item to `appcast.xml` on the `gh-pages` branch, with the
-     deltas in its `<sparkle:deltas>`.
+   - Publish the update feed ([The update feed](#the-update-feed) below): add
+     the new item, with the deltas in its `<sparkle:deltas>`, to
+     `site/public/appcast.xml` on `main`, with the release's
+     `price-history.json` beside it; Cloudflare Workers Builds deploys that to
+     `https://pacer.andrechek.com/`. The same two files go, byte for byte, to
+     the root of `gh-pages`, the legacy mirror older Pacers read.
 
    The Homebrew cask (`brew install --cask ericandrechek/tap/pacer`) is not
    touched by this workflow, and Pacer holds no key to the tap.
@@ -88,6 +104,152 @@ The steps `bin/ship.sh` automates, spelled out:
 5. Within ~24h, every installed Pacer instance will see the new
    release on its next launch (or on-demand via Pacer → "Check for
    Updates…"). Sparkle handles the download / replace / relaunch.
+
+## The update feed
+
+Every installed Pacer finds its updates in one file, and only an update can
+change which file that is. A Pacer pointed at a feed that stops getting
+releases is stranded for good. So the feed has exactly one source of truth,
+and the release that writes it also checks it is being served.
+
+| | Site copy (primary) | Legacy mirror |
+| --- | --- | --- |
+| Source | `site/public/appcast.xml`, `site/public/price-history.json` on `main` | `appcast.xml`, `price-history.json` at the root of `gh-pages` |
+| Served at | `https://pacer.andrechek.com/appcast.xml` (static files of the Cloudflare site; no Worker code runs for them) | `https://ericandrechek.github.io/Pacer/appcast.xml` (GitHub Pages) |
+| Read by | Pacer 0.9.4 and later (`SUFeedURL`, `CuratedPriceHistory.remoteURL`) | Pacer 0.9.3 and earlier |
+| Written by | the release workflow, and reviewed hand edits | a copy of the site copy, never edited on its own |
+
+### How a release publishes it
+
+The `Publish the update feed` step runs `bin/publish-feeds.sh release`
+([`bin/publish-feeds.sh`](../bin/publish-feeds.sh)):
+
+1. a worktree of `origin/main`; the release's item goes into
+   `site/public/appcast.xml` ([`bin/appcast-add-item.py`](../bin/appcast-add-item.py),
+   which checks the whole feed still parses with the item intact), and the
+   tag's `price-history.json` replaces the one beside it (the site's is kept
+   only when it is strictly newer by `asOf`, or the tag's would not decode);
+2. the site's own deploy check (`site/scripts/check-feeds.mjs`) runs on the
+   result, so a copy Workers Builds would refuse never reaches `main`;
+3. the commit `site: publish appcast and price history for X.Y.Z` is pushed to
+   `main` as `github-actions[bot]`. If `main` moved meanwhile, the push is
+   redone on the new `main` (fetch, regenerate from its copy, commit, push), up
+   to five times. Workers Builds builds `main` (its watch paths include
+   `site/*`), runs `pnpm build:ci`, and deploys in a minute or three. The
+   commit must never carry `[skip ci]`: Workers Builds honours it;
+4. while the mirror is on, the same two files are copied to `gh-pages` and
+   pushed as `appcast: X.Y.Z`;
+5. the step fails, after trying both, unless both copies were published and
+   are byte-identical. The job summary has a table saying which is where.
+
+A re-run for a release already in the feed adds nothing. A manual
+(`workflow_dispatch`) run never publishes: it previews the item against
+`main`'s copy and runs the same script with `--no-push`, requiring the two
+copies it would push to be identical. `bin/publish-feeds.sh self-test` (in
+CI) runs the whole path against a throwaway local remote.
+
+**The deploy gate.** `pnpm build` ends with `scripts/check-feeds.mjs`, which
+fails the build, so Workers Builds keeps the deployment that is live, when
+either file is missing, differs from `site/public/`, or is not fit to serve: an
+appcast that is not well-formed (a stray `<`, a bare `&`, an attribute given
+twice, unclosed tags), not an `<rss>`, or has an item without a build, a
+version, a DMG on Pacer's releases, a length and an EdDSA signature (deltas
+likewise), or a price history the app would not decode. A broken copy on
+`main` therefore means *no new deploy*, never a broken feed, and `verify`
+reports it as the feed not advertising the release. It also blocks every later
+deploy, the next release's feed included, until it is fixed; `bin/ship.sh
+preflight` fails while the site does not serve `main`'s copy, so a release is
+never tagged into that state.
+
+### When the site's feed did not update
+
+`verify` says `https://pacer.andrechek.com/appcast.xml does not advertise
+X.Y.Z`. Macs on 0.9.4 and later do not see the release until it does; the
+mirror still serves 0.9.3 and earlier.
+
+1. Find the build of the release commit (`site: publish appcast … X.Y.Z`) in
+   Cloudflare: Workers & Pages → pacer → Deployments (and its build log).
+2. A failed build: read its log. A failed `check-feeds` names the file and the
+   problem; a test or a flaky install is fixed or retried in the dashboard
+   ("Retry build"). Fix forward on `main` (a PR touching `site/` deploys on
+   merge); never hand-edit the live Worker.
+3. No build at all: check the Workers Builds connection and its watch paths
+   (`site/*`, `docs/release-notes/*`, `docs/screenshots/*`), then retry the
+   latest `main` build from the dashboard.
+4. Then `bin/ship.sh verify X.Y.Z` again.
+
+If the publish step itself failed, its log and job summary say which copy
+did not publish:
+
+- **`the site copy on main was NOT published`, mirror published:** the mirror
+  is main's copy plus the new item, so put it on `main`: in a worktree of
+  `origin/main` ([Editing the feed by hand](#editing-the-feed-by-hand)),
+  `git show origin/gh-pages:appcast.xml > site/public/appcast.xml` and the
+  same for `price-history.json`, check `git diff` adds only the new `<item>`,
+  commit, push.
+- **mirror not published, site published:** `bin/publish-feeds.sh mirror`.
+- **neither:** re-run the Release workflow's failed job. Do this only then: a
+  re-run rebuilds and re-uploads the DMG with a new build number, which is
+  harmless only while no feed names the first one. The script adds an item
+  once per version and build.
+
+### Editing the feed by hand
+
+Pulling a release and dropping deltas are the only hand edits. Make them on
+`main`'s copy, then copy it to the mirror, and do neither while a Release run
+is in progress (`gh run list --workflow=Release --limit 1`):
+
+```sh
+git fetch origin main
+W="$(mktemp -d)/site"
+git worktree add --detach "$W" origin/main
+# edit "$W/site/public/appcast.xml" (or run bin/appcast-drop-deltas.sh on it)
+git -C "$W" diff                                         # review
+git -C "$W" commit -am "site: <what and why>"
+git -C "$W" push origin HEAD:main                        # the publish; needs the owner's go
+git worktree remove "$W"
+bin/publish-feeds.sh mirror                              # gh-pages becomes the same bytes
+bin/publish-feeds.sh status                              # "byte-identical" for both files
+```
+
+Workers Builds deploys the `main` commit; check it with `curl -fsSL
+https://pacer.andrechek.com/appcast.xml` (served within a minute of the
+deploy; clients may cache it for a minute, `max-age=60`).
+
+### The legacy GitHub Pages mirror
+
+Pacer 0.9.3 and earlier read only `https://ericandrechek.github.io/Pacer/appcast.xml`,
+so every release also writes the same bytes there, behind the repository
+variable `PACER_LEGACY_PAGES_MIRROR` (on by default; `off`, `false` or `0`, any
+case, turns it off):
+
+```sh
+gh variable set PACER_LEGACY_PAGES_MIRROR --body off -R EricAndrechek/Pacer   # off: gh-pages frozen
+gh variable delete PACER_LEGACY_PAGES_MIRROR -R EricAndrechek/Pacer           # back on
+```
+
+A Mac on 0.9.3 updates from the mirror to the newest release there, which reads
+the site's feed from then on, so any mirrored release from 0.9.4 on moves a Mac
+over for good.
+
+**Retiring it,** in this order:
+
+1. Wait until no reporting Mac is below 0.9.4: the app's daily check-in in
+   PostHog, by version, over a few weeks, since a Mac that is rarely on still
+   has to come back for its update.
+2. Turn the mirror off (`PACER_LEGACY_PAGES_MIRROR=off`). gh-pages then stays
+   frozen at the last release it mirrored, which still moves any straggler to
+   the site's feed.
+3. Freeze gh-pages for good: leave it untouched for a while, watching for
+   stragglers.
+4. Delete it: GitHub Pages off in the repository settings, then the branch.
+   Remove the mirror code (`publish_mirror` in `bin/publish-feeds.sh`, the
+   mirror checks in `bin/ship.sh`) in the same change.
+
+While the mirror exists, a pulled release has to come out of it too
+(`bin/publish-feeds.sh mirror` after the edit on `main`), even when it is off:
+run that once with `PACER_LEGACY_PAGES_MIRROR=on` set in the shell, or a frozen
+mirror keeps offering what was pulled.
 
 ## Skipped releases: the upgrade matrix
 
@@ -315,11 +477,13 @@ client run belongs on a disposable machine.
 
 ### Pulling a bad release
 
-1. **Take its item out of the appcast** (a commit on `gh-pages` that deletes
-   the `<item>`), so Sparkle stops offering it. The GitHub release can stay.
-   The site's download button (`pacer.andrechek.com/download/`) follows the
-   appcast too, within a minute (its edge cache), even though GitHub still
-   lists the pulled release as latest (`site/worker/lib.ts`).
+1. **Take its item out of the appcast**, so Sparkle stops offering it: delete
+   the `<item>` from `site/public/appcast.xml` on `main`, then copy it to the
+   mirror ([Editing the feed by hand](#editing-the-feed-by-hand)). The GitHub
+   release can stay. The site's download button
+   (`pacer.andrechek.com/download/`) reads the same file, so it stops handing
+   the release out with the same deploy, even though GitHub still lists the
+   pulled release as latest (`site/worker/lib.ts`).
 2. **Check the Homebrew cask: it does not follow the appcast.** The tap pins
    releases itself and only ever moves forward, so it keeps installing the
    pulled version (`gh api repos/EricAndrechek/homebrew-tap/contents/Casks/pacer.rb
@@ -343,25 +507,29 @@ In order of how fast they act. None of them needs a new build.
 2. **Take a release's deltas out of the live appcast.** Clients read the feed
    on every check, so this is the real undo. Do it when no Release run is in
    progress (`gh run list --workflow=Release --limit 1`), because it pushes to
-   the same branch the appcast step does. The script refuses to write unless
+   the same branches the publish step does. The script refuses to write unless
    the only change is the removed `<sparkle:deltas>` blocks: every item and
-   full `<enclosure>` stays byte for byte.
+   full `<enclosure>` stays byte for byte. It edits `main`'s copy, and the
+   mirror is then made the same bytes:
 
    ```sh
-   git fetch origin gh-pages
-   GHP="$(mktemp -d)/gh-pages"
-   git worktree add --detach "$GHP" origin/gh-pages
-   bin/appcast-drop-deltas.sh 0.8.4 "$GHP/appcast.xml"      # or: all
-   git -C "$GHP" diff                                      # review: only <sparkle:deltas> lines go
-   git -C "$GHP" commit -am "appcast: drop delta updates for 0.8.4"
-   git -C "$GHP" push origin HEAD:gh-pages                 # the publish; needs the owner's go
-   git worktree remove "$GHP"
+   git fetch origin main
+   W="$(mktemp -d)/site"
+   git worktree add --detach "$W" origin/main
+   bin/appcast-drop-deltas.sh 0.8.4 "$W/site/public/appcast.xml"   # or: all
+   git -C "$W" diff                                      # review: only <sparkle:deltas> lines go
+   git -C "$W" commit -am "site: drop delta updates for 0.8.4"
+   git -C "$W" push origin HEAD:main                     # the publish; needs the owner's go
+   git worktree remove "$W"
+   bin/publish-feeds.sh mirror                           # gh-pages: the same bytes (while it exists)
    ```
 
-   Then confirm what clients get. Pages serves the commit within a minute or
-   two, and its CDN may hold the old feed for up to ten minutes more:
+   Then confirm what clients get. The site serves the commit once Workers
+   Builds has deployed it (a minute or three); Pages serves the mirror within
+   a minute or two, and its CDN may hold the old copy ten minutes more:
 
    ```sh
+   curl -fsSL https://pacer.andrechek.com/appcast.xml | grep -c '<sparkle:deltas>'
    curl -fsSL https://ericandrechek.github.io/Pacer/appcast.xml | grep -c '<sparkle:deltas>'
    SHIP_ALLOW_NO_DELTAS=1 bin/ship.sh verify 0.8.4         # "no delta updates in this item"
    ```
@@ -484,19 +652,20 @@ private key signs each release.
    Keychain entry on your Mac (for local re-export if needed) and
    the GitHub Actions secret.
 
-### 4. GitHub Pages (for the appcast)
+### 4. The site (for the appcast)
 
 The Sparkle feed URL declared in `project.yml` is
-`https://ericandrechek.github.io/Pacer/appcast.xml`. That serves the
-`appcast.xml` at the root of the `gh-pages` branch.
+`https://pacer.andrechek.com/appcast.xml`: `site/public/appcast.xml` on `main`,
+served by the Cloudflare site, which Workers Builds deploys from GitHub. Its
+one-time setup is in [`site/README.md`](../site/README.md) ("How it deploys").
+The workflow's `GITHUB_TOKEN` pushes the release commit to `main`, so `main`
+must accept pushes from `github-actions[bot]`; a branch rule that blocks it
+blocks every release's feed.
 
-1. Repo Settings → Pages.
-2. Source: **Deploy from a branch**.
-3. Branch: **gh-pages** / root (`/`).
-4. Save.
-
-The first release run creates the `gh-pages` branch with an initial
-appcast skeleton; you don't need to bootstrap it manually.
+**GitHub Pages** serves the legacy mirror until it is retired
+([The legacy GitHub Pages mirror](#the-legacy-github-pages-mirror)): Settings →
+Pages → Deploy from a branch → `gh-pages` / root. It already exists; the
+publish script only starts a `gh-pages` branch if there is none.
 
 ### 5. Set the GitHub Actions secrets
 
@@ -542,7 +711,8 @@ Before tagging the first real release, manually run the workflow with
 
 This exercises every step (signing, notarization, DMG, Sparkle sign,
 delta updates, strictly) *except* publishing the GitHub Release and pushing
-to gh-pages, so a broken secret surfaces without polluting the release feed.
+the feed to `main` and gh-pages, so a broken secret surfaces without polluting
+the release feed.
 A manual run never publishes, whatever `dry_run` says.
 
 When it goes green, you're ready to tag.
@@ -569,9 +739,11 @@ When it goes green, you're ready to tag.
   resubmit by hand: once Apple is answering again, re-run the failed job,
   which builds and submits afresh. A stapled ticket only fits the exact
   binary it was issued for.
-- **Sparkle update not detected** — check `appcast.xml` on the
-  `gh-pages` branch: it must list a `sparkle:version` greater than
-  what's installed. Sparkle compares `CFBundleVersion` (which the
+- **Sparkle update not detected** — check the feed the Mac reads
+  (`https://pacer.andrechek.com/appcast.xml` from 0.9.4, the gh-pages mirror
+  before): it must list a `sparkle:version` greater than
+  what's installed. If the site's copy lacks the release, see
+  [When the site's feed did not update](#when-the-sites-feed-did-not-update). Sparkle compares `CFBundleVersion` (which the
   workflow stamps with a unix timestamp), so version comparisons
   are strictly monotonic per release run.
 - **`no delta from X` warning on a release** — that delta failed a check and
@@ -591,7 +763,7 @@ When it goes green, you're ready to tag.
 
 - `Release` workflow's `concurrency: release` group is intentionally
   `cancel-in-progress: false` — if two tags land back-to-back they
-  serialize cleanly instead of one stomping the other's appcast push.
+  serialize cleanly instead of one stomping the other's feed push.
 - `appcast.xml` only ever grows. If you publish a bad release, tag a
   new patch and let users update past it; don't try to delete items. The
   one sanctioned edit is removing a release's `<sparkle:deltas>` block with

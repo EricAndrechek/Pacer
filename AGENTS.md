@@ -231,6 +231,16 @@ These are subtle, easy to miss, and break user-visible numbers:
 - **Do not rely on `~/.claude/stats-cache.json` for primary data.** It
   lags by hours and has fewer categories than JSONL. Use only as a
   sanity-check probe.
+- **Do not move the update feed, or edit it anywhere but `main`.** The
+  feed and the price history are `site/public/appcast.xml` and
+  `site/public/price-history.json` on `main`, static files of the site at
+  `https://pacer.andrechek.com/` (Pacer 0.9.4 and later read them:
+  `SUFeedURL`, `CuratedPriceHistory.remoteURL`, pinned by
+  `FeedLocationTests`). Releases write them (`bin/publish-feeds.sh`);
+  `gh-pages` is only a byte-for-byte mirror for 0.9.3 and earlier. A Pacer
+  pointed at a feed that stops getting releases is stranded for good, so a
+  new `SUFeedURL` needs a migration plan of its own
+  (`docs/releasing.md`, "The update feed").
 
 ## Telemetry — what Pacer may send, and how
 
