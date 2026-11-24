@@ -121,10 +121,15 @@ compose across any gap:
   rules, so a store several versions back runs each one once.
 
 `make upgrade-matrix` is the evidence, and the gate for any release that
-touches `PacerCore/Sources/PacerCore/Models/`, `PacerStore`, a
-`current*Version` constant, `RawArchive`'s columns, or a defaults migration:
+changes a file declaring a `@Model` (not only `Models/`: `Heartbeat.swift`
+and `Accounts/AccountActivation.swift` declare one too), the schema list, a
+version-gated upgrade (`current*Version`, `layoutDefaultsVersions`), the
+archive's `addedColumns` or a `migrate` function. `bin/upgrade-matrix.sh
+--needed` says whether the release does, from the latest tag (or a base you
+name), and lists the files:
 
 ```sh
+bin/upgrade-matrix.sh --needed                  # exit 0 + the files: run the matrix
 mkdir -p /tmp/frozen/projects && cp -c -R ~/.claude/projects/<a few projects> /tmp/frozen/projects/
 make upgrade-matrix CLAUDE=/tmp/frozen          # the last five releases
 make upgrade-matrix CLAUDE=/tmp/frozen TAGS="v0.8.0 v0.9.2"
@@ -142,22 +147,29 @@ probe. Then, with this tree, through `bin/dev-ingest-harness.sh`:
 | Column | Passes when |
 | --- | --- |
 | schema vs HEAD | informational: attributes added; a removed, retyped or new mandatory attribute is a WARN |
-| opened, migrated | the seeded copy opens and migrates (`needs-migration → current`) |
-| preserved | every old table and column is still there, with every row and value, and no entity is renumbered (#387) |
-| totals | after this tree's first launch, `TOTALS` equals a fresh ingest of the same tree by this tree |
+| opened, migrated | the seeded copy opens; a changed schema migrates (`needs-migration → current`), an unchanged one does not |
+| preserved | every old table and column is still there, with every row and value, and no entity is renumbered (#387); a failed query or an empty sample table fails |
+| kept | a first launch with NO transcripts leaves exactly the release's own `TOTALS`, and every sample row (`Z_PK` and dedup key) survives: nothing could be read back, so nothing lost hides |
+| totals | after this tree's first launch on the frozen tree, `TOTALS` equals a fresh ingest of it by this tree, and every old sample row still survives (a row re-read from the transcripts has a new `Z_PK`) |
 | verify-data | `bin/dev-verify-data.sh` passes on the upgraded store |
-| archive | the archive sync's own integrity verdict is `ok` (old archives gain their new columns) |
-| second launch | no migration, an incremental cycle that inserts nothing, no one-time work again, same totals |
+| archive | this launch's own archive check: a higher check count than the release's, its `integrity check N: ok` line, and no `disabled after error` (the cached store already holds the release's `ok`) |
+| second launch | no migration, an incremental cycle that inserts nothing, no one-time work again, archive still enabled, same totals |
 
 and the first launch's time and bytes written (and the migration's alone).
-`STORE=` adds a row for a real store copy, where "totals" means unchanged by
+`STORE=` adds a row for a real store copy, where "kept" means unchanged by
 the upgrade and an entity renumbering (a store from before 0.8.0, #387) is
 reported but is not a failure: it costs writes, not data.
+`PACER_MATRIX_SELF_TEST=rows` or `=archive` proves the checks bite: on copies,
+it drops 100 samples and every file cursor (a migration that lost rows the
+transcripts still hold), or overwrites the archive's header (an archive this
+tree cannot open). Each must FAIL.
 Every step is `swift build`/`swift test` under a sandbox profile that denies
-writes to the live App Group container and `~/.claude/projects`; nothing is
-launched. The first run spends two to four minutes per tag building its store
+writes to the live App Group container, the app's preferences and all of
+`~/.claude`, and denies running `open`, `osascript` or the installed app;
+nothing is launched. One run holds a cache at a time, and a failed or
+interrupted run removes the worktree and build it was making. The first run spends two to four minutes per tag building its store
 (a debug build of that tag and one scan) plus one release build of this tree;
-after that, seven tags and a 1.1 GB store copy took about eight minutes.
+after that, seven tags and a 1.1 GB store copy took about ten minutes.
 Results and per-step logs land in `OUT=` (default `$CACHE/results/<HEAD>`).
 
 ## Delta updates

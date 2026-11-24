@@ -79,18 +79,46 @@ struct EntityNumberingTests {
         }
     }
 
+    /// The `Z<NNN>` sequence number of a model name, if it has one.
+    static func sequence(of name: String) -> Int? {
+        let digits = name.dropFirst().prefix(3)
+        guard name.first == "Z", digits.count == 3, digits.allSatisfy(\.isNumber),
+              name.dropFirst(4).first?.isUppercase == true else { return nil }
+        return Int(digits)
+    }
+
     @Test("a model added since the last release is named to sort after all the others")
     func newModelsSortLast() throws {
-        let added = try numbering().keys.filter { Self.shipped[$0] == nil }.sorted()
+        let now = try numbering()
+        let added = now.keys.filter { Self.shipped[$0] == nil }.sorted()
+        // A new name must also come after every SHIPPED sequence number and
+        // entity number: `Z002Foo` beside a shipped `Z002AccountPlanEvent`, or a
+        // `Z000Foo`, sorts among the shipped models and renumbers the ones
+        // after it, which no check on the new models alone would see.
+        let highestShippedSequence = Self.shipped.keys.compactMap(Self.sequence(of:)).max() ?? 0
+        let highestShippedEntity = Self.shipped.values.max() ?? 0
         var sequence: [Int] = []
         for name in added {
-            let prefix = name.prefix(4)
-            let digits = prefix.dropFirst()
-            #expect(prefix.first == "Z" && digits.count == 3 && digits.allSatisfy(\.isNumber)
-                        && name.dropFirst(4).first?.isUppercase == true,
+            let n = Self.sequence(of: name)
+            #expect(n != nil,
                     "\(name): a new model is named Z<three-digit sequence><Name>, e.g. Z001LiveMeterOutcome")
-            if let n = Int(digits) { sequence.append(n) }
+            if let n {
+                sequence.append(n)
+                #expect(n > highestShippedSequence,
+                        "\(name): sequence \(n) is not after the highest shipped one (\(highestShippedSequence))")
+            }
+            #expect((now[name] ?? 0) > highestShippedEntity,
+                    "\(name) is entity \(now[name] ?? 0), among the shipped ones (up to \(highestShippedEntity))")
         }
         #expect(Set(sequence).count == sequence.count, "two new models share a sequence number: \(added)")
+    }
+
+    @Test("the sequence check reads Z<NNN> names, and only those")
+    func sequenceParsing() {
+        #expect(Self.sequence(of: "Z003PriceCatalogSnapshot") == 3)
+        #expect(Self.sequence(of: "Z000Foo") == 0)
+        #expect(Self.sequence(of: "ZZ01Foo") == nil)
+        #expect(Self.sequence(of: "Z001foo") == nil)
+        #expect(Self.sequence(of: "TokenSample") == nil)
     }
 }
