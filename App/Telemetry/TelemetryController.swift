@@ -252,6 +252,8 @@ final class TelemetryController {
         }
         if let extra = event.extra { event.extra = TelemetryScrubber.scrub(extra) }
         if let tags = event.tags { event.tags = tags.mapValues { TelemetryScrubber.scrub($0) } }
+        // Symbol names resolved on the Mac (`HangFingerprint`).
+        if let fingerprint = event.fingerprint { event.fingerprint = fingerprint.map { TelemetryScrubber.scrub($0) } }
     }
 
     // MARK: - Toggles, read live
