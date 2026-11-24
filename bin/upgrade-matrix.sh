@@ -508,6 +508,8 @@ REFERENCE="$OUT/head-reference/pacer.sqlite"
   echo "FAIL: HEAD's own store disagrees with its fresh ingest — $OUT/head-store, $OUT/head-reference" >&2; exit 1; }
 sql "$REFERENCE" "PRAGMA wal_checkpoint(TRUNCATE);" > /dev/null
 REFERENCE_COST="$(cost_of "$OUT/head-reference")"
+# Empty would make every tag's "no COST line" equal it.
+[ -n "$REFERENCE_COST" ] || { echo "FAIL: the reference launch logged no COST line — $OUT/head-reference/log.txt" >&2; exit 1; }
 
 # ---- checks --------------------------------------------------------------------
 # Old store vs migrated store: row counts, every old column's values, entity
@@ -588,7 +590,9 @@ missing_samples() { # <old.sqlite, cached> <new.sqlite>
 # them. So numbers inside JSON agree to 1e-9 at the same position, and an
 # array holding only strings (a list of ids) is compared as a set; a number
 # array keeps its order (the five token parts are positional). Rows equal only
-# that way are counted in the report.
+# that way are counted in the report. The tolerance is for floats only: two
+# integers (token counts, however large) must be equal, and a leaf whose key
+# the other side lacks is a difference even when its value is null.
 json_same() { # <a> <b> (SQL text expressions) → SQL: same JSON, numbers to 1e-9, id lists as sets
   local a="$1" b="$2"
   echo "(json_valid($a) AND json_valid($b) AND (
@@ -597,8 +601,9 @@ json_same() { # <a> <b> (SQL text expressions) → SQL: same JSON, numbers to 1e
      AND NOT EXISTS (SELECT 1 FROM json_tree($a) x
                      LEFT JOIN json_tree($b) y ON y.fullkey = x.fullkey AND y.type NOT IN ('object','array')
                      WHERE x.type NOT IN ('object','array')
-                       AND NOT (x.atom IS y.atom OR (x.type IN ('real','integer') AND y.type IN ('real','integer')
-                                AND abs(x.atom - y.atom) <= 1e-9 * max(1.0, abs(y.atom))))))
+                       AND (y.fullkey IS NULL OR NOT (x.atom IS y.atom OR ((x.type = 'real' OR y.type = 'real')
+                                AND x.type IN ('real','integer') AND y.type IN ('real','integer')
+                                AND abs(x.atom - y.atom) <= 1e-9 * max(1.0, abs(y.atom)))))))
     OR (json_type($a) = 'array' AND json_type($b) = 'array'
         AND NOT EXISTS (SELECT 1 FROM json_each($a) WHERE type <> 'text')
         AND NOT EXISTS (SELECT 1 FROM json_each($b) WHERE type <> 'text')
@@ -607,14 +612,17 @@ json_same() { # <a> <b> (SQL text expressions) → SQL: same JSON, numbers to 1e
 }
 #
 # One difference is by design and reported, not failed: a sample whose
-# `thinkingTokens` is NULL where the reference has a value. Releases before
-# 0.8.3 did not read it, and it is never backfilled (AGENTS.md rule 7, #362);
-# a value that DISAGREES still fails.
+# `thinkingTokens` is NULL where the reference has a value, on a row the
+# release itself stored without one (releases before 0.8.3 had no such column,
+# and it is never backfilled: AGENTS.md rule 7, #362). A NULL on a row the
+# release had recorded a value for, or on a row this tree ingested itself, is
+# data lost and fails; a value that DISAGREES fails too.
 VALUE_TABLES="ZTOKENSAMPLE:ZDEDUPKEY ZDAILYAGGREGATE:ZDATEMODELKEY ZHOURLYAGGREGATE:ZDATEHOURMODELKEY ZPROJECTDAILYAGGREGATE:ZPROJECTDATEKEY ZSESSIONINFO:ZSESSIONID"
-compare_values() { # <store> <reference> <report>
-  local store="$1" ref="$2" report="$3" spec t k c n only_here only_there
+compare_values() { # <store> <reference> <report> <the release's own store, before this launch>
+  local store="$1" ref="$2" report="$3" rel="${4:-}" spec t k c n only_here only_there
   : > "$report"
-  v() { sql "$store" "ATTACH '$(ro "$ref")' AS ref; $1" 2>/dev/null || echo "SQL FAILED"; }
+  [ -n "$rel" ] && [ -f "$rel" ] || { echo "SQL FAILED: no release store to compare against" >> "$report"; return 1; }
+  v() { sql "$store" "ATTACH '$(ro "$ref")' AS ref; ATTACH '$(ro "$rel")' AS rel; $1" 2>/dev/null || echo "SQL FAILED"; }
   for spec in $VALUE_TABLES; do
     t="${spec%%:*}"; k="${spec#*:}"
     only_here="$(v "SELECT count(*) FROM main.$t m WHERE NOT EXISTS (SELECT 1 FROM ref.$t r WHERE r.$k IS m.$k)")"
@@ -626,7 +634,8 @@ compare_values() { # <store> <reference> <report>
     columns="$(sql "$(ro "$ref")" "SELECT name FROM pragma_table_info('$t') WHERE name NOT IN ('Z_PK','Z_ENT','Z_OPT')" 2>/dev/null || true)"
     [ -n "$columns" ] || { echo "SQL FAILED: no columns for $t in the reference" >> "$report"; continue; }
     for c in $columns; do
-      local close="(m.$c IS r.$c OR (typeof(m.$c) IN ('real','integer') AND typeof(r.$c) IN ('real','integer')
+      local close="(m.$c IS r.$c OR ((typeof(m.$c) = 'real' OR typeof(r.$c) = 'real')
+                     AND typeof(m.$c) IN ('real','integer') AND typeof(r.$c) IN ('real','integer')
                      AND abs(m.$c - r.$c) <= 1e-9 * max(1.0, abs(r.$c))))"
       # SwiftData stores `Data` as a BLOB, which SQLite's JSON functions would
       # read as its binary JSONB: compare the text.
@@ -635,9 +644,14 @@ compare_values() { # <store> <reference> <report>
       n="$(v "SELECT count(*) FROM main.$t m JOIN ref.$t r ON r.$k = m.$k WHERE NOT $close AND NOT $differs")"
       [ "$n" = 0 ] || echo "equal as JSON $t.$c: $n row(s) (float sums' last bits, or id lists in another order)" >> "$report"
       if [ "$t.$c" = ZTOKENSAMPLE.ZTHINKINGTOKENS ]; then
-        n="$(v "SELECT count(*) FROM main.$t m JOIN ref.$t r ON r.$k = m.$k WHERE m.$c IS NULL AND r.$c IS NOT NULL")"
-        [ "$n" = 0 ] || echo "not backfilled $t.$c: $n row(s) NULL here (read by the reference's release only, by design)" >> "$report"
-        differs="$differs AND m.$c IS NOT NULL"
+        local excused="m.$c IS NULL AND r.$c IS NOT NULL AND EXISTS (SELECT 1 FROM rel.$t o WHERE o.$k IS m.$k"
+        if [ -n "$(sql "$(ro "$rel")" "SELECT name FROM pragma_table_info('$t') WHERE name='$c'" 2>/dev/null || true)" ]; then
+          excused="$excused AND o.$c IS NULL"
+        fi
+        excused="$excused)"
+        n="$(v "SELECT count(*) FROM main.$t m JOIN ref.$t r ON r.$k = m.$k WHERE $excused")"
+        [ "$n" = 0 ] || echo "not backfilled $t.$c: $n row(s) the release stored without it (never backfilled, by design)" >> "$report"
+        differs="$differs AND NOT ($excused)"
       fi
       n="$(v "SELECT count(*) FROM main.$t m JOIN ref.$t r ON r.$k = m.$k WHERE $differs")"
       [ "$n" = 0 ] || echo "DIFFERS $t.$c: $n row(s)" >> "$report"
@@ -795,7 +809,7 @@ for tag in "${TAGS[@]}"; do
   lost="$(missing_samples "$dir/pacer.sqlite" "$R/first-launch/pacer.sqlite")"
   [ "$lost" = 0 ] || totals="FAIL ($lost of the release's sample rows replaced or gone)"
   values=ok
-  compare_values "$R/first-launch/pacer.sqlite" "$REFERENCE" "$R/values.txt" \
+  compare_values "$R/first-launch/pacer.sqlite" "$REFERENCE" "$R/values.txt" "$dir/pacer.sqlite" \
     || values="FAIL ($(grep -m1 -E '^(EXTRA|MISSING|DUPLICATE|DIFFERS|SQL FAILED)' "$R/values.txt" | cut -c1-50))"
   [ "$(cost_of "$R/first-launch")" = "$REFERENCE_COST" ] || values="FAIL (COST differs: $(cost_of "$R/first-launch" | head -1))"
   verify=ok
