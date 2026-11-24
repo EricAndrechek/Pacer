@@ -17,7 +17,7 @@ screenshot is worth a thousand words for UI issues.
 
 ## Development setup
 
-Requirements: macOS 15+, Xcode 16+, and [`xcodegen`](https://github.com/yonsm/XcodeGen)
+Requirements: macOS 15+, Xcode 16+, and [`xcodegen`](https://github.com/yonaskolb/XcodeGen)
 (`brew install xcodegen`). The Xcode project is generated from `project.yml`, so
 you never edit `.xcodeproj` directly.
 
@@ -46,7 +46,7 @@ entry in `project.yml`) purely so the generator can render them with fake
 `TimelineEntry` values; the extension's `@main` bundle stays excluded.
 
 Architecture, invariants, and the non-negotiable correctness/performance rules
-live in [`agents.md`](agents.md) — worth a skim before a non-trivial change.
+live in [`AGENTS.md`](AGENTS.md) — worth a skim before a non-trivial change.
 
 ### Building and running it yourself
 
