@@ -418,11 +418,14 @@ money. Give any new forecast the same two layers.
   installed at a time; parallel PRs queue their installs. Marking it ready runs
   `.github/workflows/screenshots.yml`, which renders the README images on a
   `macos-26` runner and pushes a `docs: regenerate README screenshots` commit
-  onto the PR branch — the owner reviews that commit before anything merges.
-- **Merge only on the owner's explicit yes**, after that review, and always
-  squash. A change after his review resets it. A commit pushed by the
-  workflow's token triggers no CI run of its own; `main` is unprotected, so this
-  does not block the merge, but say so when asking.
+  onto the PR branch; check that commit before merging.
+- **The owning session merges and releases on its own bar** (delegated by the
+  owner, 2026-11-24): CI green on both runners, installed with `make install`,
+  an independent adversarial review with its findings fixed, and a soak before
+  any release. Always squash. What still goes to the owner, and the scheduled
+  triage loop, are in `.claude/skills/pacer-owner/SKILL.md`. A commit pushed by
+  the workflow's token triggers no CI run of its own; `main` is unprotected, so
+  this does not block the merge.
 - **Keep personal details out of commits and comments** — monitor layouts and
   coordinates, usernames, real paths. The repo is public.
 - **Mind the free runners' space.** No artifacts from new workflows (the
