@@ -3,9 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } fr
 import * as entry from './index';
 import worker from './index';
 import {
-  FRESH_SECONDS,
-  ORIGIN,
   ORIGIN_TIMEOUT_MS,
+  RELEASE_FRESH_SECONDS,
   RELEASES_API,
   RELEASES_LATEST,
   dmgFromRelease,
@@ -49,26 +48,39 @@ const RELEASE = {
   ],
 };
 
-const PRICES = '{"schema":1,"asOf":"2026-11-11","records":[]}';
+/** GitHub Pages, where the feed lived before 0.9.4. Nothing here may fetch from it any more. */
+const GITHUB_PAGES = 'https://ericandrechek.github.io/Pacer/';
 const POSTHOG = 'https://us.i.posthog.com/i/v0/e/';
 const BROWSER =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 15_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15';
 const VISITOR_IP = '203.0.113.77';
 
-/** What GitHub Pages sends for each file. */
+/** What the assets layer answers for public/appcast.xml. */
 const xml = (body = APPCAST, headers: Record<string, string> = {}) =>
-  new Response(body, { headers: { 'Content-Type': 'application/xml', ...headers } });
+  new Response(body, { headers: { 'Content-Type': 'application/xml; charset=utf-8', ...headers } });
+/** not_found_handling: "404-page" answers a missing file with the site's 404 page. */
+const notFoundPage = () => new Response('<!doctype html><title>Page not found</title>', { status: 404, headers: { 'Content-Type': 'text/html' } });
 const json = (body: string, headers: Record<string, string> = {}) =>
   new Response(body, { headers: { 'Content-Type': 'application/json; charset=utf-8', ...headers } });
 const timeout = () => {
   throw new DOMException('The operation was aborted due to timeout', 'TimeoutError');
 };
 
-type CallInit = RequestInit & { cf?: Record<string, unknown>; host?: string };
+type CallInit = RequestInit & { cf?: Record<string, unknown>; host?: string; assets?: Record<string, () => Response> };
 
-/** The handler with a stand-in for the assets binding. */
+/** The static assets the stand-in binding serves by default: the site's appcast, and a page. */
+const SITE = (): Record<string, () => Response> => ({
+  '/appcast.xml': () => xml(),
+  '/features/': () => new Response('asset', { status: 200 }),
+});
+
+/** The handler with a stand-in for the assets binding, serving `init.assets` (default SITE()). */
 async function call(path: string, init?: CallInit, token = 'phc_test') {
-  const assets = vi.fn(async () => new Response('asset', { status: 200 }));
+  const files = init?.assets ?? SITE();
+  const assets = vi.fn(async (input: RequestInfo | URL) => {
+    const make = files[new URL(urlOf(input)).pathname];
+    return make ? make() : notFoundPage();
+  });
   const env = {
     ASSETS: { fetch: assets },
     POSTHOG_TOKEN: token,
@@ -108,19 +120,11 @@ function serve(files: Record<string, () => Response>) {
 }
 const calls = (url: string) => upstream!.mock.calls.filter(([input]) => urlOf(input) === url).length;
 
-/** Fill the cache, then move the clock past freshness. */
-async function staleAppcast() {
-  serve({ [ORIGIN + 'appcast.xml']: () => xml() });
-  await (await call('/appcast.xml')).response.text();
-  vi.useFakeTimers({ toFake: ['Date'] });
-  vi.setSystemTime(Date.now() + (FRESH_SECONDS + 5) * 1000);
-}
-
 beforeEach(async () => {
   captured = [];
   capturedInits = [];
   // Each test starts with an empty edge cache.
-  for (const url of [ORIGIN + 'appcast.xml', ORIGIN + 'price-history.json', RELEASES_API]) await caches.default.delete(url);
+  await caches.default.delete(RELEASES_API);
 });
 afterEach(() => {
   upstream?.mockRestore();
@@ -128,167 +132,21 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-describe('mirrored files', () => {
-  it('serves /appcast.xml from GitHub Pages with an XML content type', async () => {
-    serve({ [ORIGIN + 'appcast.xml']: () => xml(APPCAST, { ETag: '"a1"' }) });
-    const { response, assets } = await call('/appcast.xml');
-    expect(response.status).toBe(200);
-    expect(response.headers.get('Content-Type')).toBe('application/xml; charset=utf-8');
-    expect(response.headers.get('Cache-Control')).toContain(`max-age=${FRESH_SECONDS}`);
-    expect(response.headers.get('Cache-Control')).toContain('stale-while-revalidate');
-    expect(response.headers.get('ETag')).toBe('"a1"');
-    expect(response.headers.get('X-Pacer-Cache')).toBe('MISS');
-    expect(await response.text()).toBe(APPCAST);
-    expect(calls(ORIGIN + 'appcast.xml')).toBe(1);
-    expect(assets).not.toHaveBeenCalled();
-  });
-
-  it('asks the origin with a timeout, no redirects and no HTTP cache', async () => {
-    serve({ [ORIGIN + 'appcast.xml']: () => xml() });
-    await call('/appcast.xml');
-    const [, init] = upstream!.mock.calls[0]!;
-    expect(init?.signal).toBeInstanceOf(AbortSignal);
-    expect(init?.redirect).toBe('manual');
-    expect(init?.cache).toBe('no-store');
-    expect(ORIGIN_TIMEOUT_MS).toBe(4000);
-  });
-
-  it('serves /price-history.json as JSON', async () => {
-    serve({ [ORIGIN + 'price-history.json']: () => json(PRICES) });
-    const { response } = await call('/price-history.json');
-    expect(response.headers.get('Content-Type')).toBe('application/json; charset=utf-8');
-    expect(await response.json()).toEqual(JSON.parse(PRICES));
-  });
-
-  it('answers a second request from the edge cache', async () => {
-    serve({ [ORIGIN + 'appcast.xml']: () => xml() });
-    await (await call('/appcast.xml')).response.text();
-    const { response } = await call('/appcast.xml');
-    expect(response.headers.get('X-Pacer-Cache')).toBe('HIT');
-    expect(await response.text()).toBe(APPCAST);
-    expect(calls(ORIGIN + 'appcast.xml')).toBe(1);
-  });
-
-  it('serves a stale copy and refreshes it in the background', async () => {
-    await staleAppcast();
-    serve({ [ORIGIN + 'appcast.xml']: () => xml(APPCAST + '<!-- new -->') });
-    const stale = await call('/appcast.xml');
-    expect(stale.response.headers.get('X-Pacer-Cache')).toBe('STALE');
-    expect(await stale.response.text()).toBe(APPCAST);
-    expect(calls(ORIGIN + 'appcast.xml')).toBe(1); // the background refresh
-
-    const after = await call('/appcast.xml');
-    expect(after.response.headers.get('X-Pacer-Cache')).toBe('HIT');
-    expect(await after.response.text()).toBe(APPCAST + '<!-- new -->');
-  });
-
-  it('answers an origin error in plain text, without the origin page, and does not cache it', async () => {
-    serve({
-      [ORIGIN + 'appcast.xml']: () =>
-        new Response('<html>GitHub is down</html>', { status: 503, headers: { 'Content-Type': 'text/html' } }),
+describe('the update feed and the price history', () => {
+  // Static assets (public/), served by the assets layer: wrangler.jsonc's
+  // run_worker_first lists only /download, so in production these requests
+  // never reach the Worker at all. Should one arrive here anyway, it is the
+  // static file, never a fetch from anywhere else.
+  for (const path of ['/appcast.xml', '/price-history.json']) {
+    it(`hands ${path} to the static assets and fetches nothing`, async () => {
+      serve({});
+      const { assets } = await call(path, {
+        assets: { [path]: () => new Response('the file', { status: 200 }) },
+      });
+      expect(assets).toHaveBeenCalledTimes(1);
+      expect(upstream).not.toHaveBeenCalled();
     });
-    const first = await call('/appcast.xml');
-    expect(first.response.status).toBe(502);
-    expect(first.response.headers.get('Content-Type')).toBe('text/plain; charset=utf-8');
-    expect(first.response.headers.get('Cache-Control')).toBe('no-store');
-    expect(await first.response.text()).not.toContain('<html>');
-
-    serve({ [ORIGIN + 'appcast.xml']: () => xml() });
-    const second = await call('/appcast.xml');
-    expect(second.response.status).toBe(200);
-    expect(second.response.headers.get('X-Pacer-Cache')).toBe('MISS');
-  });
-
-  it('passes a 404 on as a plain-text 404', async () => {
-    serve({});
-    const { response } = await call('/price-history.json');
-    expect(response.status).toBe(404);
-    expect(await response.text()).not.toContain('<html>');
-  });
-
-  it('does not cache a 200 that is not the file', async () => {
-    // GitHub Pages' HTML page with a 200, then XML that isn't an appcast.
-    serve({ [ORIGIN + 'appcast.xml']: () => new Response('<html>hello</html>', { headers: { 'Content-Type': 'text/html' } }) });
-    expect((await call('/appcast.xml')).response.status).toBe(502);
-    serve({ [ORIGIN + 'appcast.xml']: () => xml('<?xml version="1.0"?><error/>') });
-    expect((await call('/appcast.xml')).response.status).toBe(502);
-    serve({ [ORIGIN + 'price-history.json']: () => json('{"schema":') });
-    expect((await call('/price-history.json')).response.status).toBe(502);
-
-    serve({ [ORIGIN + 'appcast.xml']: () => xml() });
-    const good = await call('/appcast.xml');
-    expect(good.response.headers.get('X-Pacer-Cache')).toBe('MISS');
-    expect(calls(ORIGIN + 'appcast.xml')).toBe(1);
-  });
-
-  it('does not follow or cache a redirect', async () => {
-    serve({ [ORIGIN + 'appcast.xml']: () => new Response(null, { status: 301, headers: { Location: 'https://elsewhere.example/' } }) });
-    const { response } = await call('/appcast.xml');
-    expect(response.status).toBe(502);
-    expect(response.headers.get('Location')).toBeNull();
-  });
-
-  it('keeps serving the stale copy when the refresh fails', async () => {
-    await staleAppcast();
-    serve({ [ORIGIN + 'appcast.xml']: () => new Response('down', { status: 500 }) });
-    const stale = await call('/appcast.xml');
-    expect(stale.response.status).toBe(200);
-    expect(await stale.response.text()).toBe(APPCAST);
-    serve({ [ORIGIN + 'appcast.xml']: () => new Response('<html>oops</html>', { headers: { 'Content-Type': 'text/html' } }) });
-    const again = await call('/appcast.xml');
-    expect(await again.response.text()).toBe(APPCAST);
-  });
-
-  it('times out to a plain-text 502 when nothing is cached', async () => {
-    serve({ [ORIGIN + 'appcast.xml']: timeout });
-    const { response } = await call('/appcast.xml');
-    expect(response.status).toBe(502);
-    expect(response.headers.get('Content-Type')).toBe('text/plain; charset=utf-8');
-    expect(await response.text()).toContain('took too long');
-  });
-
-  it('times out to the stale copy when there is one', async () => {
-    await staleAppcast();
-    serve({ [ORIGIN + 'appcast.xml']: timeout });
-    const stale = await call('/appcast.xml');
-    expect(stale.response.status).toBe(200);
-    expect(stale.response.headers.get('X-Pacer-Cache')).toBe('STALE');
-    expect(await stale.response.text()).toBe(APPCAST);
-    const again = await call('/appcast.xml');
-    expect(await again.response.text()).toBe(APPCAST);
-  });
-
-  it('returns 502 when GitHub Pages cannot be reached', async () => {
-    serve({
-      [ORIGIN + 'appcast.xml']: () => {
-        throw new TypeError('network down');
-      },
-    });
-    const { response } = await call('/appcast.xml');
-    expect(response.status).toBe(502);
-    expect(response.headers.get('Cache-Control')).toBe('no-store');
-  });
-
-  it('answers a matching If-None-Match with 304, strong or weak', async () => {
-    serve({ [ORIGIN + 'appcast.xml']: () => xml(APPCAST, { ETag: 'W/"v9"' }) });
-    const weakCached = await call('/appcast.xml', { headers: { 'If-None-Match': '"v9"' } });
-    expect(weakCached.response.status).toBe(304);
-    expect(weakCached.response.headers.get('ETag')).toBe('W/"v9"');
-    const weakAsked = await call('/appcast.xml', { headers: { 'If-None-Match': '"x", W/"v9"' } });
-    expect(weakAsked.response.status).toBe(304);
-    const other = await call('/appcast.xml', { headers: { 'If-None-Match': '"v8"' } });
-    expect(other.response.status).toBe(200);
-  });
-
-  it('answers HEAD without a body and refuses other methods', async () => {
-    serve({ [ORIGIN + 'appcast.xml']: () => xml() });
-    const head = await call('/appcast.xml', { method: 'HEAD' });
-    expect(head.response.status).toBe(200);
-    expect(await head.response.text()).toBe('');
-    const post = await call('/appcast.xml', { method: 'POST' });
-    expect(post.response.status).toBe(405);
-    expect(post.response.headers.get('Allow')).toBe('GET, HEAD');
-  });
+  }
 });
 
 describe('/download', () => {
@@ -302,16 +160,30 @@ describe('/download', () => {
     cf: { country: 'CA' },
   };
   const both = () => ({
-    [ORIGIN + 'appcast.xml']: () => xml(),
     [RELEASES_API]: () => json(JSON.stringify(RELEASE)),
     [POSTHOG]: () => new Response('{}'),
   });
+  /** Every network fetch /download made, PostHog's aside. */
+  const fetchedOtherThanPostHog = () => upstream!.mock.calls.map(([input]) => urlOf(input)).filter((u) => u !== POSTHOG);
 
-  it('redirects to the newest DMG in the appcast', async () => {
+  it('redirects to the newest DMG in the site\'s own appcast, read from the assets binding', async () => {
     serve(both());
-    const { response } = await call('/download/', visitor);
+    const { response, assets } = await call('/download/', visitor);
     expect(response.status).toBe(302);
     expect(response.headers.get('Location')).toBe(DMG_093);
+    expect(response.headers.get('Cache-Control')).toBe('no-store');
+    const [asked] = assets.mock.calls[0]!;
+    expect(new URL(urlOf(asked)).href).toBe('https://pacer.andrechek.com/appcast.xml');
+    // Not GitHub Pages, not the API: the appcast is this deployment's own file.
+    expect(fetchedOtherThanPostHog()).toEqual([]);
+    expect(upstream!.mock.calls.some(([input]) => urlOf(input).startsWith(GITHUB_PAGES))).toBe(false);
+  });
+
+  it('reads the appcast from the host it was asked on (a preview serves its own)', async () => {
+    serve(both());
+    const { assets } = await call('/download/', { ...visitor, host: 'feat-pacer.example.workers.dev' });
+    const [asked] = assets.mock.calls[0]!;
+    expect(new URL(urlOf(asked)).href).toBe('https://feat-pacer.example.workers.dev/appcast.xml');
   });
 
   it('never hands out a release pulled from the appcast, even when GitHub calls it latest', async () => {
@@ -323,22 +195,66 @@ describe('/download', () => {
     expect(captured[0]?.properties).toMatchObject({ version: '0.9.3' });
   });
 
-  it('reads the appcast once, then from the edge cache', async () => {
-    serve(both());
-    await call('/download/', visitor);
-    await call('/download', visitor);
-    expect(calls(ORIGIN + 'appcast.xml')).toBe(1);
+  it('falls back to the GitHub API when the appcast is missing, not an appcast, names no DMG, or throws', async () => {
+    const broken: Record<string, () => Response> = {
+      missing: notFoundPage,
+      'an HTML page with a 200': () => new Response('<html>hello</html>', { headers: { 'Content-Type': 'text/html' } }),
+      'no DMG': () => xml('<rss><channel></channel></rss>'),
+      'a foreign DMG only': () => xml(APPCAST.replaceAll('https://github.com/EricAndrechek/Pacer/releases/download/', 'https://evil.example/')),
+      throws: () => {
+        throw new TypeError('assets unavailable');
+      },
+    };
+    for (const [what, make] of Object.entries(broken)) {
+      await caches.default.delete(RELEASES_API);
+      serve(both());
+      const { response } = await call('/download/', { ...visitor, assets: { '/appcast.xml': make } });
+      expect(response.status, what).toBe(302);
+      expect(response.headers.get('Location'), what).toBe(DMG_094);
+    }
   });
 
-  it('falls back to the GitHub API when the appcast cannot be read', async () => {
-    serve({ ...both(), [ORIGIN + 'appcast.xml']: timeout });
-    const { response } = await call('/download/', visitor);
-    expect(response.headers.get('Location')).toBe(DMG_094);
+  it('asks the GitHub API with a timeout and no redirects, and at most once in five minutes', async () => {
+    serve(both());
+    const none = { ...visitor, assets: {} };
+    await call('/download/', none);
+    await call('/download', none);
+    expect(calls(RELEASES_API)).toBe(1);
+    const [, init] = upstream!.mock.calls.find(([input]) => urlOf(input) === RELEASES_API)!;
+    expect(init?.signal).toBeInstanceOf(AbortSignal);
+    expect(init?.redirect).toBe('manual');
+    expect(init?.cache).toBe('no-store');
+    expect(ORIGIN_TIMEOUT_MS).toBe(4000);
+    expect(RELEASE_FRESH_SECONDS).toBe(300);
+  });
+
+  it('ignores an API answer that names no DMG on Pacer\'s releases', async () => {
+    serve({ ...both(), [RELEASES_API]: () => json(JSON.stringify({ message: 'API rate limit exceeded' })) });
+    const { response } = await call('/download/', { ...visitor, assets: {} });
+    expect(response.headers.get('Location')).toBe(RELEASES_LATEST);
+  });
+
+  it('still redirects, to the latest-release page, when the API times out', async () => {
+    serve({ ...both(), [RELEASES_API]: timeout });
+    const { response } = await call('/download/', { ...visitor, assets: {} });
+    expect(response.status).toBe(302);
+    expect(response.headers.get('Location')).toBe(RELEASES_LATEST);
+  });
+
+  it('never redirects anywhere but Pacer\'s own GitHub releases', async () => {
+    serve({
+      ...both(),
+      [RELEASES_API]: () =>
+        json(JSON.stringify({ assets: [{ name: 'Pacer-9.9.9.dmg', browser_download_url: 'https://evil.example/Pacer-9.9.9.dmg' }] })),
+    });
+    const evil = { '/appcast.xml': () => xml(APPCAST.replaceAll('https://github.com/EricAndrechek/Pacer/releases/download/', 'https://evil.example/')) };
+    const { response } = await call('/download/', { ...visitor, assets: evil });
+    expect(response.headers.get('Location')).toBe(RELEASES_LATEST);
   });
 
   it('falls back to the latest-release page when nothing can be read', async () => {
     serve({});
-    const { response } = await call('/download/', visitor);
+    const { response } = await call('/download/', { ...visitor, assets: {} });
     expect(response.status).toBe(302);
     expect(response.headers.get('Location')).toBe(RELEASES_LATEST);
   });
@@ -408,8 +324,8 @@ describe('/download', () => {
 
 describe('workers.dev', () => {
   it('marks every Worker answer noindex there, and nowhere else', async () => {
-    serve({ [ORIGIN + 'appcast.xml']: () => xml(), [POSTHOG]: () => new Response('{}') });
-    for (const path of ['/appcast.xml', '/download/', '/features/']) {
+    serve({ [POSTHOG]: () => new Response('{}') });
+    for (const path of ['/download/', '/features/']) {
       const preview = await call(path, { host: 'abc123-pacer.example.workers.dev', headers: { DNT: '1' } });
       expect(preview.response.headers.get('X-Robots-Tag')).toBe('noindex');
       const live = await call(path, { headers: { DNT: '1' } });

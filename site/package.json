@@ -10,7 +10,7 @@
   },
   "scripts": {
     "dev": "astro dev",
-    "build": "astro build && node scripts/csp-hashes.mjs",
+    "build": "astro build && node scripts/csp-hashes.mjs && node scripts/check-feeds.mjs",
     "build:ci": "pnpm test && pnpm check && pnpm build",
     "preview": "astro preview",
     "check": "astro check && pnpm run types && tsc -p worker/tsconfig.json",

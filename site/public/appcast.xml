@@ -1,0 +1,1746 @@
+<?xml version="1.0" standalone="yes"?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+    <channel>
+        <title>Pacer</title>
+        <link>https://pacer.andrechek.com/</link>
+        <description>Pacer auto-update feed</description>
+        <language>en</language>
+        <item>
+        <title>Version 0.1.0</title>
+        <pubDate>Wed, 03 Jun 2026 15:37:09 +0000</pubDate>
+        <sparkle:version>1780500840</sparkle:version>
+        <sparkle:shortVersionString>0.1.0</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.1.0/Pacer-0.1.0.dmg"
+            length="5217534"
+            type="application/octet-stream"
+            sparkle:edSignature="csnFBLKBGGUscZu+gMhe7r6DZWXpadMvcp9slnOg77uNzERQ5K8tAjqkxjCJ7Dm9IHYaxjDXbU0GCmzoTd1aCg==" />
+    </item>
+            <item>
+        <title>Version 0.1.1</title>
+        <pubDate>Wed, 03 Jun 2026 16:19:41 +0000</pubDate>
+        <sparkle:version>1780503333</sparkle:version>
+        <sparkle:shortVersionString>0.1.1</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.1.1/Pacer-0.1.1.dmg"
+            length="5217586"
+            type="application/octet-stream"
+            sparkle:edSignature="UgMrDN9CR0pSKXQzAasXe+j8fqRCJJfdN/pd5BNJtxlZmJBxAqOgyh30bcSE3lip1tkmlS9xko7WEyBo595UCg==" />
+    </item>
+            <item>
+        <title>Version 0.1.2</title>
+        <description><![CDATA[
+<h2>What's Changed</h2>
+<ul>
+<li>docs: issue templates + CONTRIBUTING by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4581703554" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/14" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/14/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/14">EricAndrechek/Pacer#14</a></li>
+<li>fix(ui): refresh "today" views automatically at the local day rollover by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4588227226" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/15" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/15/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/15">EricAndrechek/Pacer#15</a></li>
+<li>feat(ui): custom About window with project links by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4588268484" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/16" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/16/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/16">EricAndrechek/Pacer#16</a></li>
+<li>feat(ui): add Donate + Check for Updates to About window by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4588326092" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/17" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/17/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/17">EricAndrechek/Pacer#17</a></li>
+<li>fix(dev): stop Sparkle offering phantom updates to local dev builds by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4588435646" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/18" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/18/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/18">EricAndrechek/Pacer#18</a></li>
+<li>feat(dev): let contributors build under their own Apple Developer account by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4588679277" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/19" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/19/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/19">EricAndrechek/Pacer#19</a></li>
+<li>fix(ui): drop the build timestamp from Sparkle's update dialogs by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4588776346" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/20" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/20/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/20">EricAndrechek/Pacer#20</a></li>
+<li>test: deterministic scanner ground truth; make ccusage-snapshot tests opt-in by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4588955497" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/21" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/21/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/21">EricAndrechek/Pacer#21</a></li>
+<li>chore(release): prep 0.1.2 — version bump + release notes in update dialog by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4589150061" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/22" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/22/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/22">EricAndrechek/Pacer#22</a></li>
+<li>docs: rewrite README for non-technical users by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4589161839" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/23" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/23/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/23">EricAndrechek/Pacer#23</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.1.1...v0.1.2">EricAndrechek/Pacer@<tt>v0.1.1...v0.1.2</tt></a></p>
+]]></description>
+        <pubDate>Thu, 04 Jun 2026 13:47:44 +0000</pubDate>
+        <sparkle:version>1780580617</sparkle:version>
+        <sparkle:shortVersionString>0.1.2</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.1.2/Pacer-0.1.2.dmg"
+            length="5245262"
+            type="application/octet-stream"
+            sparkle:edSignature="DKeI4RJwsa6f2jQlLqxD8sBsO7ORTl4VmutDZ/8W0/GkLdJB2RMzoww1XC3MYgIwPzvdA2JmQtzFjG0IrYaSCA==" />
+    </item>
+            <item>
+        <title>Version 0.2.0</title>
+        <description><![CDATA[
+<h2>What's Changed</h2>
+<ul>
+<li>fix(release): drop release-notes categories to avoid doubled header by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4589252081" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/24" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/24/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/24">EricAndrechek/Pacer#24</a></li>
+<li>Generated README screenshots + how-it-compares section by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4589744274" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/25" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/25/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/25">EricAndrechek/Pacer#25</a></li>
+<li>Dark-mode screenshots + "vs Claude God" comparison by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4590060981" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/26" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/26/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/26">EricAndrechek/Pacer#26</a></li>
+<li>README: comparison table, widget + status-bar shots, macOS window framing by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4590298272" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/27" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/27/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/27">EricAndrechek/Pacer#27</a></li>
+<li>Screenshots: macOS window chrome, realistic pace data, first-class docs by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4590451360" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/28" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/28/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/28">EricAndrechek/Pacer#28</a></li>
+<li>Screenshots: real-data-shaped seed, auto light/dark, cohesive layout by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4590611413" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/29" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/29/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/29">EricAndrechek/Pacer#29</a></li>
+<li>docs(readme): add Website badge linking to the new landing page by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4623644242" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/30" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/30/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/30">EricAndrechek/Pacer#30</a></li>
+<li>feat(pricing): support Claude Fable 5 and Mythos 5 model families by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4627439198" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/31" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/31/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/31">EricAndrechek/Pacer#31</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.1.2...v0.2.0">EricAndrechek/Pacer@<tt>v0.1.2...v0.2.0</tt></a></p>]]></description>
+        <pubDate>Wed, 10 Jun 2026 02:51:35 +0000</pubDate>
+        <sparkle:version>1781059659</sparkle:version>
+        <sparkle:shortVersionString>0.2.0</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.2.0/Pacer-0.2.0.dmg"
+            length="5475491"
+            type="application/octet-stream"
+            sparkle:edSignature="vPZ5loGvlWzLxAO5fph9G4TEbZcZdxZ3LlhhNxrKMLN9xbGjMmbsl2DAkRuUlGC6W+hzj5BzC5HO9AedJSp+Cw==" />
+    </item>
+            <item>
+        <title>Version 0.3.0</title>
+        <description><![CDATA[
+<h2>What's Changed</h2>
+<ul>
+<li>feat(pricing): self-updating multi-source pricing + Mythos Preview rates by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4627591403" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/32" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/32/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/32">EricAndrechek/Pacer#32</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.2.0...v0.3.0">EricAndrechek/Pacer@<tt>v0.2.0...v0.3.0</tt></a></p>]]></description>
+        <pubDate>Wed, 10 Jun 2026 03:22:53 +0000</pubDate>
+        <sparkle:version>1781061574</sparkle:version>
+        <sparkle:shortVersionString>0.3.0</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.3.0/Pacer-0.3.0.dmg"
+            length="5491847"
+            type="application/octet-stream"
+            sparkle:edSignature="QHsv/G8MGm4sQ0fY+h+tN8cCYGtS1RoXvN0q7gwPSzqg4fnAli3No3Q+GelxXzBrtZ1UkJHrhDDn2Y1VizpAAA==" />
+    </item>
+            <item>
+        <title>Version 0.3.1</title>
+        <description><![CDATA[
+<h2>What's Changed</h2>
+<ul>
+<li>Export pace charts as shareable images + pace-chart perf/smoothing by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4631499529" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/33" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/33/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/33">EricAndrechek/Pacer#33</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.3.0...v0.3.1">EricAndrechek/Pacer@<tt>v0.3.0...v0.3.1</tt></a></p>]]></description>
+        <pubDate>Wed, 10 Jun 2026 15:01:57 +0000</pubDate>
+        <sparkle:version>1781103446</sparkle:version>
+        <sparkle:shortVersionString>0.3.1</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.3.1/Pacer-0.3.1.dmg"
+            length="5560890"
+            type="application/octet-stream"
+            sparkle:edSignature="tXCurpSZQ/kRzFkqNPOtO+dsqnkpWwfhQhQN5SKFR9p78XPypK4o0JszGRo4Y49ypDN4S43EGCI7L77jB2UfDA==" />
+    </item>
+            <item>
+        <title>Version 0.3.2</title>
+        <description><![CDATA[
+<h2>What's Changed</h2>
+<ul>
+<li>Move project-alias management to the Projects tab; collapse auto-detected rows by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4633828517" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/35" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/35/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/35">EricAndrechek/Pacer#35</a></li>
+<li>Projects/Models: range picker → page header, single alias entry, fix sibling un-merge by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4634021286" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/36" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/36/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/36">EricAndrechek/Pacer#36</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.3.1...v0.3.2">EricAndrechek/Pacer@<tt>v0.3.1...v0.3.2</tt></a></p>]]></description>
+        <pubDate>Wed, 10 Jun 2026 18:51:29 +0000</pubDate>
+        <sparkle:version>1781117273</sparkle:version>
+        <sparkle:shortVersionString>0.3.2</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.3.2/Pacer-0.3.2.dmg"
+            length="5590630"
+            type="application/octet-stream"
+            sparkle:edSignature="mbq9Y+yGsg7w/ull0dYuQJdV4pVKkU+n1JHGoIfDvwiX4XWrFbcwAKdhZSvB+kt1LmITkxMbMsedLZ5OgCLRCg==" />
+    </item>
+            <item>
+        <title>Version 0.3.3</title>
+        <description><![CDATA[
+<h2>What's Changed</h2>
+<ul>
+<li>feat(window): open the dashboard on the screen you launched it from by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4634554851" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/37" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/37/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/37">EricAndrechek/Pacer#37</a></li>
+<li>feat(notifications): detect off-schedule global rate-limit resets by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4634556247" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/38" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/38/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/38">EricAndrechek/Pacer#38</a></li>
+<li>fix(notifications): surface an early reset even when it landed while away by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4634662089" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/39" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/39/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/39">EricAndrechek/Pacer#39</a></li>
+<li>docs: queue predictions redesign (#3) + storage/DuckDB research (#4) by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4634665809" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/40" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/40/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/40">EricAndrechek/Pacer#40</a></li>
+<li>feat(notifications): default the early-reset alert on by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4634694777" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/41" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/41/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/41">EricAndrechek/Pacer#41</a></li>
+<li>feat(settings): Storage card in Settings → Data (+ storage breakdown research) by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4634842395" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/42" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/42/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/42">EricAndrechek/Pacer#42</a></li>
+<li>docs(research): DuckDB benchmark results + history-reclaim finding by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4634916378" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/43" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/43/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/43">EricAndrechek/Pacer#43</a></li>
+<li>feat(store): bound SwiftData persistent-history growth (gentle backstop) by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4634975477" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/44" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/44/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/44">EricAndrechek/Pacer#44</a></li>
+<li>feat(notifications): burn-rate (slope) warning for the 5-hour window by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4635241502" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/45" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/45/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/45">EricAndrechek/Pacer#45</a></li>
+<li>feat(forecast): shared TrendEstimator (recency-weighted slope + damped/clamped acceleration) by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4635400433" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/46" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/46/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/46">EricAndrechek/Pacer#46</a></li>
+<li>feat(notifications): estimator-backed 7-day burn-rate warning (unified with 5h) by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4635578205" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/47" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/47/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/47">EricAndrechek/Pacer#47</a></li>
+<li>feat(forecast): profile-shaped end-of-day &amp; monthly projections ("self-learning lite") by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4635834270" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/48" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/48/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/48">EricAndrechek/Pacer#48</a></li>
+<li>docs(research): record predictions-redesign outcome by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4635843616" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/49" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/49/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/49">EricAndrechek/Pacer#49</a></li>
+<li>feat(dashboard): 7-day pace tile uses the recency-weighted estimator (matches the warning) by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4635924150" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/50" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/50/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/50">EricAndrechek/Pacer#50</a></li>
+<li>docs(research): 7-day pace tile aligned with estimator by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4635927397" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/51" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/51/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/51">EricAndrechek/Pacer#51</a></li>
+<li>feat(forecast): self-selecting forecast ensemble (tournament foundation) by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4636013570" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/52" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/52/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/52">EricAndrechek/Pacer#52</a></li>
+<li>feat(forecast): on-device Create ML candidate for the tournament by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4636066297" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/53" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/53/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/53">EricAndrechek/Pacer#53</a></li>
+<li>feat(forecast): monthly tournament roster + day-of-week candidate by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4636089589" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/54" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/54/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/54">EricAndrechek/Pacer#54</a></li>
+<li>feat(forecast): BurnTrajectory — curve-fit tournament for rate-limit forward curves by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4640375647" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/55" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/55/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/55">EricAndrechek/Pacer#55</a></li>
+<li>feat(dashboard): projection overlay on the 5h/7d pace charts by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4640572322" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/56" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/56/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/56">EricAndrechek/Pacer#56</a></li>
+<li>feat(dashboard): "Compare models" projection detail view by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4640636255" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/57" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/57/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/57">EricAndrechek/Pacer#57</a></li>
+<li>feat(forecast): completed-cycle scoring + scoreboard (feedback-loop foundation) by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4640678675" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/58" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/58/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/58">EricAndrechek/Pacer#58</a></li>
+<li>feat(intelligence): forecast-engine primitives — Estimate, conformal intervals, EB shrinkage by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4642331441" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/59" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/59/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/59">EricAndrechek/Pacer#59</a></li>
+<li>feat(intelligence): unified walk-forward harness — per-regime scoring + bootstrap CIs by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4642360141" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/60" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/60/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/60">EricAndrechek/Pacer#60</a></li>
+<li>feat(intelligence): regime-gated end-of-day projector (weekday shape + conformal bands) by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4642443150" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/61" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/61/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/61">EricAndrechek/Pacer#61</a></li>
+<li>feat(intelligence): diurnal 7d burn model — integrate a weekday×hour rate forward by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4642488303" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/62" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/62/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/62">EricAndrechek/Pacer#62</a></li>
+<li>feat(intelligence): usage norms — typical-range bands, anomaly, pace-vs-norm by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4642518287" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/63" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/63/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/63">EricAndrechek/Pacer#63</a></li>
+<li>feat(intelligence): monthly daily-sum projector — fixes the demotion problem by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4642546126" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/64" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/64/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/64">EricAndrechek/Pacer#64</a></li>
+<li>feat(intelligence): engine actor — owns the store, typed question→Estimate API by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4642943266" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/65" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/65/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/65">EricAndrechek/Pacer#65</a></li>
+<li>feat(intelligence): self-eval persistence — the engine learns from its own track record by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4643238391" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/66" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/66/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/66">EricAndrechek/Pacer#66</a></li>
+<li>feat(intelligence): extend the self-eval loop to the rate-limit outlook by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4643384500" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/67" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/67/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/67">EricAndrechek/Pacer#67</a></li>
+<li>refactor(intelligence): the engine becomes the app's single prediction authority by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4646005096" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/68" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/68/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/68">EricAndrechek/Pacer#68</a></li>
+<li>feat(intelligence): research-driven model upgrades — pickup, pooling, remainder-conformal, stratified RL bands by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4646105973" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/69" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/69/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/69">EricAndrechek/Pacer#69</a></li>
+<li>feat(ui): final intelligence surface — research-backed uncertainty presentation by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4646186926" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/70" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/70/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/70">EricAndrechek/Pacer#70</a></li>
+<li>perf(intelligence): 2.8x faster refits + the engine reference doc by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4646248405" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/71" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/71/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/71">EricAndrechek/Pacer#71</a></li>
+<li>feat(ui): dissolve the intelligence card — engine answers live in the existing surfaces by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4648090371" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/72" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/72/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/72">EricAndrechek/Pacer#72</a></li>
+<li>feat(ui): trajectory + outlook polish across every surface by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4648981873" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/73" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/73/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/73">EricAndrechek/Pacer#73</a></li>
+<li>feat(ui): numbers with referents, labeled range bars, sheet redo, smarter burn warnings by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4649173328" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/74" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/74/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/74">EricAndrechek/Pacer#74</a></li>
+<li>feat(ui): self-explanatory units everywhere — clarity round 3 by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4649354288" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/75" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/75/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/75">EricAndrechek/Pacer#75</a></li>
+<li>fix(ui): round 4 — failure-case rendering, consistent selection metric, fold recovery by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4649514362" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/76" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/76/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/76">EricAndrechek/Pacer#76</a></li>
+<li>feat(ui): round 5 — honest crossing ranges, house modal for compare, header badges by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4649783456" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/77" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/77/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/77">EricAndrechek/Pacer#77</a></li>
+<li>fix(ui): plain-language burn copy — "limit" not "cap", outcomes not ratios, charts end at 100% by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4649941224" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/79" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/79/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/79">EricAndrechek/Pacer#79</a></li>
+<li>feat(ui): dashboard redesign — Now/Today strip, verdict chips on the wide charts, month outlook in trends by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4649990270" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/80" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/80/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/80">EricAndrechek/Pacer#80</a></li>
+<li>chore: post-redesign cleanup — stale names, file rename, fresh screenshots by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4650602657" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/81" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/81/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/81">EricAndrechek/Pacer#81</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.3.2...v0.3.3">EricAndrechek/Pacer@<tt>v0.3.2...v0.3.3</tt></a></p>]]></description>
+        <pubDate>Fri, 12 Jun 2026 15:52:01 +0000</pubDate>
+        <sparkle:version>1781279287</sparkle:version>
+        <sparkle:shortVersionString>0.3.3</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.3.3/Pacer-0.3.3.dmg"
+            length="6338661"
+            type="application/octet-stream"
+            sparkle:edSignature="d8NalMTrn5CKmWP0R+7LqjWpmVhx10WJpF96evqx6fs/WgiSSTTuu598Odx6Zs00u4bzOHYRyVYvKU0v3YXICg==" />
+    </item>
+            <item>
+        <title>Version 0.3.4</title>
+        <description><![CDATA[
+<h2>What's Changed</h2>
+<ul>
+<li>fix(oauth): drop dead refresh path, add .credentials.json fallback by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4696520408" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/82" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/82/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/82">EricAndrechek/Pacer#82</a></li>
+<li>fix(oauth): only accept a .credentials.json that holds claudeAiOauth by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4696888564" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/83" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/83/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/83">EricAndrechek/Pacer#83</a></li>
+<li>feat(oauth): read Claude Desktop credentials (opt-in) + freshest-token-wins by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4702543941" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/84" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/84/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/84">EricAndrechek/Pacer#84</a></li>
+<li>feat(oauth): hold our own token (keychain) + refresh-from-source + 401 fall-through by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4702786328" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/85" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/85/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/85">EricAndrechek/Pacer#85</a></li>
+<li>feat(ui): guided Claude Desktop enablement on first run + upgrade by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4702827006" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/86" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/86/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/86">EricAndrechek/Pacer#86</a></li>
+<li>fix(ui): tighten Desktop nudge copy; "Not now" snoozes for the session by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4702868750" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/87" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/87/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/87">EricAndrechek/Pacer#87</a></li>
+<li>fix(ui): Desktop nudge "Not now" dismisses for good; point to Settings by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4702905357" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/88" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/88/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/88">EricAndrechek/Pacer#88</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.3.3...v0.3.4">EricAndrechek/Pacer@<tt>v0.3.3...v0.3.4</tt></a></p>]]></description>
+        <pubDate>Fri, 19 Jun 2026 19:07:18 +0000</pubDate>
+        <sparkle:version>1781895821</sparkle:version>
+        <sparkle:shortVersionString>0.3.4</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.3.4/Pacer-0.3.4.dmg"
+            length="6406420"
+            type="application/octet-stream"
+            sparkle:edSignature="HtZbeVaCziMenaT4v75Y8N44J+8wVyuIrGUCCPHOQObVFSJNMU6ze2+Rp4AQCPZV6VQTDBpwpkbfPKHE7o/OAw==" />
+    </item>
+            <item>
+        <title>Version 0.3.5</title>
+        <description><![CDATA[
+<h2>What's Changed</h2>
+<ul>
+<li>fix(notify): detect early resets that null the reset anchor by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4706345455" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/89" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/89/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/89">EricAndrechek/Pacer#89</a></li>
+<li>fix(engine): reset-aware cycle segmentation so a global reset can't corrupt forecasts by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4706426788" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/90" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/90/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/90">EricAndrechek/Pacer#90</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.3.4...v0.3.5">EricAndrechek/Pacer@<tt>v0.3.4...v0.3.5</tt></a></p>]]></description>
+        <pubDate>Sat, 20 Jun 2026 12:02:14 +0000</pubDate>
+        <sparkle:version>1781956725</sparkle:version>
+        <sparkle:shortVersionString>0.3.5</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.3.5/Pacer-0.3.5.dmg"
+            length="6408583"
+            type="application/octet-stream"
+            sparkle:edSignature="fP0sIRm1wfx3FFc1fq7o1HjUv2J6wLVBiE4LAEV6Jy4n13EcehsdxhB7PGDGPqEOk3exBdWzcNd+7I+2+HiyCA==" />
+    </item>
+            <item>
+        <title>Version 0.3.6</title>
+        <description><![CDATA[
+<h2>What's Changed</h2>
+<ul>
+<li>fix(engine): scope alias-driven re-canonicalization so it can't freeze the UI by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4706858552" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/91" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/91/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/91">EricAndrechek/Pacer#91</a></li>
+<li>perf(engine): run the scan loop off the main thread (@ScanActor) by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4706995352" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/92" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/92/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/92">EricAndrechek/Pacer#92</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.3.5...v0.3.6">EricAndrechek/Pacer@<tt>v0.3.5...v0.3.6</tt></a></p>]]></description>
+        <pubDate>Sat, 20 Jun 2026 15:00:56 +0000</pubDate>
+        <sparkle:version>1781967467</sparkle:version>
+        <sparkle:shortVersionString>0.3.6</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.3.6/Pacer-0.3.6.dmg"
+            length="6411438"
+            type="application/octet-stream"
+            sparkle:edSignature="nWN5uISduOlqPymPrsrTsnJoo6jsA3I1ft/uLUJrgLI8Aae2gc7yZt1jOfWkvO2rpANNnDeFBkwsKRgfpF45Aw==" />
+    </item>
+            <item>
+        <title>Version 0.3.7</title>
+        <description><![CDATA[
+<h2>What's Changed</h2>
+<ul>
+<li>feat(intents): comprehensive Shortcuts data surface for third-party apps by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4716755954" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/93" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/93/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/93">EricAndrechek/Pacer#93</a></li>
+<li>feat(api): opt-in local HTTP server — JSON, Prometheus, and SSE by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4717033038" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/94" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/94/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/94">EricAndrechek/Pacer#94</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.3.6...v0.3.7">EricAndrechek/Pacer@<tt>v0.3.6...v0.3.7</tt></a></p>]]></description>
+        <pubDate>Mon, 22 Jun 2026 13:30:50 +0000</pubDate>
+        <sparkle:version>1782134777</sparkle:version>
+        <sparkle:shortVersionString>0.3.7</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.3.7/Pacer-0.3.7.dmg"
+            length="6620317"
+            type="application/octet-stream"
+            sparkle:edSignature="hxmY7qeYxk5QOg7INATkLhcD6sUohpnmyiNF8uWimqJYrd4NaJ7OXeVHIByAqZnvvs1lAE80HqUVABID+JwYAQ==" />
+    </item>
+            <item>
+        <title>Version 0.3.8</title>
+        <description><![CDATA[
+<h2>What's Changed</h2>
+<ul>
+<li>feat(api): per-model + per-day usage history endpoints by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4718848657" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/95" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/95/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/95">EricAndrechek/Pacer#95</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.3.7...v0.3.8">EricAndrechek/Pacer@<tt>v0.3.7...v0.3.8</tt></a></p>]]></description>
+        <pubDate>Mon, 22 Jun 2026 17:06:12 +0000</pubDate>
+        <sparkle:version>1782147744</sparkle:version>
+        <sparkle:shortVersionString>0.3.8</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.3.8/Pacer-0.3.8.dmg"
+            length="6683368"
+            type="application/octet-stream"
+            sparkle:edSignature="XuZpJ/RmjXrPi1Vr7z7SfE2SIEfovqEIlsI77B3XF8QfLa8/InzRmcG3d94QJV79yOvi2H2TClumpLMXhBlrCg==" />
+    </item>
+            <item>
+        <title>Version 0.3.9</title>
+        <description><![CDATA[
+<h2>What's Changed</h2>
+<ul>
+<li>fix(auth): read Claude Desktop's keychain only when its tokens change by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4719377028" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/96" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/96/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/96">EricAndrechek/Pacer#96</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.3.8...v0.3.9">EricAndrechek/Pacer@<tt>v0.3.8...v0.3.9</tt></a></p>]]></description>
+        <pubDate>Mon, 22 Jun 2026 22:40:01 +0000</pubDate>
+        <sparkle:version>1782167676</sparkle:version>
+        <sparkle:shortVersionString>0.3.9</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.3.9/Pacer-0.3.9.dmg"
+            length="6686663"
+            type="application/octet-stream"
+            sparkle:edSignature="koh6pmGEp5BI0Gm05+KIUIk3EkVRWwEBFS3KvvGyKmXHC2V/VXPz4ovCC35Bk33EUgW4jfZFNJY0kdTV7mdXBA==" />
+    </item>
+            <item>
+        <title>Version 0.3.10</title>
+        <description><![CDATA[
+<h2>What's Changed</h2>
+<ul>
+<li>fix(install): bounce widget extension on reinstall so widgets don't freeze by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4725376141" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/97" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/97/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/97">EricAndrechek/Pacer#97</a></li>
+<li>fix(widgets): relaunch stale widget extension after an app update by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4725672789" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/98" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/98/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/98">EricAndrechek/Pacer#98</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.3.9...v0.3.10">EricAndrechek/Pacer@<tt>v0.3.9...v0.3.10</tt></a></p>]]></description>
+        <pubDate>Tue, 23 Jun 2026 12:45:40 +0000</pubDate>
+        <sparkle:version>1782218462</sparkle:version>
+        <sparkle:shortVersionString>0.3.10</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.3.10/Pacer-0.3.10.dmg"
+            length="6689352"
+            type="application/octet-stream"
+            sparkle:edSignature="je0vrZQubJjqJTKy9XIwywLtAP0ag4Wsg4bz+OjgmVL7v62Mo2FpQTXakB7RzHzpAIMoZJdcIEBB46VS2oN0Aw==" />
+    </item>
+            <item>
+        <title>Version 0.3.11</title>
+        <description><![CDATA[
+<h2>What's Changed</h2>
+<ul>
+<li>fix(widgets): match orphaned extension by process name, not path by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4726087027" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/99" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/99/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/99">EricAndrechek/Pacer#99</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.3.10...v0.3.11">EricAndrechek/Pacer@<tt>v0.3.10...v0.3.11</tt></a></p>]]></description>
+        <pubDate>Tue, 23 Jun 2026 13:09:15 +0000</pubDate>
+        <sparkle:version>1782219862</sparkle:version>
+        <sparkle:shortVersionString>0.3.11</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.3.11/Pacer-0.3.11.dmg"
+            length="6689448"
+            type="application/octet-stream"
+            sparkle:edSignature="fqtOjDOymbMg6L/CU7RvJKfQzYvpZ3rE2KLQWi5mR31DhjvE0wBouB7onhsGYfP4gDlNNEzxL1M9sSI/K6fNBQ==" />
+    </item>
+            <item>
+        <title>Version 0.3.12</title>
+        <description><![CDATA[
+<h2>What's Changed</h2>
+<ul>
+<li>fix(pace): honest 0% idle state instead of "collecting…" by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4730660421" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/100" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/100/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/100">EricAndrechek/Pacer#100</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.3.11...v0.3.12">EricAndrechek/Pacer@<tt>v0.3.11...v0.3.12</tt></a></p>]]></description>
+        <pubDate>Wed, 24 Jun 2026 00:52:53 +0000</pubDate>
+        <sparkle:version>1782262159</sparkle:version>
+        <sparkle:shortVersionString>0.3.12</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.3.12/Pacer-0.3.12.dmg"
+            length="6698932"
+            type="application/octet-stream"
+            sparkle:edSignature="aEo45XThYVsTOTEXStMbUXrtHJwrBJA6DPA4eWtngq3xBCd1g6MXRwml6ExuVUs+aH2BgS2n0aWI4XeWzH+uCg==" />
+    </item>
+            <item>
+        <title>Version 0.3.13</title>
+        <description><![CDATA[
+<h2>What's Changed</h2>
+<ul>
+<li>6h silent auto-updates; add Token Pacer to README comparison by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4730941469" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/101" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/101/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/101">EricAndrechek/Pacer#101</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.3.12...v0.3.13">EricAndrechek/Pacer@<tt>v0.3.12...v0.3.13</tt></a></p>]]></description>
+        <pubDate>Wed, 24 Jun 2026 02:08:58 +0000</pubDate>
+        <sparkle:version>1782266644</sparkle:version>
+        <sparkle:shortVersionString>0.3.13</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.3.13/Pacer-0.3.13.dmg"
+            length="6698904"
+            type="application/octet-stream"
+            sparkle:edSignature="ck7BkTTe3VZOuHqeRbZIU8JtFSarKpUT9WiZoUCo3XBq/KHrpPfTYkkHREIWIMuTMZhMZzBFT02jCsq1laB1AA==" />
+    </item>
+            <item>
+        <title>Version 0.3.14</title>
+        <description><![CDATA[
+<h2>What's Changed</h2>
+<ul>
+<li>perf(ui): gate the toolbar freshness pill behind EquatableView by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4731258766" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/102" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/102/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/102">EricAndrechek/Pacer#102</a></li>
+<li>chore(install): self-heal the local notarization keychain profile by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4745803856" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/103" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/103/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/103">EricAndrechek/Pacer#103</a></li>
+<li>perf(ui): columnar fetch for PaceChartCard's 8-day rate-limit <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/query/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/query">@query</a> by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4746181622" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/104" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/104/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/104">EricAndrechek/Pacer#104</a></li>
+<li>perf(ui): gate the menu-bar label redraw + drop its pulse animation by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4746638236" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/105" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/105/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/105">EricAndrechek/Pacer#105</a></li>
+<li>perf(ui): debounce chart hover-selection to fix scroll stutter by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4746723932" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/106" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/106/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/106">EricAndrechek/Pacer#106</a></li>
+<li>perf(engine): stop re-reading .git/config for origin-less repos forever by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4746885057" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/107" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/107/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/107">EricAndrechek/Pacer#107</a></li>
+<li>perf(ui): fix dashboard scroll stutter (eager card stack + engine off-main) by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4747372880" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/108" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/108/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/108">EricAndrechek/Pacer#108</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.3.13...v0.3.14">EricAndrechek/Pacer@<tt>v0.3.13...v0.3.14</tt></a></p>]]></description>
+        <pubDate>Thu, 25 Jun 2026 21:09:52 +0000</pubDate>
+        <sparkle:version>1782421517</sparkle:version>
+        <sparkle:shortVersionString>0.3.14</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.3.14/Pacer-0.3.14.dmg"
+            length="6725763"
+            type="application/octet-stream"
+            sparkle:edSignature="UerA/T3K/vrhFXzR1yVN2DgJbiTsf6YW8HLaCajSTPBFLxPXaJ+zoiCzJJIrPDDP1ej40x0XQlnO36gY0J1fDw==" />
+    </item>
+            <item>
+        <title>Version 0.3.15</title>
+        <description><![CDATA[
+<h2>What's Changed</h2>
+<ul>
+<li>fix(ui): drop cross-cycle straggler that drew a red vertical line in pace charts by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4769126129" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/109" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/109/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/109">EricAndrechek/Pacer#109</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.3.14...v0.3.15">EricAndrechek/Pacer@<tt>v0.3.14...v0.3.15</tt></a></p>]]></description>
+        <pubDate>Mon, 29 Jun 2026 14:54:09 +0000</pubDate>
+        <sparkle:version>1782744562</sparkle:version>
+        <sparkle:shortVersionString>0.3.15</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.3.15/Pacer-0.3.15.dmg"
+            length="6727197"
+            type="application/octet-stream"
+            sparkle:edSignature="ddl2FHUVUR1fAVrnq3FZm/DJFPx1Ap4PU+VYJU0IiBleXf8Ft/11x9oYdxj9AJaqKDfFLyBWX3sgSPCxQk0yCg==" />
+    </item>
+            <item>
+        <title>Version 0.3.16</title>
+        <description><![CDATA[
+<h2>What's Changed</h2>
+<ul>
+<li>feat: project collections (overlapping, nestable groupings) by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4777587288" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/110" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/110/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/110">EricAndrechek/Pacer#110</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.3.15...v0.3.16">EricAndrechek/Pacer@<tt>v0.3.15...v0.3.16</tt></a></p>]]></description>
+        <pubDate>Thu, 02 Jul 2026 11:21:11 +0000</pubDate>
+        <sparkle:version>1782991007</sparkle:version>
+        <sparkle:shortVersionString>0.3.16</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.3.16/Pacer-0.3.16.dmg"
+            length="7004462"
+            type="application/octet-stream"
+            sparkle:edSignature="jmPAt1UnpK9uQYbk4sJ3pgdxdpaJd/ZH0uATbpuw6vxq5uuu05rciFYan2x6WrmAVITspE7k3jFeozaeZ85eDA==" />
+    </item>
+            <item>
+        <title>Version 0.3.17</title>
+        <description><![CDATA[
+<h2>What's Changed</h2>
+<ul>
+<li>Stable, pretty identity colors + shared donut component by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4795381436" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/111" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/111/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/111">EricAndrechek/Pacer#111</a></li>
+<li>Model naming + ordered-spectrum colors, Models group-by/metric, chart-axis fixes by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4797959238" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/112" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/112/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/112">EricAndrechek/Pacer#112</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.3.16...v0.3.17">EricAndrechek/Pacer@<tt>v0.3.16...v0.3.17</tt></a></p>]]></description>
+        <pubDate>Thu, 02 Jul 2026 20:36:59 +0000</pubDate>
+        <sparkle:version>1783024359</sparkle:version>
+        <sparkle:shortVersionString>0.3.17</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.3.17/Pacer-0.3.17.dmg"
+            length="7139633"
+            type="application/octet-stream"
+            sparkle:edSignature="dm73INskJusLfZbXt6yyFke3PWoSkoSrU4AVeqoHkPIpo8eQYhO+E4PQi4N3njhwJjGZaO2eTEedtWZlIcWJDw==" />
+    </item>
+            <item>
+        <title>Version 0.3.18</title>
+        <description><![CDATA[
+<h2>What's Changed</h2>
+<ul>
+<li>fix(ui): sort Models trend by date + kill redundant view recompute by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4798256845" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/113" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/113/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/113">EricAndrechek/Pacer#113</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.3.17...v0.3.18">EricAndrechek/Pacer@<tt>v0.3.17...v0.3.18</tt></a></p>]]></description>
+        <pubDate>Thu, 02 Jul 2026 21:27:34 +0000</pubDate>
+        <sparkle:version>1783027379</sparkle:version>
+        <sparkle:shortVersionString>0.3.18</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.3.18/Pacer-0.3.18.dmg"
+            length="7145730"
+            type="application/octet-stream"
+            sparkle:edSignature="91YOV4hCRTekHGRCAIbRXqHtXRciL3mL9fJ9cWSZWgh4b4BwLbF26yK5i9hCyEyTBls3Z4urt/4vO2oFo34LBA==" />
+    </item>
+            <item>
+        <title>Version 0.3.19</title>
+        <description><![CDATA[
+<h2>What's Changed</h2>
+<ul>
+<li>fix(ui): rate-limit projection/burn-chip live-reading reconcile + header badge wrapping by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4803562042" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/114" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/114/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/114">EricAndrechek/Pacer#114</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.3.18...v0.3.19">EricAndrechek/Pacer@<tt>v0.3.18...v0.3.19</tt></a></p>]]></description>
+        <pubDate>Fri, 03 Jul 2026 15:45:53 +0000</pubDate>
+        <sparkle:version>1783093311</sparkle:version>
+        <sparkle:shortVersionString>0.3.19</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.3.19/Pacer-0.3.19.dmg"
+            length="7164997"
+            type="application/octet-stream"
+            sparkle:edSignature="k+gxj9wVJVL9qnw0UP7aX1MzsRVRFdcbYFhuFsRHY4Skz7WbACQu9ZUvP0pkxVui+gE6tWCUEs5/hmyf4mSkCg==" />
+    </item>
+            <item>
+        <title>Version 0.3.20</title>
+        <description><![CDATA[
+<h2>What's Changed</h2>
+<ul>
+<li>tooling: bin/ship.sh + /ship skill for the release workflow by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4805171189" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/115" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/115/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/115">EricAndrechek/Pacer#115</a></li>
+<li>Prediction feedback loop v2: gated bands, snapshot trail, versioned params, shadow models, replay harness by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4819394764" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/116" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/116/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/116">EricAndrechek/Pacer#116</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.3.19...v0.3.20">EricAndrechek/Pacer@<tt>v0.3.19...v0.3.20</tt></a></p>]]></description>
+        <pubDate>Mon, 06 Jul 2026 13:14:06 +0000</pubDate>
+        <sparkle:version>1783343415</sparkle:version>
+        <sparkle:shortVersionString>0.3.20</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.3.20/Pacer-0.3.20.dmg"
+            length="7285164"
+            type="application/octet-stream"
+            sparkle:edSignature="0GV0WXtWvGbsC6PQWQgt00HnKtJe7OFDE3E7PCPUkovhkvbVPW/cUOmY5+NiBkxSTdpfgccAmQKDiPBUwBQWAQ==" />
+    </item>
+            <item>
+        <title>Version 0.3.21</title>
+        <description><![CDATA[
+<h2>What's Changed</h2>
+<ul>
+<li>7d band-coverage fix (per-cycle block conformal) + shadow-progress UI + weekly watchdog by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4819693909" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/117" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/117/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/117">EricAndrechek/Pacer#117</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.3.20...v0.3.21">EricAndrechek/Pacer@<tt>v0.3.20...v0.3.21</tt></a></p>]]></description>
+        <pubDate>Mon, 06 Jul 2026 13:49:23 +0000</pubDate>
+        <sparkle:version>1783345446</sparkle:version>
+        <sparkle:shortVersionString>0.3.21</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.3.21/Pacer-0.3.21.dmg"
+            length="7294474"
+            type="application/octet-stream"
+            sparkle:edSignature="hoMRj5MDVLVqoW9mwHqxZ7DJG4roSXOq32ohcTxb8EkZs36Hw8FHqyjHzpJup6NbhbKjuyiNFQUHbzQQAHKpCw==" />
+    </item>
+            <item>
+        <title>Version 0.3.22</title>
+        <description><![CDATA[
+<h2>What's Changed</h2>
+<ul>
+<li>tooling: ship.sh verify waits for appcast propagation before judging it by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4819782377" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/118" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/118/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/118">EricAndrechek/Pacer#118</a></li>
+<li>fix(ui): derive sidebar min-width from measured label, not a magic 220 by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4837305148" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/119" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/119/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/119">EricAndrechek/Pacer#119</a></li>
+<li>Adaptive multi-token OAuth polling + Tokens settings UI by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4840943531" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/120" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/120/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/120">EricAndrechek/Pacer#120</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.3.21...v0.3.22">EricAndrechek/Pacer@<tt>v0.3.21...v0.3.22</tt></a></p>]]></description>
+        <pubDate>Wed, 08 Jul 2026 20:50:45 +0000</pubDate>
+        <sparkle:version>1783543622</sparkle:version>
+        <sparkle:shortVersionString>0.3.22</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.3.22/Pacer-0.3.22.dmg"
+            length="7552698"
+            type="application/octet-stream"
+            sparkle:edSignature="WANZ98vKIWAoMLTgpkaElWrJFhyqhcaQkQCWaN6JtxGG26Mi8E0y3OgqPp53n53vrZyKlE8iYyCweRirQO86Aw==" />
+    </item>
+            <item>
+        <title>Version 0.4.0</title>
+        <description><![CDATA[
+<h2>What's Changed</h2>
+<ul>
+<li>Per-model rate limits, multi-account, and window-aware everything by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4998511175" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/121" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/121/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/121">EricAndrechek/Pacer#121</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.3.22...v0.4.0">EricAndrechek/Pacer@<tt>v0.3.22...v0.4.0</tt></a></p>]]></description>
+        <pubDate>Tue, 28 Jul 2026 12:35:50 +0000</pubDate>
+        <sparkle:version>1785241868</sparkle:version>
+        <sparkle:shortVersionString>0.4.0</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.4.0/Pacer-0.4.0.dmg"
+            length="8098763"
+            type="application/octet-stream"
+            sparkle:edSignature="3/9wmJZRYUCUBe33Wi2G4iDw5NgA4QipIEplhbym8cLUoCjnsv2CSR77bDqP/ZbMXAjhkn4PQ5yoPAcjy5KxDQ==" />
+    </item>
+            <item>
+        <title>Version 0.4.1</title>
+        <description><![CDATA[
+<h2>What's Changed</h2>
+<ul>
+<li>Scoped per-model pace charts plot their whole cycle, not one dot by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="5049735019" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/122" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/122/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/122">EricAndrechek/Pacer#122</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.4.0...v0.4.1">EricAndrechek/Pacer@<tt>v0.4.0...v0.4.1</tt></a></p>]]></description>
+        <pubDate>Mon, 03 Aug 2026 12:33:40 +0000</pubDate>
+        <sparkle:version>1785760123</sparkle:version>
+        <sparkle:shortVersionString>0.4.1</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.4.1/Pacer-0.4.1.dmg"
+            length="8109436"
+            type="application/octet-stream"
+            sparkle:edSignature="SwAhRNileXXqr1m0pTbRDSEg+G3lS5JN90oQxqoJOFiJSoyvqej0xe7XHi+1HCl3FwTF75PdkFzPSCGvN60UBg==" />
+    </item>
+            <item>
+        <title>Version 0.4.2</title>
+        <description><![CDATA[
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.4.1...v0.4.2">EricAndrechek/Pacer@<tt>v0.4.1...v0.4.2</tt></a></p>]]></description>
+        <pubDate>Tue, 04 Aug 2026 11:37:13 +0000</pubDate>
+        <sparkle:version>1785843155</sparkle:version>
+        <sparkle:shortVersionString>0.4.2</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.4.2/Pacer-0.4.2.dmg"
+            length="8136983"
+            type="application/octet-stream"
+            sparkle:edSignature="VV2vLk6YyXzvzxbOKYVPpKStd4tl5s9u2Tx9+4GA/4F8b65ljqJbEgrC46NG/nuG1dM31pMq2HUZr3JBFhR4DQ==" />
+    </item>
+            <item>
+        <title>Version 0.4.3</title>
+        <description><![CDATA[
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.4.2...v0.4.3">EricAndrechek/Pacer@<tt>v0.4.2...v0.4.3</tt></a></p>]]></description>
+        <pubDate>Tue, 04 Aug 2026 12:43:44 +0000</pubDate>
+        <sparkle:version>1785847121</sparkle:version>
+        <sparkle:shortVersionString>0.4.3</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.4.3/Pacer-0.4.3.dmg"
+            length="8142405"
+            type="application/octet-stream"
+            sparkle:edSignature="oWoIL6vwbHeE/bU4bUIMtYjnjw/iIeqRNDLTZGO4f2SQ8YZz4t9YkDx5rz8OWFS1kcENiioTeIODL45/PTppBg==" />
+    </item>
+            <item>
+        <title>Version 0.4.4</title>
+        <description><![CDATA[
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.4.3...v0.4.4">EricAndrechek/Pacer@<tt>v0.4.3...v0.4.4</tt></a></p>]]></description>
+        <pubDate>Tue, 04 Aug 2026 13:27:09 +0000</pubDate>
+        <sparkle:version>1785849131</sparkle:version>
+        <sparkle:shortVersionString>0.4.4</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.4.4/Pacer-0.4.4.dmg"
+            length="8149198"
+            type="application/octet-stream"
+            sparkle:edSignature="ng3MCgOK3/PX8NR5J9J1pAxh7IhDAX/3OFcVM3mv4lJVmKoXK8PIgFw7wjErdx0hrTNWbQBK6yynveo9U/hjBQ==" />
+    </item>
+            <item>
+        <title>Version 0.4.5</title>
+        <description><![CDATA[
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.4.4...v0.4.5">EricAndrechek/Pacer@<tt>v0.4.4...v0.4.5</tt></a></p>]]></description>
+        <pubDate>Tue, 04 Aug 2026 14:12:44 +0000</pubDate>
+        <sparkle:version>1785852396</sparkle:version>
+        <sparkle:shortVersionString>0.4.5</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.4.5/Pacer-0.4.5.dmg"
+            length="8150025"
+            type="application/octet-stream"
+            sparkle:edSignature="AstwHY3TpEcMI3/eRBzAeI/jYF+PUXl9mdjMo+tGVMv4pcMXS0Sh26Cv0xUn4NiKqp/LDTpWsF+uAGDTrkHgDA==" />
+    </item>
+            <item>
+        <title>Version 0.4.6</title>
+        <description><![CDATA[
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.4.5...v0.4.6">EricAndrechek/Pacer@<tt>v0.4.5...v0.4.6</tt></a></p>]]></description>
+        <pubDate>Tue, 04 Aug 2026 14:21:40 +0000</pubDate>
+        <sparkle:version>1785853020</sparkle:version>
+        <sparkle:shortVersionString>0.4.6</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.4.6/Pacer-0.4.6.dmg"
+            length="8149822"
+            type="application/octet-stream"
+            sparkle:edSignature="UCSGIWo1RHrDp6QA9QPCJTBhHnw2kTLfolPP2uw6MGobhg94nGo1C3YQVkZITwFCKizpd0W0zNFGSEdu0jG+CA==" />
+    </item>
+            <item>
+        <title>Version 0.4.7</title>
+        <description><![CDATA[<h2>What's Changed</h2>
+<ul>
+<li>perf: don't compute the auto-alias candidate hash on idle cycles</li>
+<li>docs(perf): the startup walk is gone — record how, and its regression</li>
+<li>perf: throttle dedup-index writes, they cost 90ms every cycle</li>
+<li>perf: persist the dedup map so launches stop walking the store</li>
+<li>test(verify-data): check cost, not just tokens</li>
+<li>fix(release): stop shipping empty release notes</li>
+</ul>
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.4.6...v0.4.7">EricAndrechek/Pacer@<tt>v0.4.6...v0.4.7</tt></a></p>]]></description>
+        <pubDate>Tue, 04 Aug 2026 15:11:59 +0000</pubDate>
+        <sparkle:version>1785855978</sparkle:version>
+        <sparkle:shortVersionString>0.4.7</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.4.7/Pacer-0.4.7.dmg"
+            length="8178602"
+            type="application/octet-stream"
+            sparkle:edSignature="mS8bkMV1awLSXCx0MwA5nk3tbt1lVLATid3imVSn+Fr7C4ak+59aApmNgYssa4rnmzmmYz83s9v4yVHL8qTyAA==" />
+    </item>
+            <item>
+        <title>Version 0.4.8</title>
+        <description><![CDATA[<p>Your costs were reading low. This release fixes that and rebuilds the history.</p>
+<h2>Costs were under-reported, and now self-correct</h2>
+<p>Pacer derives cost from tokens x pricing. If pricing hadn't finished loading<br>
+when a total was calculated — which routinely happened in the first seconds<br>
+after launch — everything computed in that window came out as $0. A $0 total<br>
+looks exactly like a real one, so nothing ever recalculated it, and the error<br>
+stayed permanently.</p>
+<p>On a real store this showed up as one day's project totals sitting $663 below<br>
+the same day's daily total, all of it one model's spend.</p>
+<p>Three fixes:</p>
+<ul>
+<li>Pricing is now guaranteed to be loaded before any total is calculated.</li>
+<li>When a brand-new model gets priced for the first time, Pacer now rebuilds<br>
+its history automatically. Previously every model launch needed a Pacer<br>
+update to correct the costs that had accumulated at $0.</li>
+<li>Today's and the current hour's figures are recalculated from your raw usage<br>
+every 10 minutes, so a number can't drift and then freeze when the hour<br>
+rolls over.</li>
+</ul>
+<p><strong>Your existing totals are rebuilt once on first launch after updating.</strong> No<br>
+action needed, and nothing is deleted — Pacer keeps every raw sample and<br>
+recomputes from those.</p>
+<h2>Two days in May were counted twice</h2>
+<p>126 turns from May 6th and 7th had been recorded twice over, so both days<br>
+read higher than they should. Pacer now finds and collapses these on first<br>
+launch after updating.</p>
+<p>Nothing is lost: the duplicate copies were identical to the ones kept, and<br>
+this is the only situation in which Pacer removes a raw record — it never<br>
+deletes your history by age or for space.</p>
+<h2>First launch is 3.3x faster</h2>
+<p>Setting Pacer up used to mean waiting while it read every transcript you had<br>
+ever written, one line at a time. On a 1,700-file, 1.9 GB history that was<br>
+47 seconds of an unresponsive app.</p>
+<p>It now reads them all at once: <strong>14.3 seconds</strong>, with results verified<br>
+identical to the old path down to the individual token.</p>
+<p>This only affects first launch and full re-scans. Ongoing updates are<br>
+unchanged — Pacer still watches for file changes and reads only the bytes<br>
+that changed, at ~0% idle CPU.</p>
+<h2>Under the hood</h2>
+<p>Pacer now keeps an append-only archive of every billable turn it has seen,<br>
+alongside the main database. Nothing user-visible reads it yet; it's the<br>
+foundation for keeping full history without the storage growing unbounded.<br>
+It never deletes anything.</p>
+<hr>
+<p>Requires macOS 15 or later. Update via Pacer's built-in updater, or download<br>
+below.</p>]]></description>
+        <pubDate>Tue, 04 Aug 2026 19:23:04 +0000</pubDate>
+        <sparkle:version>1785871007</sparkle:version>
+        <sparkle:shortVersionString>0.4.8</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.4.8/Pacer-0.4.8.dmg"
+            length="19929749"
+            type="application/octet-stream"
+            sparkle:edSignature="5yQ8zsUnDtOJKdqi55DKRCj65gPUijKxicwJwomUUQfo0BH/0f9wuISjKGf19m8NmPErXB6wKOXgwS080M2zBg==" />
+    </item>
+            <item>
+        <title>Version 0.4.9</title>
+        <description><![CDATA[<p>Faster rollups, and Pacer now checks its own archive.</p>
+<h2>Hourly figures rebuild ~47x faster</h2>
+<p>Recalculating an hour's usage was loading a whole day of that model's<br>
+records and filtering them in memory. It now asks for just that hour —<br>
+1,406 ms down to 30 ms on a large history. You'll notice it most if you<br>
+use Pacer heavily, where the background refresh could briefly stall.</p>
+<h2>The raw archive verifies itself</h2>
+<p>0.4.8 introduced an append-only archive of every billable turn. Pacer now<br>
+compares it against its main database every hour and records the result,<br>
+so a disagreement surfaces on its own instead of waiting for someone to<br>
+go looking.</p>
+<p>It also fixes a case where turns that arrived out of order — which happens<br>
+whenever you resume an older session — could be left out of the archive<br>
+permanently.</p>
+<p>Nothing here changes your numbers; 0.4.8 was the release that corrected<br>
+those.</p>
+<hr>
+<p>Requires macOS 15 or later. Update via Pacer's built-in updater, or<br>
+download below.</p>]]></description>
+        <pubDate>Tue, 04 Aug 2026 20:02:55 +0000</pubDate>
+        <sparkle:version>1785873470</sparkle:version>
+        <sparkle:shortVersionString>0.4.9</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.4.9/Pacer-0.4.9.dmg"
+            length="19935629"
+            type="application/octet-stream"
+            sparkle:edSignature="VOhroT/A8UZ0eq7T8sbErwQg4G0Yd8R27wcAFi8N2Cwko/PqCSsJmXWFLO8TxIiuSwCKIwpaNigo0wP3m0/yDg==" />
+    </item>
+            <item>
+        <title>Version 0.4.10</title>
+        <description><![CDATA[<p>A fix for the raw archive, which was quietly recording some replies short.</p>
+<h2>Streamed replies were archived before they finished</h2>
+<p>Pacer's archive (added in 0.4.8) keeps a permanent record of every billable<br>
+turn. Claude Code writes a long reply to disk repeatedly as it streams, and<br>
+Pacer corrects its own records once the finished version arrives — but the<br>
+archive kept whichever version it saw first.</p>
+<p>Over six days on a real machine that came to 466 turns holding roughly 2.35<br>
+million fewer output tokens than they should. Pacer's visible numbers were<br>
+never affected; only the archive was.</p>
+<p>Pacer now checks the archive's contents against its own records rather than<br>
+just checking that a turn is present at all, and repairs anything that has<br>
+been superseded. Existing archives are corrected automatically on the next<br>
+launch — no action needed.</p>
+<p>Nothing here changes the usage or cost figures you see.</p>
+<hr>
+<p>Requires macOS 15 or later. Update via Pacer's built-in updater, or download<br>
+below.</p>]]></description>
+        <pubDate>Mon, 10 Aug 2026 12:08:36 +0000</pubDate>
+        <sparkle:version>1786363351</sparkle:version>
+        <sparkle:shortVersionString>0.4.10</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.4.10/Pacer-0.4.10.dmg"
+            length="19935852"
+            type="application/octet-stream"
+            sparkle:edSignature="i+aU2U64Ce1L6G3SxkLsqycZ6yN+XviEXinw2hPqqYbqjPM8a6ojWN2NIOFNKhH30Q2j4gsgHtzxOPBBkFofDA==" />
+    </item>
+            <item>
+        <title>Version 0.4.11</title>
+        <description><![CDATA[<p>Fixes a menu-bar display bug at 100% usage.</p>
+<h2>"100%" no longer breaks the dropdown</h2>
+<p>When a window reached 100%, the menu-bar dropdown wrapped the number onto<br>
+two lines and pushed the label outside its ring. Three digits are one<br>
+character wider than every other reading, and both spots were sized for<br>
+two.</p>
+<p>Reported by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/jfwoods/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/jfwoods">@jfwoods</a> in #125 — thank you.</p>
+<p>Readings below 100% are unchanged, pixel for pixel, including the gauges<br>
+in the dashboard and widgets.</p>
+<hr>
+<p>Requires macOS 15 or later. Update via Pacer's built-in updater, or<br>
+download below.</p>]]></description>
+        <pubDate>Mon, 10 Aug 2026 12:45:55 +0000</pubDate>
+        <sparkle:version>1786365660</sparkle:version>
+        <sparkle:shortVersionString>0.4.11</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.4.11/Pacer-0.4.11.dmg"
+            length="19938767"
+            type="application/octet-stream"
+            sparkle:edSignature="2SYkMuW2NKDCXA8d+kQdKvd/OTyxeh+h57WqdxDWa8j5PKFrcs5EWWLNVQL5JHWjb47ccfdCoryS1YPDLQIaBA==" />
+    </item>
+            <item>
+        <title>Version 0.4.12</title>
+        <description><![CDATA[<p>Fixes Pacer burning a CPU core while the Dashboard window is open.</p>
+<h2>The Dashboard was pegging a core</h2>
+<p>If you left the Dashboard window open, Pacer used roughly a full CPU core<br>
+continuously — measured at 103.9% with the window open versus 0.0% with it<br>
+closed. Fans up, battery down, for a background app whose entire job is to<br>
+sit quietly.</p>
+<p>The rate-limit pace charts were reloading eight days of history — about<br>
+25,700 records — every single time anything was written to the database,<br>
+which happens constantly as Pacer records your usage. That work ran on the<br>
+main thread, which is also what draws the window.</p>
+<p>They now reload only when new rate-limit data actually arrives, roughly<br>
+every five minutes. Same charts, same history, same live updates.</p>
+<p>This affected 0.4.1 through 0.4.11. If you keep the Dashboard open, this is<br>
+worth updating for.</p>
+<h2>Also</h2>
+<p>DuckDB's background worker pool is now capped at one thread. It was sizing<br>
+itself to your CPU core count and keeping every one of those threads alive<br>
+for the life of the app, to do work that needs a single thread.</p>
+<hr>
+<p>Requires macOS 15 or later. Update via Pacer's built-in updater, or download<br>
+below.</p>]]></description>
+        <pubDate>Tue, 11 Aug 2026 11:46:49 +0000</pubDate>
+        <sparkle:version>1786448551</sparkle:version>
+        <sparkle:shortVersionString>0.4.12</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.4.12/Pacer-0.4.12.dmg"
+            length="19958404"
+            type="application/octet-stream"
+            sparkle:edSignature="SYVK5AQYKvn0S1gfEUSvRN232iLgM0o71YYyFcjTgWXWApoK/nK3WSGl8WCo+RMBG+sKpEcEl2bAAANaPMnyDQ==" />
+    </item>
+            <item>
+        <title>Version 0.4.13</title>
+        <description><![CDATA[<p>More CPU. This one is the big one.</p>
+<h2>Pacer was recomputing its whole forecast every 20 seconds</h2>
+<p>0.4.12 fixed the Dashboard window pegging a core. This fixes the rest,<br>
+which showed up as Pacer being busy in bursts even with no Claude Code<br>
+session running.</p>
+<p>The forecasting engine — the thing behind projected fill, time-to-limit<br>
+and the pace bands — was refitting from scratch every time Pacer recorded<br>
+new usage, at most every 20 seconds. Each refit takes about 4.5 seconds of<br>
+real work. That is roughly a quarter of a CPU core, permanently, to<br>
+recompute answers that change over hours.</p>
+<p>It now refits when the data it actually depends on changes — your<br>
+rate-limit windows — rather than every time a token is recorded.</p>
+<p>Measured on a real machine with Claude Code actively running:</p>
+<markdown-accessiblity-table><table role="table">
+<thead>
+<tr>
+<th></th>
+<th>CPU</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>before</td>
+<td>~100% of a core</td>
+</tr>
+<tr>
+<td>after 0.4.12</td>
+<td>~16%</td>
+</tr>
+<tr>
+<td>after this release</td>
+<td>~7%</td>
+</tr>
+</tbody>
+</table></markdown-accessiblity-table>
+<p>Forecasts are unchanged. They were already being recomputed far more often<br>
+than their answers could move.</p>
+<hr>
+<p>Requires macOS 15 or later. Update via Pacer's built-in updater, or download<br>
+below.</p>]]></description>
+        <pubDate>Tue, 11 Aug 2026 13:40:28 +0000</pubDate>
+        <sparkle:version>1786455354</sparkle:version>
+        <sparkle:shortVersionString>0.4.13</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.4.13/Pacer-0.4.13.dmg"
+            length="19967641"
+            type="application/octet-stream"
+            sparkle:edSignature="4p02DZo1b46NS08EjdoPNo8zGoRDcaQ/Se/JLjxuViWTeFu6qzRg13x0sw+E832Jlrzz+GbmrNQQFJNZkM+JCw==" />
+    </item>
+            <item>
+        <title>Version 0.4.14</title>
+        <description><![CDATA[<p>More CPU work, this time aimed at keeping the Dashboard window open.</p>
+<h2>Optimised for the window being open</h2>
+<p>0.4.12 and 0.4.13 cut Pacer's CPU use a long way, but both were verified<br>
+with the Dashboard closed. If you keep the window open — on a second<br>
+monitor, say — that's the state that matters, and it had its own set of<br>
+problems.</p>
+<p>Four pieces of work were repeating constantly for no benefit:</p>
+<ul>
+<li>The burn-rate warning re-fitted a statistical model every time rate-limit<br>
+data arrived, even though its inputs only change when the forecast is<br>
+refit.</li>
+<li>The toolbar's activity pill re-read the database on every write, to show<br>
+a label that changes about once a minute.</li>
+<li>The "Now" and "Today" tiles did the same, six times over.</li>
+<li>The rate-limit charts reloaded eight days of history — about 25,700<br>
+records — every time a poll added three new ones. They now load just<br>
+the new ones.</li>
+</ul>
+<p>No single part of Pacer now dominates its own CPU profile.</p>
+<h2>Also fixed</h2>
+<p>The "Now" tiles captured today's date and the current hour when the window<br>
+opened and kept them, so after an hour rolled over they read from the wrong<br>
+hour bucket until the window was reopened.</p>
+<hr>
+<p>Requires macOS 15 or later. Update via Pacer's built-in updater, or download<br>
+below.</p>]]></description>
+        <pubDate>Tue, 11 Aug 2026 15:20:48 +0000</pubDate>
+        <sparkle:version>1786461319</sparkle:version>
+        <sparkle:shortVersionString>0.4.14</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.4.14/Pacer-0.4.14.dmg"
+            length="19976555"
+            type="application/octet-stream"
+            sparkle:edSignature="F9oZZnRMIFZvQ00RD0bsEtNLeCjL5X0+awWr83tePmZ7rstWnH7r1N9f7Rhy2j3AlMF9SmhyRLeLOjIOvevPBg==" />
+    </item>
+            <item>
+        <title>Version 0.5.0</title>
+        <description><![CDATA[
+<h2>What's Changed</h2>
+<ul>
+<li>feat: native multi-account — attribution, scoping, and a poller that shares its tokens by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="5400787627" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/126" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/126/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/126">EricAndrechek/Pacer#126</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.4.14...v0.5.0">EricAndrechek/Pacer@<tt>v0.4.14...v0.5.0</tt></a></p>]]></description>
+        <pubDate>Thu, 10 Sep 2026 15:46:35 +0000</pubDate>
+        <sparkle:version>1789054820</sparkle:version>
+        <sparkle:shortVersionString>0.5.0</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.5.0/Pacer-0.5.0.dmg"
+            length="21115530"
+            type="application/octet-stream"
+            sparkle:edSignature="bFwkFohxQO4L77Hd2CcNoCegkTTScZzj6vVT4nrRoZX8ugb4PybvsiOGBEhdm+zSkzVr2iwXZ58l0RMRGaLnDQ==" />
+    </item>
+            <item>
+        <title>Version 0.5.1</title>
+        <description><![CDATA[<p>Pacer can now tell an AI agent how much budget it has left — and the agent can act on it.</p>
+<h2>Heads up if you scrape <code class="notranslate">/metrics</code></h2>
+<p><code class="notranslate">pacer_rate_limit_*</code> now carries an <code class="notranslate">account</code> label. On a machine with one<br>
+account nothing changes. With two signed in, a query like<br>
+<code class="notranslate">pacer_rate_limit_used_ratio{window="five_hour"}</code> returns <strong>one series per<br>
+account</strong> instead of one — so a single-stat panel or an alert rule that assumed<br>
+a single value needs an <code class="notranslate">account="…"</code> matcher or an aggregation like <code class="notranslate">max()</code>.</p>
+<p>That's the only breaking change here, and it's deliberate: the alternative was a<br>
+second metric family meaning the same thing.</p>
+<h2>A pacing skill, shipped in the app</h2>
+<p>Pacer includes a Claude Code skill. Install it from <strong>Settings → Integrations</strong><br>
+and Claude can read your usage before it starts a long run or fans out a pile of<br>
+subagents, pause and checkpoint when a window is nearly full, and wait out the<br>
+reset instead of losing the work. One shared read serves a whole fan-out, so a<br>
+hundred subagents cost Pacer nothing.</p>
+<p>It needs no dependencies beyond what macOS already has, and it updates when<br>
+Pacer updates — there's nothing to re-download.</p>
+<p>Three things it does that matter in practice:</p>
+<ul>
+<li><strong>A per-model cap only stops work that uses that model.</strong> A full Fable weekly<br>
+window has nothing to say to an agent running Opus, and won't stop it.</li>
+<li><strong>It knows which account you're on.</strong> With two logins signed in, it reads the<br>
+one this session is actually billing — not whichever was picked last.</li>
+<li><strong>It can gate on the forecast, not just the level.</strong> "Will this finish before<br>
+I run out" is a better question than "am I nearly out", and it asks that one.</li>
+</ul>
+<p>One optional line in your <code class="notranslate">CLAUDE.md</code> makes pacing the default for long runs.<br>
+Because that line points at a file Pacer owns, it never needs re-pasting.</p>
+<h2>Every window, every account, over HTTP</h2>
+<p>The local API used to report exactly two rate-limit windows for one account.<br>
+Pacer has tracked more than that for a while — per-model caps, and every account<br>
+you're signed into — and now the API does too:</p>
+<ul>
+<li><code class="notranslate">/v1/snapshot</code> reports every window, including per-model caps, and <code class="notranslate">?account=</code><br>
+scopes the whole payload to one login.</li>
+<li><code class="notranslate">/v1/limits/history</code> gives each window's utilisation over time, so you can<br>
+chart or fit it yourself.</li>
+<li><code class="notranslate">/v1/session</code> and <code class="notranslate">/v1/sessions</code> report what a session is running and where<br>
+your other live sessions are.</li>
+<li>Each window now carries how fast it's climbing — measured over the last half<br>
+hour as well as the engine's smoothed average. When those two disagree,<br>
+you're in a burst.</li>
+</ul>
+<h2>Your plan, precisely</h2>
+<p>Pacer now shows <strong>Max 20×</strong> rather than just "Max", on the dashboard, in<br>
+Settings, and over the API. It's the number that gives a percentage meaning: 20%<br>
+of a Max 20× budget is four times 20% of a Max 5× one.</p>
+<h2>Fixes</h2>
+<ul>
+<li>Switching accounts now takes effect immediately. Pacer could spend up to half<br>
+an hour still polling the account you'd just left.</li>
+<li>An account's details no longer get stuck at whatever was first recorded for<br>
+it, which is why plan information could never appear.</li>
+</ul>]]></description>
+        <pubDate>Fri, 11 Sep 2026 12:12:00 +0000</pubDate>
+        <sparkle:version>1789128278</sparkle:version>
+        <sparkle:shortVersionString>0.5.1</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.5.1/Pacer-0.5.1.dmg"
+            length="21387179"
+            type="application/octet-stream"
+            sparkle:edSignature="eBQI4FrYFPYNOkD3mmJ9IsEBOVePyFsRD07oJp90o8FRRcPCY/BzF/FJMBEhN9QS95ESWHFUnB72IMTWxU/1Bg==" />
+    </item>
+            <item>
+        <title>Version 0.6.0</title>
+        <description><![CDATA[<p>The dashboard comes back where you left it, and an agent in a fan-out stops gating on somebody else's rate limit.</p>
+<h2>Heads up if your agents use the pacing skill</h2>
+<p><code class="notranslate">--model auto</code> has changed what it does when a session is running <strong>more than<br>
+one model at once</strong> — an orchestrator with a fan-out of subagents under it.</p>
+<p>It used to answer with the model on the session's newest turn. That turns out<br>
+to be unsound: a subagent does not get its own session id. Claude Code records<br>
+its turns under the <em>parent's</em>, and nothing in the environment names a<br>
+per-agent model, so "which model am I?" is genuinely unanswerable from inside a<br>
+subagent. In practice a Sonnet builder was told it was running Fable and gated<br>
+itself on a weekly cap at 95% that did not bind it and would not reset for<br>
+three days — stalling the whole run on somebody else's limit.</p>
+<p>So it no longer guesses. With one model in flight, nothing changes: <code class="notranslate">auto</code> is<br>
+exact, as before. With several, it binds only the account-wide windows (5-hour,<br>
+weekly) and says so:</p>
+<pre class="notranslate"><code class="notranslate">pace: GO — 5h 12%, 7d 32% (cap 85%). [model ambiguous (claude-fable-5-1,
+claude-sonnet-5) — account-wide windows only; pass --model to gate on yours]
+</code></pre>
+<p><strong>If you orchestrate subagents, pass <code class="notranslate">--model</code> explicitly</strong> — the orchestrator<br>
+picked the model, so it is the one part of the system that knows. The skill's<br>
+paste-into-every-subagent clause has been updated to say so. The trade is<br>
+deliberate but it is a trade: an orchestrator running <code class="notranslate">auto</code> mid-fan-out is no<br>
+longer stopped by its own per-model cap.</p>
+<p><code class="notranslate">--model auto</code> also <em>says</em> what it resolved now, on the <code class="notranslate">GO</code>, <code class="notranslate">PAUSE</code> and<br>
+<code class="notranslate">report</code> lines. It always decided something; it just never told you, which is<br>
+why the wrong answer went unnoticed.</p>
+<p>Scraping the API? <code class="notranslate">/v1/session</code> gained a <code class="notranslate">models</code> array — every model the<br>
+session has run recently, newest first. Additive; <code class="notranslate">model</code> still means what it<br>
+did.</p>
+<h2>The window stays where you put it</h2>
+<p>Park the dashboard on whichever display and Space suits you and it comes back<br>
+there — across relaunches, across updates, and across a monitor that was still<br>
+asleep when you logged in.</p>
+<p>That was the bug that started this release: installing an update put the window<br>
+back on the wrong display at the wrong size. Four separate things were<br>
+overwriting the position you had chosen, including the app's own restore<br>
+recording its own moves as if you had made them.</p>
+<p>Three behaviours changed with it:</p>
+<ul>
+<li><strong>Summoning the dashboard takes you to it.</strong> Clicking the menu bar used to<br>
+drag the window onto whichever display your cursor was on, and onto whichever<br>
+Space you happened to be looking at. Now the window stays where it lives and<br>
+macOS switches you to it. If your Mission Control settings won't follow it,<br>
+Pacer brings the window over instead, so a menu-bar click never does nothing.</li>
+<li><strong>A dashboard you closed stays closed.</strong> Pacer meant to do this and never<br>
+did — a closed window came back on the next launch regardless. Logging in<br>
+should not put a window on screen you deliberately shut.</li>
+<li><strong>A monitor that is asleep at login no longer costs you the position.</strong> The<br>
+window waits rather than being dumped somewhere arbitrary, and returns home<br>
+when that display does.</li>
+</ul>
+<h2>Why this is 0.6.0 and not 0.5.2</h2>
+<p>Pacer's convention is that a minor bump means a SwiftData reset. <strong>This release<br>
+does not reset anything</strong> — your history is untouched and no migration runs.</p>
+<p>It is a minor because the behaviour contracts changed: <code class="notranslate">--model auto</code> answers a<br>
+different question in a fan-out, and the dashboard's window handling is<br>
+meaningfully different from what you are used to. That seemed worth a number<br>
+people would notice.</p>]]></description>
+        <pubDate>Fri, 11 Sep 2026 17:04:35 +0000</pubDate>
+        <sparkle:version>1789145834</sparkle:version>
+        <sparkle:shortVersionString>0.6.0</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.6.0/Pacer-0.6.0.dmg"
+            length="21405690"
+            type="application/octet-stream"
+            sparkle:edSignature="+QY8vDc7uoD9exWrDs+tqT1CXt/9ZlA5RGJFiPgdwHwUAYSzGA9uKfsxNm46bI+cw5GOyAm7GNmvLqOCOZqABA==" />
+    </item>
+            <item>
+        <title>Version 0.7.0</title>
+        <description><![CDATA[<p>Pacer looks like a macOS 26 app now — and on macOS 15 it looks exactly like it always has.</p>
+<h2>The new design</h2>
+<p>On <strong>macOS 26 (Tahoe) and macOS 27</strong>, Pacer adopts the system's current design:<br>
+buttons, pickers, menus and the toolbar all pick up Liquid Glass. Until now it<br>
+did not, and the reason is a detail worth stating once — macOS decides an app's<br>
+appearance from the SDK it was built against, not the version you are running.<br>
+Pacer was still built against the macOS 15 SDK, so it kept the old look even on<br>
+a brand-new Mac. This release changes what it is built with.</p>
+<p><strong>Your data is untouched.</strong> No database reset, no re-import, no re-scan. This<br>
+is a minor version because the app looks materially different, not because<br>
+anything underneath moved.</p>
+<p><strong>On macOS 15 (Sequoia) nothing changes at all</strong> — that version of macOS has no<br>
+new design to draw, and Pacer still runs there from the same single download.<br>
+macOS 15 remains the minimum.</p>
+<h2>Four things that were broken on macOS 26+ and are fixed</h2>
+<p>These only affected people already on Tahoe. Each one came from the system<br>
+changing behaviour underneath the app rather than from anything Pacer did.</p>
+<p><strong>A second account could be scanned twice.</strong> If you use <code class="notranslate">claude-swap</code>, Pacer<br>
+checks whether a discovered profile is a folder it already scans, and that<br>
+check compared two file URLs. macOS 26 changed how it decides whether a<br>
+directory URL ends in a slash, so the same folder stopped comparing equal to<br>
+itself and the guard silently stopped working. Totals stayed right — duplicate<br>
+turns are caught later by message id — but every file under that folder was<br>
+being parsed twice on every scan.</p>
+<p><strong>The Models trend axis was unreadable.</strong> It asks for six date labels across 90<br>
+days; macOS 26 drew all ninety, stacked on top of each other.</p>
+<p><strong>Menu-bar tooltips stopped appearing.</strong> Hovering the menu-bar item, and the<br>
+rows inside its dropdown, showed nothing. They use AppKit's tooltips again<br>
+rather than SwiftUI's, which still work.</p>
+<p><strong>Pacer could steal focus at launch and land on the wrong screen.</strong> Restoring<br>
+the dashboard you had left open brought the app to the front over whatever you<br>
+were working in, and a dashboard parked on a display that was not currently<br>
+connected reappeared somewhere arbitrary instead of where you keep it. It now<br>
+hands the front back to the app that had it, and falls back predictably when<br>
+its home display is missing.</p>
+<h2>Smaller things</h2>
+<p>Controls sit at the size macOS 26 designs around, rather than being compressed<br>
+a step smaller everywhere. The status readout in the toolbar no longer draws a<br>
+second pill inside the one the toolbar already draws for it. Cards keep their<br>
+edges: macOS 26 made the window background and the card background the same<br>
+colour, which had quietly flattened every stacked view.</p>]]></description>
+        <pubDate>Thu, 17 Sep 2026 22:25:45 +0000</pubDate>
+        <sparkle:version>1789683457</sparkle:version>
+        <sparkle:shortVersionString>0.7.0</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.7.0/Pacer-0.7.0.dmg"
+            length="21642941"
+            type="application/octet-stream"
+            sparkle:edSignature="NmH1YElT2StO6S6HAUkcs9Eg3RwzNYTNARA2CaG88lttudLYq7TPJOTShQoB7Wddz8PX/m5888TCvsN8JR2QCQ==" />
+    </item>
+            <item>
+        <title>Version 0.7.1</title>
+        <description><![CDATA[<p>A steadier dashboard, a window and menu-bar item that stay where you put them, and usage that lands on the account you're actually signed in with.</p>
+<h2>The dashboard stops jumping</h2>
+<p>Cards no longer shift around while Pacer loads or updates. Each of these moved everything below it:</p>
+<ul>
+<li><strong>Switching the active login</strong> (with <code class="notranslate">claude-swap</code>, or after signing in again) blanked the rate-limit pace card to "Loading history…" and back, even on "All accounts". It now stays put.</li>
+<li><strong>At launch</strong>, the charts arrive into space already kept for them instead of pushing the page down by half a screen.</li>
+<li><strong>As forecasts come in</strong>, the forecast line, the chips, Today's badge and the month-end bar keep their space while they wait.</li>
+<li><strong>While idle</strong>, the "resets in…" caption no longer re-wraps as time passes.</li>
+</ul>
+<p>Switching tabs is quicker too. Projects opens in under half the time on a large history, and the toolbar no longer flashes empty for a frame on every switch.</p>
+<h2>The window stays where you keep it</h2>
+<p>When your monitors went to sleep, macOS could move the dashboard before telling Pacer the displays had changed, and Pacer remembered that move as the window's home. It then reopened somewhere you couldn't see it. Moves that coincide with a display change are no longer saved.</p>
+<h2>The menu-bar item keeps its place</h2>
+<p>Pacer's menu-bar item now has a stable identity, so macOS remembers where you dragged it across launches and updates. The first time this version runs it may appear in the default spot. Drag it back once, and it stays there from then on.</p>
+<p><strong>Activity rings are the default menu-bar icon.</strong> If you never picked an icon style, you'll see the rings now. The old icon is still in Settings → Menu Bar.</p>
+<h2>Usage goes to the account you're signed in with</h2>
+<p>If you use more than one Claude login, Pacer could file turns and rate-limit readings under whichever account <code class="notranslate">~/.claude.json</code> last named. That file can lag behind a switch while Claude Code is already using the other login's credentials. Pacer now goes by the credential Claude Code is actually using. From this version on, new usage lands on the right account. History recorded under the wrong one before the update isn't moved automatically.</p>
+<h2>README</h2>
+<p>The screenshots on the project page are now real captures of the app: its window, its menu in the real menu bar, and its widgets as macOS draws them. They were previously drawn by hand.</p>
+<p><strong>Your data is untouched.</strong> No reset, no re-import.</p>]]></description>
+        <pubDate>Fri, 25 Sep 2026 03:25:42 +0000</pubDate>
+        <sparkle:version>1790306416</sparkle:version>
+        <sparkle:shortVersionString>0.7.1</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.7.1/Pacer-0.7.1.dmg"
+            length="21762221"
+            type="application/octet-stream"
+            sparkle:edSignature="BFkeaVEuiigbhtflBCzFChom1MBCN/GpTA8memL5SNSKTergf83qxm7iJdATsOioJ+CJJc6Dl0MtQUGX5XxLBQ==" />
+    </item>
+            <item>
+        <title>Version 0.7.2</title>
+        <description><![CDATA[<p>Clicks that open right away, a dashboard that no longer freezes while Pacer works, alerts that fire with the window closed, and live readings for every <code class="notranslate">claude-swap</code> account.</p>
+<h2>Clicks open right away</h2>
+<p>Clicking a project or a History day could take seconds to open its detail, and sometimes waited until something else on the page changed. "Edit collection" did the same, then bounced the Dock icon. They now open the moment you click.</p>
+<h2>No more freezes while Pacer is busy</h2>
+<p>The dashboard could stop responding for 1–4 seconds at a time: while forecasts recalculated, during heavy Claude Code activity, and every ten minutes when Pacer re-checked the day's totals. Each of those now runs without holding up the window.</p>
+<h2>Alerts work with the window closed</h2>
+<p>Alerts were checked only while the dashboard window was open. If Pacer started at login with the window closed, no alert fired at all, and a threshold crossed while the window was closed was skipped when you reopened it. Alerts now run whenever Pacer is running, and a crossing that happened while the window was closed, or while Pacer was quit, is announced the next time Pacer checks.</p>
+<h2>"Open Pacer at login" stays on</h2>
+<p>Pacer now remembers that you turned "Open Pacer at login" on and registers it again if macOS drops it.</p>
+<h2>Numbers that keep up</h2>
+<p>Some cards only refreshed when something else on the screen redrew, so on a quiet machine they could sit on old numbers:</p>
+<ul>
+<li>Project detail's totals, daily chart and model chart kept the numbers they opened with.</li>
+<li>The Compare models view's actual-usage line didn't move when a new reading came in.</li>
+<li>In the menu bar dropdown, every account showed the same "limit in…" forecast, even an account that wasn't being used.</li>
+</ul>
+<p>They now update as soon as their own data changes.</p>
+<h2>More than one account</h2>
+<ul>
+<li><strong>The active account no longer flips back.</strong> After a <code class="notranslate">claude-swap</code> switch, Pacer could switch back to the account you'd just left whenever it checked that account's old token, and show the old account's 5-hour and 7-day usage until that token expired. Pacer now goes only by the login Claude Code is actually using.</li>
+<li><strong>Switched-away accounts keep live readings.</strong> Pacer's copy of an account's token runs out about 8 hours after you switch away, and from then on that account's usage stopped updating. Pacer now also reads the logins <code class="notranslate">claude-swap</code> keeps for each account, so every account stays current. This shouldn't ask for your password. If your Mac does ask, Pacer stops trying until it next launches. Turn it off in Settings → Authentication → Account switcher.</li>
+</ul>
+<h2>Also</h2>
+<ul>
+<li>Two rare failures could leave a day's or a project's totals wrong for good: a project merge made in the middle of a scan, or a scan that failed partway through. Both are fixed.</li>
+<li>Pacer writes much less to disk. An index it rewrote every five minutes is now saved hourly. On a large history that cuts about 3 GB of writes a day to under 0.3 GB.</li>
+<li>A horizontal swipe in the menu bar popover could close a detail open in the dashboard. Swipes now apply only to the window they happen in.</li>
+<li>The pacing skill no longer reports a pause after the limit it was waiting on has reset.</li>
+</ul>
+<p><strong>Your data is untouched.</strong> No reset, no re-import.</p>]]></description>
+        <pubDate>Tue, 06 Oct 2026 23:23:04 +0000</pubDate>
+        <sparkle:version>1791325885</sparkle:version>
+        <sparkle:shortVersionString>0.7.2</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.7.2/Pacer-0.7.2.dmg"
+            length="22091716"
+            type="application/octet-stream"
+            sparkle:edSignature="JDzLFf1O/UNR9S8m7zuBOPNoJhFSovG1LZ28jJEizMa0H4+r73scgnCfi/xNgurnFD4/fg1ccazMikXJaH75Dg==" />
+    </item>
+            <item>
+        <title>Version 0.7.3</title>
+        <description><![CDATA[<p>Account switches that show up in about a second, readings for the account you're on that stay fresh, a local API that keeps answering when your Mac is busy, and a Homebrew install.</p>
+<h2>Switching accounts shows up right away</h2>
+<p>After a <code class="notranslate">/login</code> or a <code class="notranslate">claude-swap</code> switch, Pacer used to notice only on its next scan, which could take a few seconds when you were busy and minutes when you weren't. A brand-new account didn't appear until Pacer had read its usage at least once, which took up to several minutes. Pacer now sees the switch the moment it happens. The dashboard, menu bar, Settings and the local API all move to the new account in about a second, and a new account appears as soon as you sign in.</p>
+<p>Until Pacer has read an account's usage, it says "no reading yet" instead of showing 0%. The rate-limit widget used to show a 0% ring there.</p>
+<h2>Readings for the account you're on stay fresh</h2>
+<ul>
+<li>When Claude Code renewed its login, Pacer could go up to 30 minutes without being able to read your usage. It now picks up the renewed login right away.</li>
+<li>Pacer and <code class="notranslate">claude-swap</code> could ask for the same account's usage at the same moment, and both got turned away, leaving the reading 14 minutes old. Pacer now takes <code class="notranslate">claude-swap</code>'s readings as its own and stays out of its way.</li>
+</ul>
+<h2>The local API keeps answering</h2>
+<p>With the local API turned on (Settings → Integrations), a slow moment on your Mac could stop it answering every request, including the pacing skill's. Sessions that pace themselves then carried on without a limit, just when it mattered most. The API now answers from numbers it keeps ready in memory, in a few milliseconds, and says how old they are.</p>
+<h2>The pacing skill</h2>
+<ul>
+<li>It now stops at the safe limit by default: as close to 100% as the age of the latest reading allows. Previously it stopped at 85% unless you set a limit yourself.</li>
+<li>It follows a <code class="notranslate">/login</code> switch while a session is waiting, instead of watching the account it started on.</li>
+</ul>
+<h2>Install with Homebrew</h2>
+<div class="highlight highlight-source-shell"><pre class="notranslate">brew install --cask ericandrechek/tap/pacer</pre></div>
+<p>Pacer still updates itself; Homebrew picks up each new version too.</p>
+<h2>Also</h2>
+<ul>
+<li>The dashboard could freeze for a moment while Pacer checked whether a usage limit had reset early. That check now runs in the background, and only when it can matter.</li>
+<li>While Claude Desktop keeps rewriting the shared Claude Code settings file, Pacer checks your login far less often.</li>
+</ul>
+<p><strong>Your data is untouched.</strong> No reset, no re-import.</p>]]></description>
+        <pubDate>Fri, 09 Oct 2026 17:31:35 +0000</pubDate>
+        <sparkle:version>1791566768</sparkle:version>
+        <sparkle:shortVersionString>0.7.3</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.7.3/Pacer-0.7.3.dmg"
+            length="22337885"
+            type="application/octet-stream"
+            sparkle:edSignature="NKLHJEV3YhOwoRaDbIIhMCTIoXt8ISzOxX2ZUBEvUsbpsV/7/eixnuQSq6Z3ge/9H8SzRwvamefNt7fyJ6KwBw==" />
+    </item>
+            <item>
+        <title>Version 0.7.4</title>
+        <description><![CDATA[<p>A <code class="notranslate">pacer</code> command for your terminal, pacing that works with the local API off, Claude Desktop's usage on the right account, and a lighter dashboard.</p>
+<h2><code class="notranslate">pacer</code> on the command line</h2>
+<p>Pacer now carries a <code class="notranslate">pacer</code> command. <code class="notranslate">pacer report</code> shows every rate-limit window for the account you're on, and <code class="notranslate">pacer gate</code>, <code class="notranslate">pacer wait</code> and the rest are the pacing skill's commands.</p>
+<ul>
+<li><strong>Homebrew</strong> installs put <code class="notranslate">pacer</code> on your PATH.</li>
+<li><strong>Downloaded</strong> installs: Settings → Integrations → Command line → <strong>Install</strong>. If <code class="notranslate">/usr/local/bin</code> is already yours, that's it; otherwise macOS asks once for your administrator password. Pacer keeps the command pointing at the app if you move it.</li>
+</ul>
+<h2>Pacing works with the local API off</h2>
+<p>The pacing skill used to read Pacer only through its local API, which is off by default, so for most people it said "proceeding ungated" and paced nothing. It now reads Pacer's data directly when the API is off, with the same answers either way.</p>
+<p>The skill's script is gone: it runs <code class="notranslate">~/.claude/skills/pacer/pacer &lt;command&gt;</code> now (or plain <code class="notranslate">pacer &lt;command&gt;</code> where it's on your PATH). Pacer updates the installed skill for you. A session that already had the old instructions loaded finds <code class="notranslate">pace.sh</code> missing until it reloads the skill.</p>
+<h2>Claude Desktop's usage on the right account</h2>
+<p>Claude Desktop's built-in Claude Code bills Desktop's login, but Pacer counted its turns against whichever account your terminal was signed into. They now go to the account Desktop recorded, including past turns. Totals across all accounts don't change; per-account numbers do.</p>
+<h2>Also</h2>
+<ul>
+<li>The pace chart re-read every account's history whenever any account's usage was read, about 130 times an hour. It now reads only the account that changed, which cut its background work from minutes an hour to seconds.</li>
+<li>A session's account and model, as the pacing skill asks for them, come back instantly even when your Mac is busy, and sessions from Claude Desktop or a second Claude login are paced on their own account.</li>
+<li>After an account switch, the local API's event stream announces it in under half a second instead of about two.</li>
+<li>Settings showed the local API's port as "7,223", so a copied URL didn't work. It's "7223" again.</li>
+</ul>
+<p><strong>Your data is untouched.</strong> No reset, no re-import.</p>]]></description>
+        <pubDate>Tue, 13 Oct 2026 08:26:39 +0000</pubDate>
+        <sparkle:version>1791879535</sparkle:version>
+        <sparkle:shortVersionString>0.7.4</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.7.4/Pacer-0.7.4.dmg"
+            length="24967471"
+            type="application/octet-stream"
+            sparkle:edSignature="bprc7gWOcAay87n+xexMNaWxcV22ycb0HE/ouByku+1C0E7HvnDkIZEbFRPctzPHeXaTZIb6K/bjf0ab552uAA==" />
+    </item>
+            <item>
+        <title>Version 0.7.5</title>
+        <description><![CDATA[<p>Two fixes to <code class="notranslate">pacer wait</code>, the command the pacing skill uses to sit out a limit.</p>
+<h2><code class="notranslate">wait</code> keeps the rules that paused it</h2>
+<p>The skill's routine is to check (<code class="notranslate">pacer gate</code>) and, if told to pause, run <code class="notranslate">pacer wait</code>. A pause because a window was <em>projected</em> to fill within your horizon (<code class="notranslate">--eta</code>), or because it passed a limit you set yourself (<code class="notranslate">--cap</code>), was followed by a <code class="notranslate">wait</code> that judged only the default limit, so it resumed at once and the run went straight back into the pause. <code class="notranslate">wait</code> now uses the same <code class="notranslate">--cap</code>, <code class="notranslate">--eta</code>, <code class="notranslate">--model</code> and <code class="notranslate">--window</code> as the check that paused, unless you give it your own, and says which it took.</p>
+<h2><code class="notranslate">wait</code> notices an account switch in about a second</h2>
+<p><code class="notranslate">wait</code> checked Pacer every 15 seconds. It now listens for Pacer's news and looks the moment something changes, so switching to an account with room resumes your run in about a second. With Pacer's local API off it checks on the same 15-second interval as before.</p>
+<p><strong>Your data is untouched.</strong> No reset, no re-import.</p>]]></description>
+        <pubDate>Tue, 13 Oct 2026 09:39:54 +0000</pubDate>
+        <sparkle:version>1791883974</sparkle:version>
+        <sparkle:shortVersionString>0.7.5</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.7.5/Pacer-0.7.5.dmg"
+            length="24975387"
+            type="application/octet-stream"
+            sparkle:edSignature="42mv7siEeZTghbnusO22skXwaC5lM8hHQJLuP0nEKkdhmOVXmkLUzkeeCqMmxTPrA7IqZJHpDVbr7jP+i5NwAA==" />
+    </item>
+            <item>
+        <title>Version 0.7.6</title>
+        <description><![CDATA[<p>Fixes to <code class="notranslate">pacer</code>, the command the pacing skill uses to pause work before a limit and resume after it.</p>
+<h2>Your session's model decides which limits apply</h2>
+<p>Inside a Claude Code session, <code class="notranslate">pacer gate</code> with no <code class="notranslate">--model</code> used to hold your work to every limit on the account, including a per-model cap your work never touched, so Opus work paused on a full Fable window. It now does what <code class="notranslate">--model auto</code> does: it looks up the model your session runs and applies the caps that bind it, and the verdict says what it found. Outside a session nothing changes, and <code class="notranslate">--model all</code> still applies every limit.</p>
+<h2><code class="notranslate">wait</code> resumes only when the limit has really cleared</h2>
+<p>A paused session could be released while still at the limit. As other sessions paused, usage slowed, the safe limit rose a point, and <code class="notranslate">wait</code> took that for a reset. <code class="notranslate">wait</code> now holds the limit that paused you. It resumes when that window resets, when you switch to an account with room, or when usage really drops, and it says which.</p>
+<h2>Lanes stay paced through long tasks</h2>
+<p><code class="notranslate">pacer status</code>, the cheap check subagents run between steps, called a verdict stale after 15 minutes, so long tasks went unpaced. When a verdict is stale, <code class="notranslate">status</code> now refreshes it itself: one reader checks Pacer and the rest wait a moment for its answer, so a hundred lanes still cost one check.</p>
+<h2>Each session keeps its own verdict</h2>
+<p>Sessions used to share one pause verdict unless they set <code class="notranslate">PACE_RUN</code>, so a test in one session could pause all of them. Each session now has its own, shared with its subagents. <code class="notranslate">PACE_RUN</code> and <code class="notranslate">PACE_STATE</code> work as before.</p>
+<h2>Stop short of the limit by a margin</h2>
+<p><code class="notranslate">--margin N</code> pauses N points before the safe limit, which still adapts to how fast usage is climbing. A fixed <code class="notranslate">--cap</code> replaced that limit. <code class="notranslate">pacer safecap</code> prints the limit each window is held to.</p>
+<h2>Report a Pacer problem from the command line</h2>
+<p><code class="notranslate">pacer feedback "what you ran, what it printed"</code> saves the report on your Mac and prints a link to file it as a GitHub issue, pre-filled with the report, the Pacer version and the last verdict. Nothing is sent anywhere. The pacing skill now tells agents to report Pacer problems this way instead of working around them in their notes.</p>
+<p><strong>Your data is untouched.</strong> No reset, no re-import.</p>]]></description>
+        <pubDate>Tue, 20 Oct 2026 16:48:18 +0000</pubDate>
+        <sparkle:version>1792514491</sparkle:version>
+        <sparkle:shortVersionString>0.7.6</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.7.6/Pacer-0.7.6.dmg"
+            length="25008387"
+            type="application/octet-stream"
+            sparkle:edSignature="cHS7mCs1SroknZxblpWPwk3H4HM+99uVitJfcNfxg6+NfstMu4S1t6EmM4HOlqntqYTT6vAdWAC7y2wrmcpqDw==" />
+    </item>
+            <item>
+        <title>Version 0.7.7</title>
+        <description><![CDATA[<p>Two fixes to <code class="notranslate">pacer</code>, so paused work stops before a limit and doesn't stampede back afterwards.</p>
+<h2>A go-ahead now expires before the limit</h2>
+<p>Subagents check <code class="notranslate">pacer status</code> between steps. That check accepted a "go" for up to 15 minutes, so near a limit, work in flight kept running until the account was full. A "go" now lasts only as long as the current burn rate leaves room: <code class="notranslate">status</code> shows <code class="notranslate">go (until 22:41Z)</code>, and once that time passes the next check asks Pacer again. With plenty of room nothing changes. Near a limit, sessions get a fresh answer every minute or two and stop in time.</p>
+<h2>Resuming waits for real room</h2>
+<p>After a pause, <code class="notranslate">pacer wait</code> resumed as soon as you switched to another login, even one with only a few points left. Every waiting session then started at once and filled it within minutes. <code class="notranslate">wait</code> now resumes on a login switch only when the new login has room for 20 minutes at the rate your sessions were using (<code class="notranslate">--resume-headroom</code> to change it). A reset still resumes as before.</p>
+<p><strong>Your data is untouched.</strong> No reset, no re-import.</p>]]></description>
+        <pubDate>Wed, 21 Oct 2026 13:16:56 +0000</pubDate>
+        <sparkle:version>1792588202</sparkle:version>
+        <sparkle:shortVersionString>0.7.7</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.7.7/Pacer-0.7.7.dmg"
+            length="25028353"
+            type="application/octet-stream"
+            sparkle:edSignature="jT9fZLkS2WfHqe8P7jXC1XIYOuLQlsrePnN1BnVz+Xf0YLQnpPqB9l4wt0MNACFctr9CtM+HTOM3j98ssHnDDg==" />
+    </item>
+            <item>
+        <title>Version 0.8.0</title>
+        <description><![CDATA[<p>Costs use the rates in effect when you made each request, forecasts show a live estimate between readings, and Ultra and Claude Desktop accounts are tracked properly.</p>
+<h2>Costs and pricing</h2>
+<h3>Costs use the rate in effect when you made the request</h3>
+<p>Each request is priced from a dated price history, so a later price change no longer rewrites what you already spent. Long prompts are priced at their own tier, and 1-hour cache writes, fast mode and US-only routing are priced too. Fast mode and multi-call responses are counted call by call.</p>
+<h3>Cost by part, and sortable tables</h3>
+<p>Costs split into input, output, cache reads and cache writes, shown in the daily chart, the Day, Project and History breakdowns, and a Mix bar per model. Tables default to tokens, cache hit rate, output share, cost and mix. Right-click to show, hide, reorder or resize columns.</p>
+<h2>Forecasts and the live meter</h2>
+<h3>A live estimate between readings</h3>
+<p>Between Anthropic's readings, the menu bar, dashboard and widgets show the last reading plus the API spend since. An estimate has a decimal (42.6%), a reading doesn't (42%). An estimate is never saved as a reading and never goes below one.</p>
+<h3>Forecast lines and claims</h3>
+<p>Forecast lines stay up between polls, including on accounts that are read in bursts. An idle window says "holds until reset" or "≈X% at reset" instead of nothing. A red "limit in…" now needs at least half the window used and the crossing to hold across two updates; otherwise it reads "may hit limit in…".</p>
+<h3>Forecasts pick the method that fits you best</h3>
+<p>Pacer scores its forecast methods on your own history in the background, capped at about a fifth of one CPU core, and uses the one with the best record, falling back to the previous rule. Two networks ship in the app, which adds about 130 MB; others download once on first use.</p>
+<h3>Pacing uses the live estimate</h3>
+<p><code class="notranslate">pacer gate</code>, <code class="notranslate">status</code> and <code class="notranslate">wait</code> judge the live estimate rather than the last poll, padded for how old the reading is, so they pause closer to the limit. <code class="notranslate">pacer report</code> shows both: <code class="notranslate">42.6% est · read 42%</code>.</p>
+<h2>Accounts and plans</h2>
+<h3>Ultra accounts</h3>
+<p>Anthropic renamed Max 20× to Ultra and Max 5× to Max. Verified Ultra accounts have no 5-hour limit now, so Pacer hides their 5-hour window instead of showing an old reading, and the menu bar and widgets show the 7-day figure.</p>
+<h3>Claude Desktop</h3>
+<p>Cowork (agent-mode) sessions count under a "Claude Desktop (agent)" project, and each Desktop install counts with its own sessions. An account Claude Desktop is using, but Claude Code isn't, gets a "Desktop" chip for 30 minutes after its last activity. An idle account whose login has expired says "auth paused".</p>
+<h2>Alerts</h2>
+<h3>One alert per window per account</h3>
+<p>Alerts show while Pacer is the app in front. Each window of each account has one alert, which the next one replaces, and it clears when the window resets. Alerts have Mute until reset and Open Pacer buttons. Settings → Notifications can alert from live estimates too.</p>
+<h2>Privacy</h2>
+<h3>Crash reports and usage stats</h3>
+<p>Pacer now sends crash reports and anonymous usage stats to Sentry so bugs and slowdowns get found. Turn either off in Settings → Privacy.</p>
+<h2>Fixes</h2>
+<h3>Lower memory in long sessions</h3>
+<p>Memory settles at a few hundred megabytes instead of climbing past a gigabyte during long runs.</p>
+<h3>Tokens, subprojects and ranges</h3>
+<p>Tokens now means every kind of token in one total, and Top Days ranks by it. Subprojects group by folder inside a repo, "last N days" covers exactly N calendar days, and the low cache hit hint fires below 90%.</p>
+<h3>Profiles and the pace card</h3>
+<p>A Claude Code profile created while Pacer runs is counted within a minute. Pace-card hovers and open popovers survive a window or account appearing.</p>
+<p><strong>Your data is untouched.</strong> Pacer rebuilds cost history in the background on first launch. After that, an older version of Pacer can't open your data, so this one can't be downgraded.</p>]]></description>
+        <pubDate>Mon, 02 Nov 2026 20:42:33 +0000</pubDate>
+        <sparkle:version>1793651156</sparkle:version>
+        <sparkle:shortVersionString>0.8.0</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.8.0/Pacer-0.8.0.dmg"
+            length="156908538"
+            type="application/octet-stream"
+            sparkle:edSignature="AewAjRJNhOs9mkg0zZg0yUIlXZiresbe++MItMOL01c0EGh2XS12CTJS+NV3dx5LTihkpPs9gmMclNBBqFvmDg==" />
+    </item>
+            <item>
+        <title>Version 0.8.1</title>
+        <description><![CDATA[<p>Fixes for Ultra accounts, and an easier way to report a problem.</p>
+<h2>Report a problem from anywhere</h2>
+<p><strong>Report a Problem…</strong> is now in the menu-bar menu and in Settings → Privacy, as well as the Help menu. A report can include a picture of Pacer's window and any files you add.</p>
+<h2>Ultra accounts</h2>
+<h3>Widgets show each window once</h3>
+<p>The rate-limit gauges and pace chart widgets showed the 7-day window twice on accounts with no 5-hour limit. They now show 7-day and the next window you have, or just 7-day, and the widget's Edit sheet no longer offers a 5-hour window the account doesn't have.</p>
+<h3>No empty 5-hour readouts</h3>
+<p>Account rows in Settings no longer show an empty 5-hour bar, and Settings hides the 5-hour menu-bar chip and alert thresholds when no account has a 5-hour limit.</p>
+<p><strong>Your data is untouched.</strong></p>]]></description>
+        <pubDate>Mon, 02 Nov 2026 22:13:53 +0000</pubDate>
+        <sparkle:version>1793656792</sparkle:version>
+        <sparkle:shortVersionString>0.8.1</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.8.1/Pacer-0.8.1.dmg"
+            length="156929028"
+            type="application/octet-stream"
+            sparkle:edSignature="lCNkyswUsrsdGI1y2MRIgKC4A+tP2WJq0voaqzhRKYaUv7gzDfV8ScuBqja+TsgO4AH0UAzieDHJi4fdZXH7CQ==" />
+    </item>
+            <item>
+        <title>Version 0.8.2</title>
+        <description><![CDATA[<p>Better weekly forecasts, a lighter forecaster, and widgets that open Pacer.</p>
+<h2>Forecasts</h2>
+<h3>The 7-day forecast no longer stalls while you're climbing</h3>
+<p>When your past weeks had all maxed out early, Pacer could pick a forecast that simply held your current reading. The dashboard then said "≈79% at reset" while you were heading for the limit. Pacer now ignores the stretches of past weeks where the meter had already stopped moving when it decides which forecast to trust. The same fix applies to 5-hour windows.</p>
+<h3>Lighter on CPU</h3>
+<p>The on-device forecast models no longer retrain after every refit, stay within their CPU budget while training, and skip work when no new reading has arrived.</p>
+<h2>Widgets</h2>
+<p>Clicking a Pacer widget opens the dashboard, or brings it forward if it's already open.</p>
+<h2>Smoother</h2>
+<ul>
+<li>The once-a-day check no longer freezes Pacer for a moment while macOS answers whether Pacer opens at login.</li>
+</ul>
+<h2>Privacy</h2>
+<p>Settings → Privacy now has two switches: <strong>Crash reports and performance</strong> (sent to Sentry) and <strong>Usage data</strong>, which tells me which features, widgets and commands get used (sent to PostHog). Both are on by default, and either can be turned off. If you had turned usage data off before, it stays off. Pacer never sends prompts, projects, files, accounts or costs.</p>
+<p><strong>Your data is untouched.</strong></p>]]></description>
+        <pubDate>Wed, 04 Nov 2026 21:48:51 +0000</pubDate>
+        <sparkle:version>1793828065</sparkle:version>
+        <sparkle:shortVersionString>0.8.2</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.8.2/Pacer-0.8.2.dmg"
+            length="157363891"
+            type="application/octet-stream"
+            sparkle:edSignature="LmHpeCVcwX1CAjt/UJr2arIPzxsIlCzN8sOPyMfuvZAfkdspDfWSZad7mFHhaCNC/fPeyN1WrcHJl8VxXzZlAA==" />
+    </item>
+            <item>
+        <title>Version 0.8.3</title>
+        <description><![CDATA[<p>Fewer freezes, updates that install on their own, and a forecast view that shows its progress.</p>
+<p><strong>If Pacer only runs in your menu bar:</strong> quit it and reopen it once so this update installs. After that, updates install by themselves while you're not using Pacer.</p>
+<h2>Updates</h2>
+<ul>
+<li>A downloaded update now installs at a quiet moment instead of waiting for you to quit Pacer, which a menu-bar app never does. While one is waiting, Check for Updates reads "Relaunch to Update".</li>
+<li>Checking for updates offers the newest version, not an older one that was downloaded earlier.</li>
+</ul>
+<h2>Smoother</h2>
+<ul>
+<li>The first launch after an update no longer freezes while your data is upgraded. If the dashboard is open, it shows "Updating your data…" until it's ready.</li>
+<li>The dashboard's pace chart no longer stalls Pacer while it redraws.</li>
+<li>Tables on Models, History, Projects and the detail sheets no longer freeze while loading their saved columns.</li>
+<li>Pacer no longer freezes while its forecaster is busy, and backs off when your Mac is short of memory.</li>
+<li>The rebuild after an update is about five times faster.</li>
+</ul>
+<h2>Forecasts</h2>
+<ul>
+<li>The forecast models view says what it's doing (reading your history, scoring, about how long is left, and what's slowing it), with a <strong>Speed up</strong> button that uses more of your Mac's cores while it's plugged in, for up to an hour. Speed up is hidden in Low Power Mode.</li>
+<li>Scoring starts as soon as Pacer has finished starting up, rather than on a timer.</li>
+<li>On Ultra plans, which have no 5-hour window, Pacer no longer forecasts one.</li>
+<li>The weekly burn rate no longer reads 0 %/h between whole-percent readings, and never goes negative after a reset.</li>
+</ul>
+<h2>Multiple accounts and the <code class="notranslate">pacer</code> command</h2>
+<ul>
+<li><code class="notranslate">pacer report</code> says when your other logins have room left.</li>
+<li><code class="notranslate">pacer status</code> checks again after you switch logins, instead of reusing a verdict made for the old account.</li>
+<li>After a <code class="notranslate">/login</code> inside a session, sessions that started earlier are judged against every account they might still be billing.</li>
+<li>Accounts with several tokens get fresher readings: their polls are spread out instead of arriving together.</li>
+</ul>
+<h2>Privacy</h2>
+<p>Freezes are reported more reliably, and a check-in is sent when Pacer updates. No new kinds of data are sent. Pacer never sends prompts, projects, files, accounts or costs.</p>
+<p><strong>Your data is untouched.</strong></p>]]></description>
+        <pubDate>Wed, 11 Nov 2026 16:18:58 +0000</pubDate>
+        <sparkle:version>1794413280</sparkle:version>
+        <sparkle:shortVersionString>0.8.3</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.8.3/Pacer-0.8.3.dmg"
+            length="158198699"
+            type="application/octet-stream"
+            sparkle:edSignature="ooKFptSEiDz1EKo60yF62kUaCyumWLsKsbx9zIMCuCaZE1GpcZMSttEh8B9BkRjYLHVDSLVcuBKSYUYK66T2Dw==" />
+    </item>
+            <item>
+        <title>Version 0.9.1</title>
+        <description><![CDATA[<p>Smaller updates, fewer freezes, and Pacer comes back by itself if it ever crashes. This release includes everything from 0.9.0, which was withdrawn hours after release because it could stop within a few hours of running.</p>
+<p><strong>If Pacer only runs in your menu bar:</strong> quit it and reopen it once so this update installs. After that, updates install by themselves while you're not using Pacer.</p>
+<h2>Fixed</h2>
+<ul>
+<li>0.9.0 could crash after a few hours and stay closed until it was reopened. If you had 0.9.0, this update fixes it.</li>
+</ul>
+<h2>Keeps running</h2>
+<ul>
+<li>If Pacer crashes or is force-quit, it reopens itself in the background about 10 seconds later, so your usage keeps being recorded. It never reopens after you quit it, log out, or update, and it gives up after three tries in half an hour.</li>
+</ul>
+<h2>Smaller updates</h2>
+<ul>
+<li>Updates now download only what changed: a few megabytes instead of about 160 MB, from any of the last five releases.</li>
+<li>Updating no longer rewrites your whole usage history. Earlier updates could write about 2 GB at first launch; this one writes about 1 MB and is ready in seconds.</li>
+<li>If an update fails to download, Pacer notes why, so download problems can be found and fixed.</li>
+</ul>
+<h2>Smoother</h2>
+<ul>
+<li>Alerts, the cost chart, the menu bar dropdown, project collections and several dashboard chips no longer do their work on the thread that draws the window, which was the cause of most reported freezes.</li>
+<li>The menu bar no longer reads your data on every save, and the pace card no longer freezes while it lays out its columns.</li>
+<li>A slow disk can no longer freeze Pacer while it writes its log or while it quits.</li>
+<li>Pacer re-reads far less of your history when it checks itself, and runs its daily self-check again.</li>
+</ul>
+<h2>Kept for better forecasts</h2>
+<p>Pacer now keeps what its live meter showed before each reading, which of your logins took each reading, when your plan changes, and when each price first appeared. Past predictions are no longer deleted after 180 days. All of it stays on your Mac.</p>
+<h2>Prices</h2>
+<p>Claude Fable 5.2 and Claude Mythos 5.2 are priced from their launch on November 9.</p>
+<h2>Privacy</h2>
+<p>Pacer now counts how many times it reopened itself after a crash, and whether an update arrived as a small download. Freezes while your displays are asleep are counted instead of reported. No new kinds of data are sent. Pacer never sends prompts, projects, files, accounts or costs.</p>
+<p><strong>Your data is untouched.</strong> Coming from 0.8, Pacer upgrades it in seconds on first launch. After that, an older version of Pacer can't open it, so this one can't be downgraded.</p>]]></description>
+        <pubDate>Fri, 13 Nov 2026 21:48:18 +0000</pubDate>
+        <sparkle:version>1794605188</sparkle:version>
+        <sparkle:shortVersionString>0.9.1</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.1/Pacer-0.9.1.dmg"
+            length="158903909"
+            type="application/octet-stream"
+            sparkle:edSignature="F5MxkN3QVFYJBD+EN0Bkgl8QRoCRdqQapaEmv+jqvO8Mft6YazwagOmF3LzP6Gr3n05cagMHP4ofioEFUBWyDA==" />
+        <sparkle:deltas>
+            <enclosure
+                url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.1/Pacer-0.9.1-from-0.9.0.delta"
+                sparkle:deltaFrom="1794528744"
+                length="5026254"
+                type="application/octet-stream"
+                sparkle:deltaFromSparkleExecutableSize="976432"
+                sparkle:deltaFromSparkleLocales="ar,ca,cs,da,de,el,es"
+                sparkle:edSignature="DLQAjYu6Tr2IHfGcHn/Z/oE3Cbc0DkyLF8DrM4VR5TB5nxZT7b7vOcVcWQSlTXdZtrIIGiS3zgzTz0ZMbI3SBw==" />
+            <enclosure
+                url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.1/Pacer-0.9.1-from-0.8.3.delta"
+                sparkle:deltaFrom="1794413280"
+                length="6542142"
+                type="application/octet-stream"
+                sparkle:deltaFromSparkleExecutableSize="976432"
+                sparkle:deltaFromSparkleLocales="ar,ca,cs,da,de,el,es"
+                sparkle:edSignature="MVoK97EowfvsMeUCFT6sE05B/hctW5X73kHlsP9fDATKyXmUJTEpr7kFSrfQWEX3OYAoNERsIUcZY6tsJNgnAg==" />
+            <enclosure
+                url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.1/Pacer-0.9.1-from-0.8.2.delta"
+                sparkle:deltaFrom="1793828065"
+                length="8131810"
+                type="application/octet-stream"
+                sparkle:deltaFromSparkleExecutableSize="976432"
+                sparkle:deltaFromSparkleLocales="ar,ca,cs,da,de,el,es"
+                sparkle:edSignature="NAVA5tXTNMNui0wh54TQ6BDoOaxLcoQZbJmS01kukU0BbaJq7jZCgD1Ag18PrgUwPxSS5ZYJAqZvaCPcrTsMBg==" />
+            <enclosure
+                url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.1/Pacer-0.9.1-from-0.8.1.delta"
+                sparkle:deltaFrom="1793656792"
+                length="8789498"
+                type="application/octet-stream"
+                sparkle:deltaFromSparkleExecutableSize="976432"
+                sparkle:deltaFromSparkleLocales="ar,ca,cs,da,de,el,es"
+                sparkle:edSignature="T/TO02AVSXAqt0RzgrqD+oqHQKnxh/4p8s6qouGDmSLl+Fo8w1KqEfX99EKiwjXXtmjIf7MbEjAHQbrQ4i8bDg==" />
+            <enclosure
+                url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.1/Pacer-0.9.1-from-0.8.0.delta"
+                sparkle:deltaFrom="1793651156"
+                length="8848878"
+                type="application/octet-stream"
+                sparkle:deltaFromSparkleExecutableSize="976432"
+                sparkle:deltaFromSparkleLocales="ar,ca,cs,da,de,el,es"
+                sparkle:edSignature="60JQrUFveDdB7ykCt9aH3uXj8lnqvEIn0S/IZ52jX4yaHKpeBGtdE5DL/K5AILqxcQ33Z6M8qvXsBWkiuu5bBg==" />
+        </sparkle:deltas>
+    </item>
+            <item>
+        <title>Version 0.9.2</title>
+        <description><![CDATA[<p>Fewer freezes, especially on a busy Mac, and a daily check that Pacer's numbers still match Claude Code's own.</p>
+<p><strong>If Pacer only runs in your menu bar and you're on 0.8:</strong> quit it and reopen it once so this update installs. After that, updates install by themselves while you're not using Pacer.</p>
+<h2>Smoother</h2>
+<ul>
+<li>The window and its toolbar no longer redo their work every time Pacer saves.</li>
+<li>Project pages check whether a project's folder still exists in the background, so a slow or disconnected drive can't freeze them.</li>
+<li>Looking up your other logins and Claude Desktop sessions no longer holds Pacer up while it reads the keychain or the disk.</li>
+<li>Recording a freeze no longer causes another one.</li>
+<li>When your Mac is short of memory, Pacer refreshes its local API and its forecasts less often, so it doesn't push out the memory it's using.</li>
+<li>Freezes are written to Pacer's log with where they happened, so the ones that remain can be found.</li>
+</ul>
+<h2>A daily accuracy check</h2>
+<p>Once a day, Pacer compares its totals for your most recent Claude Code sessions with Claude Code's own. From late September to late October, a Claude Code bug left subagent output out of its transcripts, and nothing noticed for weeks. Pacer would now catch that within a day. If the totals ever disagree, Pacer reports only which kind of token, roughly by how much, and the Claude Code version.</p>
+<h2>Coming from 0.8?</h2>
+<p>This release also brings 0.9.0 and 0.9.1:</p>
+<ul>
+<li>Updates download only what changed, a few megabytes instead of about 160 MB.</li>
+<li>If Pacer crashes, it reopens itself in the background about 10 seconds later.</li>
+<li>Updating no longer rewrites your usage history.</li>
+</ul>
+<h2>Privacy</h2>
+<p>The accuracy check sends only the token kind, a rough size of the difference, and the Claude Code version: never counts, sessions or projects. No other new kinds of data are sent. Pacer never sends prompts, projects, files, accounts or costs.</p>
+<p><strong>Your data is untouched.</strong> Coming from 0.8, Pacer upgrades it in seconds on first launch. After that, an older version of Pacer can't open it, so this one can't be downgraded.</p>]]></description>
+        <pubDate>Mon, 16 Nov 2026 15:14:42 +0000</pubDate>
+        <sparkle:version>1794840834</sparkle:version>
+        <sparkle:shortVersionString>0.9.2</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.2/Pacer-0.9.2.dmg"
+            length="159264786"
+            type="application/octet-stream"
+            sparkle:edSignature="PesP5nQ3JNhvvoEYJDj4FQVym73DZGIDJA90WUf1oBhlG+I3FR1OdnT7HD723U6uBJfOlPk3W0ApB5Ern6VKBQ==" />
+        <sparkle:deltas>
+            <enclosure
+                url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.2/Pacer-0.9.2-from-0.9.1.delta"
+                sparkle:deltaFrom="1794605188"
+                length="5605238"
+                type="application/octet-stream"
+                sparkle:deltaFromSparkleExecutableSize="976432"
+                sparkle:deltaFromSparkleLocales="ar,ca,cs,da,de,el,es"
+                sparkle:edSignature="hdFs2orvdAuEJVR1X1FZma8TeEQSULgZsbPMHLgjgjDaQ7qvLYMY8IokMmQroC4xPHwbsxv1V6hvpJ7BoR7aAw==" />
+            <enclosure
+                url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.2/Pacer-0.9.2-from-0.9.0.delta"
+                sparkle:deltaFrom="1794528744"
+                length="6354002"
+                type="application/octet-stream"
+                sparkle:deltaFromSparkleExecutableSize="976432"
+                sparkle:deltaFromSparkleLocales="ar,ca,cs,da,de,el,es"
+                sparkle:edSignature="x4tRYdjy0ewYAoYTnaU6a/IEcjukwKWtUM8mBqExXVL3l8Y6GyM/Ozcb4gy20v1x5Oh5f8MwRojIEyLGwMTECA==" />
+            <enclosure
+                url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.2/Pacer-0.9.2-from-0.8.3.delta"
+                sparkle:deltaFrom="1794413280"
+                length="7352606"
+                type="application/octet-stream"
+                sparkle:deltaFromSparkleExecutableSize="976432"
+                sparkle:deltaFromSparkleLocales="ar,ca,cs,da,de,el,es"
+                sparkle:edSignature="jcpJ9WcnNwT8XNM/scKF3eL/+7lJEL0KopVOXX/S/fYcytZQhG+Dtx5c0GdqI85WEQVH9ExMyqAxnn6zSVj4Ag==" />
+            <enclosure
+                url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.2/Pacer-0.9.2-from-0.8.2.delta"
+                sparkle:deltaFrom="1793828065"
+                length="8761118"
+                type="application/octet-stream"
+                sparkle:deltaFromSparkleExecutableSize="976432"
+                sparkle:deltaFromSparkleLocales="ar,ca,cs,da,de,el,es"
+                sparkle:edSignature="bnM5w32q8prUf+4UJpzmFfbhv9pOVs8bgJXMb5PJcn4z41uOZJjLazo+Muo0bDW8ap6fjheR8ZfBLinjWiZsCw==" />
+            <enclosure
+                url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.2/Pacer-0.9.2-from-0.8.1.delta"
+                sparkle:deltaFrom="1793656792"
+                length="9351890"
+                type="application/octet-stream"
+                sparkle:deltaFromSparkleExecutableSize="976432"
+                sparkle:deltaFromSparkleLocales="ar,ca,cs,da,de,el,es"
+                sparkle:edSignature="HXzDNKd7yrsKEr/WwyExbcGb6w5R9PrlQi4vmkefm9EWnGV1lmsCkI18ct9G6HSv5GhGpOrNwBsuz6MyhVAbDg==" />
+        </sparkle:deltas>
+    </item>
+            <item>
+        <title>Version 0.9.3</title>
+        <description><![CDATA[<p>Burn rates that stop spiking after a gap, a dashboard that does less work while your displays sleep, and updates that can't get stuck waiting to install.</p>
+<h2>Rate limits after a gap</h2>
+<p>If Pacer hasn't been reading for a while, because a login lapsed, the Mac was asleep or Pacer was closed, it no longer reports a false burn-rate spike from the first few readings. Rates, and the <code class="notranslate">pacer gate</code> check that uses them, now wait for real readings to measure from.</p>
+<h2>Less work while you're away</h2>
+<p>While every display is asleep, the dashboard holds off its redraws and catches up the moment a screen wakes. Nothing you can see goes stale: the menu bar, widgets, notifications, the local API and the <code class="notranslate">pacer</code> command keep updating as before.</p>
+<h2>Updates that can't get stuck</h2>
+<ul>
+<li>A downloaded update no longer waits forever for a quiet moment. An idle Pacer that's left frontmost, or a Settings window left open, no longer holds it back. An update held for more than 72 hours installs as soon as nobody is at the Mac.</li>
+<li>Installs never interrupt text you're typing.</li>
+</ul>
+<h2>Smoother</h2>
+<ul>
+<li>Quitting no longer hangs. A bug from 0.9.2 could stall Pacer on the way out.</li>
+<li>Checking your accounts' usage does less on the main thread, so the window stays responsive while it polls.</li>
+<li>A login that Anthropic keeps refusing (HTTP 403) is parked for six hours, and Settings marks it "refused", instead of being retried constantly. Nothing is removed, and a token you change is tried straight away.</li>
+</ul>
+<h2>A daily accuracy check, extended</h2>
+<p>Once a day, Pacer now checks every request Claude Code answered against its own records, not just the totals. In the field, Pacer missed nothing. The gap that looked like under-counting came from Claude Code counting some calls it never writes to a transcript, such as "while you were away" recaps and conversation compactions. The check now allows for those.</p>
+<h2>Freeze reports</h2>
+<p>Freeze reports now say how busy the Mac was, its load, memory pressure and so on, so a slow Mac can be told apart from a slow Pacer.</p>
+<h2>The <code class="notranslate">pacer</code> command</h2>
+<p>Inside a Claude Code session, <code class="notranslate">pacer</code> now just says go or pause, and what ends the pause, instead of handing agents usage percentages to plan with. To see the numbers, set <code class="notranslate">PACER_PACING=informed</code> for a session or a repo, or run <code class="notranslate">pacer mode informed</code>. With an account switcher, a pause says when a switch is expected, and <code class="notranslate">pacer wait</code> waits for it. In <code class="notranslate">pacer json</code>, <code class="notranslate">otherAccounts.withRoom</code> now means accounts with real room to resume onto.</p>
+<h2>Privacy</h2>
+<p>No new kinds of data about you are sent. Pacer never sends prompts, projects, files, accounts or costs.</p>
+<p><strong>Your data is untouched.</strong></p>]]></description>
+        <pubDate>Tue, 24 Nov 2026 14:19:55 +0000</pubDate>
+        <sparkle:version>1795528779</sparkle:version>
+        <sparkle:shortVersionString>0.9.3</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.3/Pacer-0.9.3.dmg"
+            length="159548881"
+            type="application/octet-stream"
+            sparkle:edSignature="y5HxNhHk0Bm4n6Vn6SeuOxfoxP+vwoW5lJ6pl56DZQf+8TSiTuPTBFl55SMTkgeeP0OAisDvYCm0ey8cv5m8BQ==" />
+        <sparkle:deltas>
+            <enclosure
+                url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.3/Pacer-0.9.3-from-0.9.2.delta"
+                sparkle:deltaFrom="1794840834"
+                length="5847178"
+                type="application/octet-stream"
+                sparkle:deltaFromSparkleExecutableSize="976432"
+                sparkle:deltaFromSparkleLocales="ar,ca,cs,da,de,el,es"
+                sparkle:edSignature="kVaxIsqa4ANGvOYwWLWShf1Dtzgxnb9fJAbIf3llJzM1EkLJuBQG/JnB2hMDUsI6aVoxRXAYGwon5vTwJdYDAA==" />
+            <enclosure
+                url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.3/Pacer-0.9.3-from-0.9.1.delta"
+                sparkle:deltaFrom="1794605188"
+                length="6643094"
+                type="application/octet-stream"
+                sparkle:deltaFromSparkleExecutableSize="976432"
+                sparkle:deltaFromSparkleLocales="ar,ca,cs,da,de,el,es"
+                sparkle:edSignature="Yvg3DQ9WhZi4Qx6QhSHtBT5MJLZJnBppursYGkcijSszcxtiZOZ6VYACN+OOzOw2DNica+l9KHHa6jg1fPIVCg==" />
+            <enclosure
+                url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.3/Pacer-0.9.3-from-0.9.0.delta"
+                sparkle:deltaFrom="1794528744"
+                length="7114934"
+                type="application/octet-stream"
+                sparkle:deltaFromSparkleExecutableSize="976432"
+                sparkle:deltaFromSparkleLocales="ar,ca,cs,da,de,el,es"
+                sparkle:edSignature="m/h0tIbCTr6je4jxRjcrd+dUBW7iOPQmLtP5C8lgldeC3pNyfpDBu+L20hpLcCvrLWN3uCSr+ZdXVL0OnCbGAg==" />
+            <enclosure
+                url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.3/Pacer-0.9.3-from-0.8.3.delta"
+                sparkle:deltaFrom="1794413280"
+                length="7837882"
+                type="application/octet-stream"
+                sparkle:deltaFromSparkleExecutableSize="976432"
+                sparkle:deltaFromSparkleLocales="ar,ca,cs,da,de,el,es"
+                sparkle:edSignature="C2DWRL27nupRyXb6YD+OUPP6LxOq8uGi2YTCJWZFYgyzRUp3RKsVBs0ao/MaBej3ylToQ7zPI3YKgHCVUB7sCA==" />
+            <enclosure
+                url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.3/Pacer-0.9.3-from-0.8.2.delta"
+                sparkle:deltaFrom="1793828065"
+                length="9063842"
+                type="application/octet-stream"
+                sparkle:deltaFromSparkleExecutableSize="976432"
+                sparkle:deltaFromSparkleLocales="ar,ca,cs,da,de,el,es"
+                sparkle:edSignature="UOJ7PJEa1F6e9lvsCiA6Ya9K2n0s/iD+EtWOjMB4GZ9IHGfY1wD87EicAaNMAdGWX3aavJc49MJoL9bBUxroDQ==" />
+        </sparkle:deltas>
+    </item>
+        </channel>
+</rss>

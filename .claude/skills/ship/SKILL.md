@@ -87,16 +87,23 @@ Commit it all, then open the PR.
 ## 4 · Release — autonomous, backgrounded
 
 - `bin/ship.sh release <version>` — **run it with `run_in_background: true`**. It runs `bin/ship.sh soak` first and won't tag while the installed build is older than the code, has run under an hour, has crashed since install, or isn't running (see docs/releasing.md "Soak check before tagging"); `SHIP_SKIP_SOAK=1` only for an emergency fix. It
-  tags, watches the Release run, then verifies (asset present · appcast
-  advertises the version · enclosure length matches the asset · EdDSA signature
-  validates against the app's embedded `SUPublicEDKey` · each delta update is an
-  asset at its stated length and its signature validates). One notification when
-  it's done.
+  tags, watches the Release run, then verifies (asset present · the site's
+  appcast, `https://pacer.andrechek.com/appcast.xml`, advertises the version,
+  waiting up to 15 min for Workers Builds · the legacy gh-pages mirror is
+  byte-identical to it while on · enclosure length matches the asset · EdDSA
+  signature validates against the app's embedded `SUPublicEDKey` · each delta
+  update is an asset at its stated length and its signature validates). One
+  notification when it's done. `bin/ship.sh preflight` fails while the site
+  does not serve main's `site/public/appcast.xml`: never tag past that.
+- **The site's feed did not update** (`verify`: "does not advertise"): Macs on
+  0.9.4+ don't see the release until it deploys. Follow `docs/releasing.md` →
+  "When the site's feed did not update"; don't cut a patch for it.
 - **A delta check fails, or Macs on one version stop updating after a release
   with deltas:** don't cut a patch for it. Roll the deltas back
   (`docs/releasing.md` → "Rolling back delta updates": `PACER_SPARKLE_DELTAS=off`,
-  then `bin/appcast-drop-deltas.sh` on a gh-pages checkout). The appcast push is
-  a publish, so it needs the owner's word like any release action.
+  then `bin/appcast-drop-deltas.sh` on main's `site/public/appcast.xml` and
+  `bin/publish-feeds.sh mirror`). The push to main is a publish, so it needs the
+  owner's word like any release action.
 - If it exits non-zero: fix the cause and cut an autonomous **patch** bump with a
   short note (e.g. "fix release pipeline"), no gating — these are needed to make
   the *already-approved* release actually work. Repeat until

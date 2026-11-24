@@ -24,7 +24,14 @@ enum GadgetSchemaV2 {
 /// `PacerStore.prepareStore` and the metadata check the launch path and the
 /// widget rely on (#376). Every store here is a fresh file in a temporary
 /// directory: nothing opens the App Group store.
-@Suite("Preparing the store off the main thread")
+///
+/// Serialized: the tests hold containers for both versions of the one
+/// "Gadget" entity, and SwiftData on macOS 15 resolves an entity by name
+/// process-wide. Two containers for different versions open at once let it
+/// decode a V1 object against the V2 schema, a fatal error that ends the whole
+/// test process ("Cannot find weight … GadgetSchemaV1.Gadget"): main's CI on
+/// macos-15, 2026-11-24, passing on re-run.
+@Suite("Preparing the store off the main thread", .serialized)
 struct PacerStorePrepareTests {
 
     private func tempStoreURL() throws -> URL {

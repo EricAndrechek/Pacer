@@ -15,7 +15,8 @@ import SwiftData
 /// the record whose window contains its timestamp (`PriceLedger`).
 ///
 /// **Where rows come from.**
-/// - `curated`: the bundled `price-history.json`, refreshed from gh-pages —
+/// - `curated`: the bundled `price-history.json`, refreshed from the site
+///   (`CuratedPriceHistory.remoteURL`) —
 ///   reviewed history the catalogs can't hold (Sonnet 5's introductory
 ///   window, Sonnet 5.5's cache-read rate from launch). Never overwritten by
 ///   a catalog refresh.

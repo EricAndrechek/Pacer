@@ -12,10 +12,11 @@
     "binding": "ASSETS",
     // Astro emits dist/404.html; unknown paths get it with a 404 status.
     "not_found_handling": "404-page",
-    // Everything is a static asset except these, which the Worker
-    // answers (worker/index.ts). Listing them keeps every other request off
-    // the Worker entirely.
-    "run_worker_first": ["/appcast.xml", "/price-history.json", "/download", "/download/"],
+    // Everything is a static asset except /download, which the Worker answers
+    // (worker/index.ts). Listing only it keeps every other request off the
+    // Worker entirely. /appcast.xml and /price-history.json are static assets
+    // on purpose (public/): the update feed must never depend on Worker code.
+    "run_worker_first": ["/download", "/download/"],
   },
   // PostHog for /download's one anonymous `website_download` event (worker/index.ts).
   // The same project as the app; its token is public by design (it is compiled
@@ -24,18 +25,25 @@
     "POSTHOG_TOKEN": "phc_rCT9m6F6y7DwcDSJ5BgHpZECFyvpmsPoyUiLx5pa693A",
     "POSTHOG_HOST": "https://us.i.posthog.com",
   },
-  // Custom domain: Cloudflare creates the DNS record itself on the deploy that
-  // adds it. Held back until the owner approves the design on workers.dev;
-  // the cutover PR uncomments it.
-  // "routes": [{ "pattern": "pacer.andrechek.com", "custom_domain": true }],
+  // Custom domain: the site, and from 0.9.4 the app's update feed (SUFeedURL)
+  // and price history. Cloudflare creates the DNS record itself on the first
+  // production deploy that carries this route (the merge that added it; no
+  // record may exist for the name beforehand). scripts/indexnow.mjs only
+  // submits when it is here.
+  "routes": [{ "pattern": "pacer.andrechek.com", "custom_domain": true }],
   // Branch previews: Workers Builds runs `npx wrangler preview` for non-main
   // branches, served on workers.dev. Top-level settings apply.
   "previews": {},
+  // Set explicitly, because left out it follows workers_dev (off below).
+  // Cloudflare: "Disabling your workers.dev route does not disable Version
+  // URLs, Preview URLs, or Deployment URLs" (Workers > Routing > workers.dev),
+  // and "Production and Preview workers.dev URLs are configured separately"
+  // (Workers > Previews > Custom domains). Preview answers carry
+  // X-Robots-Tag: noindex (public/_headers, worker/index.ts, and Cloudflare's own).
   "preview_urls": true,
-  // The cutover (with the route above) sets this to false, so the site lives at
-  // one address; previews keep their workers.dev URLs. Until then workers.dev
-  // answers carry X-Robots-Tag: noindex (public/_headers, worker/index.ts).
-  "workers_dev": true,
+  // Production lives at one address. Keep it in this file: a workers.dev route
+  // switched off only in the dashboard comes back on the next deploy.
+  "workers_dev": false,
   "observability": {
     "enabled": true,
     "logs": { "enabled": true, "head_sampling_rate": 1 },
