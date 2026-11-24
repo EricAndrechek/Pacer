@@ -15,6 +15,8 @@ import SwiftData
 /// `PACER_ARENA_CAP5H` / `PACER_ARENA_CAPWK` set the cycles scored (2 / 1),
 /// `PACER_ARENA_OLD_POOLS=1` keeps network scratch as before (four a network,
 /// any size). Weights as `RuntimeRegistryProbe` finds them. Synthetic data only.
+/// `PACER_PRODUCTION_QOS=1` runs the arena at the app's QoS: a test process
+/// otherwise runs its background work at utility (`BackgroundQoS`, #431).
 @Suite("Arena runtime: memory probe", .serialized,
        .enabled(if: ProcessInfo.processInfo.environment["PACER_ARENA_PERF"] == "1"))
 struct RuntimeMemoryProbe {

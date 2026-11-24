@@ -433,7 +433,7 @@ struct RuntimeUnifiedRankingTests {
 
 /// The grader in the background: no pruning, re-grades, and the engine's
 /// methods graded the same way.
-@Suite("Runtime: the unified grader", .serialized)
+@Suite("Runtime: the unified grader", .serialized, .hangBackstop)
 struct RuntimeUnifiedGraderTests {
 
     typealias Fixtures = RuntimeEngineTests

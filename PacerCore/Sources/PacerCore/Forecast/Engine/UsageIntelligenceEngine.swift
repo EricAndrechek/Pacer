@@ -208,7 +208,7 @@ public actor UsageIntelligenceEngine {
     /// Run `work` in the background after any cleanup already queued.
     private func queueRecordCleanup(_ work: @escaping @Sendable () -> Void) {
         let previous = recordCleanup
-        recordCleanup = Task.detached(priority: .background) {
+        recordCleanup = Task.detached(priority: BackgroundQoS.priority) {
             await previous?.value
             work()
         }

@@ -92,7 +92,10 @@ struct RuntimeBudgetGovernorTests {
     /// On a background serial queue's thread, as the scorer's work runs: the
     /// QoS is raised for the job, and dispatch puts the next job back at the
     /// queue's.
-    @Test func theQoSIsAppliedOnTheScorersKindOfThread() async {
+    ///
+    /// Background on purpose (it is the queue's QoS under test), so on a
+    /// saturated Mac its jobs can wait minutes for a core (#431).
+    @Test(.hangBackstop) func theQoSIsAppliedOnTheScorersKindOfThread() async {
         let queue = DispatchSerialQueue(label: "test.arena.qos", qos: .background)
         let seen: (before: qos_class_t, applied: Bool, after: qos_class_t) = await withCheckedContinuation { c in
             queue.async {
