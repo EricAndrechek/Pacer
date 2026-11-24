@@ -157,8 +157,8 @@ struct PaceModeFile {
 ///
 /// The contract, for any controller:
 ///
-///     {"v": 1, "updatedAt": "2026-11-17T15:06:33Z", "active": "e34c1364",
-///      "holding": false, "targets": ["74598a77"]}
+///     {"v": 1, "updatedAt": "2026-11-17T15:06:33Z", "active": "a1b2c3d4",
+///      "holding": false, "targets": ["e5f6a7b8"]}
 ///
 /// `targets` are the accounts it would switch to now (an id, or the first 8
 /// characters of one), by its own bar. A file older than `freshFor` describes
