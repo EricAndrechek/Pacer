@@ -7,7 +7,7 @@ import SwiftData
 /// #431: in a test process nothing the arena applies runs at background QoS,
 /// which a saturated Mac does not schedule at all; the policies that choose a
 /// class still choose background.
-@Suite("Background QoS in a test process (#431)", .serialized)
+@Suite("Background QoS in a test process (#431)", .serialized, .hangBackstop)
 struct BackgroundQoSTests {
 
     @Test func backgroundIsAppliedAsUtilityAndNothingHigherIsTouched() {

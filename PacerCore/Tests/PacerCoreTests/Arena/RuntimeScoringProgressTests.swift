@@ -8,7 +8,7 @@ import SwiftData
 /// queue of those planned, the models still being scored, gone when the pass
 /// has no more work for the account. Read from inside a model's forecast, so
 /// every snapshot is taken while the scorer's actor is busy.
-@Suite("Arena runtime: the scorer's progress", .serialized)
+@Suite("Arena runtime: the scorer's progress", .serialized, .hangBackstop)
 struct RuntimeScoringProgressTests {
 
     typealias Fixtures = RuntimeEngineTests

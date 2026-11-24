@@ -7,7 +7,7 @@ import SwiftData
 /// `EngineHost`: the scorer's batches reach the account's engine, and live
 /// projections landing redraw it. The closures below are the app's, word for
 /// word, so this also holds them to PacerCore's types.
-@Suite("Arena runtime: the app's wiring", .serialized)
+@Suite("Arena runtime: the app's wiring", .serialized, .hangBackstop)
 @MainActor
 struct RuntimeWiringTests {
 

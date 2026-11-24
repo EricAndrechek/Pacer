@@ -17,7 +17,7 @@ import Testing
 
 // MARK: - End to end: the poller's own loop on a virtual clock
 
-@Suite("Lane stagger through the poller loop (#350)")
+@Suite("Lane stagger through the poller loop (#350)", .hangBackstop)
 struct LaneStaggerPollerTests {
 
     /// Virtual time for a whole loop run. Each nap moves the clock forward by

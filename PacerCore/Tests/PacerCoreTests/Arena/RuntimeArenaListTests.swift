@@ -7,7 +7,7 @@ import SwiftData
 /// (`UsageIntelligenceEngine.arenaModelList`): each with its record, or why it
 /// has none yet. The pure listing first, then the engine's accessor over a
 /// seeded store with test-double models (`RuntimeEngineTests`).
-@Suite("Arena runtime: every model's standing for the compare sheet", .serialized)
+@Suite("Arena runtime: every model's standing for the compare sheet", .serialized, .hangBackstop)
 struct RuntimeArenaListTests {
 
     // MARK: Pure listing

@@ -1,5 +1,16 @@
 import Foundation
+import Testing
 @testable import PacerCore
+
+extension Trait where Self == TimeLimitTrait {
+    /// For a suite whose tests wait on background work (the arena's scorer
+    /// and live lane, a poller's loop): a test still waiting after this long
+    /// is named in the log as over its time limit, rather than the run
+    /// sitting silent until somebody kills it (#431). Far past the slowest
+    /// pass seen in a full `make test` beside other builders (287 s): it is a
+    /// backstop for a hang, not a deadline for slow work.
+    static var hangBackstop: Self { .timeLimit(.minutes(20)) }
+}
 
 /// Polls `condition` until it holds or `timeout` of wall time has passed, and
 /// says which.

@@ -7,7 +7,7 @@ import SwiftData
 /// engine's selection over their record, and the live path that never waits
 /// on them. The models here are test doubles registered for the suite; the
 /// real ports register in `ArenaRegistry` on their own branches.
-@Suite("Arena runtime: scorer, selection and live path", .serialized)
+@Suite("Arena runtime: scorer, selection and live path", .serialized, .hangBackstop)
 struct RuntimeEngineTests {
 
     // MARK: Fixtures
