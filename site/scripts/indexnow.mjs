@@ -25,6 +25,13 @@ async function main() {
     console.log('indexnow: not a production deploy (WORKERS_CI_BRANCH is not main), skipping');
     return;
   }
+  // Until wrangler.jsonc routes pacer.andrechek.com (the cutover uncomments it), the site is only
+  // on workers.dev and the sitemap's URLs don't resolve: submitting them would only fail.
+  const config = readFileSync(new URL('../wrangler.jsonc', import.meta.url), 'utf8');
+  if (!/^\s*"routes"\s*:\s*\[[^\]]*pacer\.andrechek\.com/m.test(config)) {
+    console.log('indexnow: pacer.andrechek.com is not routed yet (wrangler.jsonc), skipping');
+    return;
+  }
   if (!existsSync(join(dist, `${KEY}.txt`))) {
     console.warn(`indexnow: ${dist}/${KEY}.txt is missing, skipping (is public/${KEY}.txt there?)`);
     return;
