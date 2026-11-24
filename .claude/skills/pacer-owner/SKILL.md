@@ -46,7 +46,8 @@ in AGENTS.md still holds — above all **never take over the machine**.
    - **Urgent** — a crash, data loss or a wrong number on the current release, a broken
      update path, a regression from our last release → start a fix wave now.
    - **An external PR or issue** → answer within the sweep; pull PRs with `wt switch pr:N`.
-5. Update `state.json`. Touch #249 only when the queue changed. Stay silent otherwise.
+5. Update `state.json`. Edit #249's queue only when the queue changed (it is the public
+   work list, never a place for messages to the owner). Stay silent otherwise.
 
 ## 3 · Work
 
@@ -72,27 +73,34 @@ Follow the `ship` skill; you are pre-authorized. On top of it:
   with a display awake, with no new crash report and no hang spike for the same display
   state (the hang tags say whether the Mac itself was saturated). A crash, data-loss or
   update-path fix may ship after 2 h, never less, never skipping the crash check.
-- **Cadence:** batch; about one release a day at most, unless fixing our own release.
+- **Cadence:** batch; at most one release a day, unless an urgent patch is needed (a
+  crash, data loss, a wrong number, a broken update path).
+- **Skipping versions must be safe:** a Mac several releases behind updates straight to
+  the newest in one install, so every migration has to compose from any shipped
+  release. Before a release that touches `Models/` or a version-gated upgrade, run the
+  upgrade check from every shipped release (see `docs/releasing.md`).
 - After verify: resolve the fixed Sentry issues in the new release, close or update
-  issues, note it on #249, and record it in memory.
+  issues, and record it in memory.
 
 ## 5 · Ask the owner only for these
 
 Product direction or new features; anything labelled `needs-decision`, `design-first`
-or `parked`; a visible UI change (render it first, `make render-live`, and show it);
+or `parked`; a new or redesigned piece of UI (render it first, `make render-live`, and
+show it; small visual fixes such as alignment, clipping or a wrong colour need no ask);
 a schema change (a minor release); a change to what telemetry sends or to the README's
 privacy promise; pricing policy; spending money or a new external service; posting
 anywhere public; anything needing the owner's credentials, Apple account or screen
 (an on-machine scripted check needs his yes for that run).
 
-How: one message with plain numbered questions, each with a recommendation, plus
-`PushNotification`. Keep the item in `state.json` `waiting` and carry on with other
-work; never sit idle waiting.
+How: a message in the owning session, as it comes up: plain numbered questions, each
+with a recommendation. Never in a commit, a GitHub issue or a comment (the repo is
+public), and don't rely on push notifications reaching anyone. Keep the item in
+`state.json` `waiting` and carry on with other work; never sit idle waiting.
 
 ## 6 · Weekly ("pacer-owner: weekly")
 
-One comment on #249: what shipped, the fleet (versions, health), what's next, and
-anything waiting on the owner. No push notification.
+One message in the owning session: what shipped, the fleet (versions, health), what's
+next, and anything waiting on the owner. Not posted anywhere public.
 
 ## Never
 
