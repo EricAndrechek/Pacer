@@ -2,37 +2,36 @@
 // Workers runtime treats every named export of the entry module as an entry
 // point, and refuses to start when one is a constant.
 
-export const ORIGIN = 'https://ericandrechek.github.io/Pacer/';
 export const RELEASES_LATEST = 'https://github.com/EricAndrechek/Pacer/releases/latest';
 export const RELEASES_API = 'https://api.github.com/repos/EricAndrechek/Pacer/releases/latest';
 const DMG_PREFIX = 'https://github.com/EricAndrechek/Pacer/releases/download/';
+/**
+ * The site's own appcast: a static asset (public/appcast.xml), the same file
+ * the app's Sparkle reads (SUFeedURL) and the release workflow writes.
+ */
+export const APPCAST_PATH = '/appcast.xml';
 
-/** A cached copy younger than this is served as is. */
-export const FRESH_SECONDS = 60;
 /** The GitHub API fallback is asked at most this often (it allows 60 requests an hour per address). */
 export const RELEASE_FRESH_SECONDS = 300;
 /** An older copy is still served, while a fresh one is fetched in the background, up to this age. */
 export const STALE_SECONDS = 24 * 60 * 60;
 /** No origin request may hold a response longer than this. */
 export const ORIGIN_TIMEOUT_MS = 4000;
-/** What clients (Sparkle, browsers) are told they may cache. */
-const CLIENT_CACHE_CONTROL = `public, max-age=${FRESH_SECONDS}, stale-while-revalidate=300`;
 /** The cache entry records when its bytes were fetched. */
 const FETCHED_AT = 'x-pacer-fetched-at';
-/** Every file here is a few hundred KB at most; anything far larger is not ours to cache. */
+/** Every answer here is a few hundred KB at most; anything far larger is not ours to cache. */
 const MAX_BYTES = 8 * 1024 * 1024;
 /** GitHub's API refuses requests without one. */
 const USER_AGENT = 'pacer.andrechek.com';
 
 /**
  * Something fetched from an origin and kept at the edge. `valid` decides
- * whether a 200 is really the file: GitHub Pages answers some failures with an
- * HTML page, and caching that as the appcast would hand Sparkle garbage for a
- * day. Anything that fails it is never cached.
+ * whether a 200 is really what was asked for: an error page with a 200, cached,
+ * would be served for a day. Anything that fails it is never cached.
  */
 export interface Resource {
   url: string;
-  /** The Content-Type it is served with. */
+  /** The Accept header, and the Content-Type of the cache entry. */
   type: string;
   freshSeconds: number;
   /** The origin's Content-Type must contain this. */
@@ -50,22 +49,6 @@ const isJson = (body: string) => {
   }
 };
 
-export const APPCAST: Resource = {
-  url: ORIGIN + 'appcast.xml',
-  type: 'application/xml; charset=utf-8',
-  freshSeconds: FRESH_SECONDS,
-  originType: /xml/i,
-  valid: (body) => /<rss\b/.test(body),
-};
-
-const PRICE_HISTORY: Resource = {
-  url: ORIGIN + 'price-history.json',
-  type: 'application/json; charset=utf-8',
-  freshSeconds: FRESH_SECONDS,
-  originType: /json/i,
-  valid: isJson,
-};
-
 const RELEASE_API: Resource = {
   url: RELEASES_API,
   type: 'application/json; charset=utf-8',
@@ -73,12 +56,6 @@ const RELEASE_API: Resource = {
   originType: /json/i,
   valid: isJson,
   headers: { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' },
-};
-
-/** Paths mirrored from GitHub Pages. */
-export const MIRRORED: Record<string, Resource> = {
-  '/appcast.xml': APPCAST,
-  '/price-history.json': PRICE_HISTORY,
 };
 
 function plain(status: number, text: string, extra: Record<string, string> = {}): Response {
@@ -89,25 +66,6 @@ function plain(status: number, text: string, extra: Record<string, string> = {})
 }
 
 const methodNotAllowed = () => plain(405, 'Method not allowed', { Allow: 'GET, HEAD' });
-
-/** An ETag without its weak marker, for If-None-Match's weak comparison. */
-const opaque = (tag: string) => tag.trim().replace(/^W\//, '');
-
-/** Serve a mirrored file: from the edge cache when fresh, else from GitHub Pages. */
-export async function mirror(request: Request, resource: Resource, ctx: ExecutionContext): Promise<Response> {
-  if (request.method !== 'GET' && request.method !== 'HEAD') return methodNotAllowed();
-  const result = await cachedFetch(resource, ctx);
-  if (!result.ok) return result.response;
-
-  const { response } = result;
-  const headers = clientHeaders(response.headers, resource.type, result.state);
-  const etag = response.headers.get('ETag');
-  const inm = request.headers.get('If-None-Match');
-  if (etag && inm && inm.split(',').some((t) => t.trim() === '*' || opaque(t) === opaque(etag))) {
-    return new Response(null, { status: 304, headers });
-  }
-  return new Response(request.method === 'HEAD' ? null : response.body, { status: 200, headers });
-}
 
 type CacheState = 'HIT' | 'STALE' | 'MISS';
 type Fetched = { ok: true; response: Response; state: CacheState } | { ok: false; response: Response };
@@ -164,7 +122,7 @@ export async function fetchValid(resource: Resource): Promise<Origin> {
   try {
     const upstream = await fetch(resource.url, {
       headers: { Accept: resource.type, 'User-Agent': USER_AGENT, ...resource.headers },
-      // A redirect from GitHub Pages is not the file; don't follow it into something else.
+      // A redirect is not the answer asked for; don't follow it into something else.
       redirect: 'manual',
       // The edge copy is this Worker's own (Cache API); the origin is always asked afresh.
       cache: 'no-store',
@@ -198,22 +156,6 @@ export async function fetchValid(resource: Resource): Promise<Origin> {
   }
 }
 
-function clientHeaders(from: Headers, type: string, state: CacheState): Headers {
-  const headers = new Headers({
-    'Content-Type': type,
-    'Cache-Control': CLIENT_CACHE_CONTROL,
-    // GitHub Pages sends this too; keep parity for anything fetching the files from a page.
-    'Access-Control-Allow-Origin': '*',
-    'X-Content-Type-Options': 'nosniff',
-    'X-Pacer-Cache': state,
-  });
-  for (const name of ['ETag', 'Last-Modified']) {
-    const value = from.get(name);
-    if (value) headers.set(name, value);
-  }
-  return headers;
-}
-
 // ---------------------------------------------------------------------------
 // /download
 
@@ -227,7 +169,7 @@ export async function download(request: Request, env: Env, ctx: ExecutionContext
   if (request.method !== 'GET' && request.method !== 'HEAD') return methodNotAllowed();
   let latest: Latest = { url: RELEASES_LATEST, version: null };
   try {
-    latest = await latestRelease(ctx);
+    latest = await latestRelease(request, env, ctx);
   } catch (err) {
     console.error(JSON.stringify({ message: 'latest release lookup failed', error: String(err) }));
   }
@@ -246,24 +188,44 @@ export async function download(request: Request, env: Env, ctx: ExecutionContext
 }
 
 /**
- * The DMG to hand out: the appcast's newest item first, because the appcast is
- * what Sparkle offers and pulling a bad release means deleting its item there
- * (docs/releasing.md, "Pulling a bad release"); GitHub's "latest release" can
- * still be the pulled one. The releases API only when the appcast can't be
- * read, then the latest-release page.
+ * The DMG to hand out: the newest item of the site's own appcast first,
+ * because the appcast is what Sparkle offers and pulling a bad release means
+ * deleting its item there (docs/releasing.md, "Pulling a bad release");
+ * GitHub's "latest release" can still be the pulled one. The appcast is a
+ * static asset of this same deployment, so it is read through the assets
+ * binding, never over the network. The releases API only when the appcast
+ * can't be read or names no DMG, then the latest-release page.
  */
-export async function latestRelease(ctx: ExecutionContext): Promise<Latest> {
-  const appcast = await cachedFetch(APPCAST, ctx);
-  if (appcast.ok) {
-    const url = latestDmg(await appcast.response.text());
-    if (url) return { url, version: versionOf(url) };
-  }
+export async function latestRelease(request: Request, env: Env, ctx: ExecutionContext): Promise<Latest> {
+  const url = latestDmg(await siteAppcast(request, env));
+  if (url) return { url, version: versionOf(url) };
   const api = await cachedFetch(RELEASE_API, ctx);
   if (api.ok) {
     const found = dmgFromRelease(await api.response.json().catch(() => null));
     if (found) return found;
   }
   return { url: RELEASES_LATEST, version: null };
+}
+
+/** public/appcast.xml from the assets binding, or '' when it isn't there or isn't an appcast. Never throws. */
+export async function siteAppcast(request: Request, env: Env): Promise<string> {
+  try {
+    const response = await env.ASSETS.fetch(new Request(new URL(APPCAST_PATH, request.url), { method: 'GET' }));
+    // not_found_handling serves the 404 page for a missing file; that is not the appcast.
+    if (response.status !== 200) {
+      console.error(JSON.stringify({ message: 'site appcast unavailable', status: response.status }));
+      return '';
+    }
+    const body = await response.text();
+    if (!/<rss\b/.test(body)) {
+      console.error(JSON.stringify({ message: 'site appcast is not an appcast' }));
+      return '';
+    }
+    return body;
+  } catch (err) {
+    console.error(JSON.stringify({ message: 'site appcast read failed', error: String(err) }));
+    return '';
+  }
 }
 
 const versionOf = (dmgUrl: string) => /\/Pacer-(\d+\.\d+\.\d+)\.dmg$/.exec(dmgUrl)?.[1] ?? null;

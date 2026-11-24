@@ -37,10 +37,23 @@
 /llms-full.txt
   Content-Type: text/plain; charset=utf-8
 
-# workers.dev (production's second address, and every branch preview) stays out of
-# search results. _headers can match on host with an absolute URL, so this applies
-# to the static assets only there; the Worker's own answers (/appcast.xml,
-# /price-history.json, /download/) add the same header in worker/index.ts.
-# The cutover sets workers_dev: false, leaving previews as the only workers.dev URLs.
+# The update feed (Sparkle reads it: SUFeedURL) and the dated price history
+# (CuratedPriceHistory.remoteURL), both static files written by the release
+# workflow (bin/publish-feeds.sh). A minute of caching, so a release, or an item
+# pulled from the feed, reaches every client within minutes. CORS open, as
+# GitHub Pages served them.
+/appcast.xml
+  Content-Type: application/xml; charset=utf-8
+  Cache-Control: public, max-age=60, stale-while-revalidate=300
+  Access-Control-Allow-Origin: *
+/price-history.json
+  Content-Type: application/json; charset=utf-8
+  Cache-Control: public, max-age=60, stale-while-revalidate=300
+  Access-Control-Allow-Origin: *
+
+# workers.dev (every branch preview, and production's workers.dev address whenever
+# wrangler.jsonc turns it on) stays out of search results. _headers can match on host with an
+# absolute URL, so this applies to the static assets only there; the Worker's own
+# answer (/download/) adds the same header in worker/index.ts.
 https://:worker.:account.workers.dev/*
   X-Robots-Tag: noindex

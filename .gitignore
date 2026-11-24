@@ -65,6 +65,9 @@ keys/
 *.app
 *.dmg
 appcast.xml
+# ...except the published update feed, which the site serves and the release
+# workflow commits (bin/publish-feeds.sh).
+!site/public/appcast.xml
 updates/
 
 # Editor

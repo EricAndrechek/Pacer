@@ -12,10 +12,11 @@
     "binding": "ASSETS",
     // Astro emits dist/404.html; unknown paths get it with a 404 status.
     "not_found_handling": "404-page",
-    // Everything is a static asset except these, which the Worker
-    // answers (worker/index.ts). Listing them keeps every other request off
-    // the Worker entirely.
-    "run_worker_first": ["/appcast.xml", "/price-history.json", "/download", "/download/"],
+    // Everything is a static asset except /download, which the Worker answers
+    // (worker/index.ts). Listing only it keeps every other request off the
+    // Worker entirely. /appcast.xml and /price-history.json are static assets
+    // on purpose (public/): the update feed must never depend on Worker code.
+    "run_worker_first": ["/download", "/download/"],
   },
   // PostHog for /download's one anonymous `website_download` event (worker/index.ts).
   // The same project as the app; its token is public by design (it is compiled
