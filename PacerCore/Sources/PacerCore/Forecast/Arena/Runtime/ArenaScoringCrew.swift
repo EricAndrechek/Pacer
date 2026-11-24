@@ -167,7 +167,9 @@ final class ArenaScoringCrew: @unchecked Sendable {
         // 512 KB has been enough, and a thread's stack is only reserved until
         // it is used.
         thread.stackSize = 1 << 20
-        switch budget.scorerQoS {
+        // Through `BackgroundQoS`: a test waiting on this pass must get it
+        // scheduled on a saturated Mac (#431).
+        switch BackgroundQoS.applied(budget.scorerQoS) {
         case QOS_CLASS_USER_INITIATED: thread.qualityOfService = .userInitiated
         case QOS_CLASS_UTILITY: thread.qualityOfService = .utility
         default: thread.qualityOfService = .background
