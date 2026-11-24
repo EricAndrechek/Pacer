@@ -1,0 +1,78 @@
+---
+import { ISSUES, LICENSE_URL, NAV, RELEASES, REPO, VERSION } from '../lib/site';
+---
+
+<footer class="site-footer">
+  <div class="wrap cols">
+    <div class="about">
+      <p class="name"><img src="/favicon.svg" width="22" height="22" alt="" /> Pacer {VERSION}</p>
+      <p class="muted small">
+        Free and open source under the <a href={LICENSE_URL}>MIT license</a>. Pacer reads data from Anthropic's Claude Code
+        but is not affiliated with or endorsed by Anthropic.
+      </p>
+    </div>
+    <nav aria-label="Footer" class="small">
+      <ul>
+        {NAV.map((n) => <li><a href={n.href}>{n.label}</a></li>)}
+      </ul>
+      <ul>
+        <li><a href={REPO}>Source on GitHub</a></li>
+        <li><a href={RELEASES}>All releases</a></li>
+        <li><a href={ISSUES}>Report an issue</a></li>
+        <li><a href="/llms.txt">llms.txt</a></li>
+      </ul>
+    </nav>
+  </div>
+</footer>
+
+<style>
+  .site-footer {
+    margin-top: clamp(4rem, 10vw, 7rem);
+    border-top: 1px solid var(--line);
+    padding-block: 2.5rem 3.5rem;
+  }
+  .cols {
+    display: grid;
+    grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+    gap: 2rem 3rem;
+  }
+  .name {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-weight: 750;
+    font-stretch: 112%;
+    margin-bottom: 0.6rem;
+  }
+  .about p.small {
+    max-width: 46ch;
+  }
+  nav {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1rem;
+  }
+  ul {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+  }
+  li + li {
+    margin-top: 0.15rem;
+  }
+  nav a {
+    display: inline-block;
+    padding-block: 0.3rem;
+    color: var(--ink-2);
+    text-decoration: none;
+  }
+  nav a:hover {
+    color: var(--ink);
+    text-decoration: underline;
+  }
+  @media (max-width: 720px) {
+    .cols {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+</style>

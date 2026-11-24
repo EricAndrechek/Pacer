@@ -1,0 +1,40 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "pacer",
+  // account_id: set to the owner's PERSONAL account — never the Wave RF one.
+  // Pinning it also makes a deploy from a machine signed into another account
+  // fail, instead of landing the site there. (Or leave it out and set
+  // CLOUDFLARE_ACCOUNT_ID; Workers Builds supplies the connected account.)
+  // "account_id": "<personal account id>",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-11-24",
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    // Astro emits dist/404.html; unknown paths get it with a 404 status.
+    "not_found_handling": "404-page",
+    // Everything is a static asset except these, which the Worker
+    // answers (worker/index.ts). Listing them keeps every other request off
+    // the Worker entirely.
+    "run_worker_first": ["/appcast.xml", "/price-history.json", "/download", "/download/"],
+  },
+  // PostHog for /download's one anonymous `website_download` event (worker/index.ts).
+  // The same project as the app; its token is public by design (it is compiled
+  // into the app, project.yml). Empty POSTHOG_TOKEN turns the event off.
+  "vars": {
+    "POSTHOG_TOKEN": "phc_rCT9m6F6y7DwcDSJ5BgHpZECFyvpmsPoyUiLx5pa693A",
+    "POSTHOG_HOST": "https://us.i.posthog.com",
+  },
+  // Custom domain: Cloudflare creates the DNS record itself on first deploy.
+  "routes": [{ "pattern": "pacer.andrechek.com", "custom_domain": true }],
+  // Branch previews: Workers Builds runs `npx wrangler preview` for non-main
+  // branches, served on workers.dev. Top-level settings apply.
+  "previews": {},
+  "preview_urls": true,
+  "workers_dev": true,
+  "observability": {
+    "enabled": true,
+    "logs": { "enabled": true, "head_sampling_rate": 1 },
+    "traces": { "enabled": true, "head_sampling_rate": 0.05 },
+  },
+}

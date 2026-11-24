@@ -1,0 +1,57 @@
+---
+// PostHog web analytics for the site, in the app's project (owner's decision,
+// 2026-11-24). Kept deliberately small:
+// - persistence 'memory': no cookie and nothing in localStorage. Each page load
+//   gets a new random id, so visits can't be linked to each other.
+// - person_profiles 'identified_only', and nothing ever identifies anyone.
+// - autocapture, replay, heatmaps, surveys, feature flags and web vitals off:
+//   only $pageview and the named events in src/scripts/analytics.ts.
+// - every event carries `surface: 'website'`, so web and app events never mix.
+// PostHog still receives the visitor's IP address with each request, as any
+// server does; the Privacy page says so.
+//
+// PUBLIC_POSTHOG_TOKEN overrides the token at build time; set it empty and no
+// script is emitted at all (scripts/csp-hashes.mjs then drops 'unsafe-inline').
+import { POSTHOG_HOST, POSTHOG_PROJECT_TOKEN } from '../lib/site';
+
+const token = import.meta.env.PUBLIC_POSTHOG_TOKEN ?? POSTHOG_PROJECT_TOKEN;
+const apiHost = import.meta.env.PUBLIC_POSTHOG_HOST || POSTHOG_HOST;
+---
+
+{
+  token && (
+    <script is:inline define:vars={{ token, apiHost }}>
+      // prettier-ignore
+      !function(t,e){var o,n,p,r;e.__SV||(window.posthog=e,e._i=[],e.init=function(i,s,a){function g(t,e){var o=e.split(".");2==o.length&&(t=t[o[0]],e=o[1]),t[e]=function(){t.push([e].concat(Array.prototype.slice.call(arguments,0)))}}(p=t.createElement("script")).type="text/javascript",p.crossOrigin="anonymous",p.async=!0,p.src=s.api_host+"/static/array.js",(r=t.getElementsByTagName("script")[0]).parentNode.insertBefore(p,r);var u=e;for(void 0!==a?u=e[a]=[]:a="posthog",u.people=u.people||[],Object.defineProperty(u,"toString",{configurable:!0,enumerable:!0,writable:!0,value:function(t){var e="posthog";return"posthog"!==a&&(e+="."+a),t||(e+=" (stub)"),e}}),Object.defineProperty(u.people,"toString",{configurable:!0,enumerable:!0,writable:!0,value:function(){return u.toString(1)+".people (stub)"}}),o="capture identify alias people.set people.set_once set_config register register_once unregister opt_out_capturing has_opted_out_capturing opt_in_capturing reset isFeatureEnabled onFeatureFlags getFeatureFlag getFeatureFlagResult reloadFeatureFlags group updateEarlyAccessFeatureEnrollment getEarlyAccessFeatures getActiveMatchingSurveys getSurveys getNextSurveyStep onSessionId".split(" "),n=0;n<o.length;n++)g(u,o[n]);e._i.push([i,s,a])},e.__SV=1)}(document,window.posthog||[]);
+
+      const host = location.hostname;
+      // Off under automation (headless renders, Lighthouse), on localhost, and with
+      // Global Privacy Control (respect_dnt below covers Do Not Track).
+      if (!navigator.webdriver && !navigator.globalPrivacyControl && host !== 'localhost' && host !== '127.0.0.1') {
+        posthog.init(token, {
+          api_host: apiHost,
+          defaults: '2026-08-30',
+          persistence: 'memory',
+          person_profiles: 'identified_only',
+          autocapture: false,
+          capture_pageview: true,
+          capture_pageleave: false,
+          capture_dead_clicks: false,
+          capture_heatmaps: false,
+          capture_performance: false,
+          capture_exceptions: false,
+          disable_session_recording: true,
+          disable_surveys: true,
+          advanced_disable_feature_flags: true,
+          respect_dnt: true,
+          loaded: (ph) =>
+            ph.register({
+              surface: 'website',
+              environment:
+                host === 'pacer.andrechek.com' ? 'production' : host.endsWith('.workers.dev') ? 'preview' : 'development',
+            }),
+        });
+      }
+    </script>
+  )
+}

@@ -1,0 +1,102 @@
+---
+import Base from '../layouts/Base.astro';
+import { FAQ, faqText } from '../lib/faq';
+
+const faqPage = {
+  '@type': 'FAQPage',
+  '@id': new URL('/faq/#faq', Astro.site).toString(),
+  mainEntity: FAQ.map((f) => ({
+    '@type': 'Question',
+    name: f.q,
+    acceptedAnswer: { '@type': 'Answer', text: faqText(f.a) },
+  })),
+};
+---
+
+<Base
+  title="FAQ | Pacer"
+  description="Short answers about Pacer: price, requirements, installing, updates, privacy, where rate limits come from, ccusage, multiple accounts, Ultra plans and Claude Desktop."
+  jsonLd={[faqPage]}
+>
+  <header class="wrap page-head">
+    <h1>Questions</h1>
+    <p class="lede">Short answers. Something missing? <a href="https://github.com/EricAndrechek/Pacer/issues">Ask on GitHub</a>.</p>
+  </header>
+
+  <div class="wrap faq">
+    <nav class="index" aria-label="Questions">
+      <ol>
+        {FAQ.map((f) => <li><a href={`#${f.id}`}>{f.q}</a></li>)}
+      </ol>
+    </nav>
+    <div class="answers">
+      {
+        FAQ.map((f) => (
+          <section id={f.id} aria-labelledby={`${f.id}-q`}>
+            <h2 id={`${f.id}-q`}>{f.q}</h2>
+            <p set:html={f.a} />
+          </section>
+        ))
+      }
+    </div>
+  </div>
+</Base>
+
+<style>
+  .faq {
+    display: grid;
+    grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.6fr);
+    gap: 3rem;
+    align-items: start;
+  }
+  .index {
+    position: sticky;
+    top: 1.5rem;
+    font-size: 0.95rem;
+  }
+  .index ol {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    border-left: 2px solid var(--line);
+  }
+  .index li + li {
+    margin-top: 0;
+  }
+  .index a {
+    display: block;
+    padding: 0.35rem 0 0.35rem 1rem;
+    color: var(--ink-2);
+    text-decoration: none;
+  }
+  .index a:hover {
+    color: var(--ink);
+  }
+  .answers section {
+    padding-block: 1.4rem;
+    border-bottom: 1px solid var(--line);
+    scroll-margin-top: 1rem;
+    max-width: 62ch;
+  }
+  .answers section:first-child {
+    padding-top: 0;
+  }
+  .answers h2 {
+    font-size: 1.3rem;
+    font-weight: 700;
+    margin-bottom: 0.45em;
+  }
+  .answers p {
+    margin: 0;
+    color: var(--ink-2);
+  }
+  @media (max-width: 860px) {
+    .faq {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 1.5rem;
+    }
+    .index {
+      display: none;
+    }
+  }
+</style>

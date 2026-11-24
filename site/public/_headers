@@ -1,0 +1,38 @@
+# Cloudflare Workers static-assets headers (rules are additive: when several
+# match a path their headers merge, so Cache-Control is set only on specific
+# paths, never on /*). Default for assets without a rule:
+# `public, max-age=0, must-revalidate`. Adapted from room-planner.
+#
+# CSP (one line under /*):
+#  - script-src 'self' 'unsafe-inline' here -> sha256 hashes in dist: built HTML has
+#        inline scripts (the PostHog snippet with define:vars, small Astro scripts), whose
+#        hashes change per build, so scripts/csp-hashes.mjs (run by `build`) replaces
+#        'unsafe-inline' with a hash of each one. The build fails if this line is missing.
+#        PostHog loads array.js and lazy bundles from *.posthog.com.
+#        Cloudflare Web Analytics: the andrechek.com zone may auto-inject its beacon
+#        (static.cloudflareinsights.com, reporting to cloudflareinsights.com).
+#  - style-src 'self' 'unsafe-inline'   Astro inlines its scoped CSS and the @font-face rule.
+#  - img-src 'self' data:               screenshots are same-origin.
+#  - connect-src 'self' https://*.posthog.com https://cloudflareinsights.com
+#  - object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'.
+/*
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  X-Frame-Options: DENY
+  Permissions-Policy: accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=(), interest-cohort=()
+  Strict-Transport-Security: max-age=31536000; includeSubDomains
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline' https://*.posthog.com https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://*.posthog.com https://cloudflareinsights.com; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; upgrade-insecure-requests
+
+# Hashed build output: cache forever.
+/_astro/*
+  Cache-Control: public, max-age=31536000, immutable
+
+# Pages and the text files built from them: always revalidate.
+/
+  Cache-Control: no-cache
+/*.html
+  Cache-Control: no-cache
+/llms.txt
+  Content-Type: text/plain; charset=utf-8
+/llms-full.txt
+  Content-Type: text/plain; charset=utf-8

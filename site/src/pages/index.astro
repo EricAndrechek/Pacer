@@ -1,0 +1,274 @@
+---
+import Base from '../layouts/Base.astro';
+import Download from '../components/Download.astro';
+import PaceChart from '../components/PaceChart.astro';
+import Shot from '../components/Shot.astro';
+import dashboard from '@screenshots/dashboard.png';
+import dashboardDark from '@screenshots/dashboard-dark.png';
+import menubar from '@screenshots/menubar.png';
+import menubarDark from '@screenshots/menubar-dark.png';
+import widgets from '@screenshots/widgets.png';
+import history from '@screenshots/history.png';
+---
+
+<Base app>
+  <section class="hero wrap">
+    <div class="pitch">
+      <h1>See how close you are to your Claude Code limits.</h1>
+      <p class="lede">
+        Pacer is a free, open-source Mac app that tracks your Claude Code usage from the menu bar: what it costs, where it
+        goes, and whether you will reach a rate limit before it resets.
+      </p>
+      <Download placement="hero" />
+    </div>
+    <div class="chart">
+      <PaceChart />
+    </div>
+  </section>
+
+  <section class="wrap shot-dashboard" aria-label="The dashboard">
+    <Shot
+      light={dashboard}
+      dark={dashboardDark}
+      priority
+      sizes="(max-width: 1180px) 100vw, 1180px"
+      alt="Pacer's dashboard: spend per hour now, today's cost with a projection for tonight, and pace charts for the 5-hour, 7-day and per-model windows of two accounts."
+    />
+    <p class="caption muted small">
+      The dashboard. Every rate-limit window Anthropic reports for your account, per-model caps included, paced against an
+      even burn, with a forecast to its reset.
+    </p>
+  </section>
+
+  <section class="wrap features" aria-labelledby="features-title">
+    <h2 id="features-title" class="sr-only">What Pacer does</h2>
+
+    <div class="row">
+      <div class="text">
+        <h3>Always in the menu bar</h3>
+        <p>
+          Percent chips and an activity ring for the windows you pick. Click it for every window of every account, today's
+          spend and where tonight is heading.
+        </p>
+      </div>
+      <Shot
+        class="pic framed"
+        light={menubar}
+        dark={menubarDark}
+        sizes="(max-width: 800px) 90vw, 340px"
+        widths={[340, 680]}
+        alt="Pacer's menu-bar item and its menu: bars for the 5-hour, 7-day and Fable windows, today's cost and the outlook for tonight."
+      />
+    </div>
+
+    <div class="row flip">
+      <div class="text">
+        <h3>Widgets</h3>
+        <p>
+          Six widgets for the desktop and Notification Center: today's cost, rate limits, the pace chart, the current
+          session, daily cost and top projects. Each one follows the window you choose.
+        </p>
+      </div>
+      <Shot
+        class="pic"
+        light={widgets}
+        sizes="(max-width: 800px) 92vw, 560px"
+        widths={[560, 900, 1120, 1528]}
+        alt="Pacer widgets: today's cost, 5-hour and 7-day rate-limit rings, the current session, a 14-day cost chart and top projects."
+      />
+    </div>
+
+    <div class="row">
+      <div class="text">
+        <h3>Where the spend goes</h3>
+        <p>
+          Usage by project, grouped into your own collections, and by model and by day. Open any day for its breakdown,
+          or look back six months on the heatmap.
+        </p>
+        <p><a href="/features/">All features</a></p>
+      </div>
+      <Shot
+        class="pic"
+        light={history}
+        sizes="(max-width: 800px) 92vw, 640px"
+        widths={[640, 1000, 1280, 1800]}
+        alt="Pacer's History tab: lifetime totals, a six-month activity heatmap and monthly spend."
+      />
+    </div>
+
+    <div class="row flip">
+      <div class="text">
+        <h3>Pace your agents, too</h3>
+        <p>
+          Pacer comes with a Claude Code skill and a <code>pacer</code> command. Before a long run fans out, Claude asks
+          Pacer whether to go. Near a limit it saves its work and pauses, then resumes when there is room again.
+        </p>
+        <p><a href="/cli/">How agents use it</a></p>
+      </div>
+      <pre class="pic term" aria-label="Inside a Claude Code session: pacer gate says go, later pause, and pacer wait says resume"><span class="dim">$</span> pacer gate --model opus
+pace: GO.
+<span class="dim">$</span> pacer gate --model opus
+pace: PAUSE — this login is at its limit until Thu 6:39 PM. Checkpoint, then run `pacer wait` in the background: it resumes then.
+<span class="dim">$</span> pacer wait
+pace: room is back — the limit reset. Resume.</pre>
+    </div>
+  </section>
+
+  <section class="wrap trust" aria-labelledby="trust-title">
+    <h2 id="trust-title">Numbers you can check</h2>
+    <div class="trust-grid">
+      <div>
+        <h3>From Claude Code's own files</h3>
+        <p>Pacer reads the transcripts Claude Code writes on your Mac, and once a day checks its totals against Claude Code's own.</p>
+      </div>
+      <div>
+        <h3>Priced at the time</h3>
+        <p>Each request is priced at the rate in effect when you made it, so a later price change doesn't rewrite history.</p>
+      </div>
+      <div>
+        <h3>Limits from Anthropic</h3>
+        <p>Rate-limit percentages are Anthropic's readings, not guesses from your logs. Between readings, Pacer's estimate carries a decimal.</p>
+      </div>
+    </div>
+    <p><a href="/how-pacer-counts/">How Pacer counts, and why it differs from ccusage</a></p>
+  </section>
+
+  <section class="wrap privacy" aria-labelledby="privacy-title">
+    <h2 id="privacy-title">Your usage data stays on your Mac</h2>
+    <p>
+      Pacer reads Claude Code's own files and uses your Claude Code login only to ask Anthropic for your rate limits.
+      Crash reports and anonymous usage stats help find bugs; never your prompts, projects, files, accounts or costs.
+      Turn either off in Settings.
+    </p>
+    <p><a href="/privacy/">What is sent, exactly</a></p>
+  </section>
+
+  <section class="wrap closing" aria-labelledby="get-title">
+    <h2 id="get-title">Get Pacer</h2>
+    <Download placement="home-end" />
+  </section>
+</Base>
+
+<style>
+  .hero {
+    display: grid;
+    grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
+    gap: clamp(2rem, 5vw, 4.5rem);
+    align-items: center;
+    padding-block: clamp(2.5rem, 7vw, 5.5rem) clamp(2rem, 5vw, 3.5rem);
+  }
+  .pitch h1 {
+    max-width: 13ch;
+  }
+  .pitch .lede {
+    margin-bottom: 1.8rem;
+  }
+  .chart {
+    max-width: 470px;
+    justify-self: end;
+    width: 100%;
+  }
+  .shot-dashboard {
+    padding-top: 1rem;
+  }
+  .shot-dashboard :global(img) {
+    width: 100%;
+  }
+  .caption {
+    max-width: 60ch;
+    margin: 0.5rem auto 0;
+    text-align: center;
+  }
+
+  .features {
+    display: grid;
+    gap: clamp(3.5rem, 8vw, 6rem);
+    padding-block: clamp(4rem, 9vw, 7rem) 1rem;
+  }
+  .row {
+    display: grid;
+    grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+    gap: clamp(1.5rem, 5vw, 4.5rem);
+    align-items: center;
+  }
+  .row.flip .text {
+    order: 2;
+  }
+  .row .text {
+    max-width: 40ch;
+  }
+  .row h3 {
+    font-size: clamp(1.4rem, 1.1rem + 1vw, 1.85rem);
+    font-weight: 750;
+  }
+  .row p {
+    color: var(--ink-2);
+  }
+  .row :global(.pic) {
+    justify-self: center;
+  }
+  .row :global(.framed img) {
+    border-radius: 16px;
+    max-width: 340px;
+    box-shadow: 0 30px 60px -36px rgb(22 19 58 / 0.55);
+  }
+  .term {
+    width: 100%;
+    max-width: 520px;
+    margin: 0;
+    font-size: 0.92rem;
+    padding: 1.4rem 1.5rem;
+    border-radius: var(--radius-lg);
+    box-shadow: 0 30px 60px -36px rgb(22 19 58 / 0.55);
+    white-space: pre-wrap;
+  }
+
+  .trust {
+    padding-top: clamp(4.5rem, 10vw, 7.5rem);
+  }
+  .trust-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 1.5rem 2.5rem;
+    margin: 1.5rem 0 1.25rem;
+    border-top: 3px solid var(--pace);
+    padding-top: 1.5rem;
+  }
+  .trust-grid p {
+    color: var(--ink-2);
+    margin: 0;
+  }
+
+  .privacy {
+    margin-top: clamp(4rem, 9vw, 6.5rem);
+  }
+  .privacy p {
+    max-width: 62ch;
+  }
+  .privacy p:first-of-type {
+    font-size: 1.12rem;
+  }
+
+  .closing {
+    margin-top: clamp(4rem, 9vw, 6.5rem);
+  }
+
+  @media (max-width: 900px) {
+    .hero {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .chart {
+      justify-self: start;
+    }
+    .row,
+    .row.flip {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .row.flip .text {
+      order: 0;
+    }
+    .trust-grid {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+</style>

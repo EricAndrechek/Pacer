@@ -1,0 +1,211 @@
+---
+// The hero's drawing: one rate-limit window as Pacer's dashboard draws it. The
+// straight line is an even pace from empty at the window's start to the limit
+// at its reset; the usage line takes its band's color (38% is green, as
+// UsageBand colours it in the app); the dashed line is the forecast to the reset.
+// An example, not live data: the figure caption says so.
+//
+// Geometry: plot x 0..360 is the window's time, y 190..20 is 0..100%.
+const y = (pct: number) => 190 - 1.7 * pct;
+const now = 0.64 * 360; // 3 h 12 min into 5 h: resets in 1 h 48 min
+const used = 38;
+const atReset = 54; // 38% + 9%/hr x 1.8 hr
+---
+
+<figure class="pace" data-llms="skip">
+  <div class="card">
+    <div class="top">
+      <span class="window">5-hour</span>
+      <span class="muted">resets in 1 hr 48 min</span>
+    </div>
+    <p class="reading">
+      <span class="used">{used}%</span>
+      <span class="even">/ 64%</span>
+    </p>
+    <p class="chips">
+      <span class="chip">↗ +9%/hr</span>
+      <span class="chip yellow">≈{atReset}% at reset</span>
+    </p>
+
+    <svg
+      viewBox="0 0 400 214"
+      role="img"
+      aria-label={`Example chart: 64% of the way through a 5-hour window, ${used}% of the limit is used, under the even-pace line; the forecast reaches about ${atReset}% at the reset.`}
+    >
+      <g class="grid">
+        <line x1="0" x2="360" y1={y(0)} y2={y(0)}></line>
+        <line x1="0" x2="360" y1={y(50)} y2={y(50)}></line>
+        <line x1="0" x2="360" y1={y(100)} y2={y(100)}></line>
+        <line class="now" x1={now} x2={now} y1={y(100)} y2={y(0)}></line>
+      </g>
+      <g class="axis">
+        <text x="368" y={y(100) + 4}>100%</text>
+        <text x="368" y={y(50) + 4}>50%</text>
+        <text x="368" y={y(0) + 4}>0%</text>
+        <text x="0" y="210">start</text>
+        <text x={now} y="210" text-anchor="middle">now</text>
+        <text x="360" y="210" text-anchor="end">reset</text>
+      </g>
+
+      <line class="ideal" x1="0" y1={y(0)} x2="360" y2={y(100)}></line>
+      <text class="label ideal-label" x="352" y={y(100) - 8} text-anchor="end">even pace</text>
+
+      <path
+        class="usage"
+        pathLength="1"
+        d={`M0 ${y(0)} C30 ${y(3)} 60 ${y(7)} 90 ${y(11)} S140 ${y(19)} 165 ${y(25)} S208 ${y(33)} ${now} ${y(used)}`}
+      ></path>
+      <line class="forecast" x1={now} y1={y(used)} x2="360" y2={y(atReset)}></line>
+      <circle class="dot" cx={now} cy={y(used)} r="6"></circle>
+      <text class="label you" x={now - 10} y={y(used) + 24} text-anchor="end">you</text>
+    </svg>
+  </div>
+  <figcaption class="muted small">
+    How Pacer draws a window: your usage against an even pace to the limit, and where it is heading by the reset. Example
+    figures.
+  </figcaption>
+</figure>
+
+<style>
+  .pace {
+    margin: 0;
+  }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-lg);
+    padding: 1.4rem 1.4rem 1rem;
+    box-shadow:
+      0 1px 0 rgb(255 255 255 / 0.6) inset,
+      0 30px 60px -38px rgb(22 19 58 / 0.45);
+  }
+  .top {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 1rem;
+    font-size: 0.9rem;
+  }
+  .window {
+    font-weight: 700;
+    font-stretch: 110%;
+  }
+  .reading {
+    display: flex;
+    align-items: baseline;
+    gap: 0.4rem;
+    margin: 0.2rem 0 0.35rem;
+    font-variant-numeric: tabular-nums;
+  }
+  .used {
+    font-size: clamp(3.4rem, 2.6rem + 3vw, 4.6rem);
+    line-height: 1;
+    font-weight: 800;
+    font-stretch: 72%;
+    letter-spacing: -0.02em;
+    color: var(--band-green-text);
+  }
+  .even {
+    font-size: 1.6rem;
+    font-weight: 600;
+    font-stretch: 80%;
+    color: var(--ink-3);
+  }
+  .chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    margin: 0 0 0.6rem;
+  }
+  .chip {
+    font-size: 0.82rem;
+    font-weight: 600;
+    padding: 0.18em 0.6em;
+    border-radius: 999px;
+    background: var(--sunken);
+    color: var(--ink-2);
+    font-variant-numeric: tabular-nums;
+  }
+  /* 54% is in the yellow band (50 to 75%), as UsageBand colours it in the app. */
+  .chip.yellow {
+    background: color-mix(in srgb, var(--band-yellow) 26%, transparent);
+    color: var(--band-yellow-text);
+  }
+  svg {
+    width: 100%;
+    height: auto;
+    overflow: visible;
+  }
+  .grid line {
+    stroke: var(--grid);
+    stroke-width: 1;
+  }
+  .grid .now {
+    stroke-dasharray: 2 4;
+    stroke: var(--ink-3);
+    opacity: 0.6;
+  }
+  .axis text {
+    font-size: 11px;
+    fill: var(--ink-3);
+    font-variant-numeric: tabular-nums;
+  }
+  .ideal {
+    stroke: var(--pace);
+    stroke-width: 3;
+    stroke-linecap: round;
+  }
+  .label {
+    font-size: 13px;
+    font-weight: 650;
+  }
+  .ideal-label {
+    fill: var(--pace);
+  }
+  .you {
+    fill: var(--band-green-text);
+  }
+  .usage {
+    fill: none;
+    stroke: var(--band-green);
+    stroke-width: 3.5;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-dasharray: 1;
+    stroke-dashoffset: 1;
+    animation: draw 1.5s cubic-bezier(0.3, 0.1, 0.2, 1) 0.15s forwards;
+  }
+  .forecast {
+    stroke: var(--ink-3);
+    stroke-width: 2.5;
+    stroke-dasharray: 3 6;
+    stroke-linecap: round;
+    opacity: 0;
+    animation: appear 0.5s ease-out 1.5s forwards;
+  }
+  .dot {
+    fill: var(--band-green);
+    stroke: var(--surface);
+    stroke-width: 3;
+    opacity: 0;
+    animation: appear 0.3s ease-out 1.45s forwards;
+  }
+  .you {
+    opacity: 0;
+    animation: appear 0.3s ease-out 1.5s forwards;
+  }
+  figcaption {
+    margin-top: 0.7rem;
+    max-width: 52ch;
+  }
+  @keyframes draw {
+    to {
+      stroke-dashoffset: 0;
+    }
+  }
+  @keyframes appear {
+    to {
+      opacity: 1;
+    }
+  }
+</style>

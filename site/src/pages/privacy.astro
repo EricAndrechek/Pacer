@@ -1,0 +1,164 @@
+---
+import Base from '../layouts/Base.astro';
+
+// The first two paragraphs are README.md's "Privacy" section, word for word:
+// that is the public promise (AGENTS.md "Telemetry"). The rest is sourced from
+// PacerCore/Telemetry/TelemetryConsent.swift, docs/telemetry-plan.md and
+// AGENTS.md, and, for this site, src/components/PostHog.astro and worker/index.ts.
+---
+
+<Base
+  title="Privacy | Pacer"
+  description="Your usage data stays on your Mac. What Pacer sends (crash reports to Sentry, anonymous usage stats to PostHog), the two toggles that turn it off, and what this website records."
+>
+  <header class="wrap page-head">
+    <h1>Privacy</h1>
+  </header>
+
+  <div class="wrap prose">
+    <section class="promise" aria-label="The short version">
+      <p>
+        Your usage data stays on your Mac. Pacer reads Claude Code's own files and uses your Claude Code login only to ask
+        Anthropic for your rate limits.
+      </p>
+      <p>
+        Pacer sends crash reports to <a href="https://sentry.io">Sentry</a> and anonymous usage stats to
+        <a href="https://posthog.com">PostHog</a> so I can find bugs and see what gets used. Never your prompts, projects,
+        files, accounts or costs. Turn either off in <strong>Settings → Privacy</strong>.
+      </p>
+    </section>
+
+    <section aria-labelledby="toggles">
+      <h2 id="toggles">The two toggles</h2>
+      <p>
+        Both are under Settings → Privacy, in "Sharing with Pacer". Both are on until you turn them off, and Pacer checks
+        them before every send, so a change applies at once.
+      </p>
+      <table>
+        <thead>
+          <tr><th scope="col">Toggle</th><th scope="col">Goes to</th><th scope="col">What it covers</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th scope="row">Crash reports and performance</th>
+            <td>Sentry</td>
+            <td>
+              Crashes, freezes, performance measurements, how accurate the forecasts were, and a small daily check-in
+              (Pacer version, macOS version, Mac model) so crash rates can be counted per version.
+            </td>
+          </tr>
+          <tr>
+            <th scope="row">Usage data</th>
+            <td>PostHog</td>
+            <td>
+              Which features and settings are used. Amounts of usage are sent only as broad ranges, never as exact token
+              counts or money.
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section aria-labelledby="never">
+      <h2 id="never">Never sent, whatever the toggles say</h2>
+      <ul>
+        <li>your prompts, or anything Claude wrote;</li>
+        <li>project names, file names or paths;</li>
+        <li>account IDs, emails or organization names;</li>
+        <li>costs, or exact token counts;</li>
+        <li>error messages or log lines (an error is reported as a fixed code).</li>
+      </ul>
+      <p>
+        Every report goes through one scrubber before it leaves your Mac. Sentry and PostHog do see the IP address a
+        report comes from, as any server does, and use it for an approximate location.
+      </p>
+    </section>
+
+    <section aria-labelledby="other">
+      <h2 id="other">Other connections Pacer makes</h2>
+      <ul>
+        <li><strong>Anthropic</strong>, with your Claude Code login, to read your rate limits.</li>
+        <li><strong>Update checks</strong>, and the updates themselves, from GitHub.</li>
+        <li>
+          <strong>Prices</strong>: public price lists, and Pacer's own
+          <a href="/price-history.json">dated price history</a>.
+        </li>
+        <li><strong>Forecast models</strong>, downloaded once when first needed.</li>
+      </ul>
+      <p>None of these carries your usage data.</p>
+      <p>
+        <code>pacer feedback</code> sends the text you give it to Pacer's issue tracker, with paths and names removed.
+        <code>pacer feedback --local</code>, or turning crash reports off, keeps it on your Mac.
+      </p>
+    </section>
+
+    <section aria-labelledby="site">
+      <h2 id="site">This website</h2>
+      <ul>
+        <li>
+          <strong>No cookies.</strong> The site's analytics (PostHog, the same project as the app) store nothing in your
+          browser. Each page load gets a new random ID, so your visits can't be linked to each other or to the app.
+        </li>
+        <li>
+          <strong>What is recorded:</strong> the pages you view, and a few clicks: a download button, copying the
+          Homebrew command, and links to Pacer's docs. Every event is marked as coming from the website. If your browser
+          sends Do Not Track or Global Privacy Control, nothing is recorded, downloads included.
+        </li>
+        <li>
+          <strong>Your IP address</strong> reaches PostHog with each page view, as it would any server, and gives an
+          approximate location.
+        </li>
+        <li>
+          <strong>Downloads</strong> through the site are counted once, with your country and the version you got. That
+          count is sent by the site's server, which does not pass on your IP address.
+        </li>
+        <li>The site is served by Cloudflare, which sees the requests it serves, like any host.</li>
+      </ul>
+    </section>
+
+    <p class="small muted">
+      The full list of what Pacer sends, signal by signal, is in the repo's
+      <a href="https://github.com/EricAndrechek/Pacer/blob/main/docs/telemetry-plan.md" data-track="docs">telemetry plan</a>.
+      Questions: <a href="https://github.com/EricAndrechek/Pacer/issues">open an issue</a>.
+    </p>
+  </div>
+</Base>
+
+<style>
+  .promise {
+    font-size: clamp(1.1rem, 1rem + 0.4vw, 1.28rem);
+    line-height: 1.55;
+    padding: 1.4rem 0 1.4rem 1.4rem;
+    border-left: 4px solid var(--pace);
+    margin-bottom: 1rem;
+  }
+  .promise p:last-child {
+    margin-bottom: 0;
+  }
+  th[scope='row'] {
+    font-weight: 700;
+    min-width: 12ch;
+  }
+  @media (max-width: 640px) {
+    table,
+    tbody,
+    tr,
+    th,
+    td {
+      display: block;
+      width: 100%;
+    }
+    thead {
+      display: none;
+    }
+    tr {
+      padding: 0.8rem 0;
+      border-bottom: 1px solid var(--line);
+    }
+    th,
+    td {
+      border: 0;
+      padding: 0.15rem 0;
+    }
+  }
+</style>

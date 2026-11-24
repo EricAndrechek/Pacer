@@ -1,0 +1,137 @@
+---
+import { DOWNLOAD_PATH, NAV } from '../lib/site';
+
+const here = Astro.url.pathname;
+const current = (href: string) => (here === href ? 'page' : undefined);
+---
+
+<header class="site-header">
+  <div class="wrap bar">
+    <a class="brand" href="/" aria-label="Pacer home">
+      <img src="/favicon.svg" width="30" height="30" alt="" />
+      <span>Pacer</span>
+    </a>
+
+    <nav class="links" aria-label="Main">
+      {NAV.map((n) => <a href={n.href} aria-current={current(n.href)}>{n.label}</a>)}
+    </nav>
+
+    <a class="button get" href={DOWNLOAD_PATH} data-track="download" data-placement="header">Download</a>
+
+    <details class="menu">
+      <summary aria-label="Menu">
+        <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+          <path d="M4 7h16M4 12h16M4 17h16" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+        </svg>
+      </summary>
+      <nav aria-label="Main (menu)">
+        {NAV.map((n) => <a href={n.href} aria-current={current(n.href)}>{n.label}</a>)}
+        <a href={DOWNLOAD_PATH} data-track="download" data-placement="menu">Download</a>
+      </nav>
+    </details>
+  </div>
+</header>
+
+<style>
+  .site-header {
+    border-bottom: 1px solid var(--line);
+    background: color-mix(in srgb, var(--paper) 88%, transparent);
+  }
+  .bar {
+    display: flex;
+    align-items: center;
+    gap: 1.5rem;
+    min-height: 68px;
+    position: relative;
+  }
+  .brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    color: var(--ink);
+    text-decoration: none;
+    font-weight: 800;
+    font-stretch: 115%;
+    font-size: 1.25rem;
+    letter-spacing: -0.02em;
+    margin-right: auto;
+  }
+  .brand img {
+    width: 30px;
+    height: 30px;
+  }
+  .links {
+    display: flex;
+    gap: 1.35rem;
+    font-size: 0.97rem;
+  }
+  .links a,
+  .menu nav a {
+    color: var(--ink-2);
+    text-decoration: none;
+    padding-block: 0.4rem;
+  }
+  .links a:hover,
+  .links a[aria-current='page'] {
+    color: var(--ink);
+  }
+  .links a[aria-current='page'] {
+    box-shadow: inset 0 -2px 0 var(--pace);
+  }
+  .get {
+    min-height: 40px;
+    padding: 0.45em 1.05em;
+    font-size: 0.95rem;
+  }
+  .menu {
+    display: none;
+  }
+  .menu summary {
+    list-style: none;
+    cursor: pointer;
+    display: grid;
+    place-items: center;
+    width: 44px;
+    height: 44px;
+    border-radius: 10px;
+    color: var(--ink);
+  }
+  .menu summary::-webkit-details-marker {
+    display: none;
+  }
+  .menu[open] summary {
+    background: var(--sunken);
+  }
+  .menu nav {
+    position: absolute;
+    right: var(--gutter);
+    top: calc(100% + 6px);
+    z-index: 20;
+    display: grid;
+    min-width: 220px;
+    padding: 0.5rem;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    box-shadow: 0 18px 40px -20px rgb(15 16 40 / 0.45);
+  }
+  .menu nav a {
+    padding: 0.7rem 0.8rem;
+    border-radius: var(--radius-sm);
+    color: var(--ink);
+  }
+  .menu nav a:hover {
+    background: var(--sunken);
+  }
+  @media (max-width: 940px) {
+    .links {
+      display: none;
+    }
+    .menu {
+      display: block;
+    }
+    .bar {
+      gap: 0.6rem;
+    }
+  }
+</style>

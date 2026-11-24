@@ -1,0 +1,224 @@
+---
+import Base from '../layouts/Base.astro';
+
+// Sourced from AGENTS.md ("Ground truth is the raw JSONL", the ccusage table,
+// correctness rules 1-7), README.md, docs/design.md (cost modes),
+// PacerCore/Pricing/CuratedPriceHistory.swift and docs/release-notes.
+const differences = [
+  {
+    what: 'Cache writes',
+    ccusage: 'One number.',
+    pacer: '5-minute and 1-hour writes kept apart.',
+    why: 'Anthropic prices them differently.',
+  },
+  {
+    what: 'Streamed replies',
+    ccusage: 'Keeps the first copy of a reply.',
+    pacer: 'Keeps the finished copy.',
+    why: 'Claude Code writes a reply to its transcript several times while it streams, and only the last copy has the full output count. Keeping the first under-counted output by about 63% in the transcripts where this was found. When Pacer shows more output than ccusage, this is usually why.',
+  },
+  {
+    what: 'Price',
+    ccusage: "Today's price, for every day.",
+    pacer: 'The price in effect when the request was made.',
+    why: "A price change shouldn't rewrite what you already spent.",
+  },
+  {
+    what: 'Long prompts',
+    ccusage: 'Only the tokens above 200k at the higher rate.',
+    pacer: 'The whole request at the higher rate once its prompt crosses the threshold.',
+    why: 'That is how Anthropic bills it.',
+  },
+  {
+    what: 'Data residency',
+    ccusage: 'Not priced.',
+    pacer: 'A multiplier on the standard rate (US-only routing, for example).',
+    why: 'Anthropic documents it as one.',
+  },
+  {
+    what: 'Claude Desktop',
+    ccusage: 'Not read.',
+    pacer: 'Its agent-mode sessions are counted too.',
+    why: 'Desktop usage draws on the same limits.',
+  },
+  {
+    what: 'Rate limits',
+    ccusage: 'Estimated from your logs.',
+    pacer: "Anthropic's own reading for your account.",
+    why: 'Only Anthropic knows how full a window is.',
+  },
+];
+---
+
+<Base
+  title="How Pacer counts Claude Code usage | Pacer"
+  description="Where Pacer's token, cost and rate-limit numbers come from, the rules it follows reading Claude Code's transcripts, and why its numbers differ from ccusage on purpose."
+>
+  <header class="wrap page-head">
+    <h1>How Pacer counts</h1>
+    <p class="lede">
+      Pacer's numbers come from the transcripts Claude Code writes on your Mac and from Anthropic's own rate-limit
+      readings. This is how it reads them, and where it differs from ccusage on purpose.
+    </p>
+  </header>
+
+  <div class="wrap prose">
+    <section aria-labelledby="sources">
+      <h2 id="sources">Where the numbers come from</h2>
+      <ul>
+        <li>
+          <strong>Tokens and cost</strong> come from Claude Code's transcripts: one line per request, in
+          <code>~/.claude</code> and <code>~/.config/claude</code> (Pacer reads both when both exist), or in
+          <code>CLAUDE_CONFIG_DIR</code> when you set it.
+        </li>
+        <li>
+          <strong>Rate limits</strong> come from Anthropic, asked with your Claude Code login every few minutes. Between
+          readings Pacer estimates from what you've spent since the last one, and marks the estimate with a decimal.
+        </li>
+        <li>
+          <strong>Every request is kept.</strong> Totals can always be rebuilt from those raw records, so a fix to how
+          Pacer counts corrects your history, not just what comes next.
+        </li>
+      </ul>
+    </section>
+
+    <section aria-labelledby="rules">
+      <h2 id="rules">Rules it follows</h2>
+      <ul>
+        <li>
+          <strong>Each request counts once.</strong> A resumed session copies earlier turns into a new file. Pacer matches
+          requests by their message and request IDs and counts each one once, whichever file it reads first.
+        </li>
+        <li>
+          <strong>Claude Code's internal placeholder entries are skipped.</strong> They are not requests anyone pays
+          for.
+        </li>
+        <li>
+          <strong>A broken line never stops a scan.</strong> The last line of a session that is still being written is
+          often cut off. Pacer skips a line it can't read rather than stopping.
+        </li>
+        <li>
+          <strong>Pacer checks itself daily.</strong> Once a day it compares every request Claude Code answered with its
+          own records. Some calls never reach a transcript, such as "while you were away" recaps and conversation
+          compactions, and the check allows for those.
+        </li>
+      </ul>
+    </section>
+
+    <section aria-labelledby="ccusage">
+      <h2 id="ccusage">Why it differs from ccusage</h2>
+      <p>
+        <a href="https://github.com/ryoppippi/ccusage">ccusage</a> is a good command-line tool, and Pacer started as a
+        port of it. Pacer's numbers are checked against the raw transcripts, not against ccusage, and where the two
+        disagree it is usually one of these:
+      </p>
+    </section>
+  </div>
+
+  <div class="wrap table-wrap">
+    <table class="diff">
+      <thead>
+        <tr>
+          <th scope="col"></th>
+          <th scope="col">ccusage</th>
+          <th scope="col">Pacer</th>
+          <th scope="col">Why</th>
+        </tr>
+      </thead>
+      <tbody>
+        {
+          differences.map((d) => (
+            <tr>
+              <th scope="row">{d.what}</th>
+              <td data-label="ccusage">{d.ccusage}</td>
+              <td data-label="Pacer">{d.pacer}</td>
+              <td data-label="Why">{d.why}</td>
+            </tr>
+          ))
+        }
+      </tbody>
+    </table>
+  </div>
+
+  <div class="wrap prose">
+    <p>Where a comparison with ccusage disagrees on one of these, Pacer's number is the intended one.</p>
+
+    <section aria-labelledby="pricing">
+      <h2 id="pricing">Pricing</h2>
+      <ul>
+        <li>
+          <strong>Two ways to count cost.</strong> Use the cost Claude Code reports, or have Pacer price every request
+          from its tokens. Switch in Settings.
+        </li>
+        <li>
+          <strong>Rates</strong> come from public price catalogs, plus a reviewed, dated price history for what catalogs
+          can't hold: introductory rates, launch-day prices, changes over time. Each entry names its source. The history
+          is public: <a href="/price-history.json">price-history.json</a>.
+        </li>
+        <li>
+          <strong>A new model</strong> is priced as soon as a catalog lists it, and Pacer rebuilds the history it had
+          before then.
+        </li>
+      </ul>
+    </section>
+
+    <p class="small muted">
+      The rules in full, with the tests that hold Pacer to them, are in the repo's
+      <a href="https://github.com/EricAndrechek/Pacer/blob/main/AGENTS.md" data-track="docs">AGENTS.md</a>.
+    </p>
+  </div>
+</Base>
+
+<style>
+  .table-wrap {
+    margin-block: 0.5rem 2rem;
+  }
+  .diff th[scope='row'] {
+    font-weight: 700;
+    white-space: nowrap;
+    padding-right: 1.5rem;
+  }
+  .diff td:last-child {
+    color: var(--ink-2);
+    min-width: 28ch;
+  }
+  .diff td:nth-child(3) {
+    font-weight: 550;
+  }
+  @media (max-width: 760px) {
+    .diff thead {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip: rect(0 0 0 0);
+    }
+    .diff,
+    .diff tbody,
+    .diff tr,
+    .diff th,
+    .diff td {
+      display: block;
+      width: 100%;
+    }
+    .diff tr {
+      padding: 1rem 0;
+      border-bottom: 1px solid var(--line);
+    }
+    .diff th[scope='row'] {
+      border: 0;
+      padding: 0 0 0.35rem;
+      font-size: 1.08rem;
+    }
+    .diff td {
+      border: 0;
+      padding: 0.15rem 0;
+      min-width: 0;
+    }
+    .diff td::before {
+      content: attr(data-label) ': ';
+      font-weight: 700;
+      color: var(--ink);
+    }
+  }
+</style>
