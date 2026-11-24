@@ -130,9 +130,9 @@ struct RuntimeScoringProgressTests {
         let container = try Fixtures.seeded(cycles: 12)
         let rt = Self.runtime(container)
         let pass = Task { await rt.scorer.pass(accounts: [Fixtures.account], now: Fixtures.now) }
-        // Wait until it is visibly under way, then stop it.
-        for _ in 0..<2000 where Self.seen.all.isEmpty { try await Task.sleep(for: .milliseconds(2)) }
-        #expect(!Self.seen.all.isEmpty)
+        // Wait until it is visibly under way, then stop it: however long the
+        // background queue takes to get a core (#431), not four seconds.
+        #expect(await eventually { !Self.seen.all.isEmpty }, "the pass never started forecasting")
         await rt.stop()
         _ = await pass.value
         #expect(rt.progress.progress(account: Fixtures.account) == nil)

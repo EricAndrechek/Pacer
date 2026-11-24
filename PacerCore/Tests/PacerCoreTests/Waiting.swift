@@ -29,6 +29,36 @@ func eventually(
     }
 }
 
+/// Polls `condition` until it holds, giving up only once `progress` has
+/// stood still for `stall` of wall time, and says which.
+///
+/// For work of many steps (hours of a poller's loop on a virtual clock),
+/// where a fixed deadline measures the machine rather than the code: in a
+/// full `make test` beside other builders, the stagger test's loop took 287 s
+/// of a 300 s `eventually` and then ran out (#431), every step of it still
+/// advancing. What a hang looks like is no step at all, so that is what this
+/// waits out.
+func eventually<Progress: Equatable>(
+    progressing progress: () async -> Progress,
+    stall: Duration = .seconds(300),
+    isolation: isolated (any Actor)? = #isolation,
+    _ condition: () async throws -> Bool
+) async rethrows -> Bool {
+    var last = await progress()
+    var deadline = ContinuousClock.now + stall
+    while true {
+        if try await condition() { return true }
+        let now = await progress()
+        if now != last {
+            last = now
+            deadline = ContinuousClock.now + stall
+        } else if ContinuousClock.now >= deadline || Task.isCancelled {
+            return false
+        }
+        try? await Task.sleep(for: .milliseconds(10))
+    }
+}
+
 /// Stops `coordinator`, then waits for its `runForever` task, both within
 /// `timeout`, and says whether they finished. Rethrows what `runForever`
 /// threw.

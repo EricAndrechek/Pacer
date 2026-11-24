@@ -139,9 +139,26 @@ struct RuntimeArenaListTests {
         #expect(out.map(\.id) == ["test-a"])
     }
 
+    /// Counts what the listing asks of the costly inputs, the weights check
+    /// (a look on disk per pinned network) and the live cache.
+    final class Asked: @unchecked Sendable {
+        let lock = NSLock()
+        var weights: [String] = []
+        var failures: [String] = []
+        func weight(_ id: String) { lock.withLock { weights.append(id) } }
+        func failure(_ id: String) { lock.withLock { failures.append(id) } }
+    }
+
     /// The shipped roster, with a record as deep as the scorer's cap behind
     /// every model: one row per selectable model, none a helper, each with a
     /// name of its own, and cheap enough to build on every refresh.
+    ///
+    /// Cheap by what it does, not by a stopwatch: the record arrives already
+    /// summarised (`Accuracy`), and the listing asks the weights check and the
+    /// live cache at most once per model, whatever the record's depth, so
+    /// nothing in it grows with the history or repeats inside the sort. A
+    /// 100 ms limit on the wall clock said the same until a loaded Mac took
+    /// longer to schedule the thread than to do the work (#431).
     @Test func theStandardRosterListsEveryModelCheaply() {
         let roster = ArenaRoster.standard
         for (target, weekly) in [(ArenaTarget.meterFiveHour, false), (.meterSevenDay, true)] {
@@ -156,15 +173,23 @@ struct RuntimeArenaListTests {
             }
             let acc = Self.accuracy(rows, weekly: weekly)
             let runner = ArenaRunner(registry: roster.registry)
-            let started = ContinuousClock.now
+            let asked = Asked()
             let out = UsageIntelligenceEngine.arenaListing(
-                specs: specs, accuracy: acc, weekly: weekly, pick: nil, drawn: [], liveFailure: { _ in nil },
-                weightsPresent: { runner.requiredWeights($0.name).allSatisfy { ArenaWeightStore.services($0) != nil } })
-            let elapsed = ContinuousClock.now - started
+                specs: specs, accuracy: acc, weekly: weekly, pick: nil, drawn: [],
+                liveFailure: { asked.failure($0); return nil },
+                weightsPresent: { spec in
+                    asked.weight(spec.name)
+                    return runner.requiredWeights(spec.name).allSatisfy { ArenaWeightStore.services($0) != nil }
+                })
             #expect(out.count == specs.count && !out.isEmpty)
             #expect(Set(out.map(\.name)).count == out.count)
             #expect(out.allSatisfy { ArenaRoster.isSelectable(roster.spec($0.id)!) })
-            #expect(elapsed < .milliseconds(100), "listing took \(elapsed)")
+            // Once per model at most, the record's depth (180 cycles × every
+            // cut here) notwithstanding.
+            let names = specs.map(\.name)
+            #expect(asked.weights.sorted() == names.sorted(), "weights checked \(asked.weights.count)× for \(names.count)")
+            #expect(asked.failures.count <= names.count && Set(asked.failures).count == asked.failures.count,
+                    "live cache asked \(asked.failures.count)× for \(names.count)")
         }
     }
 
