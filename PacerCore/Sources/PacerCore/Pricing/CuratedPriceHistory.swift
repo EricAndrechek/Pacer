@@ -9,7 +9,8 @@ import Foundation
 ///
 /// **Where it comes from.** A copy is bundled (`Resources/price-history.json`)
 /// so a fresh offline install prices history correctly, and a newer copy is
-/// fetched from gh-pages next to the appcast and cached in the App Group.
+/// fetched from the site next to the appcast (site/public/ on main, written by
+/// each release) and cached in the App Group.
 /// Whichever has the later `asOf` wins. The request carries no parameters;
 /// it's a static file.
 ///
@@ -36,8 +37,10 @@ public struct CuratedPriceHistory: Sendable, Equatable {
 
     public static let schemaVersion = 1
 
-    /// Published beside the appcast.
-    public static let remoteURL = URL(string: "https://ericandrechek.github.io/Pacer/price-history.json")!
+    /// Published beside the appcast (SUFeedURL) on the site. Releases up to
+    /// 0.9.3 read the GitHub Pages copy, which the release workflow keeps
+    /// identical while that mirror is on (bin/publish-feeds.sh).
+    public static let remoteURL = URL(string: "https://pacer.andrechek.com/price-history.json")!
 
     public let asOf: Date
     public let records: [PriceRecordValue]

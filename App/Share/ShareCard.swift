@@ -162,7 +162,7 @@ struct ShareCardChrome<ChartContent: View>: View {
                 .font(.system(size: 12))
                 .foregroundStyle(subInk)
             Spacer(minLength: 12)
-            Text("ericandrechek.github.io/Pacer")
+            Text("pacer.andrechek.com")
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(subInk.opacity(0.85))
         }
