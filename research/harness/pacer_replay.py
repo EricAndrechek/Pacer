@@ -45,6 +45,37 @@ RESET_LOW_MAX = 5.0
 
 # Scoring cuts (EngineSelfEval.rlCutFractions).
 RL_CUT_FRACTIONS = [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+# The app's current grading (EngineSelfEval.rlGrading, v3): twelve cuts from
+# 0.1. The band's residuals come from its cuts inside 0.2–0.9 (isBandCut).
+RL_CUT_FRACTIONS_V3 = [0.1, 0.175, 0.25, 0.325, 0.4, 0.475, 0.55, 0.625, 0.7, 0.775, 0.85, 0.925]
+
+
+def band_cuts() -> list[float]:
+    return [c for c in RL_CUT_FRACTIONS if 0.2 - 1e-9 <= c <= 0.9 + 1e-9]
+
+
+# Consecutive polls further apart than this leave a gap in coverage
+# (ReadingCoverage.maxGap, #421).
+MAX_GAP = 30 * 60.0
+
+
+@dataclass
+class GapRules:
+    """The reading-gap grading rule (#424), as the app has it by default;
+    each knob can be turned to measure it (`gap_rules.py`).
+
+    - grading: a cut whose last reading is more than MAX_GAP before it is not
+      graded (Cycle.gradedReadings): no record row, no residual.
+    - censor: also treat a cycle whose readings stopped more than MAX_GAP
+      before its reset as having no truth. Off in the app: measured worse
+      (the meter seldom moves while unread, so the last reading is usually
+      the final).
+    """
+    grading: bool = True
+    censor: bool = False
+
+
+GAPS = GapRules()
 
 
 # ---------------------------------------------------------------------------
@@ -330,6 +361,30 @@ class Cycle:
     @property
     def duration(self) -> float:
         return self.resets_at - self.cycle_start
+
+    @property
+    def end_seen(self) -> bool:
+        """The last reading within MAX_GAP of the reset."""
+        return bool(self.samples) and self.resets_at - self.samples[-1][0] <= MAX_GAP
+
+    def graded_final(self, rule: bool | None = None) -> float | None:
+        """Port of Cycle.gradedFinal: the final, when something was used.
+        With GapRules.censor (or `rule`), none when the end was not seen."""
+        if (GAPS.grading and GAPS.censor if rule is None else rule) and not self.end_seen:
+            return None
+        f = self.final
+        return f if f > 0 else None
+
+    def graded_readings(self, now: float, rule: bool | None = None):
+        """Port of Cycle.gradedReadings (#424): the readings at or before
+        `now`, at least three, the last within MAX_GAP of it; `rule`
+        overrides GAPS.grading."""
+        seen = [s for s in self.samples if s[0] <= now]
+        if len(seen) < 3:
+            return None
+        if (GAPS.grading if rule is None else rule) and now - seen[-1][0] > MAX_GAP:
+            return None
+        return seen
 
 
 def _post_reset_start(rows: list[tuple[float, float, float]]) -> int:
@@ -641,6 +696,9 @@ def diurnal_fit(table: list[list[float]]):
     return fit
 
 
+# The fits whose residual on a past cycle does not depend on the history.
+_HISTORY_FREE = {linear_recent, recency_weighted, damped_acceleration, saturating, kalman_trend, recent_rate}
+
 MODEL_COMPLEXITY = {
     "linear-recent": 1, "recency-weighted": 2, "saturating": 3,
     "damped-acceleration": 4, "kalman-trend": 5, "diurnal-rate": 3, "recent-rate": 1,
@@ -761,22 +819,32 @@ def collect_residuals(model_fit, params: Params, history: list[Cycle],
     """
     raw: dict[str, list[tuple[int, float]]] = {"pooled": []}
     n_cycles = len(history)
+    # A curve fit's residual at a past cut depends only on that cycle, so it
+    # is computed once per replay (`_RESIDUALS`, cleared by replay_window);
+    # the diurnal model's table grows with the history, so it is not.
+    memo = _RESIDUALS if model_fit in _HISTORY_FREE else None
     if mode == "auto":
         mode = "block" if n_cycles < params.conformal_block_min_cycles else "cuts"
     for ci, cyc in enumerate(history):
-        true_final = cyc.final
-        if true_final <= 0:
+        true_final = cyc.graded_final()
+        if true_final is None:
             continue
-        for cf in RL_CUT_FRACTIONS:
-            cut_now = cyc.cycle_start + cyc.duration * cf
-            seen = [s for s in cyc.samples if s[0] <= cut_now]
-            if len(seen) < 3:
+        for cf in band_cuts():
+            key = (model_fit, id(cyc), cf)
+            if memo is not None and key in memo:
+                residual = memo[key]
+            else:
+                cut_now = cyc.cycle_start + cyc.duration * cf
+                seen = cyc.graded_readings(cut_now)
+                proj = None
+                if seen is not None:
+                    partial = Partial(seen, cut_now, cyc.cycle_start, cyc.resets_at)
+                    proj = model_fit(partial, params)
+                residual = None if proj is None else true_final - displayed_at_reset(proj, partial)
+                if memo is not None:
+                    memo[key] = residual
+            if residual is None:
                 continue
-            partial = Partial(seen, cut_now, cyc.cycle_start, cyc.resets_at)
-            proj = model_fit(partial, params)
-            if proj is None:
-                continue
-            residual = true_final - displayed_at_reset(proj, partial)
             raw["pooled"].append((ci, residual))
             raw.setdefault(mode_stratum(mode, cf, cyc.cycle_start), []).append((ci, residual))
 
@@ -913,6 +981,14 @@ class CaseScore:
     claimed: bool = False         # the red "limit in …" evidence at this cut (hit_claimable)
 
 
+# Score only the cases the readings show (#424), whatever GAPS says: the
+# cycles whose end was seen and the cuts outside a gap. A forecast at a cut
+# inside a gap was shown to nobody, and a censored cycle's final is a floor.
+EVAL_CLEAN = True
+
+_RESIDUALS: dict = {}
+
+
 def replay_window(window: str, samples, activity_grid, params: Params,
                   conformal_mode: str = "auto", duration: float | None = None) -> list[CaseScore]:
     # Fixed windows resolve duration by name; scoped identities pass it in.
@@ -921,6 +997,7 @@ def replay_window(window: str, samples, activity_grid, params: Params,
     weekly = is_weekly_scale(duration)
     cycles = segment(samples, duration)
     completed = cycles[:-1] if cycles else []   # last group = current/live
+    _RESIDUALS.clear()   # keyed by the cycles' identity: this call's only
     scores: list[CaseScore] = []
     # record[m][period_key] = [abs errors] — accumulated walk-forward.
     record: dict[str, dict[str, list[float]]] = {}
@@ -933,6 +1010,12 @@ def replay_window(window: str, samples, activity_grid, params: Params,
         if truth <= 0:
             continue
         truth_hit = truth >= 99.5
+        # What the record learns from (none on a censored cycle, with
+        # GapRules.censor), and whether this cycle is scored at all: with
+        # EVAL_CLEAN only where the readings show the meter, whatever the
+        # pipeline's rules, so a before/after comparison scores the same cases.
+        record_truth = cyc.graded_final()
+        scored_cycle = not EVAL_CLEAN or cyc.graded_final(rule=True) is not None
 
         # Selection and the calibrator depend only on the record/history, not
         # the cut — resolve once per cycle (the walk over cuts is the hot loop).
@@ -943,10 +1026,10 @@ def replay_window(window: str, samples, activity_grid, params: Params,
         # Calibrators for whichever model resolves at a cut, built on demand.
         residual_cache = {chosen: collect_residuals(roster[chosen], params, history, mode=conformal_mode)}
 
-        for cf in RL_CUT_FRACTIONS:
+        for cf in (RL_CUT_FRACTIONS if scored_cycle else []):
             cut_now = cyc.cycle_start + cyc.duration * cf
-            seen = [s for s in cyc.samples if s[0] <= cut_now]
-            if len(seen) < 3:
+            seen = cyc.graded_readings(cut_now)
+            if seen is None or (EVAL_CLEAN and cyc.graded_readings(cut_now, rule=True) is None):
                 continue
             partial = Partial(seen, cut_now, cyc.cycle_start, cyc.resets_at)
             ph = phase_of(cf)
@@ -990,18 +1073,18 @@ def replay_window(window: str, samples, activity_grid, params: Params,
 
         # After the cycle completes, extend every model's record (walk-forward).
         period_key = str(round(cyc.resets_at / 60) * 60)
-        for mid, fit in roster.items():
+        for mid, fit in (roster.items() if record_truth is not None else []):
             for cf in RL_CUT_FRACTIONS:
                 cut_now = cyc.cycle_start + cyc.duration * cf
-                seen = [s for s in cyc.samples if s[0] <= cut_now]
-                if len(seen) < 3:
+                seen = cyc.graded_readings(cut_now)
+                if seen is None:
                     continue
                 partial = Partial(seen, cut_now, cyc.cycle_start, cyc.resets_at)
                 proj = fit(partial, params)
                 if proj is None:
                     continue
                 record.setdefault(mid, {}).setdefault(period_key, []).append(
-                    (cf, abs(displayed_at_reset(proj, partial) - truth)))
+                    (cf, abs(displayed_at_reset(proj, partial) - record_truth)))
     return scores
 
 
@@ -1072,7 +1155,9 @@ def parity_fixture() -> dict:
     scores for them — what `EngineSelfEval.newOutcomesRL` must reproduce
     (RLDisplayedParityTests). The cycles exercise the three cases the display
     function exists for: a plain ramp, a late spike the smoothed fits sit
-    under (anchor > 0), and a ramp whose raw line runs past 100 (clamp)."""
+    under (anchor > 0), and a ramp whose raw line runs past 100 (clamp). And
+    the reading gaps (#424): a climb across a 90-minute gap and readings that
+    stop an hour before the reset, both graded only where read."""
     duration = WINDOW_SECONDS["five_hour"]
     step = 300.0
     base = 1_752_000_000.0
@@ -1081,6 +1166,8 @@ def parity_fixture() -> dict:
         lambda f: 10.0 * f if f < 0.45 else 4.5 + 70.0 * (f - 0.45),  # late spike
         lambda f: min(100.0, 180.0 * f),                      # runs past the cap
         lambda f: 30.0 * f ** 0.5,                            # sparse polls from 4 min in: the 0% anchor
+        lambda f: 4.0 * f if f < 0.5 else 40.0 + 20.0 * f,     # a climb across a gap (1 h to 2.5 h unread)
+        lambda f: 70.0 * f,                                   # unread for the last hour
     ]
     cycles, rows = [], []
     for ci, shape in enumerate(shapes):
@@ -1090,14 +1177,20 @@ def parity_fixture() -> dict:
             times = [start + 240 + k * 360 for k in range(int((duration - 240) / 360) + 1)]
         else:
             times = [start + k * step for k in range(int(duration / step) + 1)]
+        if ci == 4:
+            times = [t for t in times if not (start + 3600 < t < start + 9000)]
+        elif ci == 5:
+            times = [t for t in times if t <= start + 4 * 3600]
         samples = [(t, round(shape((t - start) / duration), 4)) for t in times]
         cyc = Cycle(samples, start, reset)
         cycles.append({"cycleStart": start, "resetsAt": reset, "samples": samples})
         roster = model_roster(None)
+        if cyc.graded_final() is None:
+            continue
         for cf in RL_CUT_FRACTIONS:
             now = start + duration * cf
-            seen = [s for s in samples if s[0] <= now]
-            if len(seen) < 3:
+            seen = cyc.graded_readings(now)
+            if seen is None:
                 continue
             partial = Partial(seen, now, start, reset)
             for mid in PARITY_MODELS:

@@ -445,6 +445,10 @@ public enum EngineSelfEval {
     ///
     /// `grading` is the current one but for the parity test against the
     /// Python harness, which still grades v2's cuts.
+    ///
+    /// Only what the readings show is graded (#424): a cut inside a gap
+    /// (`Cycle.gradedReadings`) has no grade. The arena's grader reads the
+    /// same rule.
     public static func newOutcomesRL(
         window: String,
         cycles: [BurnTrajectory.Cycle],
@@ -463,14 +467,17 @@ public enum EngineSelfEval {
         // full-history pass; the diurnal table still learns from every cycle
         // before each one, so a slice scores exactly what the whole would.
         for (i, cycle) in sorted.enumerated() where indices?.contains(i) ?? true {
-            let trueFinal = cycle.samples.map { $0.usedPercentage }.max() ?? 0
-            guard trueFinal > 0 else { continue }
+            guard let trueFinal = cycle.gradedFinal else { continue }
             let periodKey = periodKeyRL(cycle.resetsAt)
+            // Only the cuts the readings show (`gradedCuts`): a cut inside a
+            // gap is never graded, so counting it here would leave the cycle
+            // "unscored" for good and rebuild its diurnal table every pass.
+            let cuts = cycle.gradedCuts(grading.cuts)
             // A cycle already scored in full costs nothing: skip it before the
             // diurnal table, which is built from every earlier cycle. This is
             // what keeps the once-per-launch full-history pass cheap after the
             // first one.
-            let scored = grading.cuts.allSatisfy { cf in
+            let scored = cuts.allSatisfy { cf in
                 rosterIds.allSatisfy { id in
                     existingKeys.contains(EngineEvalOutcome.makeKey(
                         surface: surface, method: id, bucket: grading.bucket(cf), periodKey: periodKey))
@@ -483,11 +490,9 @@ public enum EngineSelfEval {
                 roster.append(DiurnalBurnModel(rate: table, calendar: calendar))
             }
             let duration = cycle.resetsAt.timeIntervalSince(cycle.cycleStart)
-            guard duration > 0 else { continue }
-            for cf in grading.cuts {
+            for cf in cuts {
                 let now = cycle.cycleStart.addingTimeInterval(duration * cf)
-                let seen = cycle.samples.filter { $0.at <= now }
-                guard seen.count >= 3 else { continue }
+                guard let seen = cycle.gradedReadings(at: now) else { continue }
                 let partial = BurnTrajectory.PartialCycle(
                     samples: seen, now: now, cycleStart: cycle.cycleStart, resetsAt: cycle.resetsAt)
                 let bucket = grading.bucket(cf)
@@ -501,6 +506,18 @@ public enum EngineSelfEval {
                                           reading: partial.usedNow))
                 }
             }
+        }
+        return out
+    }
+
+    /// The buckets of `gradings` a completed cycle has no grade at (#424):
+    /// the cuts its readings do not show (`Cycle.gradedCuts`). What the record held there before the rule
+    /// is taken out of it (`UsageIntelligenceEngine.backfillRateLimitRecordIfNeeded`).
+    static func ungradedBuckets(_ cycle: BurnTrajectory.Cycle, gradings: [RLGrading]) -> Set<String> {
+        var out = Set<String>()
+        for g in gradings {
+            let graded = Set(cycle.gradedCuts(g.cuts))
+            for cf in g.cuts where !graded.contains(cf) { out.insert(g.bucket(cf)) }
         }
         return out
     }

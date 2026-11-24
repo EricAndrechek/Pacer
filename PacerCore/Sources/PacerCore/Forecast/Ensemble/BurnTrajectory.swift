@@ -99,6 +99,52 @@ public enum BurnTrajectory {
             self.cycleStart = cycleStart
             self.resetsAt = resetsAt
         }
+
+        /// The highest reading: where the meter ended.
+        public var final: Double { samples.map(\.usedPercentage).max() ?? 0 }
+
+        /// What a forecast made in this cycle is graded against: `final`,
+        /// when something was used.
+        ///
+        /// Also when the readings stopped before the reset (Pacer quit, the
+        /// Mac asleep), though the meter could have climbed unseen after
+        /// them: it seldom does. On the owner's store the meter moved across
+        /// 31 of 103 gaps inside five-hour cycles and 19 of 374 inside weekly
+        /// ones, since a Mac that is not reading is usually not being used
+        /// either. Treating those cycles as censored (#424) dropped 35 of 589
+        /// five-hour and 11 of 55 weekly cycles from the record and the
+        /// bands, and replayed walk-forward it made every forecast worse:
+        /// five-hour median miss 3.78 → 4.00 pp and early-window band
+        /// coverage 0.72 → 0.69; weekly median 1.13 → 2.00 pp, with bands
+        /// stated at 157 moments instead of 222 (`research/harness/gap_rules.py`).
+        public var gradedFinal: Double? {
+            let f = final
+            return f > 0 ? f : nil
+        }
+
+        /// The readings a forecast made at `now` had, when they show the
+        /// meter there: at least three, the last no more than
+        /// `ReadingCoverage.maxGap` before `now`. Nil: nothing is graded at
+        /// `now`. A cut inside a gap is a moment nobody was reading, so no
+        /// forecast was shown then, and the readings from before the gap say
+        /// nothing about what the meter did in it: graded, the gap's climb
+        /// was charged to the model (#424). Every grading and backtest of a
+        /// cut reads this, so they all skip the same cuts.
+        public func gradedReadings(at now: Date) -> [Sample]? {
+            let seen = samples.prefix { $0.at <= now }
+            guard seen.count >= 3, let last = seen.last, !ReadingCoverage.isGap(from: last.at, to: now)
+            else { return nil }
+            return Array(seen)
+        }
+
+        /// The cut fractions of `cuts` this cycle is graded at: every cut
+        /// `gradedReadings` answers, none when nothing was used.
+        public func gradedCuts(_ cuts: [Double]) -> [Double] {
+            guard gradedFinal != nil else { return [] }
+            let duration = resetsAt.timeIntervalSince(cycleStart)
+            guard duration > 0 else { return [] }
+            return cuts.filter { gradedReadings(at: cycleStart.addingTimeInterval(duration * $0)) != nil }
+        }
     }
 
     /// A curve-fit candidate. `fit` returns a closure giving projected usage%
@@ -162,9 +208,8 @@ public enum BurnTrajectory {
                 let duration = cycle.resetsAt.timeIntervalSince(cycle.cycleStart)
                 for cf in cutFractions {
                     let now = cycle.cycleStart.addingTimeInterval(duration * cf)
-                    let seen = cycle.samples.filter { $0.at <= now }
                     let future = cycle.samples.filter { $0.at > now }
-                    guard seen.count >= 3, future.count >= 2 else { continue }
+                    guard let seen = cycle.gradedReadings(at: now), future.count >= 2 else { continue }
                     attempts += 1
                     let partial = PartialCycle(samples: seen, now: now,
                                                cycleStart: cycle.cycleStart, resetsAt: cycle.resetsAt)

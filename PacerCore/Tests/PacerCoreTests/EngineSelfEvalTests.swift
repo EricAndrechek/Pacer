@@ -393,8 +393,9 @@ struct EngineSelfEvalTests {
     func settledMomentsDoNotRank(window: String, final: Double) throws {
         let weekly = window == "seven_day"
         let duration: TimeInterval = weekly ? 7 * 86_400 : 5 * 3600
+        // Read at least every half hour, so no cut sits in a gap (#424).
         let cycles = settlingCycles(weekly ? 3 : 8, duration: duration, final: final,
-                                    settlesAt: weekly ? 0.6 : 0.3, step: duration / 56)
+                                    settlesAt: weekly ? 0.6 : 0.3, step: weekly ? 1800 : duration / 56)
         let rows = settlingRecord(cycles, window: window)
 
         // The trap: every moment graded near 0.85 is settled, and there
@@ -425,7 +426,7 @@ struct EngineSelfEvalTests {
     /// and a row graded before it was recorded takes its moment's from any
     /// row that has it.
     @Test func aMomentsReadingComesFromAnyOfItsRows() throws {
-        let cycles = settlingCycles(3, duration: 7 * 86_400, final: 98, settlesAt: 0.6, step: 3 * 3600)
+        let cycles = settlingCycles(3, duration: 7 * 86_400, final: 98, settlesAt: 0.6, step: 1800)
         let rows = settlingRecord(cycles, window: "seven_day")
         #expect(rows.allSatisfy { $0.reading != nil })
         // "hold" graded before readings: it takes the engine rows'.
