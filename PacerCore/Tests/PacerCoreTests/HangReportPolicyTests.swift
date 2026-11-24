@@ -27,3 +27,33 @@ struct HangReportPolicyTests {
         #expect(!DisplaySleepState.isAsleep)
     }
 }
+
+@Suite("Hang Mac state")
+struct HangMacStateTests {
+    private let load = MachineLoad(loadPerCore: 3, compressorBytes: 0, swapUsedBytes: 0, physicalBytes: 16 << 30)
+
+    @Test("tags are strings prefixed mac., plus displays and verdict")
+    func tags() {
+        let tags = HangMacState.tags(load: load, pressure: .warning, displaysAsleep: false, verdict: .starved,
+                                     thermal: .nominal, lowPower: false)
+        #expect(tags["mac.load_per_core"] == "2_4")
+        #expect(tags["mac.pressure"] == "warning")
+        #expect(tags["mac.low_power"] == "false")
+        #expect(tags["mac.ram_gb"] != nil)
+        #expect(tags["hang.displays"] == "awake")
+        #expect(tags["hang.verdict"] == "starved")
+    }
+
+    @Test("no verdict, no tag; asleep displays")
+    func noVerdict() {
+        let tags = HangMacState.tags(load: load, pressure: .normal, displaysAsleep: true, thermal: .nominal, lowPower: false)
+        #expect(tags["hang.verdict"] == nil)
+        #expect(tags["hang.displays"] == "asleep")
+    }
+
+    @Test("log suffix")
+    func suffix() {
+        #expect(HangMacState.logSuffix(load: load, pressure: .warning, displaysAsleep: false, verdict: .starved)
+                == " · load 2_4 · pressure warning · verdict starved · displays awake")
+    }
+}

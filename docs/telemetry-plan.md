@@ -34,7 +34,7 @@ Tests: `TelemetryConsentTests`.
 - the check-in snapshot's usage fields: `settings.*`, `clients.*`,
   `accounts.*`, `usage.*` (peak bands, hit/forecast flags, models used, token
   magnitude), `widgets.*`, `lifecycle.*`, `env.*` beyond macOS and model,
-  `install.*`, `models.present`, `counter.*`;
+  `install.*`, `models.present` (ids with the `@revision` cut to 12 characters: a full 40-hex revision is redacted by the scrubber), `counter.*`;
 - the usage counters as Sentry metrics: `ui.*` (tabs, menu, window, modal,
   report problem, alert clicks; not `ui.click.delay.*`), `intent.*`,
   `api.route.*` (`CounterRouting.isUsage`).
@@ -52,10 +52,10 @@ counters (`data.*`, `oauth.*`, `cred.*`, `telemetry.*`, `main_thread.*`,
 
 ## Hangs (since 2026-11-05)
 `HangWatch` watches the main run loop. A stretch runs from waking to sleeping or polling. A `.strict` one-shot timer is armed only while a stretch is open, so an idle app has no wakeups. Launch counts as busy from `PacerAppDelegate.init` until the loop first sleeps.
-- Stuck 2 s and still stuck: an `App Hanging` event (mechanism AppHang, all thread stacks, tag `hang.phase` launch/running), under the `.hang` cap and the crash toggle.
+- Stuck 2 s and still stuck: an `App Hanging` event (mechanism AppHang, all thread stacks, tags `hang.phase` launch/running, `hang.displays` asleep/awake, and `mac.*` (`pressure`, `thermal`, `low_power`, `load_per_core`, `compressor_gb`, `swap_gb`, `ram_gb`: the banded `MachineLoad` set, so "Pacer is slow" reads apart from "the Mac is saturated"), under the `.hang` cap and the crash toggle.
 - Not sent while every display is asleep (`DisplaySleepState`, set by `MainThreadStallWatchdog`): macOS slows the process then and nobody is looking, and those events spent the daily hang cap. Counted as `main_thread.hang_displays_asleep`, drained by the daily check-in (non-usage counter, Sentry metric). The marker, log line and `main_thread.hang_ms` are unchanged.
 - Every 5 s while stuck: `hang-in-progress.json` is updated.
-- When it ends: `main_thread.hang_ms` with `ended=recovered`.
+- When it ends: `main_thread.hang_ms` with `ended=recovered` and a `verdict` attribute (asleep/starved/disk/busy/blocked, `WorkVerdict` over the stretch since the event went; omitted if unmeasured). The event itself carries no verdict: it is sent before there is a span to judge.
 - Next launch, if the file is still there: `main_thread.hang_ms` with `ended=terminated` and `version` (a lower bound).
 - Not sent while a debugger is attached.
 `beforeSend` budgets errors, hangs, crashes and MetricKit (`TelemetryBudget.kind`). Transactions also pass through it, spend nothing there, and are budgeted in `tracesSampler`.
@@ -138,7 +138,7 @@ list become `other`, free strings are tokenized (`[a-z0-9_.:+-]`).
 
 **Person properties** (`$set`) on `app_launched` and `daily_checkin`:
 `version`, `build.config`, `macos`, `menu_bar.shown`, `menu_bar.chips`
-(built-in chips `+`-joined, `scoped` for any per-model chip, `hidden`),
+(built-in chips `,`-joined, `scoped` for any per-model chip, `hidden`),
 `menu_bar.icon_style`, `menu_bar.icon_driver` (window kind),
 `toggles.crash_reports`, `toggles.performance`, `toggles.usage_data`; on
 `daily_checkin` also `accounts.count`, `accounts.plans`, `install.age_days`,
@@ -166,7 +166,7 @@ frame or forecast):
 | `menubar_context_action` | defined, not fired: the status item has no right-click menu today | `item` |
 | `widget_inventory` | daily check-in, `WidgetCenter.getCurrentConfigurations` | `widgets`: list of {`kind`, `family`, `primary_window` / `secondary_window` (window kind or `default`), `range`, `pinned_project` (bool)}; `count`; `refreshes.<Kind>` (yesterday's granted timelines, `WidgetRefreshLog`) |
 | `widget_tapped` | app opened by `pacer://widget?kind=&family=` (widgets carry `widgetURL`) | `kind`, `family` |
-| `cli_command` | daily check-in, from `CLIRunLog`, timestamp = when it ran | `subcommand`, `flags` (names only), `outcome` (`ok`, `failure`, `misconfigured`, `hung`, `other`), `exit_code` (other only), `duration_bucket`, `source` (`api`/`offline`/`none`), `sample_weight`; at most 100 a day, evenly thinned |
+| `cli_command` | daily check-in, from `CLIRunLog`, timestamp = when it ran | `subcommand` (one of `Pace.subcommands`, `mode` included, else `other`; `pacer mode`'s value is never recorded), `flags` (names only, `pacing` and `switch-grace` included), `outcome` (`ok`, `failure`, `misconfigured`, `hung`, `other`), `exit_code` (other only), `duration_bucket`, `source` (`api`/`offline`/`none`), `sample_weight`; at most 100 a day, evenly thinned |
 | `shortcut_run` | each App Intent's `perform` | `intent` (struct name, allow-listed) |
 | `api_request` | daily, tallied per route and client | `endpoint` (allow-listed route), `client` (family from User-Agent: `curl`, `python`, `prometheus`, …; the header is never sent), `count` |
 | `notification_shown` | after a banner is posted | `kind` (`threshold`, `reset`, `burn_rate`, `global_reset`, `daily_cost`, `project_budget`, `custom_rule`, `daily_summary`, `test`), `window` (kind) |
@@ -298,7 +298,7 @@ Debug is `#if DEBUG` (`build.config` debug).
   `PacerAppDelegate` (`:92`, `:138`, `:317`, `:379`); telemetry gates on `.normal`.
 - Not in the widget (sandboxed, no network entitlement) and not in the CLI process except the
   feedback send, which attaches the app's install ID read from the shared `cacheDirectoryPath`.
-- Debug builds (`make install`) report as environment `development`, release `pacer@dev`; release
+- Debug builds (`make install`) report as environment `development`, release `com.ericandrechek.pacer@dev+<CFBundleVersion>` (the per-build timestamp, so each dev build is its own release and issues can resolve and regress); release
   builds as `production`, `com.ericandrechek.pacer@<version>+<build>`.
 - DSN lives in `project.yml` as an Info.plist value (`PacerSentryDSN`); empty disables telemetry
   (forks building from source blank it).
@@ -564,7 +564,7 @@ if they rarely do, download them only when cheaper models leave room to improve.
     counts, archive size, transcript file count, both config dirs present, `CLAUDE_CONFIG_DIR`
     set, time-zone offset (day-boundary bugs).
 14. **Lifecycle**: launched at login or by hand, uptime, restarts per day, unclean exits, Sparkle
-    check/install failures, time from a release to each Mac running it. `lifecycle.update_result` is one of `no_update`, `found`, `download_failed`, `will_install`, `ready_to_install` (downloaded, waiting for a quiet moment), `idle_install` (relaunched to install at one), `error_<domain>_<code>`. `lifecycle.update_error` (only with `download_failed`) is why it failed: `error_<domain tail>_<code>`, then `/` and the same for the underlying error when there is one (e.g. `error_nsurlerrordomain_-1009/error_kcfstreamerrordomain_-2`). Domain tail and code only, never a description; cleared by any later result without an error (#406). `lifecycle.update_delta` (`true`/`false`, only with an install result: `ready_to_install`, `will_install`, `idle_install`) is whether the installed update was a Sparkle delta; Sparkle falls back to the full DMG without reporting a failure, and the item it hands `willInstallUpdate` is the one actually installed, so a fallback reads `false`. Cleared by any later result without one.
+    check/install failures, time from a release to each Mac running it. `lifecycle.update_result` is one of `no_update`, `found`, `download_failed`, `will_install`, `ready_to_install` (downloaded, waiting for a quiet moment), `idle_install` (relaunched to install at one), `error_<domain>_<code>`. `lifecycle.update_result_hours` is how long that result has stood, in whole hours (a `found` or `ready_to_install` days old is an update stuck waiting; with `lifecycle.sparkle_last_check_hours` it separates "checked and found nothing new" from "has not looked"). `lifecycle.update_error` is why it failed, with `download_failed` and with an `error_<domain>_<code>` result whose error has an underlying one: `error_<domain tail>_<code>`, then `:` and the same for the underlying error (e.g. `error_nsurlerrordomain_-1009:error_kcfstreamerrordomain_-2`; `error_sparkle_2001:error_nsurlerrordomain_-1009` is an appcast fetch that found the Mac offline, which Sparkle reports with the same 2001 as a failed download). Through 0.9.2 the separator was `/`, which made the pair one 40+ character token that `TelemetryScrubber` redacts as a likely credential, so a pair arrived as `<redacted>`. Domain tail and code only, never a description; cleared by any later result without an error (#406). `lifecycle.update_delta` (`true`/`false`, only with an install result: `ready_to_install`, `will_install`, `idle_install`) is whether the installed update was a Sparkle delta; Sparkle falls back to the full DMG without reporting a failure, and the item it hands `willInstallUpdate` is the one actually installed, so a fallback reads `false`. Cleared by any later result without one.
 15. **Energy**: process CPU seconds per hour and while idle (the 0 % idle invariant, fleet-wide).
 16. **Feature errors**: notification permission state, API server port in use, skill install
     failures, widget timeline failures.

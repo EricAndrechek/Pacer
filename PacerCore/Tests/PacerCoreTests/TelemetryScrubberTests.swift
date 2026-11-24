@@ -38,6 +38,11 @@ struct TelemetryScrubberTests {
         #expect(scrub("Authorization: Bearer abc.def-ghi_123") == "Authorization: <redacted>")
         #expect(scrub("key sk-ant-oat01-AbCdEf123456 used") == "key <redacted> used")
         #expect(scrub("ghp_0123456789abcdefABCDEF") == "<redacted>")
+        // Prefixed tokens are caught by their prefix, digits or not: the
+        // long-run rule now needs a digit, so these must not rely on it.
+        #expect(scrub("ghu_abcdefghijklmnopQRSTUV") == "<redacted>")
+        #expect(scrub("ghr_abcdefghijklmnopQRSTUV") == "<redacted>")
+        #expect(scrub("token xoxb-abcdefghijklmnop here") == "token <redacted> here")
         #expect(scrub("github_pat_11ABCDEFG0123456789") == "<redacted>")
     }
 
@@ -80,5 +85,14 @@ struct TelemetryScrubberTests {
         // same path under another host is still redacted.
         #expect(scrub("https://evil.example.com/project/678727/person/\(id)").contains("<redacted>"))
     }
-}
 
+    @Test("a long token with digits is redacted; long identifiers without digits are not")
+    func base64NeedsDigit() {
+        let token = String(repeating: "aB3dE6", count: 10)
+        #expect(scrub("key \(token)").contains("<redacted>"))
+        #expect(scrub("five_hour_pct+icon+seven_day_opus_pct+seven_day_pct") == "five_hour_pct+icon+seven_day_opus_pct+seven_day_pct")
+        #expect(scrub("PaceCardColumnsBodyForEachSlotConditionalContent") == "PaceCardColumnsBodyForEachSlotConditionalContent")
+        #expect(scrub("sk-ant-api03-abcdefghijkl").contains("<redacted>"))
+        #expect(scrub(String(repeating: "a1b2c3d4e5", count: 4)).contains("<redacted>"))
+    }
+}

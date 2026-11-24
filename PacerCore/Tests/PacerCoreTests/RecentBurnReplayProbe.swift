@@ -160,4 +160,36 @@ struct RecentBurnReplayProbe {
             }
         }
     }
+
+    /// The rate the moment each reading lands (#421), when a spike shows: the
+    /// every-10-minutes replay above steps over a spike that lasts one poll.
+    /// Per account and window: the moments with a rate, the readings that
+    /// have none, the highest rate, and how many exceed 50%/h on a weekly
+    /// window or 200%/h on a 5-hour one, the worst with when it was.
+    @Test func everyReading() throws {
+        let series = try Self.load(ProcessInfo.processInfo.environment["PACER_BURN_REPLAY"]!)
+        try #require(!series.isEmpty)
+        for (n, s) in series.enumerated() {
+            let times = s.readings.map(\.at)
+            let limit = RecentBurn.lookbackLimit(duration: s.duration)
+            let spikeOver = s.duration > 86400 ? 50.0 : 200.0
+            var rated = 0, unrated = 0, spikes = 0, maxRate = 0.0
+            var worst: [(Double, Date)] = []
+            for (i, r) in s.readings.enumerated() {
+                let now = r.at.addingTimeInterval(0.001)
+                let reach = Array(s.readings[Self.lowerBound(times, now.addingTimeInterval(-limit))...i])
+                guard let rate = RecentBurn.percentPerHour(readings: reach, now: now, duration: s.duration) else {
+                    unrated += 1
+                    continue
+                }
+                rated += 1
+                maxRate = max(maxRate, rate)
+                if rate > spikeOver { spikes += 1; worst.append((rate, r.at)) }
+            }
+            let top = worst.sorted { $0.0 > $1.0 }.prefix(3)
+                .map { String(format: "%.1f@%@", $0.0, ISO8601DateFormatter().string(from: $0.1)) }
+            print(String(format: "series %d %@ · rated %d · unrated %d · max %.1f%%/h · over %.0f: %d %@",
+                         n, s.window, rated, unrated, maxRate, spikeOver, spikes, top.joined(separator: " ")))
+        }
+    }
 }

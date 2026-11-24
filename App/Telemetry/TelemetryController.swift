@@ -84,8 +84,13 @@ final class TelemetryController {
         guard isRunning else { return }
         if sessionDay != nil { SentrySDK.endSession() }
         sessionDay = nil
-        TelemetryBudget.shared.flush()
-        await Task.detached(priority: .userInitiated) { SentrySDK.flush(timeout: 2) }.value
+        // The budget flush waits on a `cfprefsd` write (`persistQueue.sync`), so
+        // it runs here with the Sentry flush, not on main (PACER-1V). Still
+        // before the final Sentry flush.
+        await Task.detached(priority: .userInitiated) {
+            TelemetryBudget.shared.flush()
+            SentrySDK.flush(timeout: 2)
+        }.value
     }
 
     /// Send what is queued now, waiting at most `timeout`: for a report made
@@ -363,7 +368,10 @@ final class TelemetryController {
 
     nonisolated static var release: String {
         #if DEBUG
-        "com.ericandrechek.pacer@dev"
+        // The build number is a per-build timestamp: each dev build is its own
+        // release, so an issue can be "resolved in next release" and a
+        // regression is seen (a bare `@dev` never could be).
+        "com.ericandrechek.pacer@dev+\(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "0")"
         #else
         let info = Bundle.main.infoDictionary ?? [:]
         let version = info["CFBundleShortVersionString"] as? String ?? "0"

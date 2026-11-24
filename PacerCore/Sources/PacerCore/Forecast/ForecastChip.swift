@@ -87,7 +87,11 @@ public struct ForecastChip: Sendable, Equatable {
                 help: "You're at the top of this window — usage can't climb further until it resets.",
                 kind: .atLimit)
         }
-        let ratio = capPaceRatio(slopePercentPerHour: outlook.slopePercentPerHour, windowSeconds: duration)
+        // No slope is no chip (#421): right after a gap in coverage the rate
+        // is unknown, and reading it as 0 called the window quiet ("holds
+        // until reset") at the moment nobody had seen it move.
+        guard let slope = outlook.slopePercentPerHour else { return nil }
+        let ratio = capPaceRatio(slopePercentPerHour: slope, windowSeconds: duration)
         let atReset = endEstimate.flatMap { $0.isInsufficient ? nil : $0.value }
         guard ratio >= BurnRate.idleFractionOfCapPace else {
             let quiet = WindowSpec.isWeeklyScale(duration: duration) ? "day" : "90 minutes"
@@ -105,7 +109,7 @@ public struct ForecastChip: Sendable, Equatable {
                 return nil
             }
         }
-        var help = capPaceHelp(slopePercentPerHour: outlook.slopePercentPerHour, windowSeconds: duration)
+        var help = capPaceHelp(slopePercentPerHour: slope, windowSeconds: duration)
         if outlook.willHitLimitBeforeReset, let hit = outlook.projectedFullAt,
            let eta = relativeCrossing(hit, now: now) {
             if let phrase = crossingPhrase(outlook, now: now) {

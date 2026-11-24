@@ -190,6 +190,33 @@ struct PaceCommandTests {
         #expect(capped.out.contains("cap 99.5%"))
     }
 
+    /// #421's moment as Pacer now exports it: a login back from 61 hours
+    /// unread, its weekly at 98%, read 16 s ago, and no burn of either kind,
+    /// because neither has five minutes of readings since the gap. The rate
+    /// is unknown, so the limit is the unknown-burn 98 and the gate pauses.
+    /// Before the review fix the engine exported a burn of 0 here, which
+    /// lifted the limit to 99 with no padding and let the run go.
+    @Test func aLoginBackFromAGapHasAnUnknownBurnNotAZeroOne() throws {
+        let back = """
+        pacer_rate_limit_used_ratio{account="org",window="seven_day"} 0.98
+        pacer_rate_limit_reset_seconds{account="org",window="seven_day"} 129600
+        pacer_rate_limit_sample_age_seconds{account="org",window="seven_day"} 16
+        pacer_account_info{account="org",name="o",active="true"} 1
+        """
+        let box = try PaceSandbox(metrics: back)
+        let result = runPace(box, ["gate"], extra: ["CLAUDE_CODE_SESSION_ID": ""])
+        #expect(result.status == 10)
+        #expect(result.out.contains("safe limit 98%"))
+        // What a burn of 0 did: 99, and GO.
+        let zero = try PaceSandbox(metrics: back + """
+
+        pacer_rate_limit_burn_percent_per_hour{account="org",window="seven_day"} 0
+        """)
+        let went = runPace(zero, ["gate"], extra: ["CLAUDE_CODE_SESSION_ID": ""])
+        #expect(went.status == 0)
+        #expect(went.out.contains("99%"))
+    }
+
     // MARK: - The live value (#318)
 
     /// 5h read at 90% 150 s ago, climbing 45 points an hour, and Pacer's live

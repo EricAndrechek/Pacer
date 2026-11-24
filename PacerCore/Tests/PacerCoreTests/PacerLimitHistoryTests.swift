@@ -256,6 +256,65 @@ struct RecentBurnTests {
         #expect(RecentBurn.percentPerHour(readings: readings, now: now, duration: 5 * 3600) == nil)
     }
 
+    // MARK: - Coverage (#421)
+
+    /// #421 itself. The login had lapsed for 61 hours; the oauth lane came
+    /// back with 98% and the cswap lane with 99% 16.215 s later, and nothing
+    /// else was in reach. First-to-last over them read 1 point / 16.215 s =
+    /// 222.0%/h, the number `/metrics` reported. No rate is measured over
+    /// less than five minutes of readings since the gap.
+    @Test func aResumedPollIsNotARate() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let reset = now.addingTimeInterval(36 * 3600)
+        let resumed = [reading(61.2 * 60, 98, reset: reset, now: now),
+                       reading(16.215 / 60, 98, reset: reset, now: now),
+                       reading(0, 99, reset: reset, now: now)]
+        #expect(RecentBurn.percentPerHour(readings: resumed, now: now, duration: Self.week) == nil)
+        // Four minutes of readings at 99%: still too short to measure.
+        let four = now.addingTimeInterval(4 * 60)
+        #expect(RecentBurn.percentPerHour(readings: resumed + [reading(0, 99, reset: reset, now: four)],
+                                          now: four, duration: Self.week) == nil)
+        // Five: the run is 98% → 99% → 99% over 316.215 s, its one tick the
+        // 99%. With one tick the rate is first-to-last over the run, 1 point
+        // / 316.215 s = 11.38%/h, under the five-minute hold's cap of 12. The
+        // 61-hour-old reading is not in it: the climb across the gap is never
+        // dated.
+        let five = now.addingTimeInterval(5 * 60)
+        let burn = RecentBurn.percentPerHour(readings: resumed + [reading(0, 99, reset: reset, now: five)],
+                                             now: five, duration: Self.week)
+        #expect(abs((burn ?? -1) - 3600 / 316.215) < 1e-6)
+    }
+
+    /// The five-hour twin, from the owner's store on 2026-09-23: after a
+    /// 44-hour gap, 10% → 12% 39 s apart read 2 / 39 s = 184.6%/h through
+    /// the half-hour path.
+    @Test func aResumedFiveHourBurstIsNotARate() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let reset = now.addingTimeInterval(3 * 3600)
+        let readings = [reading(39.0 / 60, 10, reset: reset, now: now),
+                        reading(0, 12, reset: reset, now: now)]
+        #expect(RecentBurn.percentPerHour(readings: readings, now: now, duration: 5 * 3600) == nil)
+    }
+
+    /// A gap inside the weekly reach cuts it. 20% held from 16 to 11 hours
+    /// ago; nothing for ten hours; then 23% from an hour ago and 24% from
+    /// half an hour ago. Counting 23% as a tick (the meter reached it some
+    /// time in the gap) read 23 → 24 over 30 minutes, 2.0%/h. The run since
+    /// the gap holds one tick, so it is first-to-last over the run: 23 → 24
+    /// over 60 minutes, 1.0%/h, under the 30-minute hold's cap of 2.0.
+    @Test func aGapInsideTheReachCutsTheRun() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let reset = now.addingTimeInterval(3 * 86400)
+        let before = stride(from: 16.0 * 60, through: 11 * 60, by: -5).map {
+            reading($0, 20, reset: reset, now: now)
+        }
+        let after = stride(from: 60.0, through: 0, by: -5).map {
+            reading($0, $0 > 30 ? 23 : 24, reset: reset, now: now)
+        }
+        let burn = RecentBurn.percentPerHour(readings: before + after, now: now, duration: Self.week)
+        #expect(abs((burn ?? -1) - 1.0) < 1e-9)
+    }
+
     // MARK: - Cycles (#339)
 
     /// The live case: a 5-hour window reset at 9% and the server's next

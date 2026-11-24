@@ -592,9 +592,7 @@ struct ProjectDetailView: View {
         // because their source (raw TokenSample) is not a @Query (see
         // refreshDetail); the rollup-backed cards follow
         // `aggregatesFingerprint`.
-        .onReceive(NotificationCenter.default.publisher(
-            for: .pacerScanCycleDidComplete
-        )) { note in
+        .onReceive(ViewRefreshGate.shared.scanCycles) { note in
             guard let summary = note.object as? ScanCycleSummary else { return }
             if summary.samplesChanged || summary.projectAttributionChanged {
                 refreshDetail()

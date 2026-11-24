@@ -8,7 +8,7 @@ Usage (what release.yml runs; python3 -I, standard library only):
       --url https://github.com/.../Pacer-0.8.4.dmg --length 158198699 \
       --signature 'sparkle:edSignature="..."' \
       [--description-file notes.html] [--deltas-file deltas.xml] \
-      [--release-assets assets.json] [--out new.xml]
+      [--release-assets assets.json] [--critical-below 1794413280] [--out new.xml]
 
 The item is written byte for byte as the release workflow's inline template
 wrote it before delta updates existed (tests: the no-deltas output is
@@ -27,6 +27,17 @@ warning says so: a release without deltas is a slower download, a malformed
 appcast is every client unable to update (Sparkle rejects the whole feed).
 Exit 1 only when even the plain item fails, and then the appcast is left
 untouched.
+
+--critical-below BUILD adds <sparkle:criticalUpdate sparkle:version="BUILD"/>:
+the item is critical only for installs whose CFBundleVersion is below BUILD
+(Sparkle's SPUAppcastItemStateResolver compares the host's bundle version).
+For such an install Sparkle 2 still downloads and prepares the update
+silently, then shows "Install and Relaunch" at once instead of waiting for a
+quit, and asks again every SUScheduledCheckInterval (6 h) rather than weekly.
+Installs at or above BUILD see an ordinary update. It does nothing for a Mac
+whose Sparkle already holds an older prepared update: that Mac does not read
+the feed until the held update installs. Off unless given; without it the
+item is byte for byte what it was.
 """
 
 import argparse
@@ -58,6 +69,10 @@ def render_item(a, description_html, deltas_xml):
         f"        <sparkle:version>{a.build}</sparkle:version>",
         f"        <sparkle:shortVersionString>{a.version}</sparkle:shortVersionString>",
         f"        <sparkle:minimumSystemVersion>{a.min_system}</sparkle:minimumSystemVersion>",
+    ]
+    if a.critical_below:
+        lines.append(f"        <sparkle:criticalUpdate sparkle:version=\"{a.critical_below}\" />")
+    lines += [
         "        <enclosure",
         f"            url=\"{a.url}\"",
         f"            length=\"{a.length}\"",
@@ -87,6 +102,12 @@ def check(text, a, expected_deltas, assets=None):
     if not ours:
         raise ValueError("new item not found in the feed")
     item = ours[-1]
+    critical = item.findall(S + "criticalUpdate")
+    if a.critical_below:
+        if len(critical) != 1 or critical[0].get(S + "version") != a.critical_below:
+            raise ValueError(f"new item does not carry exactly one criticalUpdate below {a.critical_below}")
+    elif critical:
+        raise ValueError("new item carries a criticalUpdate nobody asked for")
     enc = item.find("enclosure")
     if enc is None:
         raise ValueError("new item has no <enclosure>")
@@ -132,7 +153,17 @@ def main():
     p.add_argument("--description-file")
     p.add_argument("--deltas-file")
     p.add_argument("--release-assets", help="`gh release view <tag> --json assets` output")
+    p.add_argument("--critical-below", metavar="BUILD",
+                   help="mark the item critical for installs whose CFBundleVersion is below BUILD")
     a = p.parse_args()
+    if a.critical_below is not None:
+        # A build number, never a marketing version: Sparkle compares the
+        # attribute with the host's CFBundleVersion, so "0.8.3" here would
+        # compare against a unix-timestamp build and match every install.
+        if not a.critical_below.isdigit() or not a.build.isdigit():
+            raise SystemExit("appcast-add-item: --critical-below takes a numeric build (CFBundleVersion), like --build")
+        if int(a.critical_below) > int(a.build):
+            raise SystemExit("appcast-add-item: --critical-below is above this item's own build")
 
     with open(a.appcast, encoding="utf-8", newline="") as f:
         feed = f.read()

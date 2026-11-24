@@ -147,13 +147,12 @@ private class PacerUpdaterDelegate: NSObject, SPUUpdaterDelegate {
         // block with it.
         MainActor.assumeIsolated { UpdateInstallScheduler.shared.release() }
         guard let error else { return }
+        // Domain and code only (and the underlying error's): never the description.
         let ns = error as NSError
-        if ns.domain == UpdateOutcomeLog.sparkleErrorDomain, ns.code == UpdateOutcomeLog.sparkleNoUpdateCode {
-            UpdateOutcomeLog.record(.noUpdate, endOfCycle: true)
-        } else {
-            UpdateOutcomeLog.record(UpdateOutcomeLog.result(forErrorDomain: ns.domain, code: ns.code),
-                                    endOfCycle: true)
-        }
+        let underlying = ns.userInfo[NSUnderlyingErrorKey] as? NSError
+        UpdateOutcomeLog.recordEndOfCycle(domain: ns.domain, code: ns.code,
+                                          underlyingDomain: underlying?.domain,
+                                          underlyingCode: underlying?.code)
     }
 }
 

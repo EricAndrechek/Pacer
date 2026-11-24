@@ -32,6 +32,15 @@ public final class RateLimitWriteSignal {
     /// reload is cheap where a missed one is a stale screen.
     public private(set) var generation: UInt64 = 0
 
+    /// `generation` as the dashboard window sees it: bumped with it while any
+    /// display is awake, and held while every display sleeps, then bumped
+    /// once on wake (`ViewRefreshGate`, #407). The key for dashboard views'
+    /// reloads. The menu bar, alerts and the API keep `generation`, which
+    /// never waits. Read the ledger and `historyGeneration` inside the reload
+    /// as before: they are always current, so the one reload on wake catches
+    /// up on everything held.
+    public private(set) var dashboardGeneration: UInt64 = 0
+
     /// Bumped when rows land that are *older* than rows already written:
     /// folded back from the archive, or adopted onto an account. A view that
     /// tops up incrementally from its newest loaded row can never fetch those,
@@ -60,6 +69,9 @@ public final class RateLimitWriteSignal {
         generation &+= 1
         ledger.record(generation, account: account)
         if let sampledAt, newest.map({ sampledAt > $0 }) ?? true { newest = sampledAt }
+        ViewRefreshGate.shared.offer(.rateLimitWrite) { [weak self] _ in
+            self?.dashboardGeneration &+= 1
+        }
     }
 
     /// The `generation` at which `account`'s rows last changed. Unchanged

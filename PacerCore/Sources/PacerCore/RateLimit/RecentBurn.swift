@@ -72,10 +72,6 @@ public enum RecentBurn {
     /// of rate depending only on where the ticks happened to fall.
     static let resolvingPoints = 2.0
 
-    /// Two readings closer than this are one reading: two poller lanes landing
-    /// together.
-    static let minSpan: TimeInterval = 1
-
     /// Percentage points per hour across `lookback`, or across the ticks
     /// back to `lookbackLimit` when `lookback` climbed less than
     /// `resolvingPoints`; nil when the readings cannot support one.
@@ -89,6 +85,17 @@ public enum RecentBurn {
     /// Nil when the newest reading is older than `lookback`, and when its own
     /// window had closed by `now`: what it measured was the last cycle's
     /// burn, and the next reading starts a new one.
+    ///
+    /// **Continuous readings only (#421).** The rate reads the readings
+    /// since the last gap in coverage (`ReadingCoverage.continuousRun`), and
+    /// no span shorter than `ReadingCoverage.minRateSpan`. A reading after a
+    /// gap is a level, not a tick: its value is known, not when the meter got
+    /// there. An account whose login had lapsed for 61 hours came back with
+    /// the oauth lane's 98% and the cswap lane's 99%, 16 s apart, and nothing
+    /// else in reach: first-to-last over those two read 222%/h, which
+    /// `pacer gate`, the card and the rotation controller all acted on. Nil
+    /// sends them to the engine's slope, or to no rate at all, rather than to
+    /// a gap read as a burn.
     public static func percentPerHour(
         readings: [Reading],
         now: Date = Date(),
@@ -98,12 +105,13 @@ public enum RecentBurn {
         let recentCutoff = now.addingTimeInterval(-lookback)
         let cutoff = now.addingTimeInterval(-lookbackLimit(duration: duration, lookback: lookback))
         let sorted = ascending(readings.filter { $0.at >= cutoff })
-        let cycle = currentCycle(sorted, duration: duration)
+        let run = Array(ReadingCoverage.continuousRun(sorted, at: \.at))
+        let cycle = currentCycle(run, duration: duration)
         guard let newest = cycle.last, newest.at >= recentCutoff else { return nil }
         if let reset = newest.resetsAt, reset <= now { return nil }
         if let first = cycle.first(where: { $0.at >= recentCutoff }),
            newest.percent - first.percent >= resolvingPoints,
-           newest.at.timeIntervalSince(first.at) >= minSpan {
+           newest.at.timeIntervalSince(first.at) >= ReadingCoverage.minRateSpan {
             return perHour(newest.percent - first.percent, over: newest.at.timeIntervalSince(first.at))
         }
         return fromTicks(cycle)
@@ -188,7 +196,11 @@ public enum RecentBurn {
     /// With fewer than two ticks, first-to-last across the cycle, under the
     /// same cap. With none, 0: the readings did not climb a point across the
     /// whole of `lookbackLimit`, which is the resolution this number stops
-    /// at.
+    /// at, or across the whole run since a gap.
+    ///
+    /// The cycle's first reading is never a tick, because there is no
+    /// earlier reading for it to climb from. After a gap in coverage the
+    /// cycle starts there (#421), so the climb across the gap is never dated.
     ///
     /// Replayed on the owner's store (`RecentBurnReplayProbe`: every weekly
     /// reading of four accounts, a moment every 10 minutes, scored against
@@ -201,13 +213,15 @@ public enum RecentBurn {
     /// point an hour for it.
     static func fromTicks(_ cycle: ArraySlice<Reading>) -> Double? {
         guard let first = cycle.first, let newest = cycle.last,
-              newest.at.timeIntervalSince(first.at) >= minSpan else { return nil }
+              newest.at.timeIntervalSince(first.at) >= ReadingCoverage.minRateSpan else { return nil }
         var ticks: [Reading] = []
         for (earlier, later) in zip(cycle, cycle.dropFirst()) where later.percent > earlier.percent {
             ticks.append(later)
         }
         guard let last = ticks.last else { return 0 }
-        let apart = { (tick: Reading) in last.at.timeIntervalSince(tick.at) >= minSpan }
+        // A tick is dated to within one poll, so two ticks closer than
+        // `minRateSpan` measure mostly that error.
+        let apart = { (tick: Reading) in last.at.timeIntervalSince(tick.at) >= ReadingCoverage.minRateSpan }
         var rate: Double
         if let start = ticks.last(where: { apart($0) && last.percent - $0.percent >= resolvingPoints })
             ?? ticks.first(where: apart) {

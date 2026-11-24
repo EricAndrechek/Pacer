@@ -791,7 +791,11 @@ public actor OAuthPoller: TokenPoolTesting {
         for lane in lanes where lane.state.account != .unknown {
             laneCounts[Account.key(forOrg: lane.resolvedOrg), default: 0] += 1
         }
-        let accounts = await accountSummaries(laneCounts: laneCounts)
+        // Read here, on the poller, not inside the main-actor block below
+        // (#417): this runs on every poll, and a fetch on main is the PACER-19
+        // shape. Only the finished value crosses to main.
+        let accounts = Self.accountSummaries(container: container, laneCounts: laneCounts,
+                                             activeKey: activeAccountKey)
         // Only ever an id the *store* knows. `activeAccountKey` is the poller's
         // in-memory guess and is `Account.defaultKey` until a response carries
         // an org header — publishing that wrote "default" into App Group
@@ -810,47 +814,54 @@ public actor OAuthPoller: TokenPoolTesting {
     }
 
     /// Build the switcher's account summaries from the persisted `Account`
-    /// rows (MainActor for SwiftData).
-    private func accountSummaries(laneCounts: [String: Int]) async -> [AccountStatusSummary] {
-        let container = self.container
-        let activeKey = activeAccountKey
-        return await MainActor.run {
-            let context = ModelContext(container)
-            let rows = (try? context.fetch(FetchDescriptor<Account>())) ?? []
-            return rows
-                .map { a in
-                    AccountStatusSummary(
-                        id: a.id,
-                        organizationId: a.organizationId,
-                        // `label`, not `displayName`: two accounts on the
-                        // same plan derive the identical placeholder, and a
-                        // switcher is exactly the setup that produces two.
-                        displayName: a.label,
-                        isActive: a.isActive || a.id == activeKey,
-                        subscriptionType: a.subscriptionType,
-                        rateLimitTier: a.rateLimitTier,
-                        fiveHourPct: a.latestFiveHourPct,
-                        sevenDayPct: a.latestSevenDayPct,
-                        extraUsageCents: a.latestExtraUsageCents,
-                        lastPolledAt: a.latestPolledAt,
-                        laneCount: laneCounts[a.id] ?? 0,
-                        switcherSlot: a.switcherSlot
-                    )
+    /// rows, on a context of its own.
+    ///
+    /// Not on the main actor (#417). `publishStatus` runs on every poll, and
+    /// this fetched every `Account` inside `MainActor.run` each time: small
+    /// while there are a few accounts, but under memory pressure a fetch can
+    /// page the store back in, and on main that is a stall (PACER-19, #413).
+    /// A fresh context reads what is saved, which is all the main-actor
+    /// version saw too: it also made a context of its own. Pure reads, so it
+    /// runs wherever it is called; the poller calls it on its own executor,
+    /// the way `LiveMeterDrift.measure` and `AccountList.read` read.
+    nonisolated static func accountSummaries(
+        container: ModelContainer, laneCounts: [String: Int], activeKey: String?
+    ) -> [AccountStatusSummary] {
+        let context = ModelContext(container)
+        let rows = (try? context.fetch(FetchDescriptor<Account>())) ?? []
+        return rows
+            .map { a in
+                AccountStatusSummary(
+                    id: a.id,
+                    organizationId: a.organizationId,
+                    // `label`, not `displayName`: two accounts on the
+                    // same plan derive the identical placeholder, and a
+                    // switcher is exactly the setup that produces two.
+                    displayName: a.label,
+                    isActive: a.isActive || a.id == activeKey,
+                    subscriptionType: a.subscriptionType,
+                    rateLimitTier: a.rateLimitTier,
+                    fiveHourPct: a.latestFiveHourPct,
+                    sevenDayPct: a.latestSevenDayPct,
+                    extraUsageCents: a.latestExtraUsageCents,
+                    lastPolledAt: a.latestPolledAt,
+                    laneCount: laneCounts[a.id] ?? 0,
+                    switcherSlot: a.switcherSlot
+                )
+            }
+            // The switcher's slot order when there is one — someone who
+            // types `cswap switch 2` should find account 2 second here.
+            // Otherwise active first, then most-recently-polled.
+            .sorted { l, r in
+                switch (l.switcherSlot, r.switcherSlot) {
+                case let (a?, b?) where a != b: return a < b
+                case (nil, _?): return false
+                case (_?, nil): return true
+                default: break
                 }
-                // The switcher's slot order when there is one — someone who
-                // types `cswap switch 2` should find account 2 second here.
-                // Otherwise active first, then most-recently-polled.
-                .sorted { l, r in
-                    switch (l.switcherSlot, r.switcherSlot) {
-                    case let (a?, b?) where a != b: return a < b
-                    case (nil, _?): return false
-                    case (_?, nil): return true
-                    default: break
-                    }
-                    if l.isActive != r.isActive { return l.isActive }
-                    return (l.lastPolledAt ?? .distantPast) > (r.lastPolledAt ?? .distantPast)
-                }
-        }
+                if l.isActive != r.isActive { return l.isActive }
+                return (l.lastPolledAt ?? .distantPast) > (r.lastPolledAt ?? .distantPast)
+            }
     }
 
     private static func testResult(from outcome: PollOutcome) -> TokenTestResult {
@@ -1028,10 +1039,11 @@ public actor OAuthPoller: TokenPoolTesting {
             noteSwitcherActivity(account: key, with: reading)
 
             if let seen = lastSwitcherIngestAt[key], seen >= reading.fetchedAt { continue }
-            // Claimed before the store read suspends, so nothing that runs in
-            // that gap can take the same reading for new.
+            // Claimed before the store read, so nothing that runs in a later
+            // suspension (the record below) can take the same reading for new.
             lastSwitcherIngestAt[key] = reading.fetchedAt
-            guard await isNewerThanStored(reading.fetchedAt, account: key) else { continue }
+            guard Self.isNewerThanStored(reading.fetchedAt, account: key, container: container)
+            else { continue }
             tally.readings += 1
 
             let snapshot = RateLimitSnapshot(
@@ -1212,17 +1224,20 @@ public actor OAuthPoller: TokenPoolTesting {
 
     /// Newest stored sample for an account, so an older cached reading is not
     /// replayed over a fresher poll.
-    private func isNewerThanStored(_ at: Date, account: String) async -> Bool {
-        let container = self.container
-        return await MainActor.run {
-            let context = ModelContext(container)
-            var d = FetchDescriptor<RateLimitSample>(
-                predicate: LimitScope.rateLimitPredicate(account: account),
-                sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
-            d.fetchLimit = 1
-            guard let newest = (try? context.fetch(d))?.first else { return true }
-            return at > newest.sampledAt
-        }
+    ///
+    /// Read on the poller, on a context of its own, not on the main actor
+    /// (#417): it runs on the poll cadence, for every new switcher reading.
+    /// The main-actor version made a fresh context too, so it saw the same
+    /// saved rows.
+    nonisolated static func isNewerThanStored(_ at: Date, account: String,
+                                              container: ModelContainer) -> Bool {
+        let context = ModelContext(container)
+        var d = FetchDescriptor<RateLimitSample>(
+            predicate: LimitScope.rateLimitPredicate(account: account),
+            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
+        d.fetchLimit = 1
+        guard let newest = (try? context.fetch(d))?.first else { return true }
+        return at > newest.sampledAt
     }
 
     /// Cancellable sleep. `notifyActivity()` / `stop()` cancel the inner
@@ -1839,23 +1854,28 @@ public actor OAuthPoller: TokenPoolTesting {
     /// Default activity signal: the most recent moment Claude Code
     /// produced usage or a session was seen — the JSONL watcher advances
     /// both as work happens, so "recent" here means "actively burning".
+    ///
+    /// Off the main actor (#417): the loop asks once per pass, and two fetches
+    /// on main per poll are the PACER-19 shape. A fresh context, as before.
     private static func defaultActivityProbe(container: ModelContainer) -> @Sendable () async -> Date? {
-        { @Sendable in
-            await MainActor.run {
-                let context = ModelContext(container)
-                var tokenProbe = FetchDescriptor<TokenSample>(
-                    sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
-                )
-                tokenProbe.fetchLimit = 1
-                let lastToken = (try? context.fetch(tokenProbe))?.first?.sampledAt
-                var sessionProbe = FetchDescriptor<SessionInfo>(
-                    sortBy: [SortDescriptor(\.lastSeenAt, order: .reverse)]
-                )
-                sessionProbe.fetchLimit = 1
-                let lastSession = (try? context.fetch(sessionProbe))?.first?.lastSeenAt
-                return [lastToken, lastSession].compactMap { $0 }.max()
-            }
-        }
+        { @Sendable in latestActivity(container: container) }
+    }
+
+    /// The newest `TokenSample` or `SessionInfo` moment, on a context of its
+    /// own. Pure reads; safe off the main actor.
+    nonisolated static func latestActivity(container: ModelContainer) -> Date? {
+        let context = ModelContext(container)
+        var tokenProbe = FetchDescriptor<TokenSample>(
+            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
+        )
+        tokenProbe.fetchLimit = 1
+        let lastToken = (try? context.fetch(tokenProbe))?.first?.sampledAt
+        var sessionProbe = FetchDescriptor<SessionInfo>(
+            sortBy: [SortDescriptor(\.lastSeenAt, order: .reverse)]
+        )
+        sessionProbe.fetchLimit = 1
+        let lastSession = (try? context.fetch(sessionProbe))?.first?.lastSeenAt
+        return [lastToken, lastSession].compactMap { $0 }.max()
     }
 
     // MARK: - Non-monotonic usage diagnostics

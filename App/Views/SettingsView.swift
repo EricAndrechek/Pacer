@@ -479,7 +479,7 @@ struct MenuBarCard: View {
             }
         })
         .onAppear { reload(); loadWindows() }
-        .onReceive(NotificationCenter.default.publisher(for: .pacerScanCycleDidComplete)) { _ in
+        .onReceive(ViewRefreshGate.shared.scanCycles) { _ in
             loadWindows()
         }
         // Which login's windows these are is an input like the data is. A

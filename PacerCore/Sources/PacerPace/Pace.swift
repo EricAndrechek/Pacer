@@ -254,11 +254,11 @@ public enum Pace {
     /// run log records (`CLIRunLog.flagNames`). Keep in step with its switch.
     static let flagNames: Set<String> = [
         "cap", "margin", "interval", "window", "model", "eta", "account", "max-wait", "max-age",
-        "retries", "state", "no-refresh", "resume-headroom", "help",
+        "retries", "state", "no-refresh", "resume-headroom", "help", "pacing", "switch-grace",
     ]
 
     /// For the "unknown subcommand" message.
-    static let subcommands = ["report", "json", "accounts", "sessions", "gate", "status", "wait", "safecap", "feedback"]
+    static let subcommands = ["report", "json", "accounts", "sessions", "gate", "status", "wait", "safecap", "feedback", "mode"]
 
     /// Where `pacer feedback` would have this reported.
     static let issuesURL = "https://github.com/EricAndrechek/Pacer/issues/new"
@@ -303,6 +303,26 @@ public enum Pace {
       - On a trip, `wait` blocks (background-friendly) until the window resets,
         then exits so the launcher is re-invoked to resume.
 
+    Pacing modes: a stop signal, not a budget.
+      - gate-only (default inside a Claude Code session): gate, status and
+        wait say go / pause / resume and how to wait, with no percentages,
+        so usage cannot steer an agent's model, fan-out width or scope.
+        report and accounts still answer, under a header saying so.
+      - informed (default in a terminal): the numbers, for a session or repo
+        whose owner wants agents to plan with them.
+      Precedence: --pacing, then PACER_PACING (the user's setting: per
+      session, or a repo's .claude/settings.json "env"), then `pacer mode`
+      for this session, then the default. An unusable PACER_PACING or mode
+      file is skipped with a warning on stderr, never an error.
+
+    Several logins: a PAUSE says whether a login switch can end it. A running
+    account switcher's heartbeat (~/.claude/pace/rotation.json) makes a switch
+    "expected", and `wait` then holds for it (--switch-grace) instead of
+    exiting 20 on a window that resets days away. "With room" (report's
+    other-logins line, json's otherAccounts.withRoom) means room to resume
+    onto: --resume-headroom points below every account-wide limit, as a wait
+    needs; a login under its limit by less is "near its limit" (nearLimit).
+
     Subcommands:
       accounts               every account: plan, live sessions, windows
       sessions               where the live sessions are, with branches
@@ -323,6 +343,10 @@ public enum Pace {
                              20=beyond --max-wait (checkpoint & stop) 2=no Pacer.
                              A login switch resumes only onto a login with
                              --resume-headroom left below that window's limit
+      mode [gate|informed|clear]
+                             print the pacing mode and where it came from, or
+                             set it for this Claude Code session (set it only
+                             when the user asks; PACER_PACING outranks it)
       feedback [--local] "TEXT"
                              report a wrong verdict or a missing flag: saved to
                              ~/.claude/pace/feedback.jsonl and sent to Pacer's
@@ -355,6 +379,10 @@ public enum Pace {
                              resume; default auto: 20 minutes at the higher
                              of its recent burn there and on the old login,
                              at least 5. 0 resumes on any headroom
+      --pacing gate|informed this command's pacing mode (see above)
+      --switch-grace S       how long `wait` holds a far-off pause for a switch
+                             a running account switcher has a target for;
+                             default 600
       --retries N            reads of Pacer before giving up; default 3
       --state FILE           the state file; default state-session-<id>.json
                              in ~/.claude/pace for a Claude Code session,
@@ -365,7 +393,9 @@ public enum Pace {
       PACE_SESSION_API (override just the session lookup's base URL),
       PACE_MODEL, PACE_MARGIN, PACE_RESUME_HEADROOM, PACE_ACCOUNT, PACE_STATE,
       PACE_RUN (names a per-run state file, so two orchestrations on one
-      machine do not overwrite each other's verdict)
+      machine do not overwrite each other's verdict), PACER_PACING
+      (gate|informed), PACE_ROTATION (an account switcher's heartbeat file;
+      default ~/.claude/pace/rotation.json)
 
     """
 }
@@ -415,6 +445,19 @@ final class PaceRun {
     /// verdict is written short-lived, so it is looked at again soon.
     private var loginLag: (login: String, judged: String)?
     private var model: String
+    /// Gate-only or informed (`PacingMode`): what agent-facing output says.
+    private var mode: PacingMode = .informed
+    private var modeSource: PacingMode.Source = .terminalDefault
+    /// `--pacing`, if given.
+    private var pacingFlag: String?
+    /// How long a `wait` holds a pause whose window resets beyond
+    /// `--max-wait` while an account switcher says a switch is coming.
+    private var switchGrace = 600
+    /// Since when this `wait` has held for an expected switch.
+    private var graceSince: Date?
+    /// Whether a switch can end this run's pause, worked out on a PAUSE.
+    private var outlook: PaceSwitchOutlook = .none
+    private let home: String
     /// The model was `auto` before it was resolved, so a verdict records
     /// that and a later `wait` or refresh asks again rather than reusing
     /// what this session ran at gate time.
@@ -453,7 +496,8 @@ final class PaceRun {
         if base.hasSuffix("/") { base.removeLast() }
         apiBase = base
         let run = environment["PACE_RUN"].flatMap { $0.isEmpty ? nil : $0 }
-        let dir = "\(environment["HOME"] ?? NSHomeDirectory())/.claude/pace"
+        home = environment["HOME"] ?? NSHomeDirectory()
+        let dir = "\(home)/.claude/pace"
         if let path = environment["PACE_STATE"].flatMap({ $0.isEmpty ? nil : $0 }) {
             statePath = path
         } else if let run {
@@ -484,6 +528,7 @@ final class PaceRun {
         // Everything after `feedback` is the text, flags and all: it is a
         // report of what was run, and that is what gets quoted.
         if sub == "feedback" { return try cmdFeedback(Array(args)) }
+        if sub == "mode" { return try cmdMode(Array(args)) }
         while let flag = args.popFirst() {
             func value() throws -> String {
                 guard let v = args.popFirst() else { try die("\(flag) needs a value") }
@@ -503,6 +548,8 @@ final class PaceRun {
             case "--state":    statePath = try value(); stateIsSessionDefault = false
             case "--no-refresh": noRefresh = true
             case "--resume-headroom": resumeHeadroom = try room(try value(), flag); given.insert("resume-headroom")
+            case "--pacing":   pacingFlag = try value()
+            case "--switch-grace": switchGrace = try integer(try value(), flag)
             case "-h", "--help":
                 io.out(Pace.help)
                 throw PaceExit(code: 0)
@@ -510,6 +557,17 @@ final class PaceRun {
             }
         }
         if interval < 5 { interval = 5 }
+        do {
+            let resolved = try PacingMode.resolve(
+                flag: pacingFlag, environment: env,
+                sessionFile: PaceModeFile.path(home: home, sessionId: env["CLAUDE_CODE_SESSION_ID"]))
+            (mode, modeSource) = (resolved.mode, resolved.source)
+            // On stderr, so a verdict on stdout reads as it always does.
+            for warning in resolved.warnings { io.err("pace: \(warning).\n") }
+        } catch {
+            // Only `--pacing`, named on this command, gets here.
+            try die("\(error)")
+        }
         if !given.contains("margin"), let raw = env["PACE_MARGIN"], !raw.isEmpty {
             margin = try points(raw, "PACE_MARGIN")
             given.insert("margin")
@@ -882,6 +940,9 @@ final class PaceRun {
     private func scopeCaveat() -> String {
         if !want.isEmpty, want != "all" { return "" }
         if allAccounts <= 1 { return "" }
+        if gateOnly {
+            return " (\(allAccounts) accounts signed in and this session could not be identified — this verdict is about the active login, which may not be the one billing you; pass --account, or run where CLAUDE_CODE_SESSION_ID is set)"
+        }
         return " (\(allAccounts) accounts signed in and this session could not be identified — these are the active login's numbers, which may not be the ones billing you; pass --account, or run where CLAUDE_CODE_SESSION_ID is set)"
     }
 
@@ -1019,7 +1080,8 @@ final class PaceRun {
             tripIdentity: tripped?.identity ?? "", tripAccount: tripped?.account ?? "",
             tripLimit: tripped?.limit, goUntil: lastGoUntil,
             account: judgedAccounts.joined(separator: ","), accountFlag: account,
-            login: io.loginMarker()?.accountId ?? "", followsLogin: followsLogin), now: now)
+            login: io.loginMarker()?.accountId ?? "", followsLogin: followsLogin,
+            switchOutlook: status == "paused" ? outlook.rawValue : ""), now: now)
     }
 
     /// Said when the gate's data had not caught up with a login switch.
@@ -1041,6 +1103,13 @@ final class PaceRun {
             return " Good until \(at): \(expiry.label) is then projected to fill within \(PaceFormat.human(eta))."
         }
         return " Good until \(at): \(expiry.label) reaches its \(PaceFormat.awkNumber(expiry.limit))% limit in ~\(PaceFormat.human(Int(expiry.seconds.rounded()))) at \(String(format: "%.0f", expiry.burn))%/h."
+    }
+
+    /// Inside a session with informed pacing, where the planning guidance is:
+    /// the gate's line is how an agent learns the user turned it on.
+    private func informedHint() -> String {
+        guard mode == .informed, !(env["CLAUDE_CODE_SESSION_ID"] ?? "").isEmpty else { return "" }
+        return " Informed pacing is on: ~/.claude/skills/pacer/planning.md applies."
     }
 
     /// What went wrong, and how loudly: `off` is ordinary; `auth` and `http`
@@ -1067,9 +1136,17 @@ final class PaceRun {
 
     // MARK: - Commands
 
+    /// What `report` and `accounts` say first in gate-only mode: they still
+    /// answer (a refusal invites workarounds, and the user's own question
+    /// deserves its answer), but say what the numbers are not for.
+    static let gateOnlyHeader = "pacer: gate-only pacing — these numbers answer the user's question. They never choose a model, fan-out width or scope; `pacer gate` decides when to stop.\n"
+
     private func cmdReport() throws {
         guard fetchRows() else { apiOffNote(); throw PaceExit(code: offExitCode) }
         try requireSelection()
+        if gateOnly { io.out(Self.gateOnlyHeader) }
+        let rotating = followsLogin ? rotation() : nil
+        let switchComing = rotating?.expectsSwitch(off: judgedAccounts) ?? false
         if !autoNote.isEmpty { io.out("pace: \(autoNote)\n") }
         let doubt = doubtReason()
         if !doubt.isEmpty { io.out("pace: \(doubt)\n") }
@@ -1089,7 +1166,11 @@ final class PaceRun {
             } else if let burn = row.burn {
                 rate = " · \(PaceFormat.signed(burn))%/h"
             }
-            let full = (row.willHit == "1" && row.hitEta != nil) ? " · full in \(PaceFormat.human(row.hitEta))" : ""
+            // A login that fills is left for another when a switcher has one
+            // with room: "full in" is this login's, not the machine's.
+            let full = (row.willHit == "1" && row.hitEta != nil)
+                ? " · full in \(PaceFormat.human(row.hitEta))" + (switchComing && row.model.isEmpty ? " (rotation moves on)" : "")
+                : ""
             var mine = ""
             if !model.isEmpty, model != "all", !row.model.isEmpty,
                !PaceRules.binds(windowModel: row.model, wanted: model) {
@@ -1112,6 +1193,11 @@ final class PaceRun {
         // with one login. An agent that read only the active login's windows
         // took them for the machine's capacity (#293).
         if let others = otherLogins() { io.out(others.line(now: now) + "\n") }
+        if let rotating {
+            io.out(switchComing
+                   ? "rotation: on — at this login's limit the account switcher moves sessions to a login with room\n"
+                   : "rotation: on, \(rotating.holding ? "holding" : "no target") — no login has room to move to\n")
+        }
         if let note = LoginChangeAudit.reportNote(
             unexplained: LoginChangeAudit.unexplained(in: io.loginChanges(), now: now)) {
             io.out(note + "\n")
@@ -1131,7 +1217,89 @@ final class PaceRun {
         }
         let shown = Set(rows.map(\.account))
         let everything = Self.rows(from: points, want: "all").filter { !shown.contains($0.account) }
-        return PaceOtherLogins(rows: everything)
+        return PaceOtherLogins(rows: everything, leaving: leavingBurns(), resumeHeadroom: resumeHeadroom)
+    }
+
+    /// The burn of each window on the login(s) judged, by identity: the work
+    /// that would move onto another login, which it needs room for.
+    private func leavingBurns() -> [String: Double] {
+        var burns: [String: Double] = [:]
+        for row in rows {
+            if let burn = PaceRules.burnRate(row) { burns[row.identity] = max(burns[row.identity] ?? 0, burn) }
+        }
+        return burns
+    }
+
+    // MARK: - Pacing mode and other logins
+
+    private var gateOnly: Bool { mode == .gate }
+
+    /// An account switcher's heartbeat, if one is running (`PaceRotation`).
+    private func rotation() -> PaceRotation? {
+        PaceRotation.read(path: PaceRotation.path(home: home, environment: env), now: io.now())
+    }
+
+    /// Whether a login switch can end a pause here, and the other logins it
+    /// was judged from. Only for a verdict that follows the login: a session
+    /// pinned to its own profile, or an `--account`, is not moved by one.
+    ///
+    /// A running switcher is believed over Pacer's own reading of the other
+    /// logins: it knows its exclusions and caps, and when it is holding, no
+    /// switch is coming whatever the other logins look like.
+    private func switchOutlook() -> (PaceSwitchOutlook, PaceOtherLogins?) {
+        guard followsLogin else { return (.none, nil) }
+        let others = otherLogins()
+        if let rotation = rotation() {
+            return (rotation.expectsSwitch(off: judgedAccounts) ? .expected : .none, others)
+        }
+        if let others, !others.withRoom.isEmpty { return (.possible, others) }
+        return (.none, others)
+    }
+
+    /// `Sat 6:59 AM`, or `?`, for a window resetting in `seconds`.
+    private func resetClock(_ seconds: String?) -> String { PaceFormat.clock(seconds, now: io.now()) }
+
+    /// What a gate-only PAUSE tells an agent: no percentages, only what to
+    /// do and when room comes back.
+    private func gateOnlyPause(_ trip: PaceRules.Trip) -> String {
+        let at = trip.why == "eta" ? "has reached the point the gate stops at" : "is at its limit"
+        let clock = resetClock(trip.resetsIn)
+        let beyond = trip.resetsIn.flatMap(PaceFormat.integer).map { $0 > maxWait } ?? false
+        switch outlook {
+        case .expected:
+            return "this login \(at), and the account switcher has a login with room to move to. "
+                + "Checkpoint, then run `pacer wait` in the background: it resumes on the switch."
+        case .possible:
+            if beyond {
+                // Nothing will switch on its own, and `wait` does not sleep
+                // that long: the user decides.
+                return "this login \(at) until \(clock); another login has room, and a switch to it ends the pause. "
+                    + "Checkpoint, stop, and tell the user both."
+            }
+            return "this login \(at); another login has room, and a switch to it ends the pause. "
+                + "Checkpoint, tell the user, then run `pacer wait` in the background: it resumes on a switch "
+                + "or when the limit resets (\(clock))."
+        case .none:
+            if beyond {
+                return "this login \(at) until \(clock), longer than a wait sleeps through. "
+                    + "Checkpoint, stop, and tell the user when it resets."
+            }
+            return "this login \(at) until \(clock). "
+                + "Checkpoint, then run `pacer wait` in the background: it resumes then."
+        }
+    }
+
+    /// The other-logins line a PAUSE adds in informed mode, with what a
+    /// switch would do.
+    private func informedOthers(_ others: PaceOtherLogins?) -> String {
+        guard let others else { return "" }
+        var line = others.line(now: io.now())
+        switch outlook {
+        case .expected: line += " — the account switcher has a target with room; `pacer wait` resumes on the switch"
+        case .possible: line += " — a switch to one ends this pause"
+        case .none: break
+        }
+        return line + "\n"
     }
 
     private func cmdJSON() throws {
@@ -1188,12 +1356,28 @@ final class PaceRun {
         catchUpWithLogin()
         guard let trip = PaceRules.evaluate(bindingRows, cap: cap, margin: margin, horizon: eta) else {
             writeState("go", note: "\(summary()) (\(capNote()))")
-            io.out("pace: GO — \(summary()) (\(capNote())).\(untilText())\(autoNoteText())\(doubtNoteText())\(scopeCaveat())\(lagNoteText())\n")
+            if gateOnly {
+                // Go, and nothing else: a percentage here is what agents
+                // planned with (`PacingMode`).
+                io.out("pace: GO.\(autoNoteText())\(doubtNoteText())\(scopeCaveat())\(lagNoteText())\n")
+            } else {
+                io.out("pace: GO — \(summary()) (\(capNote())).\(untilText())\(autoNoteText())\(doubtNoteText())\(scopeCaveat())\(lagNoteText())\(informedHint())\n")
+            }
             throw PaceExit(code: 0)
         }
+        // A pause is rare and worth one more read: whether a switch to
+        // another login ends it, which is most of what a pause means on a
+        // machine that rotates logins.
+        let others: PaceOtherLogins?
+        (outlook, others) = switchOutlook()
         writeState("paused", trip: trip.label, percent: trip.percentText, resets: trip.resetsIn,
                    note: "\(tripReason(trip)); resets in \(PaceFormat.human(trip.resetsIn))", tripped: trip)
-        io.out("pace: PAUSE — \(tripReason(trip)), resets in \(PaceFormat.human(trip.resetsIn)) (\(PaceFormat.clock(trip.resetsIn, now: io.now()))).\(autoNoteText())\(doubtNoteText())\(lagNoteText())\n")
+        if gateOnly {
+            io.out("pace: PAUSE — \(gateOnlyPause(trip))\(autoNoteText())\(doubtNoteText())\(lagNoteText())\n")
+        } else {
+            io.out("pace: PAUSE — \(tripReason(trip)), resets in \(PaceFormat.human(trip.resetsIn)) (\(PaceFormat.clock(trip.resetsIn, now: io.now()))).\(autoNoteText())\(doubtNoteText())\(lagNoteText())\n")
+            io.out(informedOthers(others))
+        }
         throw PaceExit(code: 10)
     }
 
@@ -1322,11 +1506,33 @@ final class PaceRun {
             io.out(state.goUntil.map { "go (until \(PaceFormat.utcClock($0)))\n" } ?? "go\n")
             throw PaceExit(code: 0)
         case "paused":
-            io.out("paused: \(state.quoted("note") ?? "")\n")
+            io.out("paused: \(gateOnly ? gateOnlyPausedNote(state) : state.quoted("note") ?? "")\n")
             throw PaceExit(code: 10)
         default:
             io.out("unknown\n")
             throw PaceExit(code: 3)
+        }
+    }
+
+    /// A paused verdict as a gate-only `status` says it: what to wait for,
+    /// never the percentage the full note carries.
+    private func gateOnlyPausedNote(_ state: PaceStateFile) -> String {
+        var clock = "?"
+        if let stamp = state.quoted("updatedAt"), let written = PaceFormat.isoFormatter.date(from: stamp),
+           let resets = state.bare("resetsInSeconds").flatMap(Double.init) {
+            let left = max(0, Int(ceil(written.addingTimeInterval(resets).timeIntervalSince(io.now()))))
+            clock = PaceFormat.clock(String(left), now: io.now())
+        }
+        switch state.quoted("switch") ?? "" {
+        case PaceSwitchOutlook.expected.rawValue:
+            return "checkpoint and wait — the account switcher is moving to a login with room"
+        case PaceSwitchOutlook.possible.rawValue:
+            return "checkpoint and wait — another login has room; a switch to it, or the reset (\(clock)), ends the pause"
+        default:
+            if (state.quoted("note") ?? "").hasPrefix("manual:") {
+                return "checkpoint and stop — the limit resets \(clock)"
+            }
+            return "checkpoint and wait for the reset (\(clock))"
         }
     }
 
@@ -1563,7 +1769,11 @@ final class PaceRun {
                     current = short.hold
                     held = current
                     let left = remaining(current) ?? current.trip.resetsIn
-                    io.out("pace: account switched (\(from) → \(nowOn.prefix(8))), but \(tripReason(current.trip))\(short.why) — holding for more room or its reset in ~\(PaceFormat.human(left)) (\(PaceFormat.clock(left, now: io.now()))).\n")
+                    if gateOnly {
+                        io.out("pace: switched login, but the new one is short of room — still waiting, for more room or its reset (\(PaceFormat.clock(left, now: io.now()))).\n")
+                    } else {
+                        io.out("pace: account switched (\(from) → \(nowOn.prefix(8))), but \(tripReason(current.trip))\(short.why) — holding for more room or its reset in ~\(PaceFormat.human(left)) (\(PaceFormat.clock(left, now: io.now()))).\n")
+                    }
                     announced = true
                     // Said: the "would pass the limit now" line is this one.
                     overruled = true
@@ -1573,7 +1783,9 @@ final class PaceRun {
                     }
                     // Cleared, and the gate's rules still trip: wait that out.
                     if switched {
-                        io.out("pace: account switched (\(current.trip.account.prefix(8)) → \(nowOn.prefix(8))), but \(tripReason(trip)).\n")
+                        io.out(gateOnly
+                               ? "pace: switched login, but the new one is at its limit too — still waiting.\n"
+                               : "pace: account switched (\(current.trip.account.prefix(8)) → \(nowOn.prefix(8))), but \(tripReason(trip)).\n")
                     }
                     current = anchor(trip)
                     held = current
@@ -1587,22 +1799,62 @@ final class PaceRun {
                 ? trip! : current.trip
             let left = remaining(current) ?? shown.resetsIn
             if let secs = left.flatMap(PaceFormat.integer), secs > maxWait {
+                // A window that resets beyond `--max-wait` (a weekly one, and
+                // on an Ultra login every pause is weekly) used to end the
+                // wait at once with "checkpoint and stop", seconds before a
+                // rotation controller switched the login onto one with room.
+                // When a running switcher says it has a target, hold for the
+                // switch, for `--switch-grace`.
+                let off = current.trip.account.isEmpty ? judgedAccounts : [current.trip.account]
+                let expecting = followsLogin && (rotation()?.expectsSwitch(off: off) ?? false)
+                if expecting {
+                    if graceSince == nil { graceSince = io.now() }
+                } else {
+                    graceSince = nil
+                }
+                if let since = graceSince, io.now().timeIntervalSince(since) < Double(switchGrace) {
+                    outlook = .expected
+                    writeState("paused", trip: current.trip.label, percent: current.trip.percentText, resets: left,
+                               note: "waiting for a login switch: \(tripReason(current.trip)); resets in ~\(PaceFormat.human(left))",
+                               tripped: current.trip)
+                    if !announced {
+                        io.out(gateOnly
+                               ? "pace: paused — waiting for the account switcher to move to a login with room…\n"
+                               : "pace: \(tripReason(shown)) — the account switcher has a login with room; waiting up to \(PaceFormat.human(switchGrace)) for the switch (the window itself resets \(PaceFormat.clock(left, now: io.now())))…\n")
+                        announced = true
+                    }
+                    io.sleep(TimeInterval(interval))
+                    continue
+                }
+                let others: PaceOtherLogins?
+                (outlook, others) = switchOutlook()
+                let missed = graceSince != nil ? " The account switcher did not switch within \(PaceFormat.human(switchGrace))." : ""
                 writeState("paused", trip: current.trip.label, percent: current.trip.percentText, resets: left,
                            note: "manual: \(current.trip.label) resets in \(PaceFormat.human(left)) (> max-wait \(PaceFormat.human(maxWait))) — checkpoint & stop",
                            tripped: current.trip)
-                io.out("pace: \(tripReason(shown)) and resets in \(PaceFormat.human(left)) — beyond max-wait. Checkpoint and stop; resume after \(PaceFormat.clock(left, now: io.now())).\n")
+                if gateOnly {
+                    let room = outlook == .possible ? " Another login has room: a switch to it would end the pause." : ""
+                    io.out("pace: the limit resets \(PaceFormat.clock(left, now: io.now())), beyond --max-wait. Checkpoint and stop; tell the user when it resets.\(room)\(missed)\n")
+                } else {
+                    io.out("pace: \(tripReason(shown)) and resets in \(PaceFormat.human(left)) — beyond max-wait. Checkpoint and stop; resume after \(PaceFormat.clock(left, now: io.now())).\(missed)\n")
+                    io.out(informedOthers(others))
+                }
                 throw PaceExit(code: 20)
             }
+            let off = current.trip.account.isEmpty ? judgedAccounts : [current.trip.account]
+            outlook = followsLogin && (rotation()?.expectsSwitch(off: off) ?? false) ? .expected : .none
             let note = current.trip.why == "room"
                 ? "waiting for room: \(tripReason(current.trip)); resets in ~\(PaceFormat.human(left))"
                 : "waiting for \(current.trip.label) reset (~\(PaceFormat.human(left)))"
             writeState("paused", trip: current.trip.label, percent: current.trip.percentText, resets: left,
                        note: note, tripped: current.trip)
             if !announced {
-                io.out("pace: \(tripReason(shown)) — waiting ~\(PaceFormat.human(left)) for reset (\(PaceFormat.clock(left, now: io.now())))…\n")
+                io.out(gateOnly
+                       ? "pace: paused — waiting for room: a switch to a login with room, or the reset (\(PaceFormat.clock(left, now: io.now())))…\n"
+                       : "pace: \(tripReason(shown)) — waiting ~\(PaceFormat.human(left)) for reset (\(PaceFormat.clock(left, now: io.now())))…\n")
                 announced = true
             }
-            if trip == nil, !overruled,
+            if trip == nil, !overruled, !gateOnly,
                let row = rows.first(where: { $0.identity == current.trip.identity && $0.account == current.trip.account }) {
                 io.out("pace: \(row.label) at \(PaceFormat.percent(row.percentText))% would pass the limit now (\(PaceFormat.awkNumber(PaceRules.limit(row, cap: cap, margin: margin)))%), but it paused at \(PaceFormat.awkNumber(current.trip.limit))% — holding until that window resets or falls below it.\n")
                 overruled = true
@@ -1652,28 +1904,78 @@ final class PaceRun {
             // Why the headroom came back matters: a reset is the window
             // rolling over, a switch is another login's window entirely.
             writeState("go", note: "account switched — headroom on \(newAccount.prefix(8)) (\(summary()))")
-            io.out("pace: account switched (\(anchor.trip.account.prefix(8)) → \(newAccount.prefix(8))) — headroom on the new login (\(summary())). Resume.\n")
+            io.out(gateOnly ? "pace: room is back — switched to a login with room. Resume.\n"
+                   : "pace: account switched (\(anchor.trip.account.prefix(8)) → \(newAccount.prefix(8))) — headroom on the new login (\(summary())). Resume.\n")
         } else {
             switch release ?? .reset {
             case .reset:
                 writeState("go", note: "reset — \(label) rolled over (\(summary()))")
-                io.out("pace: reset — the \(label) window rolled over; headroom restored (\(summary())). Resume.\n")
+                io.out(gateOnly ? "pace: room is back — the limit reset. Resume.\n"
+                       : "pace: reset — the \(label) window rolled over; headroom restored (\(summary())). Resume.\n")
             case .drop where anchor.trip.why == "room":
                 let now = rows.first { $0.identity == anchor.trip.identity && $0.account == anchor.trip.account }
                 let at = now.map { PaceFormat.percent($0.percentText) } ?? "?"
                 writeState("go", note: "room on \(anchor.trip.account.prefix(8)) — \(label) at \(at)% (\(summary()))")
-                io.out("pace: room on the new login — \(label) at \(at)%, at least \(anchor.trip.room) points below its limit (\(summary())). Resume.\n")
+                io.out(gateOnly ? "pace: room is back on the new login. Resume.\n"
+                       : "pace: room on the new login — \(label) at \(at)%, at least \(anchor.trip.room) points below its limit (\(summary())). Resume.\n")
             case .drop:
                 let now = rows.first { $0.identity == anchor.trip.identity && $0.account == anchor.trip.account }
                 let at = now.map { PaceFormat.percent($0.percentText) } ?? "?"
                 writeState("go", note: "\(label) fell to \(at)%, below the \(PaceFormat.awkNumber(anchor.trip.limit))% it paused at (\(summary()))")
-                io.out("pace: usage fell — \(label) at \(at)%, below the \(PaceFormat.awkNumber(anchor.trip.limit))% it paused at (\(summary())). Resume.\n")
+                io.out(gateOnly ? "pace: room is back. Resume.\n"
+                       : "pace: usage fell — \(label) at \(at)%, below the \(PaceFormat.awkNumber(anchor.trip.limit))% it paused at (\(summary())). Resume.\n")
             case .forecast:
                 writeState("go", note: "\(label) no longer projected to fill within \(PaceFormat.human(eta)) (\(summary()))")
-                io.out("pace: forecast cleared — \(label) is no longer projected to fill within \(PaceFormat.human(eta)) (\(summary())). Resume.\n")
+                io.out(gateOnly ? "pace: room is back. Resume.\n"
+                       : "pace: forecast cleared — \(label) is no longer projected to fill within \(PaceFormat.human(eta)) (\(summary())). Resume.\n")
             }
         }
         throw PaceExit(code: 0)
+    }
+
+    /// `pacer mode [gate|informed|clear]`: print the pacing mode and where it
+    /// came from, or set (or clear) it for this Claude Code session. Agents
+    /// set it only when the user asks; the run log records each use.
+    private func cmdMode(_ words: [String]) throws {
+        var choice: String?
+        for word in words {
+            if word == "-h" || word == "--help" { io.out(Pace.help); throw PaceExit(code: 0) }
+            guard choice == nil else { try die("mode takes one word: gate, informed or clear") }
+            choice = word
+        }
+        let file = PaceModeFile.path(home: home, sessionId: env["CLAUDE_CODE_SESSION_ID"])
+        if let choice {
+            guard let file else {
+                try die("`pacer mode \(choice)` sets this Claude Code session's mode, and this is not one (CLAUDE_CODE_SESSION_ID is unset). Set PACER_PACING=gate or informed instead.")
+            }
+            if choice == "clear" {
+                PaceModeFile(path: file).remove()
+            } else {
+                guard let chosen = PacingMode(name: choice) else {
+                    try die("'\(choice)' is not a pacing mode (gate, informed, or clear)")
+                }
+                guard PaceModeFile(path: file).write(chosen, now: io.now()) else { try die("could not write \(file)") }
+            }
+        }
+        let resolved: PacingMode.Resolution
+        do {
+            resolved = try PacingMode.resolve(flag: nil, environment: env, sessionFile: file)
+        } catch {
+            try die("\(error)")
+        }
+        for warning in resolved.warnings { io.err("pace: \(warning).\n") }
+        io.out("pacing: \(resolved.mode.title) (\(resolved.source.text))\n")
+        // A session choice under an explicit PACER_PACING does nothing: the
+        // user's setting wins, by design.
+        if choice != nil, choice != "clear", resolved.source == .environment {
+            io.out("PACER_PACING is set, and it outranks a session's `pacer mode`: the choice is saved but has no effect while it is set.\n")
+        }
+        switch resolved.mode {
+        case .gate:
+            io.out("Agents get go, pause and resume, and how to wait: no usage numbers. For numbers, `pacer mode informed` (this session) or PACER_PACING=informed (a repo's .claude/settings.json \"env\").\n")
+        case .informed:
+            io.out("Agents get the numbers too, and ~/.claude/skills/pacer/planning.md applies. `pacer mode gate` turns them off for this session.\n")
+        }
     }
 
     /// The limit `gate` would apply to each binding window, one per line
@@ -1811,7 +2113,8 @@ final class PaceRun {
         var plan: [String: String] = [:], active: [String: String] = [:]
         var live: [String: String] = [:], windows: [String: [String]] = [:]
         func note(_ a: String) { if !order.contains(a) { order.append(a) } }
-        for p in PaceMetricsText.parse(response.body) {
+        let points = PaceMetricsText.parse(response.body)
+        for p in points {
             let a = p.label("account")
             switch p.name {
             case "pacer_account_info":
@@ -1839,6 +2142,18 @@ final class PaceRun {
             io.out("pace: Pacer reports no accounts yet.\n")
             return
         }
+        // Each login judged the way `report` judges other logins: whether a
+        // switch onto it would have room for the work on the active one, and
+        // whether a running switcher would pick it.
+        let all = Self.rows(from: points, want: "all")
+        let activeId = order.first { active[$0] == "true" } ?? ""
+        var leaving: [String: Double] = [:]
+        for row in all where row.account == activeId {
+            if let burn = PaceRules.burnRate(row) { leaving[row.identity] = max(leaving[row.identity] ?? 0, burn) }
+        }
+        let judged = order.count > 1 ? PaceOtherLogins(rows: all, leaving: leaving, resumeHeadroom: resumeHeadroom) : nil
+        let targets = rotation()?.targets ?? []
+        if gateOnly { io.out(Self.gateOnlyHeader) }
         var text = "\(order.count) account\(order.count == 1 ? "" : "s")\n"
         for a in order {
             let planText = (plan[a] ?? "").isEmpty ? "plan unknown" : plan[a]!
@@ -1847,8 +2162,20 @@ final class PaceRun {
             let count = live[a] ?? "0"
             text += "    \(count) session\(PaceFormat.number(count) == 1 && live[a] != nil ? "" : "s") drawing on it now\n"
             if let w = windows[a], !w.isEmpty { text += "    " + w.joined(separator: "  ") + "\n" }
+            if let login = judged?.logins.first(where: { $0.account == a }) {
+                var state: String
+                if login.hasRoom {
+                    state = "room"
+                } else if login.isNear {
+                    state = "near its limit"
+                } else {
+                    state = "spent" + (login.freeIn.map { " until " + PaceFormat.until($0, now: io.now()) } ?? "")
+                }
+                if a != activeId, targets.contains(where: { PaceRotation.same(a, $0) }) { state += " · rotation target" }
+                text += "    \(state)\n"
+            }
         }
-        text += "\nA window is account-wide: every session above draws on the same percentage.\n"
+        text += "\nA window is account-wide: every session on a login draws on it. With several logins, no one login's % is the machine's capacity.\n"
         io.out(text)
     }
 

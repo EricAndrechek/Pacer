@@ -32,6 +32,12 @@ import Testing
 /// - The port has subcommands the script did not (`safecap`, #263;
 ///   `feedback`, #268), so its
 ///   "unknown subcommand" message lists more; `renamed` maps the list.
+/// - A PAUSE (in the informed mode a terminal gets) adds an `other logins:`
+///   line saying whether a switch ends it, and `accounts` a line per login
+///   saying whether it has room, with a reworded footer;
+///   `withoutOtherLogins` drops and maps those. The state file records the
+///   pause's `switch` outlook; `withoutAddedKeys` drops it. Gate-only output
+///   (the default inside a session) is not compared: the harness has none.
 /// - With `CLAUDE_CODE_SESSION_ID` set and no `--model`, the port gates as
 ///   `--model auto` (#264); `pace.sh` let every window bind. Not exercised:
 ///   the harness runs without a session id, where both bind every window.
@@ -149,8 +155,18 @@ struct PaceParityTests {
     static func withoutOtherLogins(_ text: String) -> String {
         text.split(separator: "\n", omittingEmptySubsequences: false)
             .filter { !$0.hasPrefix("other logins:") && !$0.hasPrefix("  \"otherAccounts\":") }
+            .filter { line in !accountStates.contains { line.hasPrefix("    " + $0) } }
             .joined(separator: "\n")
+            .replacingOccurrences(of: Self.accountsFooter, with: Self.scriptAccountsFooter)
     }
+
+    /// `accounts`' line per login saying whether it has room, which the
+    /// script never printed.
+    static let accountStates = ["room", "near its limit", "spent"]
+    /// `accounts`' footer, reworded so a percentage is not read as the
+    /// machine's capacity, and the script's.
+    static let accountsFooter = "A window is account-wide: every session on a login draws on it. With several logins, no one login's % is the machine's capacity."
+    static let scriptAccountsFooter = "A window is account-wide: every session above draws on the same percentage."
 
     private struct Outcome: Equatable {
         let status: Int32
@@ -197,7 +213,7 @@ struct PaceParityTests {
 
     /// The keys the script never wrote.
     static let addedKeys = ["eta", "window", "autoModel", "margin", "tripIdentity", "tripAccount", "tripLimit",
-                            "goUntil", "resumeHeadroom", "account", "accountFlag", "login", "followsLogin"]
+                            "goUntil", "resumeHeadroom", "account", "accountFlag", "login", "followsLogin", "switch"]
 
     /// `status`'s `go (until 22:41Z)` as the script's `go`.
     static func withoutGoUntil(_ text: String) -> String {
