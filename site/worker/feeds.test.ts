@@ -47,6 +47,10 @@ describe('appcastProblems', () => {
     expect(appcastProblems(FEED)).toEqual([]);
   });
 
+  it('passes a pre-release version (any v*.*.* tag releases)', () => {
+    expect(appcastProblems(FEED.replace('>0.9.3</sparkle:shortVersionString>', '>0.10.0-rc.1</sparkle:shortVersionString>'))).toEqual([]);
+  });
+
   const broken: Record<string, string> = {
     'a truncated feed (a partial write)': FEED.slice(0, -30),
     'an attribute given twice': FEED.replace('length="158198699"', 'length="158198699" length="158198699"'),

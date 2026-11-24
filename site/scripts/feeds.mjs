@@ -104,7 +104,8 @@ export function appcastProblems(text) {
     const version = /<sparkle:shortVersionString>\s*([^<\s]*)\s*</.exec(item)?.[1] ?? '';
     const build = /<sparkle:version>\s*([^<\s]*)\s*</.exec(item)?.[1] ?? '';
     const who = version || build || '(no version)';
-    if (!/^\d+\.\d+\.\d+$/.test(version)) problems.push(`${who}: <sparkle:shortVersionString> is not X.Y.Z`);
+    // X.Y.Z, or X.Y.Z-suffix: release.yml runs on any v*.*.* tag (and a dry run is 0.0.0-dev).
+    if (!/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(version)) problems.push(`${who}: <sparkle:shortVersionString> is not X.Y.Z`);
     if (!/^\d+$/.test(build)) problems.push(`${who}: <sparkle:version> is not a build number`);
     else if (builds.has(build)) problems.push(`${who}: build ${build} appears twice`);
     builds.add(build);
