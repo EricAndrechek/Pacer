@@ -158,7 +158,10 @@ struct RuntimeArenaListTests {
     /// live cache at most once per model, whatever the record's depth, so
     /// nothing in it grows with the history or repeats inside the sort. A
     /// 100 ms limit on the wall clock said the same until a loaded Mac took
-    /// longer to schedule the thread than to do the work (#431).
+    /// longer to schedule the thread than to do the work (#431). What still
+    /// bounds the absolute cost is the thread's own CPU time, which waiting
+    /// for a core does not add to; the bound is ten times that old wall
+    /// limit, for the efficiency cores and a debug build.
     @Test func theStandardRosterListsEveryModelCheaply() {
         let roster = ArenaRoster.standard
         for (target, weekly) in [(ArenaTarget.meterFiveHour, false), (.meterSevenDay, true)] {
@@ -174,6 +177,7 @@ struct RuntimeArenaListTests {
             let acc = Self.accuracy(rows, weekly: weekly)
             let runner = ArenaRunner(registry: roster.registry)
             let asked = Asked()
+            let cpuBefore = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID)
             let out = UsageIntelligenceEngine.arenaListing(
                 specs: specs, accuracy: acc, weekly: weekly, pick: nil, drawn: [],
                 liveFailure: { asked.failure($0); return nil },
@@ -181,6 +185,8 @@ struct RuntimeArenaListTests {
                     asked.weight(spec.name)
                     return runner.requiredWeights(spec.name).allSatisfy { ArenaWeightStore.services($0) != nil }
                 })
+            // A synchronous test: one thread ran all of it.
+            let cpuMs = Double(clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID) - cpuBefore) / 1e6
             #expect(out.count == specs.count && !out.isEmpty)
             #expect(Set(out.map(\.name)).count == out.count)
             #expect(out.allSatisfy { ArenaRoster.isSelectable(roster.spec($0.id)!) })
@@ -190,6 +196,7 @@ struct RuntimeArenaListTests {
             #expect(asked.weights.sorted() == names.sorted(), "weights checked \(asked.weights.count)× for \(names.count)")
             #expect(asked.failures.count <= names.count && Set(asked.failures).count == asked.failures.count,
                     "live cache asked \(asked.failures.count)× for \(names.count)")
+            #expect(cpuMs < 1_000, "listing used \(cpuMs) ms of CPU")
         }
     }
 
