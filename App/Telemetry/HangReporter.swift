@@ -144,6 +144,14 @@ enum HangReporter {
                                      displaysAsleep: HangReportPolicy.displaysAsleepNow())
         tags["hang.phase"] = phase(hang)
         event.tags = tags
+        // Sentry groups by the innermost in-app frame; a hang spent wholly in
+        // system code has only `main` there, so split those by system frames (#437).
+        if let frames = threads.first?.stacktrace?.frames {
+            event.fingerprint = HangFingerprint.fingerprint(frames: frames.map {
+                .init(function: $0.function ?? $0.instructionAddress.flatMap(HangStackSummary.symbolName),
+                      image: $0.package, inApp: $0.inApp?.boolValue)
+            })
+        }
         SentrySDK.capture(event: event)
     }
 

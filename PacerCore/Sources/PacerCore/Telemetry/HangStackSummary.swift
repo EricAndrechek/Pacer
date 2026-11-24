@@ -47,6 +47,15 @@ public enum HangStackSummary {
         return value >= base ? "\(image) +0x\(String(value - base, radix: 16))" : "\(image) \(address)"
     }
 
+    /// The nearest symbol for an address, or nil when `dladdr` has none.
+    public static func symbolName(_ address: String) -> String? {
+        let hex = address.hasPrefix("0x") ? String(address.dropFirst(2)) : address
+        guard let value = UInt(hex, radix: 16), let pointer = UnsafeRawPointer(bitPattern: value) else { return nil }
+        var info = Dl_info()
+        guard dladdr(pointer, &info) != 0, let sname = info.dli_sname else { return nil }
+        return String(cString: sname)
+    }
+
     private static func clip(_ s: String) -> String {
         s.count > nameLimit ? String(s.prefix(nameLimit)) + "…" : s
     }
