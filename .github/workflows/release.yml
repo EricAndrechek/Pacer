@@ -205,6 +205,24 @@ jobs:
             build \
             | (xcbeautify --renderer github-actions || cat)
 
+      - name: Check the executable keeps its symbol table
+        # Hang grouping (HangFingerprint, #437) tells a hang in system code
+        # from one in Pacer by naming the main thread's Pacer frames with
+        # dladdr and finding only `main` there. A stripped executable would
+        # make every such hang look like Pacer code, and they would all fall
+        # back into one Sentry issue without any error. (In Release `$main`
+        # is inlined into `main`, so `_main` is the name to look for.)
+        run: |
+          set -euo pipefail
+          APP="$(find build -name "Pacer.app" -path "*/Build/Products/Release/*" | head -1)"
+          nm -U "${APP}/Contents/MacOS/Pacer" | awk '{print $NF}' > "${RUNNER_TEMP}/pacer-symbols.txt"
+          COUNT="$(wc -l < "${RUNNER_TEMP}/pacer-symbols.txt" | tr -d ' ')"
+          if ! grep -qxF '_main' "${RUNNER_TEMP}/pacer-symbols.txt" || [ "${COUNT}" -lt 1000 ]; then
+            echo "::error::Pacer's executable is stripped (${COUNT} defined symbols, _main $(grep -qxF '_main' "${RUNNER_TEMP}/pacer-symbols.txt" && echo found || echo missing)); hang grouping needs its symbol table"
+            exit 1
+          fi
+          echo "${COUNT} defined symbols, _main present"
+
       - name: Upload debug symbols to Sentry
         # Crash reports from this release are symbolicated against these
         # dSYMs (docs/telemetry-plan.md). The release string is read from the
