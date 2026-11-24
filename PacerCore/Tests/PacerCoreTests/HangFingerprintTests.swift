@@ -360,7 +360,9 @@ import Testing
         #expect(!HangFingerprint.isRuntime(Self.appKit))
         #expect(HangFingerprint.isSystem(Self.appKit) && HangFingerprint.isSystem("/usr/lib/libsqlite3.dylib"))
         for image in ["/Applications/Pacer.app/Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle",
-                      "/Users/someone/Applications/Pacer.app/Contents/MacOS/Pacer", "AppKit", nil] {
+                      "/Users/someone/Applications/Pacer.app/Contents/MacOS/Pacer", "AppKit", nil,
+                      "/System/Volumes/Data/Users/someone/Library/Injected.dylib",
+                      "/usr/lib/../../Users/someone/Injected.dylib", "/usr/local/lib/libfoo.dylib"] {
             #expect(!HangFingerprint.isSystem(image), "\(image ?? "nil")")
         }
     }

@@ -173,8 +173,11 @@ public enum HangFingerprint {
     /// Apple's code: the OS's frameworks and libraries (the shared cache's
     /// images keep these install paths). Anything else in the process (Pacer,
     /// its frameworks, whatever got loaded into it) is never named.
+    /// `/System/Volumes/` is the writable data volume seen through its firmlink
+    /// (`/System/Volumes/Data/Users/…` is a home folder), and a `..` component
+    /// can climb out of either prefix, so both are refused.
     static func isSystem(_ image: String?) -> Bool {
-        guard let image else { return false }
+        guard let image, !image.hasPrefix("/System/Volumes/"), !image.contains("/..") else { return false }
         return image.hasPrefix("/System/") || image.hasPrefix("/usr/lib/")
     }
 
