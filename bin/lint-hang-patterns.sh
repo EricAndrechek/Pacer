@@ -34,6 +34,13 @@
 #                         reply never comes (the SIGTERM handler, found by the
 #                         on-machine relauncher check). Every call says why its
 #                         context is safe: an AppKit action, or a run-loop block.
+#   store-in-main-hop     A SwiftData context made, or a fetch or save run, inside
+#                         a hop to the main actor (`MainActor.run { … }`,
+#                         `Task { @MainActor … }`, `DispatchQueue.main.async`).
+#                         Each one can page the store in on the main thread under
+#                         memory pressure: the OAuthPoller's per-poll writes did
+#                         exactly that (PACER-19, #413, #429). Do the work on the
+#                         caller's actor and hop only the finished value.
 #
 # It is a grep, not a compiler: it reads the source line by line and knows
 # nothing about actors. That is the point — it is fast enough for every push
@@ -97,8 +104,21 @@ func f() {
     // lint:allow terminate-call an NSMenu action, called from event handling
     NSApplication.shared.terminate(self)
 }
+func g() async {
+    let n = await MainActor.run {
+        let context = ModelContext(container)
+        return (try? context.fetch(FetchDescriptor<Foo>()))?.count
+    }
+    Task { @MainActor in try? context.save() }
+    let fine = ModelContext(container)
+    await MainActor.run { publish(n) }
+    await MainActor.run {
+        // lint:allow store-in-main-hop the fixture says so
+        try? context.save()
+    }
+}
 SWIFT
-    expected=$'4 formatter-in-body\n8 formatter-in-body\n9 fetch-in-body\n13 formatter-in-body\n17 un-sync\n19 un-sync\n26 main-sync\n27 smappservice-status\n28 allow-without-reason\n28 stderr-write\n31 terminate-call'
+    expected=$'4 formatter-in-body\n8 formatter-in-body\n9 fetch-in-body\n13 formatter-in-body\n17 un-sync\n19 un-sync\n26 main-sync\n27 smappservice-status\n28 allow-without-reason\n28 stderr-write\n31 terminate-call\n37 store-in-main-hop\n38 store-in-main-hop\n40 store-in-main-hop'
     actual=$(bin/lint-hang-patterns.sh "$dir/Fixture.swift" 2>/dev/null \
         | sed -nE 's/^[^:]+:([0-9]+): \[([a-z-]+)\].*/\1 \2/p' || true)
     if [[ "$actual" == "$expected" ]]; then
@@ -176,10 +196,12 @@ BEGIN {
     off_main = "OffMainQueue\\.[A-Za-z]+\\.run|Task\\.detached|DispatchQueue\\.global|\\.async[ \t]*[({]|get(Delivered|Pending)[A-Za-z]*[ \t]*[({]"
     formatter = "(DateFormatter|ISO8601DateFormatter|NumberFormatter|RelativeDateTimeFormatter|DateComponentsFormatter|DateIntervalFormatter|ByteCountFormatter|MeasurementFormatter|ListFormatter|PersonNameComponentsFormatter)[ \t]*\\([ \t]*\\)|NSRegularExpression[ \t]*\\(|try!?[ \t]+Regex[ \t]*\\(|\\.date\\(from:"
     builder_open = "(var|func)[^=]*some[ \t]+(View|ChartContent|AxisContent|ToolbarContent|Scene|Commands)[^=]*\\{[ \t]*$"
+    main_hop = "MainActor\\.run[ \t]*(\\([^)]*\\))?[ \t]*\\{|Task[ \t]*(\\([^)]*\\))?[ \t]*\\{[ \t]*@MainActor|DispatchQueue\\.main\\.async[ \t]*(\\([^)]*\\))?[ \t]*\\{"
+    store_work = "ModelContext[ \t]*\\(|\\.mainContext([^A-Za-z]|$)|\\.(fetch|fetchCount|save)[ \t]*\\("
 }
 
 FNR == 1 {
-    in_block = 0; in_multi = 0; depth = 0; builder_depth = -1; nwrap = 0; prev = ""
+    in_block = 0; in_multi = 0; depth = 0; builder_depth = -1; nwrap = 0; nhop = 0; prev = ""
     mounted = (FILENAME ~ always_mounted)
     is_cli = (FILENAME ~ /^PacerCore\/Sources\/PacerPace\//)
     is_login_wrapper = (FILENAME ~ /LoginItemController\.swift$/)
@@ -239,9 +261,17 @@ FNR == 1 {
         if (c ~ /\.(fetch|fetchCount)[ \t]*\(/ && !allowed("fetch-in-body", raw, prev))
             report("fetch-in-body", "SwiftData fetch inside a view builder runs on every body pass, on the main context. Load it off the main thread on a data-change signal")
     }
+    # store-in-main-hop. Inside the braces of a hop to the main actor, or on
+    # the line that opens one.
+    opens_hop = (c ~ main_hop)
+    if ((nhop > 0 || opens_hop) && c ~ store_work && !allowed("store-in-main-hop", raw, prev))
+        report("store-in-main-hop", "SwiftData context, fetch or save inside a hop to the main actor: it can page the store in on the main thread (PACER-19, #429). Do it on the caller\047s actor, on a context of its own, and hop only the finished value")
+    if (opens_hop && opens > closes) hop_depth[++nhop] = depth
+
     depth += opens - closes
     if (builder_depth >= 0 && depth <= builder_depth) builder_depth = -1
     while (nwrap > 0 && depth <= wrap_depth[nwrap]) nwrap--
+    while (nhop > 0 && depth <= hop_depth[nhop]) nhop--
 
     # stderr-write (the CLI library writes its own output by design)
     if (!is_cli && c ~ /FileHandle\.standard(Error|Output)\.write|fputs[ \t]*\(.*std(err|out)|fwrite[ \t]*\(.*std(err|out)/ && !allowed("stderr-write", raw, prev))
