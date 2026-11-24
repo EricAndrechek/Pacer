@@ -22,20 +22,39 @@ import Foundation
 /// still say so. The same reasoning, and the same switch, as
 /// `MemoryPressure.shared`: what a test sees must not depend on what else the
 /// Mac is doing.
+///
+/// `PACER_PRODUCTION_QOS=1` keeps the app's classes in a test process, for the
+/// opt-in probes that measure what the app does (`RuntimePerfProbe`,
+/// `RuntimeMemoryProbe`, `RealStoreMemoryProbe`).
 public enum BackgroundQoS {
-    /// The lowest class applied in this process.
-    static let floor: qos_class_t = PacerPreferences.isTestProcess ? QOS_CLASS_UTILITY : QOS_CLASS_BACKGROUND
+    /// The lowest class this process applies: background, but utility in a
+    /// test process that has not asked for the app's classes. Pure, so both
+    /// answers are tested; `floor` is this process's.
+    static func floor(isTestProcess: Bool, environment: [String: String]) -> qos_class_t {
+        isTestProcess && environment["PACER_PRODUCTION_QOS"] != "1" ? QOS_CLASS_UTILITY : QOS_CLASS_BACKGROUND
+    }
 
-    /// `qos`, or the floor when that is higher.
-    public static func applied(_ qos: qos_class_t) -> qos_class_t {
+    /// This process's floor, decided once.
+    static let floor = Self.floor(isTestProcess: PacerPreferences.isTestProcess,
+                                  environment: ProcessInfo.processInfo.environment)
+
+    /// `qos`, or `floor` when that is higher.
+    static func applied(_ qos: qos_class_t, floor: qos_class_t) -> qos_class_t {
         qos.rawValue < floor.rawValue ? floor : qos
     }
 
-    /// For a dispatch queue that would run at background.
-    public static var queue: DispatchQoS {
+    static func queue(floor: qos_class_t) -> DispatchQoS {
         DispatchQoS(qosClass: DispatchQoS.QoSClass(rawValue: floor) ?? .background, relativePriority: 0)
     }
 
+    static func priority(floor: qos_class_t) -> TaskPriority { TaskPriority(rawValue: UInt8(floor.rawValue)) }
+
+    /// `qos` as this process applies it.
+    public static func applied(_ qos: qos_class_t) -> qos_class_t { applied(qos, floor: Self.floor) }
+
+    /// For a dispatch queue that would run at background.
+    public static var queue: DispatchQoS { queue(floor: Self.floor) }
+
     /// For a task that would run at background priority.
-    public static var priority: TaskPriority { TaskPriority(rawValue: UInt8(floor.rawValue)) }
+    public static var priority: TaskPriority { priority(floor: Self.floor) }
 }
