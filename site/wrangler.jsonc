@@ -25,18 +25,24 @@
     "POSTHOG_TOKEN": "phc_rCT9m6F6y7DwcDSJ5BgHpZECFyvpmsPoyUiLx5pa693A",
     "POSTHOG_HOST": "https://us.i.posthog.com",
   },
-  // Custom domain: Cloudflare creates the DNS record itself on the deploy that
-  // adds it. Held back until the owner approves the design on workers.dev;
-  // the cutover PR uncomments it.
-  // "routes": [{ "pattern": "pacer.andrechek.com", "custom_domain": true }],
+  // Custom domain: the site, and from 0.9.4 the app's update feed (SUFeedURL)
+  // and price history. Cloudflare created the DNS record itself on the first
+  // deploy that carried this route. scripts/indexnow.mjs only submits when it
+  // is here.
+  "routes": [{ "pattern": "pacer.andrechek.com", "custom_domain": true }],
   // Branch previews: Workers Builds runs `npx wrangler preview` for non-main
   // branches, served on workers.dev. Top-level settings apply.
   "previews": {},
+  // Set explicitly, because left out it follows workers_dev (off below).
+  // Cloudflare: "Disabling your workers.dev route does not disable Version
+  // URLs, Preview URLs, or Deployment URLs" (Workers > Routing > workers.dev),
+  // and "Production and Preview workers.dev URLs are configured separately"
+  // (Workers > Previews > Custom domains). Preview answers carry
+  // X-Robots-Tag: noindex (public/_headers, worker/index.ts, and Cloudflare's own).
   "preview_urls": true,
-  // The cutover (with the route above) sets this to false, so the site lives at
-  // one address; previews keep their workers.dev URLs. Until then workers.dev
-  // answers carry X-Robots-Tag: noindex (public/_headers, worker/index.ts).
-  "workers_dev": true,
+  // Production lives at one address. Keep it in this file: a workers.dev route
+  // switched off only in the dashboard comes back on the next deploy.
+  "workers_dev": false,
   "observability": {
     "enabled": true,
     "logs": { "enabled": true, "head_sampling_rate": 1 },
