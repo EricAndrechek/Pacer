@@ -49,17 +49,17 @@ func eventually(
 /// of a 300 s `eventually` and then ran out (#431), every step of it still
 /// advancing. What a hang looks like is no step at all, so that is what this
 /// waits out.
-func eventually<Progress: Equatable>(
-    progressing progress: () async -> Progress,
+func eventually<Progress: Equatable & Sendable>(
+    progressing progress: () -> Progress,
     stall: Duration = .seconds(300),
     isolation: isolated (any Actor)? = #isolation,
     _ condition: () async throws -> Bool
 ) async rethrows -> Bool {
-    var last = await progress()
+    var last = progress()
     var deadline = ContinuousClock.now + stall
     while true {
         if try await condition() { return true }
-        let now = await progress()
+        let now = progress()
         if now != last {
             last = now
             deadline = ContinuousClock.now + stall
