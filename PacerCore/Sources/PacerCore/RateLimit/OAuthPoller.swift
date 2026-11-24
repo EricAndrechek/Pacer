@@ -178,6 +178,10 @@ public actor OAuthPoller: TokenPoolTesting {
         case keychainStatus(OSStatus)
         case tokenExpired
         case unauthorized
+        /// The same token was refused with HTTP 403 `forbidden403ParkAfter` polls
+        /// in a row: parked in place (the lane stays, cooling for 6 h), not
+        /// dropped, so the pool and the signed-in credential are untouched (#434).
+        case forbiddenParked
         case rateLimited(retryAfter: TimeInterval?)
         case http(status: Int)
         case transport
@@ -223,6 +227,17 @@ public actor OAuthPoller: TokenPoolTesting {
         let source: CredentialCandidate.Source
         var state: OAuthPollScheduler.LaneState
         var consecutiveFailures: Int
+        /// Polls in a row that got HTTP 403; every other outcome resets it (#434).
+        /// Manual tests (the Settings "Test" button) are not counted.
+        var consecutive403 = 0
+        /// Parked after repeated 403s: `state.cooldownUntil` is the retry time.
+        /// Cleared by the next poll's outcome, so the pill never outlives it.
+        var refused403 = false
+        /// When this lane last took a good reading, and when its current 403
+        /// streak began: a lane vouches for the network only if it succeeded
+        /// after the streak started (#434).
+        var lastSuccessAt: Date?
+        var streak403Start: Date?
         /// The account this token resolved to (from a successful poll's
         /// `anthropic-organization-id`); nil until first polled.
         var resolvedOrg: String?
@@ -472,7 +487,7 @@ public actor OAuthPoller: TokenPoolTesting {
         guard let idx = lanes.firstIndex(where: { Self.laneId($0.credential.accessToken) == id }) else {
             return .failure(reason: "That token is no longer available.")
         }
-        let outcome = await pollLane(idx)
+        let outcome = await pollLane(idx, manual: true)
         await publishStatus()
         return Self.testResult(from: outcome)
     }
@@ -487,7 +502,7 @@ public actor OAuthPoller: TokenPoolTesting {
         await loadPersistedMetaIfNeeded()
         ensureLanes()
         if let idx = lanes.firstIndex(where: { $0.credential.accessToken == trimmed }) {
-            let outcome = await pollLane(idx)
+            let outcome = await pollLane(idx, manual: true)
             await publishStatus()
             return Self.testResult(from: outcome)
         }
@@ -542,7 +557,7 @@ public actor OAuthPoller: TokenPoolTesting {
         guard let idx = lanes.firstIndex(where: { $0.credential.accessToken == trimmed }) else {
             return .failure(reason: "Couldn't add the token.")
         }
-        let outcome = await pollLane(idx)
+        let outcome = await pollLane(idx, manual: true)
         let lane = lanes.first(where: { $0.credential.accessToken == trimmed })
         switch lane?.state.account {
         case .primary:
@@ -783,7 +798,8 @@ public actor OAuthPoller: TokenPoolTesting {
                 cooldownUntil: lane.state.cooldownUntil,
                 consecutiveFailures: lane.consecutiveFailures,
                 priority: i,
-                accountKey: lane.accountKey
+                accountKey: lane.accountKey,
+                refusedReason: lane.refused403 ? Self.refusedReason(until: lane.state.cooldownUntil) : nil
             )
         }
         // Lane counts per account, for the switcher.
@@ -870,6 +886,7 @@ public actor OAuthPoller: TokenPoolTesting {
         case .secondaryAccount(let org): return .otherAccount(org: org)
         case .rateLimited:               return .failure(reason: "Rate-limited (429). This token is cooling down.")
         case .unauthorized:              return .failure(reason: "Anthropic rejected this token (401).")
+        case .forbiddenParked:           return .failure(reason: "Anthropic keeps refusing this token (HTTP 403).")
         case .tokenExpired:              return .failure(reason: "This token is expired.")
         case .transport:                 return .failure(reason: "Network error. Check your connection.")
         case .http(let s):               return .failure(reason: "Server returned HTTP \(s).")
@@ -1506,6 +1523,7 @@ public actor OAuthPoller: TokenPoolTesting {
 
     private var lastStalledNoteAt: Date?
 
+
     /// After each poll: tally `oauth.lane_stalled` when a lane has gone quiet,
     /// at most once an hour. A loop over a handful of lanes and a counter add;
     /// nothing is sent from here (the check-in sends the tally).
@@ -1521,10 +1539,40 @@ public actor OAuthPoller: TokenPoolTesting {
         TelemetryCounters.add("oauth.lane_stalled", n)
     }
 
+    /// A lane's token refused with 403 this many polls in a row is parked (#434).
+    /// One 403 between successes keeps the ordinary cooling.
+    static let forbidden403ParkAfter = 3
+    /// How long a parked lane waits. A changed token is a different lane, so it
+    /// is polled at once; this only paces retries of the same refused token.
+    static let forbidden403Backoff: TimeInterval = 6 * 3600
+
+    enum ForbiddenKind: String { case permission, edge, unknown }
+
+    /// What a 403 looks like, judged locally and never sent or logged beyond
+    /// this one word. Anthropic's own refusals are JSON with an error type
+    /// `permission_error`; a WAF, proxy or region block answers with an HTML or
+    /// plain-text page. Nothing else is a reliable signal, so anything that is
+    /// neither is `.unknown` and treated like a permission refusal.
+    nonisolated static func forbiddenKind(body: String) -> ForbiddenKind {
+        if body.contains("permission_error") { return .permission }
+        let head = body.drop(while: \.isWhitespace).prefix(1)
+        if head == "<" { return .edge }
+        if !body.isEmpty, head != "{" { return .edge }
+        return .unknown
+    }
+
+    private var lastAllForbiddenLogAt: Date?
+
+    static func refusedReason(until: Date?) -> String {
+        guard let until else { return "Anthropic refused this token (HTTP 403)" }
+        return "Anthropic refused this token (HTTP 403) — retrying at "
+            + until.formatted(date: .omitted, time: .shortened)
+    }
+
     // MARK: - One poll
 
     @discardableResult
-    private func pollLane(_ idx: Int) async -> PollOutcome {
+    private func pollLane(_ idx: Int, manual: Bool = false) async -> PollOutcome {
         guard idx < lanes.count else { return .credentialsNotFound }
         let credential = lanes[idx].credential
         let polledAt = Date()
@@ -1552,7 +1600,10 @@ public actor OAuthPoller: TokenPoolTesting {
 
         let previous = lastOutcome
         let previousLane = lastPolledLaneId
-        let outcome = await apply(result: result, laneIndex: idx, now: now)
+        // The lane as it was polled: a 401 or an expiry removes it, and the log
+        // line must name that one, not whichever lane slid into its slot.
+        let polledLane = lanes[idx]
+        let outcome = await apply(result: result, laneIndex: idx, now: now, manual: manual)
         lastOutcome = outcome
         noteStalledLanes(now: now)
         lastPolledLaneId = idx < lanes.count
@@ -1576,13 +1627,20 @@ public actor OAuthPoller: TokenPoolTesting {
         } else if !Self.sameCategory(previous, outcome) || previousLane != lastPolledLaneId {
             Log.write("OAuthPoller", Self.summarize(
                 outcome: outcome, laneCount: lanes.count,
-                lane: idx < lanes.count ? lanes[idx] : nil,
+                lane: Self.removedByPoll(outcome) ? polledLane : (idx < lanes.count ? lanes[idx] : nil),
                 liveKeychainToken: liveKeychainToken))
         }
         // Persist the lane's freshly-learned state (account/org/last-poll/
         // cooldown) so it survives a restart.
         await saveAllLaneMeta()
         return outcome
+    }
+
+    private static func removedByPoll(_ outcome: PollOutcome) -> Bool {
+        switch outcome {
+        case .unauthorized, .tokenExpired: return true
+        default: return false
+        }
     }
 
     /// A poll's outcome as a small enumerable label: `ok`, `401`, `403`,
@@ -1630,11 +1688,36 @@ public actor OAuthPoller: TokenPoolTesting {
     private func apply(
         result: Result<RateLimitSnapshot, OAuthClientError>,
         laneIndex idx: Int,
-        now: Date
+        now: Date,
+        manual: Bool = false
     ) async -> PollOutcome {
+        // The 403 streak is consecutive: any other outcome ends it (#434), and a
+        // lane that is polled again is no longer shown as refused until this
+        // poll says so.
+        // A manual Test of a parked lane that fails keeps the park: the 6 h is
+        // not replaced by a cooling that is shorter. A manual success un-parks.
+        if manual, idx < lanes.count, lanes[idx].refused403, case .failure(let e) = result {
+            switch e {
+            case .http(let s, _): return .http(status: s)
+            case .rateLimited(let ra): return .rateLimited(retryAfter: ra)
+            case .transport: return .transport
+            case .responseSchemaMismatch: return .responseSchemaMismatch
+            default: break
+            }
+        }
+        if idx < lanes.count {
+            lanes[idx].refused403 = false
+            if case .failure(.http(403, _)) = result {} else {
+                lanes[idx].consecutive403 = 0
+                lanes[idx].streak403Start = nil
+            }
+        }
         switch result {
         case .success(let snapshot):
             lanes[idx].consecutiveFailures = 0
+            lanes[idx].consecutive403 = 0
+            lanes[idx].refused403 = false
+            lanes[idx].lastSuccessAt = now
             lanes[idx].state.cooldownUntil = nil
             lanes[idx].lastTopPercent = [snapshot.fiveHour?.usedPercentage,
                                          snapshot.sevenDay?.usedPercentage]
@@ -1713,7 +1796,14 @@ public actor OAuthPoller: TokenPoolTesting {
             cooldownLane(idx, now: now, retryAfter: nil)
             return .transport
 
-        case .failure(.http(let status, _)):
+        case .failure(.http(let status, let body)):
+            if status == 403, !manual {
+                if lanes[idx].consecutive403 == 0 { lanes[idx].streak403Start = now }
+                lanes[idx].consecutive403 += 1
+                if lanes[idx].consecutive403 >= Self.forbidden403ParkAfter, park403(idx, body: body, now: now) {
+                    return .forbiddenParked
+                }
+            }
             cooldownLane(idx, now: now, retryAfter: nil)
             return .http(status: status)
 
@@ -1728,6 +1818,42 @@ public actor OAuthPoller: TokenPoolTesting {
         case .failure(.keychainMalformed):    return .keychainMalformed
         case .failure(.keychainStatus(let s)): return .keychainStatus(s)
         }
+    }
+
+    /// Park lane `idx` for `forbidden403Backoff` after repeated 403s, in place:
+    /// the lane stays in the pool (so the persisted pool, a manual token's row
+    /// and the signed-in credential are untouched) and only its cooldown moves.
+    /// Returns false, leaving ordinary cooling, when the refusals do not look
+    /// like this token's own: every other lane is failing too (VPN, proxy,
+    /// region, WAF) or the body is an edge page rather than Anthropic's JSON.
+    private func park403(_ idx: Int, body: String, now: Date) -> Bool {
+        let kind = Self.forbiddenKind(body: body)
+        // Only a lane of the SAME account can say this token, not the network,
+        // is the problem, and only one that took a good reading after this
+        // streak began. That also means a park never takes an account's last
+        // usable lane: a parked lane keeps its `.primary` slot, and a
+        // replacement would wait out the rediscovery interval (#434).
+        let key = lanes[idx].accountKey
+        let since = lanes[idx].streak403Start ?? .distantPast
+        let othersHealthy = key != nil && lanes.enumerated().contains { i, l in
+            i != idx && l.accountKey == key && !l.refused403
+                && l.consecutive403 == 0 && l.consecutiveFailures == 0
+                && (l.lastSuccessAt.map { $0 >= since } ?? false)
+        }
+        guard kind != .edge, othersHealthy else {
+            if lastAllForbiddenLogAt.map({ now.timeIntervalSince($0) >= 3_600 }) ?? true {
+                lastAllForbiddenLogAt = now
+                Log.write("OAuthPoller", "http 403 ×\(lanes[idx].consecutive403) on \(kind.rawValue) body with "
+                    + (kind == .edge ? "an edge-looking response" : "no healthy lane of the account beside it")
+                    + " — not parking (looks like the network, not the token); lanes=\(lanes.count)")
+            }
+            return false
+        }
+        lanes[idx].consecutive403 = 0
+        lanes[idx].refused403 = true
+        lanes[idx].state.cooldownUntil = now.addingTimeInterval(Self.forbidden403Backoff)
+        TelemetryCounters.add("oauth.lane_parked_403")
+        return true
     }
 
     /// Grow a lane's cooldown exponentially per consecutive failure,
@@ -1837,6 +1963,8 @@ public actor OAuthPoller: TokenPoolTesting {
             return "access token expired — dropped lane; \(lanes)"
         case .unauthorized:
             return "unauthorized (401) — dropped lane; \(lanes)"
+        case .forbiddenParked:
+            return "http 403 ×\(forbidden403ParkAfter) — parked lane (retry in \(Int(forbidden403Backoff / 3600)) h); \(lanes)"
         case .rateLimited(let retryAfter):
             let ra = retryAfter.map { "\(Int($0))s" } ?? "nil"
             return "rate-limited (429) retryAfter=\(ra) — lane cooling; \(lanes)"

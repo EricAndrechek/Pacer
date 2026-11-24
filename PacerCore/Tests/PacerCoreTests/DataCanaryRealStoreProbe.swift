@@ -56,7 +56,8 @@ struct DataCanaryRealStoreProbe {
 
         for (label, policy) in [
             ("standard (7-day lookback)", SessionTotalsCanary.Policy.standard),
-            ("whole history (no lookback)", SessionTotalsCanary.Policy(lookback: 10 * 365 * 86_400)),
+            ("whole history (no lookback)",
+             SessionTotalsCanary.Policy(maxBytesPerRun: .max, lookback: 10 * 365 * 86_400)),
         ] {
             let started = Date()
             let report = DataCanary.run(container: container, sources: sources, now: now,
@@ -64,15 +65,22 @@ struct DataCanaryRealStoreProbe {
             let ms = Int(Date().timeIntervalSince(started) * 1000)
             print("[canary-probe] \(label): \(report.sessions) sessions in the config, "
                   + "\(report.checked.count) judged, \(report.checked.count - report.mismatched.count) match, "
-                  + "\(report.mismatched.count) mismatch; \(ms) ms")
+                  + "\(report.mismatched.count) mismatch; read "
+                  + String(format: "%.1f MB in %d ms", Double(report.bytesRead) / 1_048_576, ms))
             let skipped = report.skipped.sorted { $0.key < $1.key }
                 .map { "\($0.key.rawValue)=\($0.value)" }.joined(separator: " ")
             print("[canary-probe]   skipped: \(skipped.isEmpty ? "none" : skipped)")
             for session in report.checked.sorted(by: { ($0.ccVersion ?? "") < ($1.ccVersion ?? "") }) {
-                let ratios = SessionTotalsCanary.TokenKind.allCases.map { kind -> String in
-                    let r = session.comparison.ratios[kind] ?? 1
+                // Only the kinds judged; then the transcripts' evidence (counts
+                // of requests and markers, no ids).
+                var ratios = SessionTotalsCanary.TokenKind.allCases.compactMap { kind -> String? in
+                    guard let r = session.comparison.ratios[kind] else { return nil }
                     return "\(kind.rawValue)=" + (r.isFinite ? String(format: "%.3f", r) : "inf")
                 }.joined(separator: " ")
+                let e = session.evidence
+                ratios += " [requests \(e.answeredRequests) answered, \(e.missingRequests.map(String.init) ?? "?") missing, "
+                    + "\(e.unansweredRequests) unanswered; compactions \(e.compactions), recaps \(e.recaps)"
+                    + (e.desktop ? ", desktop]" : "]")
                 let verdict = session.comparison.matched ? "match"
                     : "MISMATCH " + session.comparison.mismatches
                         .map { "\($0.kind.rawValue) \($0.band)" }.joined(separator: ", ")

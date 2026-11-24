@@ -253,7 +253,27 @@ final class ArchiveSync {
             verdict = "ok|\(stamp)|\(archived.rows)"
         } else {
             mismatches += 1
-            let detail = "rows \(archived.rows)/\(stored.rows) out \(archived.output)/\(stored.output)"
+            // The store's samples for the same days, counted, so a rollup
+            // that disagrees with its own samples can be told from an archive
+            // that is off (#433). A COUNT on the (date, model) index walks
+            // every row before today: O(rows), 0.24 s of CPU for 1.17M rows
+            // on a store copy, on the scan actor, once per failing hourly
+            // check. Skipped while a scan cycle is part-way through, when the
+            // rollups may still be catching up with samples it already saved.
+            // nil if the count fails, which must not stop the check.
+            let midScan = ScanCoordinator.isCycleInFlight
+            let sampleRows = midScan ? nil : (try? context.fetchCount(FetchDescriptor<TokenSample>(
+                predicate: #Predicate<TokenSample> { $0.date < today }))).map(Int64.init)
+            var detail = "rows \(archived.rows)/\(stored.rows) out \(archived.output)/\(stored.output)"
+            if let sampleRows { detail += " samples \(sampleRows)" }
+            if midScan { detail += " mid-scan" }
+            // Direction and order of magnitude only: what the check-in sends.
+            for key in ArchiveIntegrityGap.counterKeys(
+                archivedRows: archived.rows, storedRows: stored.rows,
+                archivedOutput: archived.output, storedOutput: stored.output,
+                sampleRows: sampleRows, midScan: midScan) {
+                TelemetryCounters.add(key)
+            }
             verdict = "mismatch|\(stamp)|\(detail)"
             // Widen the next reconcile pass to everything. Convergence then
             // doesn't depend on the window having been wide enough, which is

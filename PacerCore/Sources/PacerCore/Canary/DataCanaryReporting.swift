@@ -20,7 +20,7 @@ public extension DataCanary {
         public static let mismatched = "data.canary.mismatched"
     }
 
-    /// The problem's tags: the token kind, the ratio band, and the Claude Code
+    /// The problem's tags: the kind (a token kind, or `requests`), the ratio band, and the Claude Code
     /// version the session's turns were written by. Nothing else; a version
     /// that is not plain dotted digits is sent as `other`.
     static func problemAttributes(
@@ -72,9 +72,19 @@ public extension DataCanary {
     }
 
     static func logLine(_ session: CheckedSession) -> String {
-        let ratios = SessionTotalsCanary.TokenKind.allCases.map { kind in
-            "\(kind.rawValue)=\(format(session.comparison.ratios[kind] ?? 1))"
+        // Only the kinds judged: a session judged on requests alone has no
+        // token ratios, and printing 1.000 for them would claim a match.
+        var ratios = SessionTotalsCanary.TokenKind.allCases.compactMap { kind in
+            session.comparison.ratios[kind].map { "\(kind.rawValue)=\(format($0))" }
         }.joined(separator: " ")
+        let e = session.evidence
+        if e.answeredRequests > 0 || e.unansweredRequests > 0 {
+            ratios += " (requests \(e.answeredRequests) answered, \(e.missingRequests.map(String.init) ?? "?") missing, "
+                + "\(e.unansweredRequests) unanswered)"
+        }
+        if e.compactions > 0 || e.recaps > 0 || e.desktop {
+            ratios += " (compactions \(e.compactions), recaps \(e.recaps)\(e.desktop ? ", desktop" : ""))"
+        }
         let verdict = session.comparison.matched
             ? "match"
             : "MISMATCH " + session.comparison.mismatches.map {
@@ -90,6 +100,9 @@ public extension DataCanary {
         var line = "run: \(report.configFiles) config(s), \(report.sessions) session(s); "
             + "checked \(report.checked.count) (mismatch \(report.mismatched.count)); "
             + "already judged \(report.alreadyJudged); skipped: \(skipped.isEmpty ? "none" : skipped)"
+        if report.bytesRead > 0 {
+            line += String(format: "; read %.1f MB", Double(report.bytesRead) / 1_048_576)
+        }
         if let elapsed { line += String(format: "; %.0f ms", elapsed * 1000) }
         return line
     }
@@ -147,7 +160,7 @@ public extension DataCanary {
         let started = Date()
         let report = run(container: container, sources: sources,
                          alreadyJudged: ledger.judged(now: now), now: now)
-        ledger.record(report.checked.map(\.sessionId), now: now)
+        ledger.record(report.checked.map(\.sessionId) + report.unjudgeable, now: now)
         publish(report, elapsed: Date().timeIntervalSince(started))
         return report
     }

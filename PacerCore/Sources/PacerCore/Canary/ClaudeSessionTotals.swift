@@ -14,10 +14,14 @@ import Foundation
 /// - every API call the process made, subagents included. Subagent transcripts
 ///   carry the parent's `sessionId`, so Pacer's sums for that id include them
 ///   too: like for like.
-/// - also Claude Code's own background calls, which write no transcript:
-///   titles and summaries on its small model (Haiku), and classifier and
-///   suggestion calls on the main model that re-read the cached context. That
-///   is why only output is compared both ways (`SessionTotalsCanary`).
+/// - also Claude Code's own background calls, which write no usage to any
+///   transcript: titles and summaries on its small model (Haiku), and on the
+///   main model compactions, "while you were away" recaps, and classifier and
+///   suggestion calls, all re-reading the cached context. Compactions and
+///   recaps add main-model output too, a few percent of a session's (measured
+///   2026-11-23, `SessionTotalsCanary`). That is why input and cache are judged
+///   in one direction only, and output above allows for what the transcripts'
+///   markers say those calls spent.
 /// - the process's whole life, from `lastStartTime` for `lastDuration`. A
 ///   session that a long-lived process resumed, or one it ran after other
 ///   work, is not like for like; `SessionTotalsCanary.eligibility` tells.

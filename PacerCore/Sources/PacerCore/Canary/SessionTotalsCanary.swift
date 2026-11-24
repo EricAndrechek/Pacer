@@ -1,24 +1,51 @@
 import Foundation
 
-/// Judges one session: do Claude Code's own totals agree with Pacer's? (#353)
+/// Judges one session: does Pacer hold everything Claude Code made for it? (#353)
 ///
 /// From 2026-09-23 to 10-22, Claude Code 2.1.280–2.1.306 stopped writing the
 /// finished copy of subagent messages. Pacer kept the best copy there was, and
 /// output was under-counted by about half for a month before anyone noticed.
 /// Claude Code's own counters (`ClaudeSessionTotals`) showed it from the first
-/// day: 2.3× the transcripts' output for sessions with subagents. This is the
-/// check that would have said so. Pure: `DataCanary` gathers the inputs.
+/// day: 2.3× the transcripts' output for sessions with subagents. Pure:
+/// `DataCanary` gathers the inputs. Two checks:
 ///
-/// **Like for like.** Ratios are Claude Code's number over Pacer's. Claude
-/// Code's counters also hold its own background calls, which write no
-/// transcript, so its numbers run *above* the transcripts' even when nothing is
-/// wrong (a real install, healthy sessions: cache reads 1.0–1.5×, input 2× to
-/// 1000×, Haiku output 100–2000×). Hence:
+/// **Requests, exact.** Claude Code logs every API request it makes
+/// (`api-request` lines) and tags each usage line with the request it answers
+/// (`requestRef`). Every answered request must have a Pacer row; one missing
+/// is a mismatch (`TranscriptEvidence`). This is the check that sees a lost
+/// file, a line shape the parser stopped reading, or a dedup that merged two
+/// requests, at any size. It does not count logged requests with no answer:
+/// 1.8% of the logged requests on one install (7,166 of 391,785) got no
+/// response line at all (failed, retried, interrupted), which is Claude Code's
+/// and not a loss. Measured 2026-11-23 on 329 fully ingested sessions of one
+/// install: 386,248 answered requests, every one in the store (1,399 of them
+/// under another session, as a resume's replay).
+///
+/// **Tokens, a backstop.** Ratios are Claude Code's number over Pacer's.
+/// Claude Code's counters also hold its own calls, which write no usage to any
+/// transcript, so its numbers run *above* the transcripts' even when nothing
+/// is wrong (cache reads 1.0–1.5×, input 2× to 1000×, Haiku output 100–2000×).
+/// Hence:
 /// - **output** is judged both ways. Above: Claude Code's output on every model
-///   but its small one against all of Pacer's output, which healthy sessions
-///   put at 0.999–1.017. That is the direction the 09-23 defect went (6.9× on a
-///   2.1.306 session of the same install). Below: all of Claude Code's output
+///   but its small one against all of Pacer's output, which is the direction
+///   the 09-23 defect went (its requests were all there; their output was
+///   not, so only this check sees it). Below: all of Claude Code's output
 ///   against all of Pacer's.
+///
+///   Above is allowed what the transcripts say Claude Code spent off the
+///   record, on top of `tolerance`: each compaction (a `compact_boundary`
+///   line; 4.4–7.6k output measured, budgeted 10k) and each "while you were
+///   away" recap (an `away_summary` line; 80–310 measured, budgeted 500)
+///   inside the counters' window, plus `desktopTolerance` for a session Claude
+///   Desktop wrote, which makes calls that leave no line at all (one Desktop
+///   session: 9.5% over with all 112 requests present; four others exact).
+///   Measured 2026-11-23 against the counters Claude Code writes into its
+///   transcripts (`cost-state` lines): of 66 sessions written wholly by
+///   2.1.307+, none crosses that allowance above (the flat 2% the canary
+///   started with crossed on 9, Sentry PACER-28; three more fall below 0.98
+///   only because their counters stop days before their transcripts, which
+///   `spanSkip` rules out); of the 42 sessions with 09-23-era turns above
+///   1.13, all 42 cross it.
 /// - **input, cache reads, cache writes** are judged only below: Pacer holding
 ///   more than Claude Code counted means Pacer counted something twice. Above
 ///   is Claude Code's own calls, and says nothing.
@@ -26,11 +53,14 @@ import Foundation
 /// one number.
 public enum SessionTotalsCanary {
 
+    /// What a mismatch is in. Every case but `requests` is a token count.
     public enum TokenKind: String, CaseIterable, Sendable, Comparable {
         case input
         case output
         case cacheRead = "cache_read"
         case cacheWrite = "cache_write"
+        /// Requests Claude Code answered that Pacer has no row for.
+        case requests
 
         public static func < (a: TokenKind, b: TokenKind) -> Bool {
             allCases.firstIndex(of: a)! < allCases.firstIndex(of: b)!
@@ -72,15 +102,87 @@ public enum SessionTotalsCanary {
                 lastSeenAt: info.lastSeenAt,
                 ccVersion: info.ccVersion)
         }
+
+        /// A session Pacer has no rows for: nothing, placed in the counters'
+        /// own window so no span rule trips on it.
+        public static func nothing(during claude: ClaudeSessionTotals) -> PacerTotals {
+            let at = claude.startedAt ?? Date.distantPast
+            return PacerTotals(inputTokens: 0, outputTokens: 0, cacheReadTokens: 0,
+                               cacheWriteTokens: 0, firstSeenAt: at, lastSeenAt: at)
+        }
+    }
+
+    /// What the session's transcripts say on their own, read by `DataCanary`.
+    public struct TranscriptEvidence: Sendable, Equatable {
+        /// Requests Claude Code logged and answered with a usage line, across
+        /// every transcript of the session. 0 for transcripts written before
+        /// Claude Code logged requests: the request check then has nothing to
+        /// judge.
+        public var answeredRequests: Int
+        /// Of those, how many have no Pacer row, in this session or any other
+        /// (a resume replays a turn under a new session id; one copy is kept).
+        /// nil when the store could not be asked: not judged.
+        public var missingRequests: Int?
+        /// Logged with no answer at all (failed, retried, interrupted). Claude
+        /// Code's, not a loss; for the local log.
+        public var unansweredRequests: Int
+        /// Inside the counters' window: main-model calls whose usage reaches no
+        /// transcript, each leaving one line.
+        public var compactions: Int
+        public var recaps: Int
+        /// Claude Desktop wrote the session (`entrypoint` `claude-desktop`).
+        public var desktop: Bool
+
+        public init(answeredRequests: Int = 0, missingRequests: Int? = 0,
+                    unansweredRequests: Int = 0, compactions: Int = 0, recaps: Int = 0,
+                    desktop: Bool = false) {
+            self.answeredRequests = answeredRequests
+            self.missingRequests = missingRequests
+            self.unansweredRequests = unansweredRequests
+            self.compactions = compactions
+            self.recaps = recaps
+            self.desktop = desktop
+        }
+
+        public static let none = TranscriptEvidence()
     }
 
     public struct Policy: Sendable, Equatable {
-        /// A ratio this far from 1 is a mismatch.
+        /// A ratio this far from 1 is a mismatch. Output above 1 is also
+        /// allowed what the transcripts' markers explain (below).
         public var tolerance: Double
-        /// Sessions smaller than this, in output on either side, are not
-        /// judged: one compaction or one stray turn moves a small session's
-        /// ratio by more than any tolerance worth having.
+        /// Output above Pacer's allowed per compaction in the window. Measured
+        /// 4.4–7.6k per compaction (five sessions with compactions and no
+        /// recaps), ~9.4k implied for one with recaps too. Not more: in a
+        /// session that compacts 25 times, every 10k of slack per compaction
+        /// is 250k of lost output the check would not see.
+        public var compactionOutputAllowance: Int64
+        /// Output allowed per recap in the window: 80–310 measured, the median
+        /// ~120, a few above 500 only where 2% of the session covered them.
+        public var recapOutputAllowance: Int64
+        /// Extra output tolerance for a session Claude Desktop wrote: it makes
+        /// main-model calls that leave no line (9.5% on one session whose 112
+        /// requests were all present). 10 points rather than the 7.5 that
+        /// session needed: one sample, and the request check still covers
+        /// lost requests there.
+        public var desktopTolerance: Double
+        /// Answered requests Pacer may lack before it is a mismatch. Zero: on
+        /// 329 real sessions none was missing.
+        public var maxMissingRequests: Int
+        /// Sessions smaller than this, in output on either side, are not judged
+        /// on tokens: one stray turn moves a small session's ratio by more than
+        /// any tolerance worth having. Requests are judged at any size, and so
+        /// is a session Pacer holds no output for.
         public var minimumOutputTokens: Int64
+        /// The most transcript bytes the canary reads for one session. Larger
+        /// sessions are skipped (`tooLarge`).
+        public var maxTranscriptBytes: Int64
+        /// The most transcript bytes one run reads; the rest wait for the next
+        /// run (`overBudget`). The first run after an upgrade finds a week of
+        /// unjudged sessions at once, where a day normally brings a few. 1 GB:
+        /// the reader went through 1,976 MB of real transcripts in 38.7 s (a
+        /// debug build), so about 20 s of one utility thread at most per day.
+        public var maxBytesPerRun: Int64
         /// How long Claude Code's save and every transcript of the session must
         /// have been still.
         public var quietPeriod: TimeInterval
@@ -99,11 +201,20 @@ public enum SessionTotalsCanary {
         /// transcript's timestamps, written by the same process.
         public var clockSlack: TimeInterval
 
-        public init(tolerance: Double = 0.02, minimumOutputTokens: Int64 = 20_000,
+        public init(tolerance: Double = 0.02, compactionOutputAllowance: Int64 = 10_000,
+                    recapOutputAllowance: Int64 = 500, desktopTolerance: Double = 0.10,
+                    maxMissingRequests: Int = 0, minimumOutputTokens: Int64 = 20_000,
+                    maxTranscriptBytes: Int64 = 2 << 30, maxBytesPerRun: Int64 = 1 << 30,
                     quietPeriod: TimeInterval = 15 * 60, lookback: TimeInterval = 7 * 86_400,
                     maxLeadIn: TimeInterval = 30 * 60, clockSlack: TimeInterval = 2 * 60) {
             self.tolerance = tolerance
+            self.compactionOutputAllowance = compactionOutputAllowance
+            self.recapOutputAllowance = recapOutputAllowance
+            self.desktopTolerance = desktopTolerance
+            self.maxMissingRequests = maxMissingRequests
             self.minimumOutputTokens = minimumOutputTokens
+            self.maxTranscriptBytes = maxTranscriptBytes
+            self.maxBytesPerRun = maxBytesPerRun
             self.quietPeriod = quietPeriod
             self.lookback = lookback
             self.maxLeadIn = maxLeadIn
@@ -117,7 +228,8 @@ public enum SessionTotalsCanary {
     public enum SkipReason: String, CaseIterable, Sendable, Comparable {
         /// Claude Code wrote no start time or duration.
         case noTiming = "no_timing"
-        /// Pacer has no rows for the session (often a session with no turns).
+        /// Pacer has no rows for the session and no transcript of it was found
+        /// (often a session with no turns).
         case noSession = "no_session"
         case tooOld = "too_old"
         /// The session's first turn predates the process that saved the
@@ -134,6 +246,10 @@ public enum SessionTotalsCanary {
         case noTranscript = "no_transcript"
         /// A transcript Pacer has not read to its end.
         case notIngested = "not_ingested"
+        /// More transcript than `maxTranscriptBytes` to read.
+        case tooLarge = "too_large"
+        /// This run had read `maxBytesPerRun` already: judged on a later run.
+        case overBudget = "over_budget"
         case tooSmall = "too_small"
 
         public static func < (a: SkipReason, b: SkipReason) -> Bool {
@@ -161,9 +277,9 @@ public enum SessionTotalsCanary {
         }
     }
 
-    /// Whether the session can be judged at all: finished, fully ingested,
-    /// and with counters that cover exactly it. nil means yes. The comparison
-    /// itself can still decline a session as too small (`compare`).
+    /// Whether the session can be judged on its tokens: finished, fully
+    /// ingested, and with counters that cover exactly it. nil means yes. The
+    /// comparison itself can still decline a session as too small (`compare`).
     ///
     /// **Finished and ingested**, the rule: Claude Code saved the counters at
     /// least `quietPeriod` ago and no transcript of the session has been
@@ -174,7 +290,8 @@ public enum SessionTotalsCanary {
     ///
     /// **Same span**: the counters cover the saving process's life, `startedAt`
     /// to `savedAt`. Pacer's turns for the session must sit inside it, and
-    /// begin within `maxLeadIn` of its start.
+    /// begin within `maxLeadIn` of its start. A session Pacer has no rows for
+    /// has nothing to misplace (`spanSkip`).
     public static func eligibility(
         claude: ClaudeSessionTotals,
         pacer: PacerTotals?,
@@ -188,7 +305,9 @@ public enum SessionTotalsCanary {
         return transcriptSkip(transcripts, now: now, policy: policy)
     }
 
-    /// The part of `eligibility` that needs no disk: timing and span.
+    /// The part of `eligibility` that needs no disk: timing and span. nil for
+    /// a session Pacer has no rows for, once the counters are old enough to
+    /// be final: it is judged as Pacer holding nothing.
     public static func spanSkip(
         claude: ClaudeSessionTotals,
         pacer: PacerTotals?,
@@ -196,23 +315,27 @@ public enum SessionTotalsCanary {
         policy: Policy = .standard
     ) -> SkipReason? {
         guard let start = claude.startedAt, let saved = claude.savedAt else { return .noTiming }
-        guard let pacer else { return .noSession }
         let oldest = now.addingTimeInterval(-policy.lookback)
-        if saved < oldest || pacer.firstSeenAt < oldest { return .tooOld }
-        if pacer.firstSeenAt < start.addingTimeInterval(-policy.clockSlack) {
-            return .beganBeforeProcess
-        }
-        if pacer.firstSeenAt.timeIntervalSince(start) > policy.maxLeadIn {
-            return .ranOtherWorkFirst
-        }
-        if pacer.lastSeenAt > saved.addingTimeInterval(policy.clockSlack) {
-            return .turnsAfterSave
+        if saved < oldest { return .tooOld }
+        if let pacer {
+            if pacer.firstSeenAt < oldest { return .tooOld }
+            if pacer.firstSeenAt < start.addingTimeInterval(-policy.clockSlack) {
+                return .beganBeforeProcess
+            }
+            if pacer.firstSeenAt.timeIntervalSince(start) > policy.maxLeadIn {
+                return .ranOtherWorkFirst
+            }
+            if pacer.lastSeenAt > saved.addingTimeInterval(policy.clockSlack) {
+                return .turnsAfterSave
+            }
         }
         if now.timeIntervalSince(saved) < policy.quietPeriod { return .notFinished }
         return nil
     }
 
-    /// The part of `eligibility` that the transcripts on disk decide.
+    /// The part of `eligibility` that the transcripts on disk decide. Both
+    /// checks need it: a transcript still being written or not yet read
+    /// proves nothing either way.
     public static func transcriptSkip(
         _ transcripts: TranscriptState,
         now: Date,
@@ -229,7 +352,8 @@ public enum SessionTotalsCanary {
 
     public struct Mismatch: Sendable, Equatable {
         public let kind: TokenKind
-        /// Claude Code's number over Pacer's, as judged.
+        /// Claude Code's number over Pacer's, as judged: for `requests`,
+        /// answered requests over the ones Pacer has.
         public let ratio: Double
         public var band: String { SessionTotalsCanary.ratioBand(ratio) }
 
@@ -240,48 +364,81 @@ public enum SessionTotalsCanary {
     }
 
     public struct Comparison: Sendable, Equatable {
-        /// Claude Code over Pacer per kind. Output is the like-for-like ratio
-        /// (every model but the small one); the rest are totals.
+        /// Claude Code over Pacer per kind judged. Output is the like-for-like
+        /// ratio (every model but the small one); requests are answered over
+        /// held; the rest are totals.
         public let ratios: [TokenKind: Double]
         public let mismatches: [Mismatch]
         public var matched: Bool { mismatches.isEmpty }
     }
 
-    /// Compare one eligible session. nil when it is too small to judge.
+    /// Output above Pacer's that the transcripts explain (the type's comment).
+    public static func outputAllowance(
+        pacerOutput: Int64, evidence: TranscriptEvidence, policy: Policy = .standard
+    ) -> Double {
+        let tolerance = policy.tolerance + (evidence.desktop ? policy.desktopTolerance : 0)
+        return tolerance * Double(pacerOutput)
+            + Double(policy.compactionOutputAllowance) * Double(evidence.compactions)
+            + Double(policy.recapOutputAllowance) * Double(evidence.recaps)
+    }
+
+    /// Compare one session. `judgeTokens` is false when the counters do not
+    /// cover exactly this session (`spanSkip`): the request check, which needs
+    /// only the transcripts and the store, still runs. nil when nothing could
+    /// be judged.
     public static func compare(
         claude: ClaudeSessionTotals,
         pacer: PacerTotals,
+        evidence: TranscriptEvidence = .none,
+        judgeTokens: Bool = true,
         policy: Policy = .standard
     ) -> Comparison? {
-        let likeForLike = claude.outputTokensExcludingSmallModel
-        guard max(likeForLike, pacer.outputTokens) >= policy.minimumOutputTokens else { return nil }
-
-        let outputAbove = ratio(likeForLike, pacer.outputTokens)
-        let outputBelow = ratio(claude.outputTokens, pacer.outputTokens)
-        let ratios: [TokenKind: Double] = [
-            .input: ratio(claude.inputTokens, pacer.inputTokens),
-            .output: outputAbove,
-            .cacheRead: ratio(claude.cacheReadTokens, pacer.cacheReadTokens),
-            .cacheWrite: ratio(claude.cacheCreationTokens, pacer.cacheWriteTokens),
-        ]
-
-        let low = 1 - policy.tolerance
-        let high = 1 + policy.tolerance
+        var ratios: [TokenKind: Double] = [:]
         var mismatches: [Mismatch] = []
-        for kind in TokenKind.allCases {
-            switch kind {
-            case .output:
-                if outputAbove > high {
-                    mismatches.append(Mismatch(kind: .output, ratio: outputAbove))
-                } else if outputBelow < low {
-                    mismatches.append(Mismatch(kind: .output, ratio: outputBelow))
-                }
-            case .input, .cacheRead, .cacheWrite:
+        let low = 1 - policy.tolerance
+
+        let requestsJudged = evidence.answeredRequests > 0 && evidence.missingRequests != nil
+        if requestsJudged, let missing = evidence.missingRequests {
+            let answered = evidence.answeredRequests
+            let held = max(0, answered - missing)
+            let r = ratio(Int64(answered), Int64(held))
+            ratios[.requests] = r
+            if missing > policy.maxMissingRequests {
+                mismatches.append(Mismatch(kind: .requests, ratio: r))
+            }
+        }
+
+        let likeForLike = claude.outputTokensExcludingSmallModel
+        let allowance = outputAllowance(pacerOutput: pacer.outputTokens, evidence: evidence,
+                                        policy: policy)
+        // Main-model output and no turn of Pacer's: a loss at any size, unless
+        // the session's markers explain it (a resume whose rows stayed under
+        // the old session id, then a compaction).
+        let nothingHeld = pacer.outputTokens == 0 && Double(likeForLike) > allowance
+        let tokensJudged = judgeTokens
+            && (nothingHeld || max(likeForLike, pacer.outputTokens) >= policy.minimumOutputTokens)
+        if tokensJudged {
+            let outputAbove = ratio(likeForLike, pacer.outputTokens)
+            let outputBelow = ratio(claude.outputTokens, pacer.outputTokens)
+            ratios[.input] = ratio(claude.inputTokens, pacer.inputTokens)
+            ratios[.output] = outputAbove
+            ratios[.cacheRead] = ratio(claude.cacheReadTokens, pacer.cacheReadTokens)
+            ratios[.cacheWrite] = ratio(claude.cacheCreationTokens, pacer.cacheWriteTokens)
+
+            let excess = Double(likeForLike - pacer.outputTokens)
+            if excess > allowance {
+                mismatches.append(Mismatch(kind: .output, ratio: outputAbove))
+            } else if outputBelow < low {
+                mismatches.append(Mismatch(kind: .output, ratio: outputBelow))
+            }
+            for kind in [TokenKind.input, .cacheRead, .cacheWrite] {
                 if let r = ratios[kind], r < low {
                     mismatches.append(Mismatch(kind: kind, ratio: r))
                 }
             }
         }
+        guard requestsJudged || tokensJudged else { return nil }
+        mismatches.sort { $0.kind < $1.kind }
         return Comparison(ratios: ratios, mismatches: mismatches)
     }
 
@@ -302,7 +459,9 @@ public enum SessionTotalsCanary {
         case ..<0.98: return "0.9-0.98"
         case ...1.02: return "0.98-1.02"
         case ...1.1: return "1.02-1.1"
-        default: return ">1.1"
+        case ...1.25: return "1.1-1.25"
+        case ...2: return "1.25-2"
+        default: return ">2"
         }
     }
 }

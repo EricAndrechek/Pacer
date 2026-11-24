@@ -9,9 +9,10 @@ import SwiftData
 /// handful of sessions saved since the last run: one `SessionInfo` fetch by id
 /// (twice: once to drop what can't be judged before touching the disk, once
 /// for the final numbers), a `stat` per project folder per session to find the
-/// transcripts, and one `JSONLFileCursor` fetch by path. No `TokenSample` is
-/// read: the rollup has every number the comparison needs (`SessionTotalsCanary`
-/// says why the per-model split is not needed).
+/// transcripts, one `JSONLFileCursor` fetch by path, then one streamed pass
+/// over each judged session's transcripts (`TranscriptEvidenceReader`, at most
+/// `Policy.maxTranscriptBytes`) and a `TokenSample` count per 500 of its
+/// answered requests: counted by dedup key on its index, never fetched.
 ///
 /// **What it reports** (`publish`): a local log line per judged session and a
 /// summary; three health counters; on a mismatch, one `Telemetry.problem` per
@@ -26,6 +27,17 @@ public enum DataCanary {
         public let sessionId: String
         public let ccVersion: String?
         public let comparison: SessionTotalsCanary.Comparison
+        /// What the transcripts said: for the local log.
+        public let evidence: SessionTotalsCanary.TranscriptEvidence
+
+        public init(sessionId: String, ccVersion: String?,
+                    comparison: SessionTotalsCanary.Comparison,
+                    evidence: SessionTotalsCanary.TranscriptEvidence = .none) {
+            self.sessionId = sessionId
+            self.ccVersion = ccVersion
+            self.comparison = comparison
+            self.evidence = evidence
+        }
     }
 
     public struct Report: Sendable, Equatable {
@@ -37,6 +49,12 @@ public enum DataCanary {
         public var alreadyJudged = 0
         public var checked: [CheckedSession] = []
         public var skipped: [SkipReason: Int] = [:]
+        /// Sessions whose transcripts were read, or found too large to read,
+        /// with nothing to judge: recorded like judged ones, so they are not
+        /// read again every day.
+        public var unjudgeable: [String] = []
+        /// Transcript bytes read this run (`Policy.maxBytesPerRun`).
+        public var bytesRead: Int64 = 0
 
         public var mismatched: [CheckedSession] { checked.filter { !$0.comparison.matched } }
 
@@ -121,15 +139,18 @@ public enum DataCanary {
         guard !candidates.isEmpty else { return report }
 
         let context = ModelContext(container)
-        // Span rules need only the rollup; dropping those sessions here keeps
-        // the disk walk to the few that can be judged.
+        // Span rules need only the rollup. Most span skips rule out only the
+        // token comparison: the request check needs just the transcripts and
+        // the store. These three rule out both: the counters are not final
+        // yet, or the session is history.
         let first = sessionTotals(ids: candidates.map(\.sessionId), context: context)
         var survivors: [ClaudeSessionTotals] = []
         for claude in candidates {
-            if let skip = SessionTotalsCanary.spanSkip(
+            switch SessionTotalsCanary.spanSkip(
                 claude: claude, pacer: first[claude.sessionId], now: now, policy: policy) {
+            case let skip? where skip == .noTiming || skip == .tooOld || skip == .notFinished:
                 report.skipped[skip, default: 0] += 1
-            } else {
+            default:
                 survivors.append(claude)
             }
         }
@@ -143,26 +164,93 @@ public enum DataCanary {
         let final = sessionTotals(ids: survivors.map(\.sessionId), context: context)
 
         for claude in survivors.sorted(by: { $0.sessionId < $1.sessionId }) {
-            let state = transcriptState(files[claude.sessionId] ?? [], cursors: cursors,
-                                        cursorPath: cursorPath)
-            guard let pacer = final[claude.sessionId] else {
+            let sessionFiles = files[claude.sessionId] ?? []
+            let pacer = final[claude.sessionId]
+            if pacer == nil, sessionFiles.isEmpty {
                 report.skipped[.noSession, default: 0] += 1
                 continue
             }
-            if let skip = SessionTotalsCanary.eligibility(
-                claude: claude, pacer: pacer, transcripts: state, now: now, policy: policy) {
+            let state = transcriptState(sessionFiles, cursors: cursors, cursorPath: cursorPath)
+            if let skip = SessionTotalsCanary.transcriptSkip(state, now: now, policy: policy) {
                 report.skipped[skip, default: 0] += 1
                 continue
             }
+            // On the final rollup: rows can have arrived since the first read.
+            let tokenSkip = SessionTotalsCanary.spanSkip(
+                claude: claude, pacer: pacer, now: now, policy: policy)
+            let bytes = sessionFiles.reduce(Int64(0)) { $0 + $1.size }
+            guard bytes <= policy.maxTranscriptBytes else {
+                report.skipped[.tooLarge, default: 0] += 1
+                report.unjudgeable.append(claude.sessionId)
+                continue
+            }
+            // The first session is always read, so a run makes progress.
+            guard report.bytesRead == 0 || report.bytesRead + bytes <= policy.maxBytesPerRun else {
+                report.skipped[.overBudget, default: 0] += 1
+                continue
+            }
+            report.bytesRead += bytes
+            guard let evidence = gatherEvidence(
+                sessionId: claude.sessionId, files: sessionFiles, claude: claude,
+                policy: policy, context: context) else {
+                report.skipped[.notFinished, default: 0] += 1
+                continue
+            }
             guard let comparison = SessionTotalsCanary.compare(
-                claude: claude, pacer: pacer, policy: policy) else {
-                report.skipped[.tooSmall, default: 0] += 1
+                claude: claude, pacer: pacer ?? .nothing(during: claude), evidence: evidence,
+                judgeTokens: tokenSkip == nil, policy: policy) else {
+                report.skipped[tokenSkip ?? .tooSmall, default: 0] += 1
+                report.unjudgeable.append(claude.sessionId)
                 continue
             }
             report.checked.append(CheckedSession(
-                sessionId: claude.sessionId, ccVersion: pacer.ccVersion, comparison: comparison))
+                sessionId: claude.sessionId, ccVersion: pacer?.ccVersion,
+                comparison: comparison, evidence: evidence))
         }
         return report
+    }
+
+    /// The transcripts' evidence for one session, with the request check's
+    /// answer from the store: how many answered requests have no row. nil when
+    /// a transcript changed while it was read: the session was resumed, and
+    /// is judged on a later run.
+    ///
+    /// Each file is read only up to the size its cursor was checked against.
+    /// A resumed session's new turns, past that size, may not be in the store
+    /// yet; reading them would report Pacer's lag as lost requests.
+    static func gatherEvidence(
+        sessionId: String, files: [TranscriptFile], claude: ClaudeSessionTotals,
+        policy: Policy, context: ModelContext
+    ) -> SessionTotalsCanary.TranscriptEvidence? {
+        // A negative duration in a hand-edited or corrupt config must not trap
+        // the range; markers are then counted over the whole session.
+        var window: ClosedRange<Date>?
+        if let start = claude.startedAt, let saved = claude.savedAt, saved >= start {
+            window = start.addingTimeInterval(-policy.clockSlack)...saved.addingTimeInterval(policy.clockSlack)
+        }
+        let scan = TranscriptEvidenceReader.read(
+            files.map { .init(url: URL(fileURLWithPath: $0.path), upTo: $0.size) },
+            sessionId: sessionId, window: window)
+        // Changed while read: the counters may be about to change too.
+        guard files.allSatisfy({ unchanged($0) }) else { return nil }
+        let keys = scan.answeredKeys
+        return SessionTotalsCanary.TranscriptEvidence(
+            answeredRequests: keys.count,
+            missingRequests: keys.isEmpty ? 0 : missingRequests(keys: keys, context: context),
+            unansweredRequests: scan.unanswered,
+            compactions: scan.compactions,
+            recaps: scan.recaps,
+            desktop: scan.desktop)
+    }
+
+    /// Whether `file` still has the size and modification time it was found
+    /// with.
+    static func unchanged(_ file: TranscriptFile) -> Bool {
+        guard let values = try? URL(fileURLWithPath: file.path).resourceValues(
+                forKeys: [.fileSizeKey, .contentModificationDateKey]),
+              let size = values.fileSize, let modified = values.contentModificationDate
+        else { return false }
+        return Int64(size) == file.size && modified == file.modified
     }
 
     // MARK: - Store reads
@@ -191,6 +279,25 @@ public enum DataCanary {
             }
         }
         return out
+    }
+
+    /// How many of `keys` (answered requests' dedup keys) have no row in the
+    /// store, under any session. Counted, not fetched: an index lookup per
+    /// batch, no rows materialised, so a session of 100k requests costs a few
+    /// hundred counts once a day. nil when the store could not be asked, which
+    /// leaves the request check unjudged rather than reporting every request
+    /// lost. A key the store holds twice can hide one missing in its batch;
+    /// the store repairs duplicates, so that is a transient blind spot.
+    static func missingRequests(keys: Set<String>, context: ModelContext) -> Int? {
+        var missing = 0
+        for chunk in chunked(Array(keys)) {
+            let wanted: [String?] = chunk
+            let descriptor = FetchDescriptor<TokenSample>(
+                predicate: #Predicate { wanted.contains($0.dedupKey) })
+            guard let found = try? context.fetchCount(descriptor) else { return nil }
+            missing += max(0, chunk.count - found)
+        }
+        return missing
     }
 
     /// Batches for an `IN (…)` predicate, well under SQLite's variable limit.

@@ -70,12 +70,12 @@ struct PacePacingModeTests {
         let path = "/tmp/pace-rotation-\(UUID().uuidString).json"
         defer { try? FileManager.default.removeItem(atPath: path) }
         let now = Date()
-        try "{\"v\": 1, \"updatedAt\": \"\(PaceFormat.utcStamp(now))\", \"active\": \"e34c1364\", \"holding\": false, \"targets\": [\"74598a77\", \"e34c1364\"]}\n"
+        try "{\"v\": 1, \"updatedAt\": \"\(PaceFormat.utcStamp(now))\", \"active\": \"a1b2c3d4\", \"holding\": false, \"targets\": [\"e5f6a7b8\", \"a1b2c3d4\"]}\n"
             .write(toFile: path, atomically: true, encoding: .utf8)
         let rotation = try #require(PaceRotation.read(path: path, now: now))
-        #expect(rotation.targets == ["74598a77"])
+        #expect(rotation.targets == ["e5f6a7b8"])
         // A session on the account just switched to, with no other target: no switch is coming.
-        #expect(!rotation.expectsSwitch(off: ["e34c1364-full-org-id", "74598a77"]))
+        #expect(!rotation.expectsSwitch(off: ["a1b2c3d4-full-org-id", "e5f6a7b8"]))
     }
 
     // MARK: - Which mode

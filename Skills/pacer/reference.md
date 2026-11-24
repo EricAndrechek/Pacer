@@ -58,12 +58,12 @@ its windows, and (with more than one login) `room`, `near its limit` or
 $ pacer accounts
 2 accounts
 
-  427af130   max · active login
+  a1b2c3d4   max · active login
     0 sessions drawing on it now
     5h 0%  7d 39%  Fable 57%
     room
 
-  74598a77   max
+  e5f6a7b8   max
     4 sessions drawing on it now
     5h 55%  7d 89%  Fable 100%
     room · rotation target
@@ -71,9 +71,9 @@ $ pacer accounts
 
 ```
 $ pacer sessions
-active  74598a77  grafana (main)          claude-opus-5     /Users/…/grafana
-active  74598a77  Pacer (feat/pacing)     claude-opus-5     /Users/…/Pacer  ← git@github.com:…
-recent  74598a77  core (main)             claude-fable-5-1  /Users/…/chtypes/core
+active  e5f6a7b8  acme-api (main)         claude-opus-5     /Users/…/acme-api
+active  e5f6a7b8  globex-web (feat/login) claude-opus-5     /Users/…/globex-web  ← git@github.com:…
+recent  e5f6a7b8  core (main)             claude-fable-5-1  /Users/…/acme/core
 ```
 
 - **The plan** reads `Max 20×` when Anthropic reports a tier and falls back to
@@ -298,8 +298,8 @@ heartbeat every loop to `~/.claude/pace/rotation.json` (`PACE_ROTATION`
 overrides the path):
 
 ```json
-{"v": 1, "updatedAt": "2026-11-17T15:06:33Z", "active": "e34c1364",
- "holding": false, "targets": ["74598a77"]}
+{"v": 1, "updatedAt": "2026-11-17T15:06:33Z", "active": "a1b2c3d4",
+ "holding": false, "targets": ["e5f6a7b8"]}
 ```
 
 `targets` are the accounts it would switch to now, by its own bar (an id, or
