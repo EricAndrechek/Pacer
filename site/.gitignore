@@ -1,0 +1,9 @@
+node_modules
+dist
+.astro/
+.wrangler
+.dev.vars*
+.env
+.env.*
+!.env.example
+worker/worker-configuration.d.ts

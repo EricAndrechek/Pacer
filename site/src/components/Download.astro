@@ -1,0 +1,154 @@
+---
+import { BREW_COMMAND, DOWNLOAD_PATH, REQUIREMENTS, VERSION } from '../lib/site';
+
+interface Props {
+  /** Show the version and requirements line under the buttons. */
+  details?: boolean;
+  /** Where on the site this block is, for the download_clicked event. */
+  placement: string;
+}
+const { details = true, placement } = Astro.props;
+---
+
+<div class="download">
+  <div class="row">
+    <a class="button" href={DOWNLOAD_PATH} data-track="download" data-placement={placement}>
+      <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true">
+        <path d="M10 3v10m0 0-4-4m4 4 4-4M4 16h12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
+      </svg>
+      Download for Mac
+    </a>
+    <div class="brew">
+      <code>{BREW_COMMAND}</code>
+      <button
+        type="button"
+        class="copy"
+        data-copy={BREW_COMMAND}
+        data-placement={placement}
+        aria-label="Copy the Homebrew command"
+      >
+        <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true">
+          <rect x="7" y="7" width="9" height="9" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"></rect>
+          <path d="M13 4.5V4a1.5 1.5 0 0 0-1.5-1.5h-7A1.5 1.5 0 0 0 3 4v7a1.5 1.5 0 0 0 1.5 1.5H5" fill="none" stroke="currentColor" stroke-width="1.6"></path>
+        </svg>
+        <span class="done" aria-hidden="true">Copied</span>
+      </button>
+    </div>
+  </div>
+  {
+    details && (
+      <p class="meta muted small">
+        Version {VERSION}. {REQUIREMENTS}. Signed, notarized, and it updates itself.
+      </p>
+    )
+  }
+</div>
+
+<script>
+  import { track } from '../scripts/analytics';
+
+  for (const button of document.querySelectorAll<HTMLButtonElement>('button[data-copy]')) {
+    button.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(button.dataset.copy ?? '');
+        track('download_clicked', { source: 'brew_copy', placement: button.dataset.placement ?? 'unknown' });
+        button.classList.add('copied');
+        button.setAttribute('aria-label', 'Copied');
+        setTimeout(() => {
+          button.classList.remove('copied');
+          button.setAttribute('aria-label', 'Copy the Homebrew command');
+        }, 1600);
+      } catch {
+        /* clipboard blocked: the command is on screen to select */
+      }
+    });
+  }
+</script>
+
+<style>
+  .row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.75rem;
+  }
+  .brew {
+    display: inline-flex;
+    align-items: center;
+    min-height: 48px;
+    max-width: 100%;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--surface);
+    padding-left: 1.05rem;
+  }
+  .brew code {
+    background: none;
+    border: 0;
+    padding: 0;
+    font-size: 0.86rem;
+    color: var(--ink);
+    white-space: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .copy {
+    position: relative;
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 44px;
+    height: 44px;
+    margin: 1px 2px 1px 0.35rem;
+    border: 0;
+    border-radius: 999px;
+    background: transparent;
+    color: var(--ink-2);
+    cursor: pointer;
+  }
+  .copy:hover {
+    background: var(--sunken);
+    color: var(--ink);
+  }
+  .done {
+    position: absolute;
+    bottom: calc(100% + 6px);
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 0.15em 0.55em;
+    border-radius: 6px;
+    background: var(--ink);
+    color: var(--paper);
+    font-size: 0.78rem;
+    font-weight: 600;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.15s;
+  }
+  .copy.copied .done {
+    opacity: 1;
+  }
+  .meta {
+    margin: 0.9rem 0 0;
+  }
+  .brew {
+    min-width: 0;
+  }
+  @media (max-width: 480px) {
+    .row > .button {
+      width: 100%;
+      justify-content: center;
+    }
+    /* The command doesn't fit a phone's width on one line: let it break at its spaces. */
+    .brew {
+      width: 100%;
+      border-radius: 16px;
+      padding-block: 0.35rem;
+    }
+    .brew code {
+      white-space: normal;
+      flex: 1;
+      line-height: 1.45;
+    }
+  }
+</style>

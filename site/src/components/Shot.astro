@@ -1,0 +1,53 @@
+---
+// A screenshot from docs/screenshots, resized to WebP at build time. With a
+// `dark` image it follows the reader's light/dark setting, as the README does.
+import type { ImageMetadata } from 'astro';
+import { getImage } from 'astro:assets';
+
+interface Props {
+  light: ImageMetadata;
+  dark?: ImageMetadata;
+  alt: string;
+  /** CSS width the image is shown at, for the browser to pick a size. */
+  sizes: string;
+  widths?: number[];
+  /** The hero image: load it first. */
+  priority?: boolean;
+  class?: string;
+}
+
+const {
+  light,
+  dark,
+  alt,
+  sizes,
+  widths = [480, 800, 1200, 1700, 2200],
+  priority = false,
+  class: className,
+} = Astro.props;
+
+async function variant(src: ImageMetadata) {
+  const usable = widths.filter((w) => w <= src.width);
+  const ws = usable.length ? usable : [src.width];
+  const img = await getImage({ src, widths: ws, format: 'webp', quality: 80 });
+  return { srcset: img.srcSet.attribute, src: img.src };
+}
+
+const l = await variant(light);
+const d = dark ? await variant(dark) : null;
+---
+
+<picture class={className}>
+  {d && <source media="(prefers-color-scheme: dark)" type="image/webp" srcset={d.srcset} sizes={sizes} />}
+  <source type="image/webp" srcset={l.srcset} sizes={sizes} />
+  <img
+    src={l.src}
+    width={light.width}
+    height={light.height}
+    alt={alt}
+    sizes={sizes}
+    loading={priority ? 'eager' : 'lazy'}
+    decoding="async"
+    fetchpriority={priority ? 'high' : undefined}
+  />
+</picture>

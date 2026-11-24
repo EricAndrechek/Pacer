@@ -210,6 +210,9 @@ client run belongs on a disposable machine.
 
 1. **Take its item out of the appcast** (a commit on `gh-pages` that deletes
    the `<item>`), so Sparkle stops offering it. The GitHub release can stay.
+   The site's download button (`pacer.andrechek.com/download/`) follows the
+   appcast too, within a minute (its edge cache), even though GitHub still
+   lists the pulled release as latest (`site/worker/lib.ts`).
 2. **Check the Homebrew cask: it does not follow the appcast.** The tap pins
    releases itself and only ever moves forward, so it keeps installing the
    pulled version (`gh api repos/EricAndrechek/homebrew-tap/contents/Casks/pacer.rb

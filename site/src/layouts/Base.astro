@@ -1,0 +1,135 @@
+---
+import '../styles/global.css';
+import archivo from '@fontsource-variable/archivo/files/archivo-latin-wdth-normal.woff2?url';
+import PostHog from '../components/PostHog.astro';
+import SiteHeader from '../components/SiteHeader.astro';
+import SiteFooter from '../components/SiteFooter.astro';
+import {
+  DEFAULT_DESCRIPTION,
+  DEFAULT_TITLE,
+  DOWNLOAD_PATH,
+  FEATURES,
+  LATEST_RELEASE,
+  OG_IMAGE,
+  REPO,
+  SITE_NAME,
+  VERSION,
+} from '../lib/site';
+
+interface Props {
+  title?: string;
+  description?: string;
+  /** Extra JSON-LD nodes for this page's `@graph` (FAQPage, ...). */
+  jsonLd?: Record<string, unknown>[];
+  /** Emit the SoftwareApplication node (home page). */
+  app?: boolean;
+  noindex?: boolean;
+}
+
+const {
+  title = DEFAULT_TITLE,
+  description = DEFAULT_DESCRIPTION,
+  jsonLd: pageJsonLd = [],
+  app = false,
+  noindex = false,
+} = Astro.props;
+
+// Every absolute URL derives from `site` (astro.config.mjs: SITE_URL).
+const site = Astro.site ?? new URL(Astro.url.origin);
+const abs = (path: string) => new URL(path.replace(/^\/+/, ''), site).toString();
+const canonical = new URL(Astro.url.pathname, site).toString();
+const home = abs('/');
+const ogImage = abs(OG_IMAGE.path);
+
+const website = {
+  '@type': 'WebSite',
+  '@id': `${home}#website`,
+  name: SITE_NAME,
+  url: home,
+  inLanguage: 'en',
+};
+const software = {
+  '@type': 'SoftwareApplication',
+  '@id': `${home}#app`,
+  name: SITE_NAME,
+  url: home,
+  description: DEFAULT_DESCRIPTION,
+  applicationCategory: 'DeveloperApplication',
+  operatingSystem: 'macOS 15 or later',
+  softwareVersion: VERSION,
+  downloadUrl: abs(DOWNLOAD_PATH),
+  installUrl: LATEST_RELEASE,
+  releaseNotes: abs('/changelog/'),
+  license: 'https://opensource.org/licenses/MIT',
+  isAccessibleForFree: true,
+  offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
+  featureList: FEATURES,
+  image: ogImage,
+  screenshot: ogImage,
+  codeRepository: REPO,
+  sameAs: [REPO],
+  isPartOf: { '@id': `${home}#website` },
+};
+const graph = noindex ? [] : [website, ...(app ? [software] : []), ...pageJsonLd];
+const jsonLd = { '@context': 'https://schema.org', '@graph': graph };
+
+const fontFace = `@font-face{font-family:'Archivo';font-style:normal;font-display:swap;font-weight:100 900;font-stretch:62% 125%;src:url(${archivo}) format('woff2-variations'),url(${archivo}) format('woff2');unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2190-2193,U+2212,U+2215,U+FEFF,U+FFFD}`;
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <link rel="canonical" href={canonical} />
+    {noindex && <meta name="robots" content="noindex" />}
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#f6f7fb" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#0f1028" media="(prefers-color-scheme: dark)" />
+
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="preload" href={archivo} as="font" type="font/woff2" crossorigin />
+    <style is:inline set:html={fontFace} />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content={SITE_NAME} />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={canonical} />
+    <meta property="og:image" content={ogImage} />
+    <meta property="og:image:width" content={String(OG_IMAGE.width)} />
+    <meta property="og:image:height" content={String(OG_IMAGE.height)} />
+    <meta property="og:image:alt" content={OG_IMAGE.alt} />
+    <meta property="og:locale" content="en_US" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={title} />
+    <meta name="twitter:description" content={description} />
+    <meta name="twitter:image" content={ogImage} />
+    <meta name="twitter:image:alt" content={OG_IMAGE.alt} />
+
+    <link rel="sitemap" href="/sitemap-index.xml" />
+    <link rel="alternate" type="text/plain" href="/llms.txt" title="llms.txt" />
+    {
+      graph.length > 0 && (
+        <script type="application/ld+json" set:html={JSON.stringify(jsonLd).replace(/</g, '\\u003c')} />
+      )
+    }
+    <PostHog />
+    <slot name="head" />
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+    <SiteHeader />
+    <main id="main">
+      <slot />
+    </main>
+    <SiteFooter />
+    <script>
+      import '../scripts/analytics';
+    </script>
+  </body>
+</html>

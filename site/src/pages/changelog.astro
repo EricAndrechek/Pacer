@@ -1,0 +1,145 @@
+---
+import Base from '../layouts/Base.astro';
+import { releases } from '../lib/releases';
+import { RELEASES } from '../lib/site';
+
+const all = releases();
+const fmt = (d: string) =>
+  new Date(`${d}T12:00:00Z`).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC' });
+---
+
+<Base
+  title="Changelog | Pacer"
+  description={`What changed in every Pacer release, from ${all.at(-1)?.version} to ${all[0]?.version}, in the words of each release's notes.`}
+>
+  <header class="wrap page-head">
+    <h1>Changelog</h1>
+    <p class="lede">
+      Every release's notes, newest first. Downloads and older builds are on <a href={RELEASES}>GitHub</a>.
+    </p>
+  </header>
+
+  <div class="wrap log">
+    <nav class="index" aria-label="Releases">
+      <ol>
+        {all.map((r) => <li><a href={`#v${r.version}`}>{r.version}</a></li>)}
+      </ol>
+    </nav>
+    <div class="entries">
+      {
+        all.map((r, i) => (
+          <article id={`v${r.version}`} aria-labelledby={`v${r.version}-title`}>
+            <header>
+              <h2 id={`v${r.version}-title`}>
+                {r.version}
+                {i === 0 && <span class="latest">Latest</span>}
+              </h2>
+              {r.date && <time datetime={r.date}>{fmt(r.date)}</time>}
+            </header>
+            <div class="notes" set:html={r.html} />
+          </article>
+        ))
+      }
+    </div>
+  </div>
+</Base>
+
+<style>
+  .log {
+    display: grid;
+    grid-template-columns: 9rem minmax(0, 1fr);
+    gap: 3rem;
+    align-items: start;
+  }
+  .index {
+    position: sticky;
+    top: 1.5rem;
+    max-height: calc(100vh - 3rem);
+    overflow-y: auto;
+  }
+  .index ol {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    border-left: 2px solid var(--line);
+    font-variant-numeric: tabular-nums;
+  }
+  .index li + li {
+    margin-top: 0;
+  }
+  .index a {
+    display: block;
+    padding: 0.2rem 0 0.2rem 1rem;
+    color: var(--ink-2);
+    text-decoration: none;
+    font-size: 0.95rem;
+  }
+  .index a:hover {
+    color: var(--ink);
+  }
+  article {
+    padding-bottom: 2.5rem;
+    margin-bottom: 2.5rem;
+    border-bottom: 1px solid var(--line);
+    scroll-margin-top: 1rem;
+    max-width: var(--measure);
+  }
+  article > header {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 0.4rem 1rem;
+    margin-bottom: 0.6rem;
+  }
+  article h2 {
+    margin: 0;
+    font-stretch: 85%;
+    font-weight: 800;
+    font-variant-numeric: tabular-nums;
+    display: flex;
+    align-items: center;
+    gap: 0.7rem;
+  }
+  .latest {
+    font-size: 0.8rem;
+    font-weight: 650;
+    font-stretch: 100%;
+    letter-spacing: 0;
+    padding: 0.2em 0.65em;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--pace) 14%, transparent);
+    color: var(--link);
+  }
+  time {
+    color: var(--ink-3);
+    font-size: 0.95rem;
+  }
+  .notes :global(h3) {
+    font-size: 1.08rem;
+    margin-top: 1.5em;
+  }
+  .notes :global(h4) {
+    font-size: 1rem;
+    margin-top: 1.2em;
+  }
+  .notes :global(p),
+  .notes :global(li) {
+    color: var(--ink-2);
+  }
+  .notes :global(p:first-child) {
+    color: var(--ink);
+    font-size: 1.08rem;
+  }
+  .notes :global(strong) {
+    color: var(--ink);
+  }
+  @media (max-width: 860px) {
+    .log {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 0;
+    }
+    .index {
+      display: none;
+    }
+  }
+</style>

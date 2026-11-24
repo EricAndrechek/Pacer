@@ -1,0 +1,342 @@
+/*
+ * Pacer's site. Colours come from the app icon (indigo, royal blue, cyan) and
+ * from the app's own usage bands (green, yellow, orange, red), which appear
+ * only where they mean what they mean in the app: how full a window is.
+ * One family, Archivo, used across its width axis: semi-expanded for
+ * headings, normal for text, condensed for the numbers on a gauge.
+ */
+
+:root {
+  color-scheme: light dark;
+
+  --paper: #f6f7fb;
+  --surface: #ffffff;
+  --sunken: #eceffa;
+  --ink: #16133a;
+  --ink-2: #4a4f6a;
+  --ink-3: #6b7090;
+  --line: #dce0ec;
+  --link: #3457d7;
+  --button: #3457d7;
+  --button-hover: #2a48c0;
+  --on-button: #ffffff;
+  --focus: #22c8f0;
+
+  /* Chart: the even-pace line is the icon's blue; usage takes its band colour. */
+  --pace: #3457d7;
+  --band-green: #22a356;
+  --band-green-text: #157a43;
+  --band-yellow: #f2b90f;
+  --band-yellow-text: #7a5600;
+  --band-orange: #f07a1a;
+  --band-red: #e84a3a;
+  --grid: #e3e6f1;
+
+  --code-bg: #16133a;
+  --code-ink: #e7e9f7;
+  --code-dim: #9da3c7;
+
+  --radius-lg: 22px;
+  --radius: 12px;
+  --radius-sm: 8px;
+  --gutter: clamp(16px, 4vw, 40px);
+  --measure: 66ch;
+  --wide: 1180px;
+
+  --font: 'Archivo', ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Arial, sans-serif;
+  --mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #0f1028;
+    --surface: #171936;
+    --sunken: #13152f;
+    --ink: #eceefa;
+    --ink-2: #a8adc9;
+    --ink-3: #8f94b6;
+    --line: #2a2d52;
+    --link: #8ea4ff;
+    --button: #4561e0;
+    --button-hover: #5672ec;
+    --on-button: #ffffff;
+
+    --pace: #6e8bff;
+    --band-green: #3bd66e;
+    --band-green-text: #5fe08a;
+    --band-yellow: #ffc93a;
+    --band-yellow-text: #ffd76a;
+    --band-orange: #ff8c2e;
+    --band-red: #ff5a4a;
+    --grid: #262a4d;
+
+    --code-bg: #0a0b1e;
+    --code-ink: #e7e9f7;
+    --code-dim: #8f94b6;
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font);
+  font-size: 1.0625rem;
+  font-weight: 400;
+  font-stretch: 100%;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: 'kern';
+  text-rendering: optimizeLegibility;
+}
+
+img,
+svg,
+picture {
+  display: block;
+  max-width: 100%;
+}
+img {
+  height: auto;
+}
+
+a {
+  color: var(--link);
+  text-underline-offset: 0.18em;
+  text-decoration-thickness: 1px;
+}
+a:hover {
+  text-decoration-thickness: 2px;
+}
+
+:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  font-stretch: 112%;
+  line-height: 1.12;
+  letter-spacing: -0.015em;
+  margin: 0 0 0.5em;
+  text-wrap: balance;
+}
+h1 {
+  font-size: clamp(2.2rem, 1.2rem + 3.6vw, 4rem);
+  font-weight: 800;
+  line-height: 1.02;
+  letter-spacing: -0.03em;
+}
+h2 {
+  font-size: clamp(1.55rem, 1.1rem + 1.4vw, 2.2rem);
+  font-weight: 750;
+}
+h3 {
+  font-size: 1.2rem;
+  font-weight: 700;
+  letter-spacing: -0.005em;
+}
+h4 {
+  font-size: 1.05rem;
+  font-weight: 700;
+}
+
+p {
+  margin: 0 0 1em;
+  text-wrap: pretty;
+}
+
+code,
+kbd,
+pre {
+  font-family: var(--mono);
+  font-size: 0.9em;
+}
+:not(pre) > code {
+  background: var(--sunken);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.08em 0.36em;
+  overflow-wrap: anywhere;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+
+pre {
+  margin: 0 0 1.25em;
+  padding: 1.1em 1.25em;
+  background: var(--code-bg);
+  color: var(--code-ink);
+  border-radius: var(--radius);
+  overflow-x: auto;
+  line-height: 1.55;
+  font-size: 0.86rem;
+}
+pre .dim {
+  color: var(--code-dim);
+}
+
+hr {
+  border: 0;
+  border-top: 1px solid var(--line);
+  margin: 2.5rem 0;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.97rem;
+}
+th,
+td {
+  text-align: left;
+  vertical-align: top;
+  padding: 0.7em 0.9em 0.7em 0;
+  border-bottom: 1px solid var(--line);
+}
+th {
+  font-weight: 700;
+  font-stretch: 106%;
+}
+
+ul,
+ol {
+  padding-left: 1.25em;
+  margin: 0 0 1em;
+}
+li + li {
+  margin-top: 0.35em;
+}
+
+.wrap {
+  width: 100%;
+  max-width: var(--wide);
+  margin-inline: auto;
+  padding-inline: var(--gutter);
+}
+
+.prose {
+  max-width: var(--measure);
+}
+/* A prose column inside the page's wrap keeps the wrap's left edge, so it lines
+   up with the page head; only its children are held to a reading width. */
+.wrap.prose {
+  max-width: var(--wide);
+}
+.wrap.prose > :not(section),
+.wrap.prose > section > * {
+  max-width: var(--measure);
+}
+/* Terminal output whose columns must line up: as wide as the page allows, then it scrolls. */
+.wrap.prose pre.wide {
+  max-width: min(calc(100vw - 2 * var(--gutter)), calc(var(--wide) - 2 * var(--gutter)));
+  width: max-content;
+  white-space: pre;
+}
+.prose h2 {
+  margin-top: 2.2em;
+}
+.prose h3 {
+  margin-top: 1.8em;
+}
+
+.lede {
+  font-size: clamp(1.1rem, 1rem + 0.45vw, 1.3rem);
+  color: var(--ink-2);
+  line-height: 1.5;
+  max-width: 44ch;
+}
+
+.muted {
+  color: var(--ink-2);
+}
+.small {
+  font-size: 0.92rem;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.skip {
+  position: absolute;
+  left: 12px;
+  top: -60px;
+  z-index: 50;
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--ink);
+  font-weight: 600;
+}
+.skip:focus {
+  top: 12px;
+}
+
+.page-head {
+  padding-block: clamp(2.5rem, 6vw, 4.5rem) clamp(1.5rem, 3vw, 2.5rem);
+}
+.page-head .lede {
+  max-width: 56ch;
+}
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55em;
+  min-height: 48px;
+  padding: 0.7em 1.25em;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  background: var(--button);
+  color: var(--on-button);
+  font-weight: 650;
+  font-stretch: 106%;
+  font-size: 1.02rem;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.button:hover {
+  background: var(--button-hover);
+}
+.button.secondary {
+  background: transparent;
+  color: var(--ink);
+  border-color: var(--line);
+}
+.button.secondary:hover {
+  background: var(--sunken);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

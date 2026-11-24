@@ -1,0 +1,303 @@
+---
+import Base from '../layouts/Base.astro';
+import Download from '../components/Download.astro';
+import Shot from '../components/Shot.astro';
+import models from '@screenshots/models.png';
+import projects from '@screenshots/projects-collections.png';
+import share from '@screenshots/share-card.png';
+import shareDark from '@screenshots/share-card-dark.png';
+
+// Sourced from README.md "What you get" and docs/release-notes; nothing here
+// the app doesn't do today.
+const sections = [
+  {
+    id: 'limits',
+    title: 'Rate limits',
+    items: [
+      {
+        h: 'Every window, paced',
+        p: "Your 5-hour and weekly windows, and any per-model caps Anthropic reports for your account (a weekly Fable limit, say), each drawn against an even pace to the limit. Color bands say whether you're behind, on track, ahead or nearly maxed.",
+      },
+      {
+        h: 'A forecast for each one',
+        p: 'Where each window will be at its reset and, if it will fill first, when. Pacer scores its forecast methods on your own history and uses the one with the best record. The range behind a forecast is one click in.',
+      },
+      {
+        h: 'Read from Anthropic',
+        p: 'Percentages come from Anthropic, using your Claude Code login, every few minutes. Between readings Pacer estimates from what you have spent since: an estimate has a decimal (42.6%), a reading does not (42%).',
+      },
+      {
+        h: 'Ultra plans',
+        p: 'Ultra has no 5-hour limit, so Pacer shows the weekly and per-model windows only.',
+      },
+    ],
+  },
+  {
+    id: 'cost',
+    title: 'Cost',
+    items: [
+      {
+        h: 'Two ways to count',
+        p: 'See spend the way Claude Code reports it, or have Pacer price it from tokens. Switch in Settings. Daily, monthly and all-time totals.',
+      },
+      {
+        h: 'Priced at the time',
+        p: 'Each request is priced at the rate in effect when you made it, so a price change never rewrites what you already spent. Long prompts are priced at their tier; 1-hour cache writes, fast mode and US-only routing are priced too.',
+      },
+      {
+        h: 'Cost by part',
+        p: 'Spend split into input, output, cache reads and cache writes, in the daily chart and every breakdown.',
+      },
+      {
+        h: 'Today, live',
+        p: 'Your current burn rate per hour, and where today will end at this pace.',
+      },
+    ],
+  },
+  {
+    id: 'breakdowns',
+    title: 'Where it goes',
+    items: [
+      {
+        h: 'Projects and collections',
+        p: 'Usage per project. Group projects into your own collections, which can overlap and nest without changing anything on disk, and scope totals to one.',
+      },
+      {
+        h: 'Models',
+        p: 'Share, trend and a full table per model, each Claude model in its own color. Group by model or by class.',
+      },
+      {
+        h: 'Days and history',
+        p: 'Open any day for its breakdown. Lifetime totals, monthly spend and a six-month activity heatmap.',
+      },
+      {
+        h: 'Share and export',
+        p: 'Share a 5-hour or 7-day burn chart as an image. Export daily totals, daily totals by model, or per-project numbers to CSV.',
+      },
+    ],
+  },
+  {
+    id: 'accounts',
+    title: 'Accounts',
+    items: [
+      {
+        h: 'More than one Claude account',
+        p: 'Every token and dollar goes to the account that used it. A toolbar menu scopes the whole app (dashboard, history, projects, models, widgets, menu bar) to one account or all of them. Rate limits show the account you are signed into.',
+      },
+      {
+        h: 'Follows your switches',
+        p: 'Switch with claude-swap, /logout or a CLAUDE_CONFIG_DIR profile, and Pacer follows. With claude-swap it reads its usage cache rather than asking Anthropic the same question twice.',
+      },
+      {
+        h: 'Claude Desktop',
+        p: 'Agent-mode (Cowork) sessions from Claude Desktop count too, on the account Desktop is signed into.',
+      },
+    ],
+  },
+  {
+    id: 'glance',
+    title: 'At a glance',
+    items: [
+      {
+        h: 'Menu bar',
+        p: 'An activity-ring icon and percent chips. Choose which window drives the icon.',
+      },
+      {
+        h: 'Widgets',
+        p: 'Today, rate limits, the pace chart, the current session, daily cost and top projects, on the desktop or in Notification Center. Each picks the window it shows.',
+      },
+      {
+        h: 'Notifications, if you want them',
+        p: 'An alert when a window crosses 50, 75 or 90%, on any window, or when you pass a daily spending limit you set. Off by default.',
+      },
+      {
+        h: 'The window stays put',
+        p: 'The dashboard comes back on the display and Space you left it, across relaunches, updates and a monitor that was asleep at login.',
+      },
+    ],
+  },
+  {
+    id: 'agents',
+    title: 'For agents and scripts',
+    items: [
+      {
+        h: 'A Claude Code skill',
+        p: 'Install it from Settings, and Claude checks every window before it fans out, pauses with its work saved near a limit, and resumes when there is room.',
+        link: { href: '/cli/', text: 'How it works' },
+      },
+      {
+        h: 'The pacer command',
+        p: 'pacer report, gate, wait and more, for your terminal and your own scripts. It reads Pacer\'s data directly, so the local API can stay off.',
+        link: { href: '/cli/', text: 'Commands' },
+      },
+      {
+        h: 'Local API and metrics',
+        p: 'An optional HTTP API and Prometheus metrics endpoint for your own tools. Off by default, and on this Mac only unless you change it.',
+      },
+    ],
+  },
+  {
+    id: 'app',
+    title: 'The app',
+    items: [
+      {
+        h: 'Native',
+        p: 'SwiftUI, not a web view. On macOS 26 and newer it uses Liquid Glass; on macOS 15 it looks as it always has.',
+      },
+      {
+        h: 'Updates itself',
+        p: 'Signed and notarized. Updates install while you are not using Pacer and download only what changed.',
+      },
+      {
+        h: 'Comes back after a crash',
+        p: 'If Pacer crashes, it reopens itself in the background about 10 seconds later.',
+      },
+    ],
+  },
+];
+---
+
+<Base
+  title="Features | Pacer"
+  description="Everything Pacer does: rate-limit pacing with forecasts, cost priced at the time, breakdowns by project and model, multiple accounts, menu bar, widgets, and pacing for Claude Code agents."
+>
+  <header class="wrap page-head">
+    <h1>Features</h1>
+    <p class="lede">What Pacer shows you about your Claude Code usage, and where.</p>
+    <nav class="toc" aria-label="On this page">
+      {sections.map((s) => <a href={`#${s.id}`}>{s.title}</a>)}
+    </nav>
+  </header>
+
+  {
+    sections.map((s) => (
+      <section class="wrap group" id={s.id} aria-labelledby={`${s.id}-title`}>
+        <h2 id={`${s.id}-title`}>{s.title}</h2>
+        <div class="items">
+          {s.items.map((i) => (
+            <div class="item">
+              <h3>{i.h}</h3>
+              <p>{i.p}</p>
+              {'link' in i && i.link && (
+                <p>
+                  <a href={i.link.href}>{i.link.text}</a>
+                </p>
+              )}
+            </div>
+          ))}
+        </div>
+        {s.id === 'breakdowns' && (
+          <div class="shots">
+            <figure>
+              <Shot
+                light={projects}
+                sizes="(max-width: 900px) 92vw, 560px"
+                widths={[560, 900, 1120, 1600]}
+                alt="The Projects tab with collections: a filter bar of collections, a donut of top projects, and a table of every project."
+              />
+              <figcaption class="muted small">Projects, scoped to a collection.</figcaption>
+            </figure>
+            <figure>
+              <Shot
+                light={models}
+                sizes="(max-width: 900px) 92vw, 560px"
+                widths={[560, 900, 1120, 1600]}
+                alt="The Models tab: a token-share donut, a daily model-mix trend, and a per-model table."
+              />
+              <figcaption class="muted small">Models, each in its own color.</figcaption>
+            </figure>
+          </div>
+        )}
+        {s.id === 'glance' && (
+          <figure class="share">
+            <Shot
+              light={share}
+              dark={shareDark}
+              sizes="(max-width: 700px) 92vw, 600px"
+              widths={[600, 900, 1360]}
+              alt="A share card: a 7-day rate-limit burn chart against the even-pace line, exported as an image."
+            />
+            <figcaption class="muted small">A burn chart, shared as an image.</figcaption>
+          </figure>
+        )}
+      </section>
+    ))
+  }
+
+  <section class="wrap closing" aria-labelledby="get-title">
+    <h2 id="get-title">Get Pacer</h2>
+    <Download placement="features-end" />
+  </section>
+</Base>
+
+<style>
+  .toc {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem 0.5rem;
+    margin-top: 1.5rem;
+  }
+  .toc a {
+    padding: 0.4rem 0.85rem;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    color: var(--ink);
+    text-decoration: none;
+    font-size: 0.93rem;
+    background: var(--surface);
+  }
+  .toc a:hover {
+    border-color: var(--pace);
+  }
+  .group {
+    padding-top: clamp(2.5rem, 6vw, 4rem);
+    scroll-margin-top: 1rem;
+  }
+  .group h2 {
+    padding-bottom: 0.6rem;
+    border-bottom: 3px solid var(--pace);
+    display: inline-block;
+  }
+  .items {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1.75rem 3.5rem;
+    margin-top: 1.25rem;
+  }
+  .item {
+    max-width: 52ch;
+  }
+  .item h3 {
+    margin-bottom: 0.35em;
+  }
+  .item p {
+    color: var(--ink-2);
+    margin-bottom: 0.4em;
+  }
+  .shots {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 2rem;
+    margin-top: 2.5rem;
+  }
+  figure {
+    margin: 0;
+  }
+  figcaption {
+    margin-top: 0.4rem;
+    text-align: center;
+  }
+  .share {
+    max-width: 600px;
+    margin-top: 2.5rem;
+  }
+  .closing {
+    margin-top: clamp(4rem, 9vw, 6rem);
+  }
+  @media (max-width: 760px) {
+    .items,
+    .shots {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+</style>

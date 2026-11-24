@@ -201,6 +201,41 @@ Status: PLAN, not built. Branch `exp/sentry-telemetry`, rebased on main aa7fbf7a
 this tree, sentry-cocoa 9.30 source, Sentry docs, and live tests against the `ericandrechek/pacer`
 project.
 
+## The website (pacer.andrechek.com, `site/`)
+
+The site reports to the app's PostHog project (the owner's decision,
+2026-11-24), never to Sentry. Every event carries `surface: 'website'`, so web
+and app events never mix, and `environment` (`production` on
+pacer.andrechek.com, `preview` on workers.dev, else `development`). Nothing
+links a web visitor to an install: conversion is read in aggregate,
+`website_download` counts against new installs from `daily_checkin`.
+
+**Browser** (`site/src/components/PostHog.astro`, `site/src/scripts/analytics.ts`):
+`persistence: 'memory'` (no cookie, nothing in localStorage, a new random id
+per page load), `person_profiles: 'identified_only'` with nothing ever
+identified; autocapture, replay, heatmaps, dead clicks, web vitals, surveys,
+feature flags and exception capture off; `respect_dnt`, and not loaded under
+Global Privacy Control, automation or on localhost. PostHog receives the
+visitor's IP with each request and the project keeps it (anonymize_ips is off
+for the app); posthog-js cannot drop it.
+
+| Event | When | Properties |
+| --- | --- | --- |
+| `$pageview` | every page load | PostHog's standard page properties |
+| `download_clicked` | a Download link, or the Homebrew command copied | `source`: `button` \| `brew_copy`; `placement`: `hero`, `home-end`, `features-end`, `header`, `menu` |
+| `docs_link_clicked` | a link to the repo's docs | `href` (one of the site's own links) |
+
+**Worker** (`site/worker/lib.ts`), sent server-side from `/download/` in
+`ctx.waitUntil`, so it never delays the redirect:
+
+| Event | When | Properties |
+| --- | --- | --- |
+| `website_download` | a GET of `/download/`, not from a crawler, not with DNT or GPC | `country` (Cloudflare's), `version` (the DMG redirected to), `environment`, `distinct_id` a random UUID per download, `$process_person_profile: false`, `$ip: null`, `$geoip_disable: true` |
+
+The visitor's IP never reaches PostHog from the Worker: the request is the
+Worker's own. The site's Privacy page says all of this in plain words; change
+both together.
+
 ## Memory and slow refits (#389)
 `memory.footprint_mb` gains `pressure`, `thermal`, `low_power`, `load_per_core` (lt1, 1_2, 2_4, 4_8, gt8), `compressor_gb`, `swap_gb`, `ram_gb`, `peak_mb`, `file_mb` (power-of-two bands).
 `memory.pressure_change`: count, at most once per level per 15 min; the first six attributes above with `ram_gb`, plus `from`, `footprint_mb`, `file_mb`.

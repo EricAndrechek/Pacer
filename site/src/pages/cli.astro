@@ -1,0 +1,235 @@
+---
+import Base from '../layouts/Base.astro';
+
+// Sourced from Skills/pacer (SKILL.md, reference.md, pacing.md, pace-guard.sh)
+// and the command's own help (PacerCore/Sources/PacerPace/Pace.swift).
+const commands = [
+  ['report', 'Every window for the account this session is signed into, then a line about your other logins.'],
+  ['accounts', 'Every login: its plan, the sessions drawing on it, its windows, and whether it has room.'],
+  ['sessions', 'Where the live Claude Code sessions are, with their branches.'],
+  ['json', 'The same as report, for scripts.'],
+  ['gate', 'Read Pacer once and write a verdict for this run: go (exit 0) or pause (exit 10).'],
+  ['status', 'Read that verdict: a file read, cheap enough for every subagent. A stale one is re-gated, by one reader for all.'],
+  ['wait', 'Block until there is room again, then exit 0. Exit 20 when the reset is further out than a wait sleeps through (6 hours).'],
+  ['safecap', 'The limit gate applies to each window, one per line, for scripts.'],
+  ['mode', 'Show the pacing mode and where it came from, or set it for this session.'],
+  ['feedback "…"', 'Report a wrong verdict or a missing flag to Pacer’s issue tracker, scrubbed of paths and names. --local keeps it on your Mac.'],
+];
+
+const exits = [
+  ['0', 'Go (gate, status) or resume (wait).'],
+  ['10', 'Pause. Dispatch nothing new; checkpoint.'],
+  ['20', 'wait: the reset is beyond --max-wait. Checkpoint and stop.'],
+  ['3', 'status: the verdict is unknown or stale. Proceed, and say so.'],
+  ['2', 'No Pacer on this Mac. No signal, not no budget: proceed ungated.'],
+  ['4', 'Misconfigured, usually a token set in Pacer but not in PACE_TOKEN. The run is unpaced: tell the user.'],
+  ['1', 'A --window that matches nothing.'],
+];
+---
+
+<Base
+  title="The pacer command and Claude Code skill | Pacer"
+  description="Pacer's Claude Code skill and pacer command turn a rate limit into a resumable pause: gate before each wave, save work and wait at a limit, resume when there is room."
+>
+  <header class="wrap page-head">
+    <h1>Pace your agents</h1>
+    <p class="lede">
+      A long Claude Code run that hits a rate limit halfway loses its place. Pacer's skill and <code>pacer</code> command
+      turn that into a pause: save the work, wait, resume.
+    </p>
+  </header>
+
+  <div class="wrap prose">
+    <section aria-labelledby="rule">
+      <h2 id="rule">A stop signal, not a budget</h2>
+      <p>
+        Pacer tells an agent when to stop and when to start again. It does not tell it what to take on: usage never picks
+        the model, how many subagents to run, or what to leave out. Those are decided on the task's merits.
+      </p>
+    </section>
+
+    <section aria-labelledby="install">
+      <h2 id="install">Set it up</h2>
+      <ul>
+        <li>
+          <strong>The skill:</strong> install it from Pacer's Settings. It updates when Pacer does.
+        </li>
+        <li>
+          <strong>The command:</strong> a Homebrew install puts <code>pacer</code> on your PATH. With the download, use
+          Settings → Integrations → Command line. While the skill is installed, <code>~/.claude/skills/pacer/pacer</code>
+          always works too.
+        </li>
+        <li>
+          <strong>Make it the default</strong> for long runs with one line in your <code>CLAUDE.md</code>:
+        </li>
+      </ul>
+      <pre>@~/.claude/skills/pacer/pacing.md</pre>
+      <p>
+        Paste the line, not the text it points to: the file ships inside Pacer and is replaced when Pacer updates, so it
+        never needs re-pasting. Settings → Integrations has a copy button.
+      </p>
+    </section>
+
+    <section aria-labelledby="run">
+      <h2 id="run">How a run uses it</h2>
+      <ol class="steps">
+        <li>
+          <strong>Before each wave of subagents,</strong> the orchestrator runs <code>pacer gate --model opus</code> (the
+          model the wave will use). Exit 0 is go; exit 10 is pause.
+        </li>
+        <li>
+          <strong>Every subagent runs <code>pacer status</code>,</strong> which only reads the verdict the gate wrote. One
+          read of Pacer serves a hundred subagents.
+        </li>
+        <li>
+          <strong>On a pause,</strong> work in progress is committed, a resume list is written, and
+          <code>pacer wait</code> runs in the background.
+        </li>
+        <li>
+          <strong>When <code>wait</code> exits, there is room again</strong>: the window reset, or the session moved to a
+          login with room. The run picks up from its resume list.
+        </li>
+      </ol>
+      <pre><span class="dim">$</span> pacer gate --model opus
+pace: GO.
+<span class="dim">$</span> pacer gate --model opus
+pace: PAUSE — this login is at its limit until Thu 6:39 PM. Checkpoint, then run `pacer wait` in the background: it resumes then.
+<span class="dim">$</span> pacer wait
+pace: room is back — the limit reset. Resume.</pre>
+    </section>
+
+    <section aria-labelledby="modes">
+      <h2 id="modes">Gate-only and informed</h2>
+      <p>
+        <strong>Gate-only</strong> is the default inside a Claude Code session: <code>gate</code>, <code>status</code>
+        and <code>wait</code> say go, pause or resume and what ends a pause, with no percentages, so usage can't steer an
+        agent's plan. <strong>Informed</strong> adds the numbers. It is the default in a terminal, where a person is
+        reading.
+      </p>
+      <pre><span class="dim"># gate-only</span>
+pace: GO.
+<span class="dim"># informed</span>
+pace: GO — 5h 40%, 7d 32% (safe limit 5h 96%, 7d 99%).</pre>
+      <p>To choose, the first of these that is set wins:</p>
+      <ol>
+        <li><code>--pacing gate</code> or <code>--pacing informed</code> on one command;</li>
+        <li>
+          <code>PACER_PACING</code>, your own setting: for a repo, <code>"env": &#123;"PACER_PACING": "informed"&#125;</code>
+          in <code>.claude/settings.json</code>; for one launch, <code>PACER_PACING=informed claude</code>;
+        </li>
+        <li><code>pacer mode informed</code> (or <code>gate</code>, or <code>clear</code>) for the current session.</li>
+      </ol>
+    </section>
+
+    <section aria-labelledby="report">
+      <h2 id="report">Seeing the numbers</h2>
+      <p>
+        <code>pacer report</code> shows every window for the account you're on. A whole number is Anthropic's reading; a
+        decimal is Pacer's estimate since that reading.
+      </p>
+      <pre class="wide"><span class="dim">$</span> pacer report
+5h         15.6% est · read 15% 1m ago · +33%/h now (+0 avg) · resets in 4h 48m  (Thu 6:39 PM)
+7d           81% used · +7%/h now (+2 avg) · resets in 3d 16h  (Mon 5:59 AM)
+Fable        99% used · +8%/h now (+2 avg) · full in 6h 24m · resets in 3d 16h</pre>
+      <p>
+        <code>now</code> is the rate over the last half hour; <code>avg</code> is a longer average, shown only when the two
+        disagree. A gap between them means you are in a burst.
+      </p>
+    </section>
+
+    <section aria-labelledby="model">
+      <h2 id="model">Name the model</h2>
+      <p>
+        A per-model cap, such as a weekly Fable limit, only stops work that uses that model. So pass the model a wave will
+        run: <code>pacer gate --model opus</code>. The 5-hour and weekly windows always apply. In a session running one
+        model, <code>pacer</code> works it out; in a fan-out with several models, the orchestrator should name each.
+      </p>
+    </section>
+
+    <section aria-labelledby="logins">
+      <h2 id="logins">Several logins</h2>
+      <p>
+        A window belongs to one login, not to your Mac. When another login has room, a pause says so, and switching to it
+        ends the pause. If an account switcher is running and tells Pacer about itself, <code>pacer wait</code> resumes as
+        soon as it moves you.
+      </p>
+    </section>
+
+    <section aria-labelledby="ref">
+      <h2 id="ref">Commands</h2>
+      <table>
+        <thead>
+          <tr><th scope="col">Command</th><th scope="col">What it does</th></tr>
+        </thead>
+        <tbody>
+          {
+            commands.map(([c, d]) => (
+              <tr>
+                <td><code>pacer {c}</code></td>
+                <td>{d}</td>
+              </tr>
+            ))
+          }
+        </tbody>
+      </table>
+
+      <h3>Exit codes</h3>
+      <table>
+        <thead>
+          <tr><th scope="col">Code</th><th scope="col">Meaning</th></tr>
+        </thead>
+        <tbody>
+          {
+            exits.map(([c, d]) => (
+              <tr>
+                <td><code>{c}</code></td>
+                <td>{d}</td>
+              </tr>
+            ))
+          }
+        </tbody>
+      </table>
+      <p class="small muted">
+        Every flag and every number is explained in the skill's
+        <a href="https://github.com/EricAndrechek/Pacer/blob/main/Skills/pacer/reference.md" data-track="docs">reference</a>.
+      </p>
+    </section>
+
+    <section aria-labelledby="guard">
+      <h2 id="guard">Outside Claude Code</h2>
+      <p>
+        <code>pace-guard.sh</code>, beside the skill, waits until there is room and then starts <code>claude</code> with
+        your arguments. Use it to wrap an unattended run from your own terminal:
+      </p>
+      <pre>~/.claude/skills/pacer/pace-guard.sh -p "keep working on the migration"</pre>
+    </section>
+  </div>
+</Base>
+
+<style>
+  section + section {
+    margin-top: 0.5rem;
+  }
+  .steps {
+    padding-left: 1.4em;
+  }
+  .steps li {
+    padding-left: 0.3em;
+  }
+  .steps li::marker {
+    font-weight: 800;
+    font-stretch: 80%;
+    color: var(--pace);
+  }
+  pre {
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  table code {
+    white-space: nowrap;
+  }
+  td:first-child {
+    width: 1%;
+    white-space: nowrap;
+  }
+</style>
