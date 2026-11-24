@@ -59,9 +59,19 @@ private func makeProfile(_ home: URL, _ name: String, org: String) throws -> URL
     return profile
 }
 
+/// The re-listing's clock, pinned: "inside the minute" is what the test says,
+/// not however long a loaded Mac took between two cycles. On the wall clock a
+/// full `make test` beside other builds put more than a minute between them,
+/// and the backstop listed early (#431).
+@ScanActor
+private final class RootsClock {
+    var now = Date(timeIntervalSince1970: 1_790_000_000)
+    func advance(_ seconds: TimeInterval) { now = now.addingTimeInterval(seconds) }
+}
+
 @ScanActor
 private func makeCoordinator(
-    home: URL, primaryRoot: URL, defaultAccount: String
+    home: URL, primaryRoot: URL, defaultAccount: String, clock: RootsClock
 ) throws -> (ScanCoordinator, ModelContainer) {
     let container = try PacerStore.makeInMemoryContainer()
     let context = ModelContext(container)
@@ -74,6 +84,7 @@ private func makeCoordinator(
                              desktopSessions: nil),
         resolver: ClaudePathResolver(environment: ["CLAUDE_CONFIG_DIR": primaryRoot.path]),
         homeDirectory: home)
+    coordinator.rootsClock = { clock.now }
     return (coordinator, container)
 }
 
@@ -98,8 +109,9 @@ struct SessionProfileRefreshTests {
             line("2026-10-01T10:00:00Z", session: "cli-session", message: "d1"),
             line("2026-10-01T10:01:00Z", session: "cli-session", message: "shared", output: 80),
         ])
+        let clock = RootsClock()
         let (coordinator, container) = try makeCoordinator(
-            home: home, primaryRoot: configRoot, defaultAccount: defaultOrg)
+            home: home, primaryRoot: configRoot, defaultAccount: defaultOrg, clock: clock)
         _ = try await coordinator.runOnce()
         #expect(try samples(container).count == 2)
         #expect(coordinator.resolvedRootsForTesting.count == 1)
@@ -146,7 +158,8 @@ struct SessionProfileRefreshTests {
         #expect(all.filter { $0.accountId == defaultOrg }.count == 2)
 
         // Nothing changed: a write under a known root, then a full walk inside
-        // the minute. Neither lists the folders or adds a root again.
+        // the minute (59 s on). Neither lists the folders or adds a root again.
+        clock.advance(59)
         try (line("2026-10-01T12:00:00Z", session: "cli-session", message: "d2") + "\n")
             .appendLine(to: defaultTranscript)
         await coordinator.watcherForTesting.noteChangedPathsForTesting([defaultTranscript.path])
@@ -158,7 +171,7 @@ struct SessionProfileRefreshTests {
 
         // The minute's re-listing finds the same profile: nothing is added and
         // nothing is read twice.
-        coordinator.expireProfileRootRefreshForTesting()
+        clock.advance(1)
         _ = try await coordinator.runOnce()
         #expect(coordinator.profileRootRelistsForTesting == 2)
         #expect(coordinator.resolvedRootsForTesting.count == 2)
@@ -175,8 +188,9 @@ struct SessionProfileRefreshTests {
         try writeTranscript(under: work, session: "work-session", lines: [
             line("2026-10-01T09:00:00Z", session: "work-session", message: "w1"),
         ])
+        let clock = RootsClock()
         let (coordinator, container) = try makeCoordinator(
-            home: home, primaryRoot: work, defaultAccount: defaultOrg)
+            home: home, primaryRoot: work, defaultAccount: defaultOrg, clock: clock)
         _ = try await coordinator.runOnce()
         #expect(coordinator.resolvedRootsForTesting.count == 1)
 
@@ -185,11 +199,13 @@ struct SessionProfileRefreshTests {
             line("2026-10-01T11:00:00Z", session: "personal-session", message: "p1"),
         ])
         // A full walk inside the minute does not list: the profile waits.
+        clock.advance(59)
         _ = try await coordinator.runOnce()
         #expect(coordinator.profileRootRelistsForTesting == 0)
         #expect(try samples(container).count == 1)
 
-        coordinator.expireProfileRootRefreshForTesting()
+        // A minute after the launch's listing, it lists.
+        clock.advance(1)
         _ = try await coordinator.runOnce()
         #expect(coordinator.profileRootRelistsForTesting == 1)
         #expect(coordinator.resolvedRootsForTesting.map(\.root.path)
@@ -213,7 +229,7 @@ struct SessionProfileRefreshTests {
             line("2026-10-01T10:00:00Z", session: "cli-session", message: "d1"),
         ])
         let (coordinator, container) = try makeCoordinator(
-            home: home, primaryRoot: configRoot, defaultAccount: defaultOrg)
+            home: home, primaryRoot: configRoot, defaultAccount: defaultOrg, clock: RootsClock())
         _ = try await coordinator.runOnce()
 
         // A profile folder with no `projects/` yet, holding a stray `.jsonl`.

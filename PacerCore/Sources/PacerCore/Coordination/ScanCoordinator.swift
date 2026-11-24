@@ -822,7 +822,7 @@ public final class ScanCoordinator {
             [$0.path + "/", $0.resolvingSymlinksInPath().path + "/"]
         }))
         sessionProfileRoots = discoverSessionProfileRoots()
-        lastProfileRootRefresh = Date()
+        lastProfileRootRefresh = rootsClock()
         if !sessionProfileRoots.isEmpty {
             log("roots: +\(sessionProfileRoots.count) session profile(s)")
         }
@@ -832,7 +832,7 @@ public final class ScanCoordinator {
         if !desktopRoots.isEmpty {
             log("roots: +\(desktopRoots.count) from \(desktopInstallIds.count) Claude Desktop install(s)")
         }
-        lastDesktopRootRefresh = Date()
+        lastDesktopRootRefresh = rootsClock()
         return primaryRoots + sessionProfileRoots + desktopRoots
     }
 
@@ -862,6 +862,11 @@ public final class ScanCoordinator {
     /// Re-listings since launch. A test seam: a cycle that changed nothing
     /// must not list.
     private(set) var profileRootRelistsForTesting = 0
+    /// The clock the minute's re-listings (session profiles and Desktop's)
+    /// are timed by. Tests pin it: "inside the minute" read the wall clock,
+    /// and on a loaded Mac two cycles a test ran back to back were more than
+    /// a minute apart (#431).
+    var rootsClock: () -> Date = { Date() }
 
     /// Pick up session profiles created since the roots were resolved (#322).
     ///
@@ -898,10 +903,11 @@ public final class ScanCoordinator {
         let unclaimed = (hinted ?? []).filter {
             isUnderProfileSessions($0) && !Self.isClaimed($0, by: resolvedRoots)
         }
+        let now = rootsClock()
         let due = hinted == nil && (lastProfileRootRefresh.map {
-            Date().timeIntervalSince($0) >= Self.profileRootRefreshInterval } ?? true)
+            now.timeIntervalSince($0) >= Self.profileRootRefreshInterval } ?? true)
         guard !unclaimed.isEmpty || due else { return (hinted, []) }
-        lastProfileRootRefresh = Date()
+        lastProfileRootRefresh = now
         profileRootRelistsForTesting += 1
         // A folder that appeared since launch (the switcher installed while
         // Pacer ran) is watched from now on.
@@ -948,9 +954,6 @@ public final class ScanCoordinator {
     var resolvedRootsForTesting: [ClaudePathResolver.ResolvedRoot] { resolvedRoots }
     /// The extra folders the watcher was last handed.
     var watchedExtraPathsForTesting: [String] { watchedExtraPaths }
-    /// Make the next full walk re-list the switcher's folders, as if a minute
-    /// had passed.
-    func expireProfileRootRefreshForTesting() { lastProfileRootRefresh = nil }
 
     /// The roots Claude Desktop adds: one per agent-mode (Cowork) session
     /// (#250), and each install's own `CLAUDE_CONFIG_DIR` (#295). Kept apart
@@ -1020,10 +1023,11 @@ public final class ScanCoordinator {
             desktopSessions.isUnderAgentSessions($0)
                 && ClaudePathResolver.ResolvedRoot.root(forFile: $0, among: resolvedRoots) == nil
         }
+        let now = rootsClock()
         let due = hinted == nil && (lastDesktopRootRefresh.map {
-            Date().timeIntervalSince($0) >= Self.desktopRootRefreshInterval } ?? true)
+            now.timeIntervalSince($0) >= Self.desktopRootRefreshInterval } ?? true)
         guard !unclaimed.isEmpty || due else { return (hinted, false) }
-        lastDesktopRootRefresh = Date()
+        lastDesktopRootRefresh = now
         desktopSessions.refresh()
         let others = Set(resolvedRoots.filter { !desktopRoots.contains($0) }.map(\.root.path))
         let fresh = desktopSessions.scanRoots.filter { !others.contains($0.root.path) }
