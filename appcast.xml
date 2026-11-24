@@ -2,7 +2,7 @@
 <rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
     <channel>
         <title>Pacer</title>
-        <link>https://ericandrechek.github.io/Pacer/appcast.xml</link>
+        <link>https://pacer.andrechek.com/</link>
         <description>Pacer auto-update feed</description>
         <language>en</language>
         <item>
