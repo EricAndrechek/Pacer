@@ -147,7 +147,8 @@ enum HangReporter {
         // Sentry groups by the in-app frames; a hang spent wholly in system
         // code has only the entry point there, so those are split by what the
         // run loop was running (#437). It decides from Sentry's in-app marks
-        // before naming any frame, and names only the few it keys on.
+        // before naming any frame, then names only Pacer's entry point and
+        // the system-library frames it keys on (`package` is the image path).
         if let frames = threads.first?.stacktrace?.frames {
             event.fingerprint = HangFingerprint.fingerprint(frames: frames.map {
                 HangFingerprint.Frame(function: $0.function,
