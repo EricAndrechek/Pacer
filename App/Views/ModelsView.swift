@@ -162,6 +162,8 @@ private struct ModelsContent: View {
     @Query private var globalAggregates: [DailyAggregate]
     @Query private var scopedAggregates: [AccountDailyAggregate]
     @State private var scope = UsageScope.shared
+    /// Models with no price yet: the rows they are in carry the mark.
+    @State private var pricePending = PricePending.shared
 
     /// Every account, or one. Both queries are live, so switching is a
     /// re-read rather than a recompute.
@@ -261,6 +263,8 @@ private struct ModelsContent: View {
         let lastSeen: String
         /// The row's cost by priced part (#225); drawn as its Mix bar.
         let breakdown: CostBreakdown
+        /// The row's models (a group's versions) that have no price yet.
+        let pricePending: [String]
         var id: String { key }
     }
 
@@ -368,6 +372,7 @@ private struct ModelsContent: View {
             byKey[b.key] = a
         }
         let ungrouped = grouping == .none
+        let pending = pricePending
         let unsorted = byKey.map { (key, a) -> ModelRow in
             ModelRow(
                 key: key,
@@ -382,7 +387,8 @@ private struct ModelsContent: View {
                 activeDays: a.dates.count,
                 firstSeen: a.firstSeen,
                 lastSeen: a.lastSeen,
-                breakdown: a.breakdown
+                breakdown: a.breakdown,
+                pricePending: pending.pending(in: a.members)
             )
         }
         // Cost, largest first, with the bucket key breaking ties: a stable
@@ -399,6 +405,7 @@ private struct ModelsContent: View {
                 tokens: r.tokens,
                 costParts: r.breakdown.cost,
                 cost: r.cost,
+                pricePendingModels: r.pricePending,
                 extra: ModelTableExtra(model: r.model, activeDays: r.activeDays,
                                        lastSeen: r.lastSeen))
         }
@@ -497,6 +504,8 @@ private struct ModelsContent: View {
             cachedDerived?.share = Self.share(derived.tableRows, sort: sort)
         }
         .onChange(of: grouping) { _, _ in refreshDerived() }
+        // A model gaining its price drops its rows' mark; no scan need follow.
+        .onChange(of: pricePending.models) { _, _ in refreshDerived() }
     }
 
     private var emptyState: some View {

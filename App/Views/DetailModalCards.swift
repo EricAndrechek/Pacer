@@ -20,11 +20,14 @@ enum DetailModalCards {
     /// A modal's models, as the donut card and the table both take them.
     typealias ModelRow = PacerUsageRow<PacerUsageNoExtra>
 
-    /// One model's row: its colour, every token part and its cost by part.
+    /// One model's row: its colour, every token part and its cost by part,
+    /// and the "price pending" mark when `pending` (`PricePending.models`,
+    /// which the modal keys its row rebuild on) holds the model.
     static func modelRow(model: String, tokens: TokenBreakdown, costParts: CostComponents,
-                         cost: Double) -> ModelRow {
+                         cost: Double, pending: Set<String>) -> ModelRow {
         PacerUsageRow(id: model, label: pacerModelDisplayName(model), color: pacerModelColor(model),
-                      tokens: tokens, costParts: costParts, cost: cost)
+                      tokens: tokens, costParts: costParts, cost: cost,
+                      pricePendingModels: pending.contains(model) ? [model] : [])
     }
 
     /// How the models divide the cost and the tokens: the shared donut card,

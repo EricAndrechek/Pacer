@@ -263,6 +263,10 @@ public struct PacerUsageRow<Extra>: Identifiable, UsageColumnValues {
     public let costParts: CostComponents
     /// The total the Cost column prints and sorts by.
     public let cost: Double
+    /// The models in this row's cost that have no price yet (`PricePending`),
+    /// raw ids: the Cost cell carries the "price pending" mark while there
+    /// are any (`PacerPricePendingMark`). Empty for every other row.
+    public let pricePendingModels: [String]
     public let extra: Extra
 
     /// - Parameter cost: the row's total as the rest of the page prints it.
@@ -279,6 +283,7 @@ public struct PacerUsageRow<Extra>: Identifiable, UsageColumnValues {
         tokens: TokenBreakdown,
         costParts: CostComponents,
         cost: Double? = nil,
+        pricePendingModels: [String] = [],
         extra: Extra
     ) {
         self.id = id
@@ -289,6 +294,7 @@ public struct PacerUsageRow<Extra>: Identifiable, UsageColumnValues {
         self.tokens = tokens
         self.costParts = costParts
         self.cost = cost ?? costParts.total
+        self.pricePendingModels = pricePendingModels
         self.extra = extra
     }
 
@@ -308,11 +314,12 @@ public extension PacerUsageRow where Extra == PacerUsageNoExtra {
         color: Color? = nil,
         tokens: TokenBreakdown,
         costParts: CostComponents,
-        cost: Double? = nil
+        cost: Double? = nil,
+        pricePendingModels: [String] = []
     ) {
         self.init(id: id, label: label, subtitle: subtitle, sortLabel: sortLabel,
                   color: color, tokens: tokens, costParts: costParts, cost: cost,
-                  extra: PacerUsageNoExtra())
+                  pricePendingModels: pricePendingModels, extra: PacerUsageNoExtra())
     }
 }
 
@@ -838,17 +845,22 @@ where Leading.TableRowValue == PacerUsageRow<Extra>,
                                   order: column.sortsDescendingFirst ? .reverse : .forward)
         ) { row in
             let cell = column.cellText(tokens: row.tokens, cost: row.cost, costParts: row.costParts)
-            Text(cell?.text ?? "")
-                .font(isCost
-                      ? .system(size: 12, weight: .semibold, design: .rounded)
-                      : .system(size: 12))
-                .foregroundStyle(isCost ? .primary : .secondary)
-                .monospacedDigit()
-                // A column narrowed past its number cuts the number short
-                // ("88.…") rather than overflowing into its neighbour.
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .help(cell?.help ?? "")
+            HStack(spacing: 3) {
+                // Before the number, so the numbers' trailing edges stay
+                // aligned down the column.
+                if isCost { PacerPricePendingMark(models: row.pricePendingModels) }
+                Text(cell?.text ?? "")
+                    .font(isCost
+                          ? .system(size: 12, weight: .semibold, design: .rounded)
+                          : .system(size: 12))
+                    .foregroundStyle(isCost ? .primary : .secondary)
+                    .monospacedDigit()
+                    // A column narrowed past its number cuts the number short
+                    // ("88.…") rather than overflowing into its neighbour.
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .help(cell?.help ?? "")
+            }
         }
         .width(min: column.minWidth, ideal: column.idealWidth)
         .alignment(.numeric)

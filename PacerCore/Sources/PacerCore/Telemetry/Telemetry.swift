@@ -72,7 +72,13 @@ public enum Telemetry {
         /// a name) with enumerable attributes, such as an error's domain and
         /// code. Sentry: an error event under the crash-reports toggle and the
         /// daily error cap; strings and bools become tags, numbers extra data.
-        func problem(_ message: String, attributes: Attributes)
+        ///
+        /// `fingerprint`, when given, decides which issue the event joins
+        /// instead of Sentry's own grouping (which, for a message event, is
+        /// the message): our own enumerable parts, such as
+        /// `["unpriced-model", <model id>]`, so one cause on every Mac is one
+        /// issue and two causes sharing a message are two.
+        func problem(_ message: String, attributes: Attributes, fingerprint: [String]?)
     }
 
     struct NoSink: Sink {
@@ -81,7 +87,7 @@ public enum Telemetry {
         func gauge(_ key: String, _ value: Double, unit: Unit, attributes: Attributes) {}
         func span(_ span: Span) {}
         func breadcrumb(_ category: String, _ message: String) {}
-        func problem(_ message: String, attributes: Attributes) {}
+        func problem(_ message: String, attributes: Attributes, fingerprint: [String]?) {}
     }
 
     private static let installed = Mutex<any Sink>(NoSink())
@@ -106,7 +112,8 @@ public enum Telemetry {
     public static func breadcrumb(_ category: String, _ message: String) {
         sink.breadcrumb(category, message)
     }
-    public static func problem(_ message: String, attributes: Attributes = [:]) {
-        sink.problem(message, attributes: attributes)
+    public static func problem(_ message: String, attributes: Attributes = [:],
+                               fingerprint: [String]? = nil) {
+        sink.problem(message, attributes: attributes, fingerprint: fingerprint)
     }
 }
