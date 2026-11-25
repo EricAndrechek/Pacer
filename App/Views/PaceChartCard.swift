@@ -372,7 +372,7 @@ struct PaceChartCard: View {
             // one more stall per poll.
             let base = entry
             let incremental = through != nil
-            let fetched = await Task.detached(priority: .userInitiated) {
+            let fetched = await RenderReadiness.task("pace-chart", priority: .userInitiated) {
                 let loaded = await Self.load(container: container, account: account, through: through)
                 let merged = Self.merge(base, with: loaded, incremental: incremental)
                 return (entry: merged.entry, changed: merged.changed,
@@ -512,7 +512,7 @@ struct PaceChartCard: View {
     /// cost.
     private static func prepareOffMain(_ series: [AccountSeries],
                                        priority: TaskPriority) async -> (series: [PaceSeriesPrep], ms: Int) {
-        await Task.detached(priority: priority) {
+        await RenderReadiness.task("pace-chart", priority: priority) {
             let started = Date()
             let built = Self.prepare(series, now: started)
             return (built, Int(Date().timeIntervalSince(started) * 1000))

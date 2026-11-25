@@ -31,5 +31,5 @@ import PacerCore
 func askEngine<T: Sendable>(
     _ body: @escaping @Sendable () async -> T
 ) async -> T {
-    await Task.detached(priority: .userInitiated, operation: body).value
+    await RenderReadiness.task("engine-ask", priority: .userInitiated, operation: body).value
 }
