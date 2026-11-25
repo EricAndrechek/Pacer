@@ -63,7 +63,7 @@ counters (`data.*`, `oauth.*`, `cred.*`, `telemetry.*`, `main_thread.*`,
 - Not sent while a debugger is attached.
 `beforeSend` budgets errors, hangs, crashes and MetricKit (`TelemetryBudget.kind`). Transactions also pass through it, spend nothing there, and are budgeted in `tracesSampler`.
 The check-in also runs when the Sentry release differs from `pacer.telemetry.checkin.lastRelease`, with `checkin.reason` = `day`/`version`. A `version` check-in omits `cli.*`, `widget.timeline_ms`, `widget_inventory` `refreshes.*` and `forecast.*`. Count Macs by unique users.
-`Telemetry.problem`: a fixed message, with string/bool attributes as tags and numbers as extra; crash toggle and `.error` cap. First use is "Store prepare failed": `error.domain`, `error.code`, `error.underlying_*`, `store.before`, extra `elapsed_ms`. Second is the data canary's "Session totals disagree with Claude Code" (see "Data canary" below).
+`Telemetry.problem`: a fixed message, with string/bool attributes as tags and numbers as extra; crash toggle and `.error` cap. First use is "Store prepare failed": `error.domain`, `error.code`, `error.underlying_*`, `store.before`, extra `elapsed_ms`. Second is the data canary's "Session totals disagree with Claude Code" (see "Data canary" below). Third is "feed unreachable" (see "Feed fallbacks" below).
 
 ## Crash relaunch (since 0.9.1, #412)
 `PacerRelauncher` brings Pacer back after it exits without quitting (AGENTS.md, "Relaunch after a crash"). Three health counters (not usage: Sentry metrics, and `counter.*` in PostHog's `daily_checkin`), no ids, no paths:
@@ -225,6 +225,26 @@ The appcast headers are set on `SPUUpdater.httpHeaders` from
 headers come from `FeedRequestHeaderProvider`, whose extra (the id) the app
 installs from `App/Telemetry/FeedRequestIdentity.swift`. Nothing else about
 either request changes. Code: `PacerCore/Util/FeedRequestHeaders.swift`.
+
+### Feed fallbacks (since 0.9.5)
+
+When pacer.andrechek.com cannot be read, Pacer reads the same file from `main` on
+`raw.githubusercontent.com` (`FeedFallback`; no `X-Pacer-*` header is ever sent
+there) and reports it:
+
+- `Telemetry.problem("feed unreachable")`: crash-reports toggle and `.error` cap, at
+  most one per feed per 24 h (`pacer.feed.problemReported.<feed>`, persisted).
+  Tags: `feed` (`appcast`, `price_history`), `error.domain` (`NSURLErrorDomain`, `http`,
+  `decode`, `SUSparkleErrorDomain`, else `other`), `fallback` (`ok`, `failed`); extra
+  `error.code`, and `http.status` when the site answered with one (price history).
+  Counts toward the appcast only when the primary check failed with a network or
+  appcast error, never for "no update".
+- Counter `feed.fallback_used.appcast` / `feed.fallback_used.price_history`, each use.
+  The appcast's is reported once the fallback check has ended (the check after the failed one).
+
+Also "update download failed" (`feed=update_archive`, `error.domain`, `error.code`,
+`error.underlying_domain`/`error.underlying_code` when present), from Sparkle's
+`failedToDownloadUpdate`, under the same once-a-day limit; `lifecycle.update_error` is unchanged.
 
 ## The website (pacer.andrechek.com, `site/`)
 

@@ -68,6 +68,27 @@ final class PacerUpdater: ObservableObject {
             userDriverDelegate: userDriverDelegate
         )
         #endif
+        scheduleCatchUpCheck()
+    }
+
+    /// Just updated (the build differs from the last launch's)? Check again in
+    /// a couple of minutes, once: an update held while Pacer ran an older
+    /// version may already have a newer one behind it. Only the user's own
+    /// launch records the build.
+    private func scheduleCatchUpCheck() {
+        guard LaunchMode.isNormalLaunch,
+              let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String else { return }
+        let store = PacerPreferences.store
+        let previous = store.string(forKey: UpdateRetryPolicy.lastLaunchBuildKey)
+        store.set(build, forKey: UpdateRetryPolicy.lastLaunchBuildKey)
+        guard UpdateRetryPolicy.needsCatchUpCheck(previousBuild: previous, currentBuild: build) else { return }
+        let updater = controller.updater
+        DispatchQueue.main.asyncAfter(deadline: .now() + UpdateRetryPolicy.catchUpDelay) {
+            // Sparkle does not enforce the user's "check automatically" choice
+            // on a call like this one.
+            guard updater.automaticallyChecksForUpdates else { return }
+            updater.checkForUpdatesInBackground()
+        }
     }
 
     var updater: SPUUpdater { controller.updater }
@@ -100,13 +121,27 @@ private class PacerUpdaterDelegate: NSObject, SPUUpdaterDelegate {
         // `.updates` is the user's "Check for Updates…"; the launch and
         // scheduled checks (`.updatesInBackground`) and the info-only probe
         // are `scheduled`.
+        feedLoaded = false
         let last = FeedRequestHeaders.previousCheck(
             key: PacerPreferenceKeys.appcastLastCheck, store: PacerPreferences.store,
             now: Date(), record: LaunchMode.isNormalLaunch)
-        updater.httpHeaders = FeedRequestHeaders.headers(
+        // The fallback feed (raw.githubusercontent.com) gets none of them:
+        // `X-Pacer-*` reach only pacer.andrechek.com. The chooser's state
+        // cannot change between here and the request.
+        updater.httpHeaders = feedChooser.usesFallback ? [:] : FeedRequestHeaders.headers(
             check: updateCheck == .updates ? .manual : .scheduled,
             since: last,
             id: FeedRequestIdentity.idHeader())
+    }
+
+    /// Which appcast the next check reads: `SUFeedURL` (the site) unless the
+    /// check before it could not reach it, then the same file on `main`, once.
+    /// Sparkle's own words: "An appcast feed URL to check for new updates in,
+    /// or nil for the default behavior" (`feedURLStringForUpdater:`).
+    private var feedChooser = FeedFallback.AppcastChooser()
+
+    func feedURLString(for updater: SPUUpdater) -> String? {
+        feedChooser.feedURLString
     }
 
     // Sparkle also puts `httpHeaders` on the update archive and delta
@@ -120,6 +155,10 @@ private class PacerUpdaterDelegate: NSObject, SPUUpdaterDelegate {
         // Notes are inline today; a notes URL elsewhere would get the headers.
         guard let url = updateItem.releaseNotesURL ?? updateItem.fullReleaseNotesURL else { return true }
         return FeedRequestHeaders.isPacerSite(url)
+    }
+
+    func updater(_ updater: SPUUpdater, didFinishLoading appcast: SUAppcast) {
+        feedLoaded = true
     }
 
     func updater(_ updater: SPUUpdater, didFindValidUpdate item: SUAppcastItem) {
@@ -138,9 +177,35 @@ private class PacerUpdaterDelegate: NSObject, SPUUpdaterDelegate {
                                 error: UpdateOutcomeLog.errorDetail(domain: ns.domain, code: ns.code,
                                                                     underlyingDomain: underlying?.domain,
                                                                     underlyingCode: underlying?.code))
+        FeedFallback.reportDownloadFailure(domain: ns.domain, code: ns.code,
+                                           underlyingDomain: underlying?.domain, underlyingCode: underlying?.code)
+        // Sooner than the 6 h interval, with backoff: 30 min, 2 h, then normal.
+        downloadFailures += 1
+        if let delay = UpdateRetryPolicy.downloadRetryDelay(afterFailures: downloadFailures) {
+            recheck(updater, after: delay)
+        }
     }
 
+    /// One extra background check, never when the user turned automatic checks
+    /// off (Sparkle does not enforce that on a direct call). If a session is
+    /// already running Sparkle ignores it.
+    private func recheck(_ updater: SPUUpdater, after delay: TimeInterval) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak updater] in
+            guard let updater, updater.automaticallyChecksForUpdates else { return }
+            updater.checkForUpdatesInBackground()
+        }
+    }
+
+    /// Set by `didFinishLoadingAppcast`, cleared before every check: what
+    /// separates "the feed was unreachable" from "the archive download failed",
+    /// which are both `SUDownloadError`.
+    private var feedLoaded = false
+
+    /// Failed downloads in a row; a download that gets to install ends the run.
+    private var downloadFailures = 0
+
     func updater(_ updater: SPUUpdater, willInstallUpdate item: SUAppcastItem) {
+        downloadFailures = 0
         let byPolicy = MainActor.assumeIsolated { UpdateInstallScheduler.shared.installingByPolicy }
         // `item` is the one being installed: after a failed delta Sparkle swaps
         // in the full-DMG item before this fires (`fallBackAndDownloadRegularUpdate`),
@@ -155,6 +220,7 @@ private class PacerUpdaterDelegate: NSObject, SPUUpdaterDelegate {
     // walk-through). Sparkle still installs on quit if Pacer quits first.
     func updater(_ updater: SPUUpdater, willInstallUpdateOnQuit item: SUAppcastItem,
                  immediateInstallationBlock immediateInstallHandler: @escaping () -> Void) -> Bool {
+        downloadFailures = 0
         let version = item.displayVersionString
         // This item is the one the automatic driver was handed; a later
         // `willInstallUpdate` carries the one actually installed and overwrites.
@@ -178,10 +244,21 @@ private class PacerUpdaterDelegate: NSObject, SPUUpdaterDelegate {
         // A held update's cycle only ends when its driver is gone, and the
         // block with it.
         MainActor.assumeIsolated { UpdateInstallScheduler.shared.release() }
-        guard let error else { return }
+        let ns = error as NSError?
+        let underlying = ns?.userInfo[NSUnderlyingErrorKey] as? NSError
+        // "Up to date" arrives as an error too; only a feed that could not be
+        // reached counts (see `FeedFallback.appcastFailure`).
+        let failure = ns.flatMap { FeedFallback.appcastFailure($0, feedLoaded: feedLoaded) }
+        let wasFallback = feedChooser.usesFallback
+        if case .report(let primary, let fallbackOK) = feedChooser.finished(failure: failure) {
+            FeedFallback.report(feed: .appcast, failure: primary, fallbackOK: fallbackOK)
+        }
+        // The primary just failed: read the fallback soon, not in ~6 h.
+        if !wasFallback, feedChooser.usesFallback { recheck(updater, after: FeedFallback.failoverRecheckDelay) }
+        // A check that got through (an answer, even "up to date") ends the backoff.
+        if ns == nil || (ns?.domain == "SUSparkleErrorDomain" && ns?.code == 1001) { downloadFailures = 0 }
+        guard let ns else { return }
         // Domain and code only (and the underlying error's): never the description.
-        let ns = error as NSError
-        let underlying = ns.userInfo[NSUnderlyingErrorKey] as? NSError
         UpdateOutcomeLog.recordEndOfCycle(domain: ns.domain, code: ns.code,
                                           underlyingDomain: underlying?.domain,
                                           underlyingCode: underlying?.code)
