@@ -14,14 +14,14 @@ struct UsageColumnLayoutBoxTests {
     typealias Box = UsageColumnLayoutBox<Row>
 
     private static func store() -> (UserDefaults, String) {
-        let name = "pacer.tests.layoutBox.\(UUID().uuidString)"
-        return (UserDefaults(suiteName: name)!, name)
+        let t = TestDefaults(prefix: "layoutBox")
+        return (t.defaults, t.suiteName)
     }
 
     @Test("nothing stored is the default layout")
     func empty() {
         let (store, suite) = Self.store()
-        defer { UserDefaults().removePersistentDomain(forName: suite) }
+        defer { TestDefaults.cleanup(suite: suite) }
         let layout = Box().value(tableId: "t", store: store)
         #expect(layout[visibility: UsageColumn.input.rawValue] == .automatic)
     }
@@ -29,7 +29,7 @@ struct UsageColumnLayoutBoxTests {
     @Test("a layout from an older build loads, under the same key")
     func oldFormatLoads() throws {
         let (store, suite) = Self.store()
-        defer { UserDefaults().removePersistentDomain(forName: suite) }
+        defer { TestDefaults.cleanup(suite: suite) }
         store.set(Data(UsageTableLayoutTests.round1Layout.utf8),
                   forKey: PacerUsageTableMetrics.columnsKey(tableId: "t"))
         let layout = Box().value(tableId: "t", store: store)
@@ -39,7 +39,7 @@ struct UsageColumnLayoutBoxTests {
     @Test("a write persists and a new box reads it back; the first box does not re-read defaults")
     func roundTrip() {
         let (store, suite) = Self.store()
-        defer { UserDefaults().removePersistentDomain(forName: suite) }
+        defer { TestDefaults.cleanup(suite: suite) }
         let box = Box()
         var layout = box.value(tableId: "t", store: store)
         layout[visibility: UsageColumn.cacheRead.rawValue] = .visible
@@ -54,7 +54,7 @@ struct UsageColumnLayoutBoxTests {
     @Test("reset stores the default layout; tables keep separate keys")
     func reset() {
         let (store, suite) = Self.store()
-        defer { UserDefaults().removePersistentDomain(forName: suite) }
+        defer { TestDefaults.cleanup(suite: suite) }
         let box = Box()
         var layout = box.value(tableId: "a", store: store)
         layout[visibility: UsageColumn.cacheRead.rawValue] = .visible
@@ -67,7 +67,7 @@ struct UsageColumnLayoutBoxTests {
     @Test("an undecodable stored value is the default layout")
     func garbage() {
         let (store, suite) = Self.store()
-        defer { UserDefaults().removePersistentDomain(forName: suite) }
+        defer { TestDefaults.cleanup(suite: suite) }
         store.set(Data("nope".utf8), forKey: PacerUsageTableMetrics.columnsKey(tableId: "t"))
         #expect(Box().value(tableId: "t", store: store)[visibility: UsageColumn.input.rawValue] == .automatic)
     }

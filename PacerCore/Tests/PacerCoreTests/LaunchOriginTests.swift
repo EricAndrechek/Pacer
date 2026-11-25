@@ -15,9 +15,9 @@ struct LaunchOriginTests {
 
     @Test("tallies accumulate and clear on drain")
     func tally() {
-        let name = "pacer.test.launch.\(UUID().uuidString)"
-        let s = UserDefaults(suiteName: name)!
-        s.removePersistentDomain(forName: name)
+        let holder = TestDefaults(prefix: "launch")
+        defer { holder.cleanup() }
+        let s = holder.defaults
         LaunchOrigin.login.record(store: s)
         LaunchOrigin.manual.record(store: s)
         LaunchOrigin.manual.record(store: s)

@@ -58,8 +58,8 @@ struct UsageTableLayoutTests {
     }
 
     private static func store() -> (UserDefaults, String) {
-        let name = "pacer.tests.usageTable.\(UUID().uuidString)"
-        return (UserDefaults(suiteName: name)!, name)
+        let t = TestDefaults(prefix: "usageTable")
+        return (t.defaults, t.suiteName)
     }
 
     private static func host(_ view: some View, width: CGFloat = 900) -> Hosted {
@@ -127,7 +127,7 @@ struct UsageTableLayoutTests {
           arguments: [(1, false), (5, false), (3, true), (9, true)])
     func fitsItsRows(count: Int, subtitles: Bool) throws {
         let (store, suite) = Self.store()
-        defer { UserDefaults().removePersistentDomain(forName: suite) }
+        defer { TestDefaults.cleanup(suite: suite) }
         let hosted = Self.host(Harness(rows: Self.rows(count, subtitles: subtitles),
                                        tableId: "fit", store: store))
         let table = try #require(Self.table(in: hosted.host))
@@ -152,7 +152,7 @@ struct UsageTableLayoutTests {
     @Test("a long table stops at the cap and scrolls inside")
     func capsLongLists() throws {
         let (store, suite) = Self.store()
-        defer { UserDefaults().removePersistentDomain(forName: suite) }
+        defer { TestDefaults.cleanup(suite: suite) }
         let count = PacerUsageTableMetrics.defaultMaxVisibleRows + 20
         let hosted = Self.host(Harness(rows: Self.rows(count, subtitles: false),
                                        tableId: "cap", store: store))
@@ -168,7 +168,7 @@ struct UsageTableLayoutTests {
     @Test("a table opens on its label, Tokens, Hit %, Out %, Cost and Mix; the parts wait in the menu")
     func defaultColumns() throws {
         let (store, suite) = Self.store()
-        defer { UserDefaults().removePersistentDomain(forName: suite) }
+        defer { TestDefaults.cleanup(suite: suite) }
         let hosted = Self.host(Harness(rows: Self.rows(2, subtitles: false),
                                        tableId: "columns", store: store))
         let table = try #require(Self.table(in: hosted.host))
@@ -199,7 +199,7 @@ struct UsageTableLayoutTests {
     @Test("a donut list's columns are columns the table shows, under the same titles")
     func donutListColumnsShown() throws {
         let (store, suite) = Self.store()
-        defer { UserDefaults().removePersistentDomain(forName: suite) }
+        defer { TestDefaults.cleanup(suite: suite) }
         let hosted = Self.host(Harness(rows: Self.rows(2, subtitles: false), tableId: "list", store: store))
         let table = try #require(Self.table(in: hosted.host))
         // A modal's Models table follows its By model card, as All models
@@ -214,7 +214,7 @@ struct UsageTableLayoutTests {
     @Test("the header lets the user reorder, resize, and hide every column but the label")
     func customizable() throws {
         let (store, suite) = Self.store()
-        defer { UserDefaults().removePersistentDomain(forName: suite) }
+        defer { TestDefaults.cleanup(suite: suite) }
         let hosted = Self.host(Harness(rows: Self.rows(2, subtitles: false),
                                        tableId: "custom", store: store))
         let table = try #require(Self.table(in: hosted.host) as? NSOutlineView)
@@ -237,7 +237,7 @@ struct UsageTableLayoutTests {
     @Test("a layout the user makes is the next table's layout")
     func layoutPersists() throws {
         let (store, suite) = Self.store()
-        defer { UserDefaults().removePersistentDomain(forName: suite) }
+        defer { TestDefaults.cleanup(suite: suite) }
         let first = Self.host(Harness(rows: Self.rows(2, subtitles: false),
                                       tableId: "persist", store: store))
         let table = try #require(Self.table(in: first.host) as? NSOutlineView)
@@ -279,7 +279,7 @@ struct UsageTableLayoutTests {
     @Test("a layout saved by the round-1 table still loads; the new columns follow the defaults")
     func round1LayoutLoads() throws {
         let (store, suite) = Self.store()
-        defer { UserDefaults().removePersistentDomain(forName: suite) }
+        defer { TestDefaults.cleanup(suite: suite) }
         let data = Data(Self.round1Layout.utf8)
         // It decodes as the type the table stores.
         let decoded = try JSONDecoder().decode(
@@ -299,7 +299,7 @@ struct UsageTableLayoutTests {
     @Test("a saved layout naming a column the table no longer has still loads")
     func layoutWithRetiredColumn() throws {
         let (store, suite) = Self.store()
-        defer { UserDefaults().removePersistentDomain(forName: suite) }
+        defer { TestDefaults.cleanup(suite: suite) }
         // Today by model had a Share column in round 1; the donut is the
         // share now, and the column is gone.
         let share = #"{"base":{"explicit":{"_0":"share"}}}"#
@@ -330,7 +330,7 @@ struct UsageTableLayoutTests {
           arguments: [CGFloat(900), 600, 420])
     func savedTooWideRefits(width: CGFloat) throws {
         let (store, suite) = Self.store()
-        defer { UserDefaults().removePersistentDomain(forName: suite) }
+        defer { TestDefaults.cleanup(suite: suite) }
         let key = PacerUsageTableMetrics.columnsKey(tableId: "too-wide")
         store.set(Data(Self.wideLayout(width: 180).utf8), forKey: key)
         let hosted = Self.host(Harness(rows: Self.rows(3, subtitles: true), tableId: "too-wide",
@@ -364,7 +364,7 @@ struct UsageTableLayoutTests {
     @Test("a layout saved in a narrower window fills the card rather than leaving a gap")
     func savedTooNarrowFills() throws {
         let (store, suite) = Self.store()
-        defer { UserDefaults().removePersistentDomain(forName: suite) }
+        defer { TestDefaults.cleanup(suite: suite) }
         store.set(Data(Self.wideLayout(width: 40).utf8),
                   forKey: PacerUsageTableMetrics.columnsKey(tableId: "too-narrow"))
         let width: CGFloat = 900
@@ -384,7 +384,7 @@ struct UsageTableLayoutTests {
     @Test("a layout that showed Write % shows Hit % in its place; the stored layout is renamed")
     func writeShareLayoutBecomesHitRate() throws {
         let (store, suite) = Self.store()
-        defer { UserDefaults().removePersistentDomain(forName: suite) }
+        defer { TestDefaults.cleanup(suite: suite) }
         // The round-1 layout, with Write % shown by hand (a table hides
         // it by default) and dragged to third place.
         let share = #"{"base":{"explicit":{"_0":"writeShare"}}}"#
@@ -440,7 +440,7 @@ struct UsageTableLayoutTests {
     @Test("a layout saved before a table's defaults version is cleared once; one saved after is kept")
     func layoutDefaultsVersion() throws {
         let (store, suite) = Self.store()
-        defer { UserDefaults().removePersistentDomain(forName: suite) }
+        defer { TestDefaults.cleanup(suite: suite) }
         let layout = Data(Self.round4Layout().utf8)
         let key = PacerUsageTableMetrics.columnsKey(tableId: "t")
         let marker = PacerUsageTableMetrics.layoutDefaultsKey(tableId: "t")
@@ -494,7 +494,7 @@ struct UsageTableLayoutTests {
     @Test("a round-4 layout of a reset table opens on the new defaults, then keeps what the user does")
     func round4LayoutOpensOnNewDefaults() throws {
         let (store, suite) = Self.store()
-        defer { UserDefaults().removePersistentDomain(forName: suite) }
+        defer { TestDefaults.cleanup(suite: suite) }
         let layout = Data(Self.round4Layout().utf8)
         // "models" is one of the tables round 5 resets; "kept" is not, and
         // shows what the same layout would have done.
@@ -525,7 +525,7 @@ struct UsageTableLayoutTests {
     @Test("a table card leaves a card's title spacing between its title and the column titles")
     func titleSpacing() throws {
         let (store, suite) = Self.store()
-        defer { UserDefaults().removePersistentDomain(forName: suite) }
+        defer { TestDefaults.cleanup(suite: suite) }
         let title = "Most expensive days"
         let card = PacerTableCard(title) {
             PacerUsageTable(rows: Self.rows(3, subtitles: false), tableId: "spacing", labelTitle: "Date",
@@ -574,7 +574,7 @@ struct UsageTableLayoutTests {
     @Test("the header is the system's: its own cells and dividers, the sort marked natively")
     func nativeHeader() throws {
         let (store, suite) = Self.store()
-        defer { UserDefaults().removePersistentDomain(forName: suite) }
+        defer { TestDefaults.cleanup(suite: suite) }
         let hosted = Self.host(Harness(rows: Self.rows(3, subtitles: true),
                                        tableId: "native", store: store))
         let table = try #require(Self.table(in: hosted.host))
@@ -598,7 +598,7 @@ struct UsageTableLayoutTests {
     @Test("every title fits its column's starting width")
     func titlesFit() throws {
         let (store, suite) = Self.store()
-        defer { UserDefaults().removePersistentDomain(forName: suite) }
+        defer { TestDefaults.cleanup(suite: suite) }
         let hosted = Self.host(Harness(rows: Self.rows(2, subtitles: false), tableId: "titles",
                                        store: store, defaults: Set(UsageColumn.allCases)), width: 1400)
         let table = try #require(Self.table(in: hosted.host))
@@ -747,7 +747,7 @@ struct UsageTableLayoutTests {
         for column in UsageColumn.allCases { ids[column.title(label: "Model")] = column.rawValue }
         for title in expected where title != "Model" && title != "Mix" {
             let (store, suite) = Self.store()
-            defer { UserDefaults().removePersistentDomain(forName: suite) }
+            defer { TestDefaults.cleanup(suite: suite) }
             let sort = PacerUsageSort(column: try #require(ids[title]), descending: true)
             let hosted = Self.host(ExtrasHarness(rows: Self.widestRows(), tableId: "default-\(layout)",
                                                  store: store, extras: extras,
@@ -790,7 +790,7 @@ struct UsageTableLayoutTests {
                                UsageColumn.cacheHitRate.rawValue, UsageColumn.tokens.rawValue]
         for column in sorts {
             let (store, suite) = Self.store()
-            defer { UserDefaults().removePersistentDomain(forName: suite) }
+            defer { TestDefaults.cleanup(suite: suite) }
             let hosted = Self.host(SessionsHarness(rows: rows, showProject: showProject, store: store,
                                                    width: width,
                                                    sort: PacerUsageSort(column: column, descending: true)),
@@ -825,7 +825,7 @@ struct UsageTableLayoutTests {
     @Test("Reset columns brings back the default columns, order and widths, and keeps the sort")
     func resetColumns() throws {
         let (store, suite) = Self.store()
-        defer { UserDefaults().removePersistentDomain(forName: suite) }
+        defer { TestDefaults.cleanup(suite: suite) }
         // What a fresh table looks like, for comparison.
         let fresh = Self.host(Harness(rows: Self.rows(2, subtitles: false), tableId: "reset-fresh",
                                       store: store))
@@ -906,7 +906,7 @@ struct UsageTableLayoutTests {
     @Test("the header's menu is AppKit's column menu, Show All included, then Reset Columns")
     func headerMenuHasReset() throws {
         let (store, suite) = Self.store()
-        defer { UserDefaults().removePersistentDomain(forName: suite) }
+        defer { TestDefaults.cleanup(suite: suite) }
         let hosted = Self.host(Harness(rows: Self.rows(2, subtitles: false), tableId: "header-menu",
                                        store: store))
         let table = try #require(Self.table(in: hosted.host))
@@ -950,7 +950,7 @@ struct UsageTableLayoutTests {
     @Test("the header's own items still show and hide columns, and Reset Columns there undoes it")
     func headerMenuResets() throws {
         let (store, suite) = Self.store()
-        defer { UserDefaults().removePersistentDomain(forName: suite) }
+        defer { TestDefaults.cleanup(suite: suite) }
         let hosted = Self.host(HeaderResetHarness(rows: Self.rows(2, subtitles: false), store: store))
         var table = try #require(Self.table(in: hosted.host))
         let fresh: [String] = Self.visibleTitles(table)
@@ -992,7 +992,7 @@ struct UsageTableLayoutTests {
     @Test("a header menu someone else set is kept whole, with Reset Columns added once")
     func headerMenuKeepsAnother() throws {
         let (store, suite) = Self.store()
-        defer { UserDefaults().removePersistentDomain(forName: suite) }
+        defer { TestDefaults.cleanup(suite: suite) }
         let hosted = Self.host(Harness(rows: Self.rows(2, subtitles: false), tableId: "other-menu",
                                        store: store))
         let table = try #require(Self.table(in: hosted.host))
@@ -1009,7 +1009,7 @@ struct UsageTableLayoutTests {
     @Test("the header's tooltips say what Hit %, Out %, Tokens and Mix are")
     func headerTooltips() throws {
         let (store, suite) = Self.store()
-        defer { UserDefaults().removePersistentDomain(forName: suite) }
+        defer { TestDefaults.cleanup(suite: suite) }
         let hosted = Self.host(Harness(rows: Self.rows(2, subtitles: false), tableId: "tooltips",
                                        store: store))
         let table = try #require(Self.table(in: hosted.host))
@@ -1037,7 +1037,7 @@ struct UsageTableLayoutTests {
     @Test("a click opens its row and clears the selection; an arrow key only moves it")
     func clickOpensKeysWalk() throws {
         let (store, suite) = Self.store()
-        defer { UserDefaults().removePersistentDomain(forName: suite) }
+        defer { TestDefaults.cleanup(suite: suite) }
         final class Opened { var ids: [String] = [] }
         let opened = Opened()
         let hosted = Self.host(OpeningHarness(rows: Self.rows(3, subtitles: false), store: store,
@@ -1065,7 +1065,7 @@ struct UsageTableLayoutTests {
           arguments: [CGFloat(900), 600, 480, 420])
     func fitsItsWidth(width: CGFloat) throws {
         let (store, suite) = Self.store()
-        defer { UserDefaults().removePersistentDomain(forName: suite) }
+        defer { TestDefaults.cleanup(suite: suite) }
         let hosted = Self.host(Harness(rows: Self.rows(3, subtitles: true), tableId: "fitWidth",
                                        store: store, width: width), width: width)
         let table = try #require(Self.table(in: hosted.host))
@@ -1109,7 +1109,7 @@ struct UsageTableLayoutTests {
           arguments: [true, false])
     func sessionColumns(showProject: Bool) throws {
         let (store, suite) = Self.store()
-        defer { UserDefaults().removePersistentDomain(forName: suite) }
+        defer { TestDefaults.cleanup(suite: suite) }
         let rows = PacerSessionsTable.rows(Self.sessions(3))
         let hosted = Self.host(SessionsHarness(rows: rows, showProject: showProject, store: store),
                                width: 640)
@@ -1132,7 +1132,7 @@ struct UsageTableLayoutTests {
     @Test("a long sessions list stops at its own cap")
     func sessionsCap() throws {
         let (store, suite) = Self.store()
-        defer { UserDefaults().removePersistentDomain(forName: suite) }
+        defer { TestDefaults.cleanup(suite: suite) }
         let rows = PacerSessionsTable.rows(Self.sessions(40))
         let hosted = Self.host(SessionsHarness(rows: rows, showProject: true, store: store), width: 640)
         let cap: CGFloat = PacerUsageTableMetrics.height(
@@ -1580,12 +1580,12 @@ struct UsageTableRender {
         let dir = ProcessInfo.processInfo.environment["PACER_RENDER_DIR"]
             ?? FileManager.default.temporaryDirectory.path
         try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-        let suite = "pacer.tests.usageTable.render.\(UUID().uuidString)"
-        var suites: [String] = [suite]
-        defer { for name in suites { UserDefaults().removePersistentDomain(forName: name) } }
+        var holders: [TestDefaults] = []
+        defer { for h in holders { h.cleanup() } }
         func store(_ tag: String) -> UserDefaults {
-            suites.append(suite + "." + tag)
-            return UserDefaults(suiteName: suite + "." + tag)!
+            let h = TestDefaults(prefix: "usageTable.render.\(tag)")
+            holders.append(h)
+            return h.defaults
         }
         // 849: the page at the window's default size (1080, less the
         // sidebar); the card inside it is 48pt narrower. 760 and 660: the

@@ -285,7 +285,9 @@ struct ParkedCredentialStoreTests {
 
     @Test("the setting is on unless it has been turned off")
     func defaultsOn() {
-        let defaults = UserDefaults(suiteName: "pacer-test-\(UUID().uuidString)")!
+        let holder = TestDefaults(prefix: "parked")
+        defer { holder.cleanup() }
+        let defaults = holder.defaults
         #expect(PacerPreferences.switcherCredentialsEnabled(from: defaults))
         defaults.set(false, forKey: PacerPreferenceKeys.switcherCredentialsEnabled)
         #expect(!PacerPreferences.switcherCredentialsEnabled(from: defaults))
