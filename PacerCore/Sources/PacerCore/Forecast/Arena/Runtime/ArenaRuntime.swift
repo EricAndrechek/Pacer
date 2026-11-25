@@ -275,7 +275,10 @@ public actor ArenaRecordScorer {
     /// a pass and on memory pressure.
     nonisolated let memo = ArenaForecastMemo()
     /// Wakes the pass while it waits on its workers (`ArenaScoringCrew`).
-    private let wake = ArenaWakeup()
+    private nonisolated let wake = ArenaWakeup()
+    /// The pass's worker threads that are running, which a stop raises
+    /// (`beginStop`).
+    nonisolated let workers = ArenaWorkerThreads()
     let config: Config
     private let calendar: Calendar
     private let landed: @Sendable (_ account: String, _ outcomes: [EngineSelfEval.NewOutcome]) async -> Void
@@ -353,6 +356,18 @@ public actor ArenaRecordScorer {
                 try? await Task.sleep(for: .seconds(self.config.rescanInterval))
             }
         }
+    }
+
+    /// The part of a stop that cannot wait: from any thread, without this
+    /// actor. Every check from here on finds the stop, every worker runs at
+    /// `qos` or above until it leaves (`ArenaWorkerThreads`), and the pass
+    /// wakes to save what is back. Returns how many workers it raised.
+    @discardableResult
+    nonisolated func beginStop(hurryingTo qos: qos_class_t) -> Int {
+        cancel.set(true)
+        let raised = workers.hurry(to: qos)
+        wake.signal()
+        return raised
     }
 
     func stop() async {
@@ -634,7 +649,7 @@ public actor ArenaRecordScorer {
                       + (phase == .cheap ? String(format: " (≤ %.0f ms a forecast)", config.cheapCostMs) : "")
                       + ", " + Self.rateText(budget.rate))
             let crew = ArenaScoringCrew(scorer: self, phase: phase, streams: streams, declined: declined, plan: plan,
-                                        wake: wake, budget: budget, cancel: cancel)
+                                        wake: wake, budget: budget, cancel: cancel, threads: workers)
             await run(crew, phase: phase, report: &report, planned: planned, started: started, lastLog: &lastLog)
             (streams, declined) = crew.finish()
             guard !cancel.isSet else {
@@ -722,9 +737,18 @@ public actor ArenaRecordScorer {
                 // Per handback, not per drain: how many cycles came back
                 // before this actor woke is timing, and what gets saved
                 // together, and handed over in what order, must not be.
-                if unsavedCount >= config.flushOutcomes { await flush() }
+                if unsavedCount >= config.flushOutcomes, !cancel.isSet { await flush() }
             }
-            if SuspendingClock.now - lastFlush >= .seconds(config.flushInterval) { await flush() }
+            if cancel.isSet {
+                // Stopping: what is back is saved now, not once every worker
+                // is. A worker still out may be one the Mac is not running,
+                // and a quit does not wait for it for long (#446,
+                // `ArenaRuntime.stop`). Saved only: the engines are stopping
+                // too, and read the record from the store at the next launch.
+                saveUnsaved()
+            } else if SuspendingClock.now - lastFlush >= .seconds(config.flushInterval) {
+                await flush()
+            }
             if SuspendingClock.now - lastLog >= .seconds(120) {
                 lastLog = SuspendingClock.now
                 log(report, phase: phase, of: planned, since: started)
@@ -1474,11 +1498,56 @@ public final class ArenaRuntime: Sendable {
         Task.detached(priority: BackgroundQoS.priority) { await scorer.start(accounts: accounts, beforePass: fetchMissing) }
     }
 
-    /// Stop at the next check inside a model, every worker, and wait for it.
-    public func stop() async {
+    /// The longest `stop` waits for the scorer to wind down: well inside the
+    /// two seconds a quit may spend on Pacer's own work (#446). Raised, the
+    /// workers reach their next check in moments (a budget sleep is at most
+    /// `ArenaCPUBudget.sleepStep`).
+    public static let stopBound: Duration = .seconds(1)
+
+    /// Stop every lane: each worker at the next check inside its model, the
+    /// scorer once it has saved what is back. Waits for that at most `bound`,
+    /// and returns whether it all wound down in time.
+    ///
+    /// A quit waits here (`AppBackgroundService.stop`), and must not wait on
+    /// work the Mac is not running (#446). The workers run at background QoS,
+    /// which a saturated Mac does not schedule at all, so the stop raises each
+    /// one to its own class first (`ArenaWorkerThreads`); the scorer's queue
+    /// is raised by dispatch for the job the wait puts on it. The scorer saves
+    /// what has come back as soon as it wakes, without waiting for the workers
+    /// still out (`run`).
+    ///
+    /// Past `bound`, what is still out is left to the process's exit, and
+    /// nothing of it is lost that matters: a worker holds only its cycle's
+    /// forecasts, in memory; grades reach the store only in the scorer's own
+    /// transactions, which SQLite commits whole or not at all; and the next
+    /// launch's pass grades whatever is missing (`RuntimeStopTests`).
+    @discardableResult
+    public func stop(within bound: Duration = ArenaRuntime.stopBound) async -> Bool {
+        let began = ContinuousClock.now
+        let waiter = qos_class_t(rawValue: UInt32(Task.currentPriority.rawValue))
         cancel.set(true)
         governor?.stop()
-        await scorer.stop()
+        let raised = scorer.beginStop(hurryingTo: Self.hurryQoS(waiter: waiter))
+        let scorer = self.scorer
+        let done = await BoundedWait.atMost(bound) { await scorer.stop() }
         FMScratch.release()
+        let ms = Int((ContinuousClock.now - began) / .milliseconds(1))
+        let raisedText = raised > 0 ? ", \(raised) worker(s) raised" : ""
+        if done {
+            Log.write("Arena", "stopped in \(ms) ms\(raisedText)")
+        } else {
+            Log.write("Arena", "stop: stopped waiting after \(ms) ms\(raisedText), \(scorer.workers.count) "
+                      + "worker(s) still out; what they hold is graded again at the next launch")
+        }
+        return done
+    }
+
+    /// The class a stop raises the scorer's workers to: the waiter's, as a
+    /// priority inversion is resolved, but never below utility (out of the
+    /// tier a busy Mac starves, as `BackgroundQoS` does for tests) and never
+    /// above user-initiated (interactive is for the event loop).
+    static func hurryQoS(waiter: qos_class_t) -> qos_class_t {
+        let lo = QOS_CLASS_UTILITY.rawValue, hi = QOS_CLASS_USER_INITIATED.rawValue
+        return qos_class_t(rawValue: min(hi, max(lo, waiter.rawValue)))
     }
 }
