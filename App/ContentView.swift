@@ -56,12 +56,6 @@ struct ContentView: View {
     @SceneStorage("pacer.sidebar.selection")
     private var selectionRaw: String = Destination.dashboard.rawValue
 
-    /// Widest sidebar tab label at the *current* Dynamic Type size,
-    /// measured off-screen by `sidebarLabelProbe`. `nil` until the first
-    /// measurement lands — `sidebarMinWidth` errs wide until then so a
-    /// label can never clip in the gap. Grows with accessibility text.
-    @State private var measuredLabelWidth: CGFloat?
-
     /// Explicit so the README screenshot run can show the window with the
     /// sidebar closed (`ScreenshotMode.captureRealWindow`); for a user it
     /// behaves exactly as the split view's own state did.
@@ -155,7 +149,7 @@ struct ContentView: View {
         // unrelated redraw (#140; AGENTS.md, "SwiftUI state and data flow").
         let _ = columnVisibility
         NavigationSplitView(columnVisibility: $columnVisibility) {
-            sidebar
+            DashboardSidebar(selection: selection)
         } detail: {
             // A stable container, so the toolbar below hangs off a view that
             // survives a tab switch. `detail` is a `switch` — attached to it
@@ -258,14 +252,51 @@ struct ContentView: View {
         }
     }
 
-    // MARK: - Sidebar
+    // MARK: - Detail
 
-    /// Left pane. Custom-rendered list (rather than the default
-    /// `List`/`Section` pair) so we can place the app brand at top and
-    /// pin Settings to the bottom — both common macOS sidebar idioms
-    /// that `List` makes awkward.
     @ViewBuilder
-    private var sidebar: some View {
+    private var detail: some View {
+        // Key the active destination on the current local day. Reading
+        // `PacerToday.shared.key` here (tracked by `@Observable`) makes
+        // `detail` re-evaluate at the midnight rollover; the `.id` then
+        // rebuilds the destination — re-running every card's `init()`
+        // against a fresh `Date()` so date-pinned `@Query` predicates
+        // stop matching yesterday. This is the automatic equivalent of
+        // the manual "switch tabs and back" that users relied on.
+        let dayKey = PacerToday.shared.key
+        switch selection.wrappedValue {
+        case .dashboard: DashboardView().id(dayKey)
+        case .history:   HistoryView().id(dayKey)
+        case .projects:  ProjectsView(initialScope: ScreenshotMode.projectsInitialScope).id(dayKey)
+        case .models:    ModelsView().id(dayKey)
+        case .settings:  SettingsView()
+        }
+    }
+}
+
+// MARK: - Sidebar
+
+/// The window's left pane: brand, destinations, the footer, Settings.
+///
+/// Its own view (it was a property of `ContentView`) so a diagnostic render
+/// can draw it without the split view around it (`LiveRenderMode`'s
+/// `sidebar` page).
+///
+/// Custom-rendered list (rather than the default `List`/`Section` pair) so we
+/// can place the app brand at top and pin Settings to the bottom — both common
+/// macOS sidebar idioms that `List` makes awkward.
+struct DashboardSidebar: View {
+    typealias Destination = ContentView.Destination
+
+    let selection: Binding<Destination>
+
+    /// Widest sidebar tab label at the *current* Dynamic Type size,
+    /// measured off-screen by `sidebarLabelProbe`. `nil` until the first
+    /// measurement lands — `sidebarMinWidth` errs wide until then so a
+    /// label can never clip in the gap. Grows with accessibility text.
+    @State private var measuredLabelWidth: CGFloat?
+
+    var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             sidebarBrand
                 .padding(.horizontal, 12)
@@ -292,6 +323,12 @@ struct ContentView: View {
             }
 
             Spacer(minLength: 0)
+
+            // Which Pacer this is, a way to say something about it, and its
+            // update once one is ready: in plain sight, above Settings.
+            SidebarFooter(status: UpdateStatus.shared)
+                .padding(.horizontal, 12)
+                .padding(.bottom, 10)
 
             Divider().opacity(0.4)
             VStack(alignment: .leading, spacing: 0) {
@@ -435,26 +472,48 @@ struct ContentView: View {
             Spacer(minLength: 0)
         }
     }
+}
 
-    // MARK: - Detail
+/// The sidebar's foot: "Pacer 0.9.4" and Send Feedback on one line (two when
+/// the sidebar is too narrow for both), and above them, only while there is
+/// something to show, the update's progress or its install button.
+///
+/// Reads `status.state` in its own body, so it follows the check and the
+/// install hold whatever else redraws.
+private struct SidebarFooter: View {
+    let status: UpdateStatus
 
-    @ViewBuilder
-    private var detail: some View {
-        // Key the active destination on the current local day. Reading
-        // `PacerToday.shared.key` here (tracked by `@Observable`) makes
-        // `detail` re-evaluate at the midnight rollover; the `.id` then
-        // rebuilds the destination — re-running every card's `init()`
-        // against a fresh `Date()` so date-pinned `@Query` predicates
-        // stop matching yesterday. This is the automatic equivalent of
-        // the manual "switch tabs and back" that users relied on.
-        let dayKey = PacerToday.shared.key
-        switch selection.wrappedValue {
-        case .dashboard: DashboardView().id(dayKey)
-        case .history:   HistoryView().id(dayKey)
-        case .projects:  ProjectsView(initialScope: ScreenshotMode.projectsInitialScope).id(dayKey)
-        case .models:    ModelsView().id(dayKey)
-        case .settings:  SettingsView()
+    var body: some View {
+        let state = status.state
+        VStack(alignment: .leading, spacing: 8) {
+            PacerUpdateAction(state: state) { status.installNow() }
+            // The version and the button side by side when they fit, the
+            // button under the version when they don't (a dev build's label
+            // is longer, and the sidebar can be dragged narrow).
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) {
+                    PacerVersionLabel(status.version)
+                    Spacer(minLength: 0)
+                    feedbackButton
+                }
+                VStack(alignment: .leading, spacing: 6) {
+                    PacerVersionLabel(status.version)
+                    feedbackButton
+                }
+            }
         }
+    }
+
+    private var feedbackButton: some View {
+        Button {
+            FeedbackWindow.shared.show(from: .sidebar)
+        } label: {
+            Label(FeedbackCopy.button, systemImage: "bubble.left")
+                .lineLimit(1)
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .fixedSize()
     }
 }
 

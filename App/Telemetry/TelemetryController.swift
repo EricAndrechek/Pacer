@@ -191,7 +191,7 @@ final class TelemetryController {
         o.beforeSend = { event in
             guard TelemetryController.crashAllowed else { return nil }
             // Transactions arrive here too and are budgeted in `tracesSampler`;
-            // feedback is budgeted where it is sent (ReportProblemView).
+            // feedback is budgeted where it is sent (FeedbackView).
             if let kind = TelemetryController.budgetKind(event), !TelemetryBudget.shared.take(kind) {
                 return nil
             }

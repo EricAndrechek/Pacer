@@ -181,10 +181,11 @@ frame or forecast):
 | `detail_opened` | modal root set or pushed; each sheet/popover appears | `which`: `day`, `project`, `session`, `projection` (prediction details / compare models), `alias_manager`, `alias_editor`, `collections_manager`, `collection_editor`, `bulk_merge`, `chart_share`; `pushed` |
 | `control_changed` | card controls (`AnalyticsSettings` watch list, plus the project budget toggle) | `card`, `control`, `value`: History/Models/Projects `range` (`7d`…`all`), Models `grouping`, heatmap `metric`, table `sort` columns, toolbar `account_scope` (`all` / `one`, never the id), `project_budget` `enabled` |
 | `export_used` | after a successful export | `flavor`: `daily_totals_csv`, `daily_by_model_csv`, `project_totals_csv`, `chart_image_copy`, `chart_image_save`, `chart_image_share` |
-| `report_problem_opened` | Report a Problem window | `from`: `help_menu`, `status_menu`, `settings` |
+| `report_problem_opened` | Send Feedback window opened (named for its old title, "Report a Problem", so the series carries on) | `from`: `help_menu`, `status_menu`, `settings`, `sidebar` |
+| `feedback_sent` | Send Feedback window: accepted by the site's endpoint, or handed to Open GitHub Issue | `kind`: `idea`, `problem`, `other`; `via`: `site`, `github`. Never the text, the email or the files |
 | `setting_changed` | `AnalyticsSettings` watch list | `setting`; `value` only for bools and fixed sets (icon style, alert source, cost mode, time range, chips summary, icon driver as window kind); thresholds, ports, hours send the key alone; tokens, hosts and paths are not watched |
 | `menubar_opened` | `menuWillOpen` | — |
-| `menubar_item_clicked` | status menu items | `item`: `open_pacer`, `settings`, `report_problem`, `quit` |
+| `menubar_item_clicked` | status menu items | `item`: `open_pacer`, `settings`, `report_problem` (Send Feedback…), `install_update` (Update to … — Restart), `quit` |
 | `menubar_context_action` | defined, not fired: the status item has no right-click menu today | `item` |
 | `widget_inventory` | daily check-in, `WidgetCenter.getCurrentConfigurations` | `widgets`: list of {`kind`, `family`, `primary_window` / `secondary_window` (window kind or `default`), `range`, `pinned_project` (bool)}; `count`; `refreshes.<Kind>` (yesterday's granted timelines, `WidgetRefreshLog`) |
 | `widget_tapped` | app opened by `pacer://widget?kind=&family=` (widgets carry `widgetURL`) | `kind`, `family` |
@@ -358,8 +359,9 @@ Debug is `#if DEBUG` (`build.config` debug).
 
 - **Where applied**: `beforeSend` (errors, hangs, crashes, MetricKit; returns
   nil over budget), `tracesSampler` (root transactions; over budget samples at
-  0), `beforeSendMetric` (per name; stall has its own), the Report a Problem
-  sheet (offers the GitHub issue instead), the CLI's `pacer feedback` POST, and
+  0), `beforeSendMetric` (per name; stall has its own), the Send Feedback
+  window (its endpoint POST; over the cap it offers the GitHub issue instead),
+  the CLI's `pacer feedback` POST, and
   `CrashReportForwardingService` (widget/CLI crash envelopes; these bypass the
   SDK's hooks, so they spend the crash budget directly).
 - **State**: App Group defaults, one dictionary (UTC day + counts), so a
@@ -477,7 +479,21 @@ CLI crashes are not reported.
    one child span per phase, rebuilt from `ScanReport.phaseTimings`; capped 20 per Mac per day.
    PacerCore emits through a small `TelemetrySink` protocol (no Sentry import in PacerCore).
 4. **Crashes, hangs, diagnostics** as above.
-5. **Problem reports**: Help → "Report a Problem…" sheet → `SentrySDK.capture(feedback:)`; and
+5. **Feedback**: "Send Feedback…" (sidebar footer, status menu, Help menu, Settings → Privacy) →
+   `POST https://pacer.andrechek.com/api/feedback` (`FeedbackSubmission`, `FeedbackSender`), which
+   forwards to Sentry user feedback. Since 2026-11-25 (the owner's decision) it always goes that way,
+   whatever the crash-reports toggle, and needs no GitHub account; a GitHub issue is offered only
+   when the POST fails or the day's 5 are spent (`TelemetryBudget.take(.feedback)`). JSON body:
+   `kind` (`idea`/`problem`/`other`), `message`, `email` (optional, the person's own), `appVersion`,
+   `appBuild`, `devDescribe` (dev builds' `git describe`), `macOS`, `model` (`hw.model`), `locale`,
+   `installId` (only while "Usage data" is on), `attachments` (≤ 3; PNG, JPEG, plain text, JSON or
+   QuickTime; ≤ 8 MB in all once base64-encoded, under the Worker's CPU budget on Cloudflare's free
+   plan; the window picture is off by default). Answers: 2xx sent; 400 shows the endpoint's reason;
+   429 "try again later"; anything else, or no answer, offers the GitHub issue. The message is the person's own words, sent on their click,
+   so it is **not** run through `TelemetryScrubber`: `FeedbackRedactor` removes only credentials
+   (`Authorization:` values, bearer tokens, `sk-ant-…`/`sk-…`, GitHub tokens, JWTs, other 40+
+   character random tokens) and the window shows "1 token removed"; paths, emails and hex ids stay.
+   Only a normal launch sends (`LaunchMode.isNormalLaunch`). And
    `pacer feedback` POSTs a `feedback` envelope with the DSN (scrubbed, ≤ 4096 chars, 3 s timeout,
    falls back to today's local inbox + issue link). Off with `--local`, `PACER_FEEDBACK=local`, or
    the crash-reports toggle. This replaces #290's Worker + GitHub App design.
@@ -488,7 +504,8 @@ CLI crashes are not reported.
   (`-Users-<name>-…`) → `<project>`; emails → `<email>`; `Bearer …`, `sk-ant-…`, `sk-…`,
   `ghp_…`, `github_pat_…`, hex ≥ 32 and base64 ≥ 40 → `<redacted>`.
 - Applied to event message, exception values, breadcrumbs, tags/contexts, span descriptions and
-  data, metric attributes, feedback text.
+  data, metric attributes, `pacer feedback` text (the window's feedback uses `FeedbackRedactor`
+  instead, item 5).
 
 ## Release pipeline
 
