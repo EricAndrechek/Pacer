@@ -119,7 +119,7 @@ test:  ## Run the PacerCore unit + ground-truth tests.
 			grep -E "✘ Test .*(recorded an issue|failed after)|error: -\[|Test Case .* failed" "$$log" | head -40; fi; \
 		rm -f "$$HOME"/Library/Preferences/pacer.testprocess.*.plist; exit $$status
 
-lint-hangs:  ## Flag the code shapes behind production hangs and the 0.9.0 crash (sync XPC on main, @Query in always-mounted views, formatters in view bodies, stderr writes). A grep; seconds. See bin/lint-hang-patterns.sh.
+lint-hangs:  ## Flag the code shapes behind production hangs and the 0.9.0 crash (sync XPC on main, @Query in always-mounted views, formatters in view bodies, stderr writes, store work in a hop to main). A grep; seconds. See bin/lint-hang-patterns.sh.
 	@bin/lint-hang-patterns.sh --self-test
 	@bin/lint-hang-patterns.sh
 
