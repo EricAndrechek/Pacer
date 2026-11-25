@@ -207,10 +207,8 @@ project.
 The two periodic requests Pacer makes to its own site, the Sparkle appcast
 (`/appcast.xml`) and the curated price history (`/price-history.json`), carry
 headers so the site can count active Macs and versions. The site turns each
-price-history request into one `feed_request` event in PostHog ("Feed request
-counting on the site", below); the appcast is a plain static file whose
-requests run no Worker code, so its headers are not recorded. Nothing goes to
-Sentry for this. The `X-Pacer-*` headers only ever
+of these requests into one `feed_request` event in PostHog ("Feed request
+counting on the site", below). Nothing goes to Sentry for this. The `X-Pacer-*` headers only ever
 reach pacer.andrechek.com: Sparkle also puts its `httpHeaders` on update
 archive/delta downloads and release-notes fetches (GitHub releases), so the
 updater delegate strips every `X-Pacer-*` header from those requests
@@ -368,19 +366,21 @@ retried without it, or sent straight to Sentry as Report a Problem does today.
 ## Feed request counting on the site (since 2026-11-25, `site/worker/lib.ts`)
 
 How many Macs run Pacer, and on which versions, counted from every Mac,
-telemetry toggles or not: every Pacer from 0.9.4 on fetches the price history
-(`/price-history.json`) from pacer.andrechek.com about once a day (on the
-catalog's 24-hour refresh, retried hourly after a failure). That path reaches
-the site's Worker (`run_worker_first`), which returns the static file exactly as
-the assets layer answers it and then, in `ctx.waitUntil`, posts one event to the
-app's PostHog project. Nothing about the count can change or delay the answer
-(`site/README.md`, "The Worker"). The update feed (`/appcast.xml`) is **not**
-counted: it is a plain static file whose requests run no Worker code. On the
-Workers Free plan (the owner's choice) an account past its daily request
-limit answers Worker-first paths with 429 until 00:00 UTC, which would fail
-update checks (the owner's decision, 2026-11-25). The Worker would count it the
-same way if it were routed (`file: appcast`, Sparkle's User-Agent); it is not,
-and a test keeps it out.
+telemetry toggles or not: every Pacer from 0.9.4 on fetches the update feed
+(`/appcast.xml`, Sparkle: at launch and every 6 hours) and the price history
+(`/price-history.json`, about once a day on the catalog's 24-hour refresh,
+retried hourly after a failure) from pacer.andrechek.com. Both paths run the
+site's Worker (`run_worker_first`), which returns the static file exactly as
+the assets layer answers it, untouched, and then, in `ctx.waitUntil`, posts
+one event to the app's PostHog project. Nothing about the count can change or
+delay the answer (`site/README.md`, "The Worker").
+
+The cost (owner's decision, 2026-11-25): the site is on the Workers Free plan,
+whose request limit is daily and account-wide. Past it, Worker-first paths
+answer 429 until 00:00 UTC, update checks included. Pacer 0.9.5 and later
+then read both files from `main` on raw.githubusercontent.com ("Feed
+fallbacks"); 0.9.4 has no fallback, so its checks fail until the reset.
+Accepted until Macs are on 0.9.5.
 
 **Counted:** GETs whose User-Agent starts `Pacer/` (304s too: a conditional GET
 is still a check). Not HEAD or any other method, crawlers, browsers, `curl`
@@ -389,7 +389,7 @@ Not Track or Global Privacy Control.
 
 | Event | When | Properties |
 | --- | --- | --- |
-| `feed_request` | a counted GET of the price history | `surface: 'feed'`; `environment` (`production` on pacer.andrechek.com, `preview` on workers.dev, else `development`); `file` (`appcast` \| `price_history`); `status` (the asset's: 200, 304, …); `app_version` (`X-Pacer-Version` when it is X.Y.Z[-pre], 20 characters at most, else the version in Sparkle's `Pacer/<version> Sparkle/<version>`, else null); `app_build` (the build in CFNetwork's `Pacer/<build> CFNetwork/<v> Darwin/<v>`, the price history's request, else null); `sparkle_version`; `darwin_major` and `macos_major` (from `Darwin/<v>`: 20–24 → 11–15, 25 → 26, 27 on → the same number; null when unknown); `country` (Cloudflare's); `window_6h` (UTC day and 6-hour window, `2026-11-25/2`); `pacer_id_present`; `check_kind` and `since_last_check` (below; left out when the header is absent); `$process_person_profile: false`, `$ip: null`, `$geoip_disable: true`, `$lib: 'pacer-site-worker'` |
+| `feed_request` | a counted GET of either file | `surface: 'feed'`; `environment` (`production` on pacer.andrechek.com, `preview` on workers.dev, else `development`); `file` (`appcast` \| `price_history`); `status` (the asset's: 200, 304, …); `app_version` (`X-Pacer-Version` when it is X.Y.Z[-pre], 20 characters at most, else the version in Sparkle's `Pacer/<version> Sparkle/<version>`, else null); `app_build` (the build in CFNetwork's `Pacer/<build> CFNetwork/<v> Darwin/<v>`, the price history's request, else null); `sparkle_version`; `darwin_major` and `macos_major` (from `Darwin/<v>`: 20–24 → 11–15, 25 → 26, 27 on → the same number; null when unknown); `country` (Cloudflare's); `window_6h` (UTC day and 6-hour window, `2026-11-25/2`); `pacer_id_present`; `check_kind` and `since_last_check` (below; left out when the header is absent); `$process_person_profile: false`, `$ip: null`, `$geoip_disable: true`, `$lib: 'pacer-site-worker'` |
 
 **Request headers** ("Feed requests" above has what the app sends and when):
 each value is checked against its list here, and anything else is recorded as
@@ -414,25 +414,25 @@ checked shapes above, so there is no free text for `TelemetryScrubber` to
 clean; the Worker never runs the app's code.
 
 **Reading it.** Macs with Usage data on: distinct `distinct_id` where
-`pacer_id_present`. All Macs: `status` 200/304 price-history requests per UTC
-day, about one per running Mac (a failed refresh retries hourly, so count
-`since_last_check` other than `lt1h` from 0.9.5 on), split by `app_version`
-(from `X-Pacer-Version`, 0.9.5 and later). Before 0.9.5 only `app_build` is
-known (CFNetwork's User-Agent), which maps to its version through the
-appcast's `sparkle:version`. A Mac that is on but never refreshes prices
-(offline) is not seen, nor is a fetch that fell back to
-raw.githubusercontent.com ("Feed fallbacks"). The website's events (`surface: 'website'`) and these
+`pacer_id_present`. All Macs: `check_kind = 'scheduled'` appcast requests per
+`window_6h` (each Mac checks about once per window, and a launch adds a
+check), split by `app_version` (Sparkle's User-Agent carries it); or
+price-history requests per UTC day, about one per running Mac (count
+`since_last_check` other than `lt1h` to leave out hourly retries), whose
+`app_version` comes from `X-Pacer-Version` (0.9.5+) and before that only
+`app_build`, which maps to its version through the appcast's
+`sparkle:version`. Before 0.9.5 there is no `check_kind`, so manual checks
+inflate the appcast count a little. A Mac that is offline is not seen, nor is
+a request that fell back to raw.githubusercontent.com ("Feed fallbacks"). The website's events (`surface: 'website'`) and these
 (`surface: 'feed'`) never mix.
 
-**Volume and caps.** About one event a day per Mac, on PostHog's free
+**Volume and caps.** About five events a day per Mac, on PostHog's free
 quota with the app's own; no per-Mac cap applies (there is no Mac to cap, only
 requests), and anyone can send a `Pacer/` User-Agent: a flood shows up as an
-outlier in `country` and `window_6h`. Every price-history request is also a
-Worker request, so on the Workers Free plan a flood of any User-Agent can use
-up the account's daily request limit, and the price history then answers 429
-until 00:00 UTC (the app keeps its cached copy); the appcast is unaffected
-(`site/README.md`, "What routing the price history through the Worker
-costs").
+outlier in `country` and `window_6h`. Every feed request is also a Worker
+request, so a flood of any User-Agent can use up the account's daily request
+limit, and the feed then answers 429 until 00:00 UTC (above; `site/README.md`,
+"What routing the feed through the Worker costs").
 
 **Privacy page:** no new disclosure, the owner's decision (2026-11-25). It
 lists update checks and the price history among the connections Pacer makes;

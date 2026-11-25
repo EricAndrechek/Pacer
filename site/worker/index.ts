@@ -1,20 +1,17 @@
 // pacer.andrechek.com's Worker. Everything is a static asset (dist/, served by
 // the assets layer before this code runs) except the paths listed in
-// wrangler.jsonc's `run_worker_first`: /download, /api/feedback and the price
-// history.
+// wrangler.jsonc's `run_worker_first`: /download, /api/feedback, the update
+// feed and the price history.
 //
 // The update feed (/appcast.xml) and the price history (/price-history.json)
 // are static assets: public/appcast.xml and public/price-history.json, written
 // to main by the release workflow (bin/publish-feeds.sh) and deployed with the
 // site. The app reads both from here from 0.9.4 (SUFeedURL,
-// CuratedPriceHistory.remoteURL). The update feed is a plain static file: its
-// requests never run Worker code (it is not in run_worker_first; /download
-// only reads it through the binding). The price history reaches this code only
-// to be counted
-// (lib.ts, "The update feed and the price history"): the answer is the assets
-// binding's own Response, returned as it is, and the count runs after it in
-// ctx.waitUntil. Should anything here throw, the asset is fetched again and
-// returned.
+// CuratedPriceHistory.remoteURL), so they are every installed Pacer's way to
+// its next update. They reach this code only to be counted (lib.ts, "The
+// update feed and the price history"): the answer is the assets binding's own
+// Response, returned as it is, and the count runs after it in ctx.waitUntil.
+// Should anything here throw, the asset is fetched again and returned.
 //
 // - /download redirects to the newest DMG in that appcast, so the site's
 //   download buttons are right from the moment a release is published, and a

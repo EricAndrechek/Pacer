@@ -14,19 +14,19 @@
     "not_found_handling": "404-page",
     // Everything is a static asset except what is listed here, which reaches
     // the Worker first (worker/index.ts): /download and /api/feedback, which
-    // the Worker answers, and the price history, which it only counts
-    // (`feed_request`). That is still a static asset (public/): the Worker
-    // returns the assets binding's own Response untouched and counts in
+    // the Worker answers, and the update feed and price history, which it only
+    // counts (`feed_request`). Those two are still static assets (public/): the
+    // Worker returns the assets binding's own Response untouched and counts in
     // ctx.waitUntil, and falls back to the asset if anything of its own throws
-    // (site/README.md, "The Worker"). /appcast.xml is deliberately NOT listed:
-    // the update feed is a plain static file that no Worker code touches, so the
-    // account's daily Worker request limit can never stand between a Mac and its
-    // next update (worker/index.test.ts fails if it is added). Every path not
-    // listed never runs Worker code.
-    "run_worker_first": ["/download", "/download/", "/api/feedback", "/price-history.json"],
+    // (site/README.md, "The Worker"). Listing /appcast.xml puts update checks
+    // under the Workers Free plan's account-wide daily request limit: past it,
+    // these paths answer 429 until 00:00 UTC. 0.9.5+ then reads the feed from
+    // raw.githubusercontent.com; 0.9.4 has no fallback and waits. Accepted by
+    // the owner, 2026-11-25. Every path not listed never runs Worker code.
+    "run_worker_first": ["/download", "/download/", "/api/feedback", "/appcast.xml", "/price-history.json"],
   },
   // PostHog for /download's one anonymous `website_download` event and the
-  // price history's `feed_request` counts (worker/lib.ts).
+  // feed's `feed_request` counts (worker/lib.ts).
   // The same project as the app; its token is public by design (it is compiled
   // into the app, project.yml). Empty POSTHOG_TOKEN turns the event off.
   // SENTRY_DSN: where /api/feedback forwards the app's feedback (worker/feedback.ts).

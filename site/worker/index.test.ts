@@ -11,6 +11,7 @@ import {
   dmgFromRelease,
   environmentOf,
   feedEvent,
+  feedFileOf,
   latestDmg,
   macosMajor,
   pacerClient,
@@ -140,10 +141,9 @@ afterEach(() => {
 });
 
 describe('the update feed and the price history', () => {
-  // Every 0.9.4+ Pacer reads both. wrangler.jsonc's run_worker_first sends only
-  // the price history here, only to be counted (the appcast stays a pure static
-  // asset; guarded below). The handler counts either, and its answer must be
-  // the assets binding's own Response, whatever the count does.
+  // Every 0.9.4+ Pacer's way to its next update. wrangler.jsonc's
+  // run_worker_first sends both here only to be counted (checked below): the
+  // answer must be the assets binding's own Response, whatever the count does.
   const SPARKLE_UA = 'Pacer/0.9.4 Sparkle/2.10.1';
   const CFNETWORK_UA = 'Pacer/1795528779 CFNetwork/3860.100.1 Darwin/25.1.0';
   const ETAG = '"0f3c9a7e2b1d"';
@@ -208,6 +208,33 @@ describe('the update feed and the price history', () => {
     const [asked] = assets.mock.calls[0]!;
     expect((asked as Request).headers.get('If-None-Match')).toBe(ETAG);
     expect(captured[0]?.properties).toMatchObject({ file: 'appcast', status: 304 });
+  });
+
+  it('passes a Range answer (206) through untouched, and counts it', async () => {
+    serve(posthogOk());
+    const partial = () =>
+      new Response(APPCAST.slice(0, 100), {
+        status: 206,
+        headers: { ...APPCAST_HEADERS, 'Content-Range': `bytes 0-99/${APPCAST.length}`, 'Accept-Ranges': 'bytes' },
+      });
+    const { response, assets } = await call('/appcast.xml', { ...mac(SPARKLE_UA, { Range: 'bytes=0-99' }), assets: { '/appcast.xml': partial } });
+    expect(response).toBe(await assetAnswer(assets));
+    expect(response.status).toBe(206);
+    expect(response.headers.get('Content-Range')).toBe(`bytes 0-99/${APPCAST.length}`);
+    expect(await response.text()).toBe(APPCAST.slice(0, 100));
+    // The binding saw the client's own Range header.
+    expect((assets.mock.calls[0]![0] as Request).headers.get('Range')).toBe('bytes=0-99');
+    expect(captured[0]?.properties).toMatchObject({ file: 'appcast', status: 206 });
+  });
+
+  it("answers an update check's HEAD with the asset's own headers and no body, and does not count it", async () => {
+    serve(posthogOk());
+    const head = () => new Response(null, { headers: APPCAST_HEADERS });
+    const { response, assets } = await call('/appcast.xml', { ...mac(SPARKLE_UA), method: 'HEAD', assets: { '/appcast.xml': head } });
+    expect(response).toBe(await assetAnswer(assets));
+    expect([...response.headers]).toEqual([...new Headers(APPCAST_HEADERS)]);
+    expect(response.body).toBeNull();
+    expect(captured).toHaveLength(0);
   });
 
   it('passes every other answer of the assets layer through as it is (a 404 on a preview without the file)', async () => {
@@ -699,12 +726,14 @@ describe('workers.dev', () => {
 });
 
 describe('routing', () => {
-  it('runs the Worker for the price history, and never for the update feed', () => {
+  it('runs the Worker first for the update feed, the price history, /download and /api/feedback, and nothing else', () => {
     const runFirst = /"run_worker_first":\s*\[([^\]]*)\]/.exec(wrangler)?.[1] ?? '';
-    expect(runFirst).toContain('"/price-history.json"');
-    expect(runFirst).toContain('"/download"');
-    // The update feed must never depend on Worker code or its request limit (site/README.md, "The Worker").
-    expect(runFirst).not.toContain('appcast');
+    const paths = [...runFirst.matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+    expect(paths.sort()).toEqual(['/api/feedback', '/appcast.xml', '/download', '/download/', '/price-history.json']);
+    // Each listed feed path is one the handler counts and serves as an asset.
+    expect(feedFileOf('/appcast.xml')).toBe('appcast');
+    expect(feedFileOf('/price-history.json')).toBe('price_history');
+    expect(feedFileOf('/appcast.xml/')).toBeNull();
   });
 });
 
