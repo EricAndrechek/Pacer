@@ -18,15 +18,18 @@ read from `https://pacer.andrechek.com/` (`SUFeedURL`,
 | `src/lib/faq.ts` | FAQ text, used by the page and its `FAQPage` JSON-LD |
 | `../docs/screenshots/` | The README screenshots, imported directly (`@screenshots/...`), so the site never falls behind the app |
 | `public/appcast.xml`, `public/price-history.json` | The update feed and the price history. Written by releases; hand edits only as `docs/releasing.md` says |
-| `worker/index.ts`, `worker/lib.ts`, `worker/feedback.ts` | The Worker: `/download/` and `/api/feedback` |
+| `worker/index.ts`, `worker/lib.ts`, `worker/feedback.ts` | The Worker: `/download/`, `/api/feedback`, and counting price-history requests |
 | `scripts/` | `lastmod.mjs` (sitemap dates from git), `llms-full.mjs` (`/llms-full.txt` from the built pages), `csp-hashes.mjs`, `indexnow.mjs`, `feeds.mjs` + `check-feeds.mjs` (the feed's deploy gate) |
 | `public/_headers` | Security headers and the CSP (inline-script hashes filled in by `pnpm build`) |
 
 ## The Worker
 
-Only `/download/` and `/api/feedback` reach Worker code (`run_worker_first`
-in `wrangler.jsonc`); everything else is a static asset, the update feed
-included, so no Worker bug can take the feed down.
+Only `/download/`, `/api/feedback` and `/price-history.json` reach Worker
+code (`run_worker_first` in `wrangler.jsonc`); everything else is a static
+asset and never runs it, **the update feed (`/appcast.xml`) included**: it is a
+plain static file whose requests never run Worker code, so no Worker bug or
+Worker request limit can stand between a Mac and its next update (a test in
+`worker/index.test.ts` keeps it out of `run_worker_first`).
 
 - **`/appcast.xml`, `/price-history.json`** are `public/` files.
   `public/_headers` gives them their Content-Type
@@ -35,6 +38,31 @@ included, so no Worker bug can take the feed down.
   `Access-Control-Allow-Origin: *`, as GitHub Pages served them; the assets
   layer adds the ETag and answers `If-None-Match` with 304. Sparkle does not
   check the appcast's content type (it parses the bytes).
+- **The Worker only counts the price history's requests** (`serveFeed` in
+  `worker/lib.ts`), which every running Pacer fetches about once a day: how
+  many Macs run Pacer and on which versions, whatever their telemetry toggles
+  say. (`serveFeed` would count the appcast too; it is not routed.)
+  The answer is the very `Response` that `env.ASSETS.fetch(request)` returns,
+  never rebuilt or re-headed, so its bytes, status, headers, ETag and 304s are
+  the assets layer's own (the same asset worker serves both ways: with this
+  routing and with main's, `wrangler dev --local` answered byte- and
+  header-identically for GET, conditional GET and HEAD). The count is one
+  `feed_request` event, posted to PostHog in `ctx.waitUntil` after the answer,
+  with every failure caught and logged; if anything of the Worker's own throws,
+  the asset is fetched again and returned as it is.
+  [docs/telemetry-plan.md](../docs/telemetry-plan.md), "Feed requests", has the
+  event. Only GETs from a `Pacer/` User-Agent are counted, 304s included; never
+  HEAD, crawlers, `curl` (the release workflow's and `bin/ship.sh`'s checks),
+  DNT or GPC. The client's IP address and headers are never sent.
+- **What routing the price history through the Worker costs.** Each of its
+  requests is a Worker request (about one a day per Mac). On the Workers Free
+  plan, an account past its daily request limit answers `run_worker_first`
+  paths with **429 instead of the static file** (Cloudflare, Static Assets,
+  "Billing and limitations"), until the limit resets at 00:00 UTC; static
+  assets alone are never limited. The app then keeps its cached price history
+  and retries in an hour, so prices are late, never wrong. This is why the
+  appcast is not routed: its 429 would be a missed update check. If the
+  counting has to go, take `/price-history.json` out of `run_worker_first`.
 - **`/download/`** redirects (302) to the newest DMG **in the site's appcast**,
   read through the assets binding (`env.ASSETS`, never the network), the same
   file Sparkle reads, so a release pulled from the appcast
@@ -82,7 +110,9 @@ in localStorage; a new random id per page load), `person_profiles:
 heatmaps, surveys, flags and web vitals off, `respect_dnt`, and off under
 Global Privacy Control, automation and localhost. Events: `$pageview`,
 `download_clicked` (`source: button | brew_copy`, `placement`),
-`docs_link_clicked` (`href`), plus the Worker's `website_download`. Nothing
+`docs_link_clicked` (`href`), plus the Worker's `website_download` and
+`feed_request` (`surface: 'feed'`: the app's own price fetches, counted by
+the Worker; above). Nothing
 joins a web visitor to an app install: conversion is read in aggregate
 (`website_download` counts against new installs in the app's daily check-in).
 PostHog still receives the visitor's IP with page views and the project keeps
@@ -112,8 +142,12 @@ pnpm exec wrangler deploy --dry-run --outdir /tmp/pacer-site   # validate the bu
 ```
 
 Analytics are off on localhost. `pnpm dev:worker` with `--var POSTHOG_TOKEN:`
-keeps a test `/download/` from reaching PostHog, and `--var SENTRY_DSN:` keeps
-a test `/api/feedback` from reaching Sentry (it then answers `503`).
+keeps a test `/download/`, or a price-history request with a `Pacer/`
+User-Agent, from reaching PostHog: `wrangler dev` hands the Worker the URL of
+the route (`pacer.andrechek.com`), so a local request counts as `production`.
+Point `--var POSTHOG_HOST:` at a local listener to see what would be sent.
+`--var SENTRY_DSN:` keeps a test `/api/feedback` from reaching Sentry (it then
+answers `503`).
 
 ## How it deploys (Cloudflare Workers Builds)
 
@@ -186,8 +220,11 @@ From 0.9.4 the app's Sparkle feed (`SUFeedURL`) is
 **Every installed Pacer from 0.9.4 on gets its updates through this site**, and
 only an update could move the feed again. So:
 
-- The feed files are static assets, not Worker code: a bug in `worker/` cannot
-  take them down.
+- The feed files are static assets, not Worker code. The appcast never
+  reaches the Worker. The price history's requests do, only to be counted: the
+  Worker returns the assets binding's answer as it is, falling back to it on
+  any error of its own, and shares the Worker's request limit
+  ([The Worker](#the-worker)).
 - `pnpm build` refuses to deploy a feed or price history that is not fit to
   serve (`scripts/check-feeds.mjs`; `docs/releasing.md`, "The deploy gate"),
   so a bad commit on `main` costs a deploy, never the feed. The release

@@ -19,7 +19,7 @@
  * memory, whatever the number of files: the body, its parsed copy, the
  * decoded files and the envelope are all in memory at once, held well under
  * the isolate's 128 MB, and an isolate that runs out is restarted with every
- * request it is serving (the update feed's included).
+ * request it is serving (price-history requests included).
  */
 export const MAX_BODY_BYTES = 12 * 1024 * 1024;
 /** Each attachment, decoded: as base64 (a third larger) it fits the body cap with the message. */
