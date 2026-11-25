@@ -141,6 +141,11 @@ if git -C "${REPO_ROOT}" rev-parse HEAD >/dev/null 2>&1; then
     fi
 fi
 
+# The same git state goes into Info.plist (bin/build-git-info.sh), so the app
+# labels itself "0.9.4+14 · dev (9eb8c89)" rather than project.yml's
+# placeholder version (AppVersionLabel). Empty without git: plain "dev".
+read -r -a GIT_BUILD_SETTINGS <<< "$("${REPO_ROOT}/bin/build-git-info.sh" "${REPO_ROOT}")"
+
 echo
 echo "==> Building Pacer.app (${BUILD_CONFIGURATION}, unsigned, build ${DEV_BUILD_VERSION})"
 xcodebuild \
@@ -150,6 +155,7 @@ xcodebuild \
     -destination 'platform=macOS' \
     -derivedDataPath "${REPO_ROOT}/Build" \
     CURRENT_PROJECT_VERSION="${DEV_BUILD_VERSION}" \
+    "${GIT_BUILD_SETTINGS[@]}" \
     build \
     | (grep -E '(error:|warning:|FAILED|SUCCEEDED)' || true)
 

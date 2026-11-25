@@ -104,6 +104,9 @@ final class PacerUpdater: ObservableObject {
 /// automatic (background) driver, and the veto stops every background check
 /// before it downloads anything.
 ///
+/// It also tells `UpdateStatus` how the check is going, for the surfaces that
+/// show it (the sidebar footer, the status menu).
+///
 /// Sparkle delivers "you're up to date" through the error channel
 /// (`SUNoUpdateError`), so that code is mapped to its own outcome rather than
 /// recorded as a failure.
@@ -111,6 +114,10 @@ final class PacerUpdater: ObservableObject {
 /// Sparkle calls every method here on the main thread (`SPUUpdater` is
 /// main-thread only), which is what the `assumeIsolated` calls rely on.
 private class PacerUpdaterDelegate: NSObject, SPUUpdaterDelegate {
+    /// Called before every check; one that throws is not made. The Debug
+    /// delegate overrides it to veto background checks, and calls this only
+    /// for the checks it lets through.
+    ///
     /// Sparkle calls this right before every check and reads `httpHeaders`
     /// only afterwards. Setting them here, from scratch each time, makes a
     /// toggle change land on the very next request. Sparkle has already
@@ -121,6 +128,7 @@ private class PacerUpdaterDelegate: NSObject, SPUUpdaterDelegate {
         // `.updates` is the user's "Check for Updates…"; the launch and
         // scheduled checks (`.updatesInBackground`) and the info-only probe
         // are `scheduled`.
+        note(.checkStarted)
         feedLoaded = false
         let last = FeedRequestHeaders.previousCheck(
             key: PacerPreferenceKeys.appcastLastCheck, store: PacerPreferences.store,
@@ -149,6 +157,7 @@ private class PacerUpdaterDelegate: NSObject, SPUUpdaterDelegate {
     // releases). Nothing X-Pacer-* may reach them, the id least of all.
     func updater(_ updater: SPUUpdater, willDownloadUpdate item: SUAppcastItem, with request: NSMutableURLRequest) {
         FeedRequestHeaders.strip(request)
+        note(.downloadStarted(version: item.displayVersionString))
     }
 
     func updater(_ updater: SPUUpdater, shouldDownloadReleaseNotesForUpdate updateItem: SUAppcastItem) -> Bool {
@@ -167,9 +176,18 @@ private class PacerUpdaterDelegate: NSObject, SPUUpdaterDelegate {
 
     func updaterDidNotFindUpdate(_ updater: SPUUpdater) {
         UpdateOutcomeLog.record(.noUpdate)
+        note(.noUpdate)
+    }
+
+    // Extracted is as far as the progress goes: what follows is the hold
+    // (`UpdateInstallScheduler`, which `UpdateStatus` reads) or Sparkle's own
+    // install prompt.
+    func updater(_ updater: SPUUpdater, didExtractUpdate item: SUAppcastItem) {
+        note(.prepared)
     }
 
     func updater(_ updater: SPUUpdater, failedToDownloadUpdate item: SUAppcastItem, error: any Error) {
+        note(.downloadFailed)
         // Domain and code only (and the underlying error's): never the description.
         let ns = error as NSError
         let underlying = ns.userInfo[NSUnderlyingErrorKey] as? NSError
@@ -212,6 +230,7 @@ private class PacerUpdaterDelegate: NSObject, SPUUpdaterDelegate {
         // so a fallback reads `false` here, which is the point.
         UpdateOutcomeLog.record(byPolicy ? .idleInstall : .willInstall, version: item.displayVersionString,
                                 delta: item.isDeltaUpdate)
+        note(.prepared)
     }
 
     // Returning true keeps the automatic driver, and so Sparkle's session,
@@ -229,6 +248,7 @@ private class PacerUpdaterDelegate: NSObject, SPUUpdaterDelegate {
             UpdateInstallScheduler.shared.hold(version: version, updater: updater, install: immediateInstallHandler)
         }
         if held { UpdateOutcomeLog.record(.readyToInstall, version: version, delta: delta) }
+        note(.prepared)
         return held
     }
 
@@ -238,6 +258,8 @@ private class PacerUpdaterDelegate: NSObject, SPUUpdaterDelegate {
 
     func updater(_ updater: SPUUpdater, didAbortWithError error: any Error) {
         MainActor.assumeIsolated { UpdateInstallScheduler.shared.release() }
+        let ns = error as NSError
+        note(.aborted(noUpdate: UpdateState.isNoUpdate(domain: ns.domain, code: ns.code)))
     }
 
     func updater(_ updater: SPUUpdater, didFinishUpdateCycleFor updateCheck: SPUUpdateCheck, error: (any Error)?) {
@@ -257,11 +279,17 @@ private class PacerUpdaterDelegate: NSObject, SPUUpdaterDelegate {
         if !wasFallback, feedChooser.usesFallback { recheck(updater, after: FeedFallback.failoverRecheckDelay) }
         // A check that got through (an answer, even "up to date") ends the backoff.
         if ns == nil || (ns?.domain == "SUSparkleErrorDomain" && ns?.code == 1001) { downloadFailures = 0 }
+        let failed = ns.map { !UpdateState.isNoUpdate(domain: $0.domain, code: $0.code) } ?? false
+        note(.cycleFinished(failed: failed))
         guard let ns else { return }
         // Domain and code only (and the underlying error's): never the description.
         UpdateOutcomeLog.recordEndOfCycle(domain: ns.domain, code: ns.code,
                                           underlyingDomain: underlying?.domain,
                                           underlyingCode: underlying?.code)
+    }
+
+    fileprivate func note(_ event: UpdateState.Event) {
+        MainActor.assumeIsolated { UpdateStatus.shared.note(event) }
     }
 }
 
@@ -330,7 +358,6 @@ private final class PacerUserDriverDelegate: NSObject, SPUStandardUserDriverDele
 /// Compiled out of Release builds entirely.
 private final class DevBuildUpdaterDelegate: PacerUpdaterDelegate {
     override func updater(_ updater: SPUUpdater, mayPerform updateCheck: SPUUpdateCheck) throws {
-        try super.updater(updater, mayPerform: updateCheck)
         // `.updatesInBackground` is the launch/scheduled check;
         // `.updates` is the user clicking "Check for Updates…".
         if updateCheck == .updatesInBackground {
@@ -340,6 +367,8 @@ private final class DevBuildUpdaterDelegate: PacerUpdaterDelegate {
                 userInfo: [NSLocalizedDescriptionKey: "Automatic update checks are disabled in Debug builds."]
             )
         }
+        // A check that goes ahead shows as one (`UpdateStatus`).
+        try super.updater(updater, mayPerform: updateCheck)
     }
 }
 #endif
@@ -351,7 +380,8 @@ private final class DevBuildUpdaterDelegate: PacerUpdaterDelegate {
 ///
 /// While a downloaded update waits for a quiet moment (`UpdateInstallScheduler`)
 /// Sparkle's session stays open and no check can run, so the item installs
-/// that update instead, as "Relaunch to Update".
+/// that update instead, as "Update to 0.9.5 — Restart", the status menu's words
+/// (`UpdateCopy`).
 struct CheckForUpdatesView: View {
     @ObservedObject private var checker: UpdaterChecker
 
@@ -361,17 +391,18 @@ struct CheckForUpdatesView: View {
 
     var body: some View {
         // Read here, in this body, so the title follows the hold.
-        let waiting = UpdateInstallScheduler.shared.readyVersion != nil
-        Button(waiting ? "Relaunch to Update" : "Check for Updates…") {
+        let state = UpdateStatus.shared.state
+        let ready = state.readyVersion
+        Button(ready.map(UpdateCopy.menuInstall) ?? UpdateCopy.checkForUpdates) {
             // Decided at the click, not from the render: the hold can end
             // between the two.
             if UpdateInstallScheduler.shared.readyVersion != nil {
-                UpdateInstallScheduler.shared.installNow()
+                UpdateStatus.shared.installNow()
             } else {
                 checker.updater.checkForUpdates()
             }
         }
-        .disabled(!waiting && !checker.canCheckForUpdates)
+        .disabled(state.isInstalling || (ready == nil && !checker.canCheckForUpdates))
     }
 }
 

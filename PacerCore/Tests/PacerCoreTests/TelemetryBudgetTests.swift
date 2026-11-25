@@ -20,6 +20,21 @@ struct TelemetryBudgetTests {
         return (TelemetryBudget(store: defaults, limits: limits, now: { clock.now }), defaults, clock)
     }
 
+    @Test("a refund gives back one take, never below zero")
+    func refund() throws {
+        var limits = TelemetryBudget.Limits.release
+        limits.feedback = 2
+        let (budget, _, _) = try make(limits)
+        #expect(budget.take(.feedback))
+        #expect(budget.take(.feedback))
+        #expect(!budget.take(.feedback))
+        budget.refund(.feedback)
+        #expect(budget.used(.feedback) == 1)
+        #expect(budget.take(.feedback))
+        budget.refund(.feedback); budget.refund(.feedback); budget.refund(.feedback)
+        #expect(budget.used(.feedback) == 0)
+    }
+
     @Test("a kind allows its limit, then refuses")
     func perKind() throws {
         var limits = TelemetryBudget.Limits.release

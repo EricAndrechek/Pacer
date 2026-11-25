@@ -268,7 +268,10 @@ promise). Read this before adding any signal.
   class). Usage levels go in bands (`TelemetryBands`).
 - **Everything leaving goes through `TelemetryScrubber`.** The send hooks in
   `TelemetryController`, `AnalyticsPayload` and the CLI's feedback path apply
-  it; do not add a send path that skips it.
+  it; do not add a send path that skips it. The one exception is the Send
+  Feedback window's message and email: the person's own words, sent on their
+  click to the site's endpoint, so only credentials come out
+  (`FeedbackRedactor`; owner's decision, 2026-11-25).
 - **Only the user's own app sends.** `LaunchMode.isNormalLaunch` gates it:
   screenshot, render, probe and self-test runs, tests, and `PACER_TELEMETRY=off`
   never start Sentry. A new diagnostic mode goes in `LaunchMode`, nowhere else.

@@ -93,12 +93,24 @@ extension AnalyticsEvent {
         AnalyticsEvent(.exportUsed, properties: ["flavor": .string(flavor.rawValue)])
     }
 
+    /// Where the Send Feedback window was opened from.
     public enum ReportProblemSource: String, Sendable, CaseIterable {
-        case helpMenu = "help_menu", statusMenu = "status_menu", settings
+        case helpMenu = "help_menu", statusMenu = "status_menu", settings, sidebar
     }
 
     public static func reportProblemOpened(from source: ReportProblemSource) -> AnalyticsEvent {
         AnalyticsEvent(.reportProblemOpened, properties: ["from": .string(source.rawValue)])
+    }
+
+    /// How a report left: through the site's feedback endpoint, or handed to
+    /// a GitHub issue (the endpoint failed, or today's report limit is reached).
+    public enum FeedbackRoute: String, Sendable, CaseIterable { case site, github }
+
+    /// The kind chosen and the route; never the text, the email or the files.
+    public static func feedbackSent(kind: FeedbackKind, via route: FeedbackRoute) -> AnalyticsEvent {
+        AnalyticsEvent(.feedbackSent, properties: [
+            "kind": .string(kind.rawValue), "via": .string(route.rawValue),
+        ])
     }
 
     public static func updateInstalled(from: String, to: String) -> AnalyticsEvent {
@@ -121,7 +133,10 @@ extension AnalyticsEvent {
     public static func menubarOpened() -> AnalyticsEvent { AnalyticsEvent(.menubarOpened) }
 
     public enum MenubarItem: String, Sendable, CaseIterable {
+        // `report_problem` is the Send Feedback… item, under its old name so
+        // the series carries on.
         case openPacer = "open_pacer", settings, reportProblem = "report_problem", quit
+        case installUpdate = "install_update"
     }
 
     public static func menubarItemClicked(_ item: MenubarItem) -> AnalyticsEvent {
