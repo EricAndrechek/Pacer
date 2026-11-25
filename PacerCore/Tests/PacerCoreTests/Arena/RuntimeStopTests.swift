@@ -11,32 +11,38 @@ import Testing
 struct RuntimeStopTests {
     typealias Fixtures = RuntimeEngineTests
 
-    /// Holds the first forecast asked of it while armed until released, as a
-    /// worker the scheduler never runs looks to anything waiting on it: no
-    /// check reached, no handback, for as long as it likes. Released or not,
-    /// it lets go after `giveUp`, so a stop that waits for it fails the test
-    /// (every wait below is shorter) instead of hanging the run.
+    /// Holds one caller while armed (the first past `skipping`) until
+    /// released, as a worker the scheduler never runs looks to anything
+    /// waiting on it: no check reached, no handback, for as long as it likes.
+    /// Released or not, it lets go after `giveUp`, so a stop that waits for it
+    /// fails the test (every wait below is shorter) instead of hanging the run.
     final class Gate: @unchecked Sendable {
         static let giveUp: TimeInterval = 300
         private let lock = NSLock()
         private var armed = false
+        private var skip = 0
         private var holding = false
+        private var holder: pthread_t?
         private let release = DispatchSemaphore(value: 0)
 
-        func arm() { lock.withLock { armed = true } }
+        func arm(skipping n: Int = 0) { lock.withLock { armed = true; skip = n } }
         var isHolding: Bool { lock.withLock { holding } }
+        /// The thread held now: valid while `isHolding`, which it is until `open`.
+        var heldThread: pthread_t? { lock.withLock { holding ? holder : nil } }
         func open() { release.signal() }
 
         func holdIfArmed() {
             let hold: Bool = lock.withLock {
                 guard armed else { return false }
+                guard skip == 0 else { skip -= 1; return false }
                 armed = false
                 holding = true
+                holder = pthread_self()
                 return true
             }
             guard hold else { return }
             _ = release.wait(timeout: .now() + Self.giveUp)
-            lock.withLock { holding = false }
+            lock.withLock { holding = false; holder = nil }
         }
     }
 
@@ -109,10 +115,20 @@ struct RuntimeStopTests {
                 "the pass never reached the held forecast")
         #expect(try RuntimeWorkersTests.rows(container).isEmpty, "nothing is saved before the stop")
 
-        let began = ContinuousClock.now
-        let wound = await rt.stop()
-        let took = ContinuousClock.now - began
+        let held = try #require(Self.gate.heldThread)
+        let before = Self.priority(held)
+        // From a user-initiated task, as a quit's is: the class the workers
+        // are raised to is the waiter's.
+        let (wound, took) = await Task(priority: .userInitiated) { () -> (Bool, Duration) in
+            let began = ContinuousClock.now
+            let wound = await rt.stop()
+            return (wound, ContinuousClock.now - began)
+        }.value
         #expect(!wound, "the held worker cannot have handed back")
+        // The runtime's own worker, raised by the stop out of the class it
+        // was started at (utility here, `BackgroundQoS`; background in the
+        // app), and still raised while it is out.
+        #expect(Self.priority(held) > before, "the stop did not raise the scorer's worker")
         // Its bound, give or take a loaded Mac; a stop that waited for the
         // worker would wait out the gate (`Gate.giveUp`).
         #expect(took < .seconds(30), "the stop waited \(took) for a worker that never ran")
@@ -137,6 +153,37 @@ struct RuntimeStopTests {
         Self.gate.open()
         #expect(await eventually { rt.scorer.workers.count == 0 }, "the released worker never left")
         await rt.scorer.stop()
+        #expect(try RuntimeWorkersTests.rows(container) == whole)
+    }
+
+    /// A worker started but not yet run (a busy Mac can make a new background
+    /// thread wait minutes for its first instruction) holds no cycle, and a
+    /// stop does not wait for it: the stop winds down cleanly, well inside its
+    /// bound. The worker, when it runs, finds the stop and leaves.
+    @Test func aStopDoesNotWaitForAWorkerThatHasNotBegun() async throws {
+        let baseline = try Fixtures.seeded(cycles: 6)
+        _ = await Self.runtime(baseline, workers: 1).scorer.pass(accounts: [Fixtures.account], now: Fixtures.now)
+        let whole = try RuntimeWorkersTests.rows(baseline)
+
+        let container = try Fixtures.seeded(cycles: 6)
+        let rt = Self.runtime(container, workers: 2)
+        let notYet = Gate()
+        notYet.arm(skipping: 1)
+        rt.scorer.workers.beforeBeginning = { notYet.holdIfArmed() }
+        rt.start(accounts: { [Fixtures.account] })
+        // One worker has graded every cycle and gone; the other was started
+        // and has not begun.
+        #expect(await eventually { notYet.isHolding && rt.scorer.workers.count == 0 },
+                "the pass never got one worker started and the other not begun")
+
+        // A bound far past what winding down takes here, short of the gate's.
+        let wound = await rt.stop(within: .seconds(60))
+        #expect(wound, "the stop waited for a worker that holds nothing")
+        #expect(try RuntimeWorkersTests.rows(container) == whole)
+
+        notYet.open()
+        #expect(await eventually { !notYet.isHolding && rt.scorer.workers.count == 0 },
+                "the late worker never left")
         #expect(try RuntimeWorkersTests.rows(container) == whole)
     }
 

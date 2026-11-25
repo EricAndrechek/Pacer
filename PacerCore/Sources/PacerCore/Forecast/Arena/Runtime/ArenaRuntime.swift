@@ -1498,8 +1498,9 @@ public final class ArenaRuntime: Sendable {
         Task.detached(priority: BackgroundQoS.priority) { await scorer.start(accounts: accounts, beforePass: fetchMissing) }
     }
 
-    /// The longest `stop` waits for the scorer to wind down: well inside the
-    /// two seconds a quit may spend on Pacer's own work (#446). Raised, the
+    /// The longest `stop` waits for the scorer to wind down (#446). This
+    /// bounds only the arena's part of a quit: the scan's stop, the telemetry
+    /// flushes and the log flush after it have waits of their own. Raised, the
     /// workers reach their next check in moments (a budget sleep is at most
     /// `ArenaCPUBudget.sleepStep`).
     public static let stopBound: Duration = .seconds(1)

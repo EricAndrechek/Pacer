@@ -115,6 +115,15 @@ final class ArenaWorkerThreads: @unchecked Sendable {
     /// Workers running now.
     var count: Int { lock.lock(); defer { lock.unlock() }; return entries.count }
 
+    /// Tests: runs on each worker's thread before it begins, standing in for
+    /// the wait a busy Mac can give a new background thread before its first
+    /// instruction (`ArenaScoringCrew.isFinished`).
+    var beforeBeginning: (@Sendable () -> Void)? {
+        get { lock.lock(); defer { lock.unlock() }; return beginning }
+        set { lock.lock(); beginning = newValue; lock.unlock() }
+    }
+    private var beginning: (@Sendable () -> Void)?
+
     /// An override of `thread` to `qos`, or nil if the kernel refused one.
     /// The SDK imports the result as never nil, though the call returns NULL
     /// for a class or priority it does not take: read the bits as they are.
@@ -271,6 +280,7 @@ final class ArenaScoringCrew: @unchecked Sendable {
 
     /// A worker thread, from its first cycle until nothing is left for it.
     private func work(_ index: Int) {
+        threads.beforeBeginning?()
         // Before the first claim, so a stop that finds this worker running
         // can raise it (`ArenaWorkerThreads`), and waits for it (`isFinished`).
         let token = threads.enter()
