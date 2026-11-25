@@ -12,66 +12,30 @@ final class TestDefaults: @unchecked Sendable {
     let suiteName: String
     let defaults: UserDefaults
 
+    /// An absolute path (no `.plist`): `UserDefaults(suiteName:)` then keeps the
+    /// plist at that path, so nothing lands in ~/Library/Preferences at all.
+    /// (A named suite there is re-written by cfprefsd 2-3 s after any removal,
+    /// even after the process has exited, so it cannot be cleaned up.)
+    static let directory: URL = {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pacer-test-defaults-\(getpid())", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }()
+
     init(prefix: String = "default") {
-        suiteName = "pacer.tests.\(prefix).\(UUID().uuidString)"
+        suiteName = Self.directory.appendingPathComponent("\(prefix).\(UUID().uuidString)").path
         defaults = UserDefaults(suiteName: suiteName)!
     }
 
     deinit { cleanup() }
 
-    /// Idempotent. Empties the suite and deletes its plist now, and hands the
-    /// path to `Reaper` for the delete that sticks (see there).
+    /// Idempotent.
     func cleanup() { Self.cleanup(suite: suiteName) }
 
     static func cleanup(suite: String) {
         UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite)
-        CFPreferencesAppSynchronize(suite as CFString)
-        let path = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Preferences/\(suite).plist").path
-        try? FileManager.default.removeItem(atPath: path)
-        Reaper.shared.add(path)
-    }
-}
-
-/// Deletes the plists once cfprefsd has stopped writing them (#464).
-///
-/// Removing a suite, synchronizing and deleting the file is not enough:
-/// cfprefsd flushes the removal on its own timer, 2 to 3 seconds later, and
-/// writes the file back (an empty one). Measured: gone at +2 s, back at +3 s,
-/// with the process still alive. And the process may end before the flush.
-/// So the paths go to one detached shell per test process, which waits for
-/// the process to end, waits out the flush, and deletes them.
-private final class Reaper: @unchecked Sendable {
-    static let shared = Reaper()
-
-    private let lock = NSLock()
-    private var list: FileHandle?
-
-    func add(_ path: String) {
-        lock.lock(); defer { lock.unlock() }
-        if list == nil { list = start() }
-        try? list?.write(contentsOf: Data((path + "\n").utf8))
-    }
-
-    private func start() -> FileHandle? {
-        let file = FileManager.default.temporaryDirectory
-            .appendingPathComponent("pacer-test-defaults-\(getpid()).list")
-        guard FileManager.default.createFile(atPath: file.path, contents: nil),
-              let handle = try? FileHandle(forWritingTo: file) else { return nil }
-        let reaper = Process()
-        reaper.executableURL = URL(fileURLWithPath: "/bin/sh")
-        // `kill -0` on the test process: it is our parent, so this holds until it ends.
-        reaper.arguments = ["-c", """
-            while kill -0 "$1" 2>/dev/null; do sleep 1; done
-            sleep 8
-            while IFS= read -r p; do rm -f "$p"; done < "$2"
-            rm -f "$2"
-            """, "sh", String(getpid()), file.path]
-        reaper.standardInput = FileHandle.nullDevice
-        reaper.standardOutput = FileHandle.nullDevice
-        reaper.standardError = FileHandle.nullDevice
-        do { try reaper.run() } catch { return nil }
-        return handle
+        try? FileManager.default.removeItem(atPath: suite + ".plist")
     }
 }
 
