@@ -593,6 +593,7 @@ final class AppBackgroundService {
     }
 
     private func installArchiveObserver() {
+        guard !LaunchMode.skipsLaunchMaintenance else { return }
         guard (try? PacerStore.sharedContainerURL()) != nil else { return }
         let archiveURL = Self.archiveURL()
         archiveObserver = NotificationCenter.default.addObserver(
@@ -726,7 +727,7 @@ final class AppBackgroundService {
     /// puts them to use (bands, cycle facts, selection) without waiting for
     /// the next poll.
     private func startRecordBackfill(_ engines: [UsageIntelligenceEngine]) {
-        guard recordBackfillTask == nil,
+        guard !LaunchMode.skipsLaunchMaintenance, recordBackfillTask == nil,
               EngineRefitPolicy.recordBackfillAllowed(pressure: MemoryPressure.shared.level) else { return }
         let gate = arenaGate
         recordBackfillTask = Task.detached(priority: .background) { [weak self] in

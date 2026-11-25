@@ -71,6 +71,7 @@ enum OffscreenRenderer {
         // sent me looking for a bug the live app did not have. A renderer that
         // under-waits does not fail — it lies.
         await settle(seconds: 5.0)
+        await awaitLoads(name)
         // Measure again now the page has loaded. The size above was taken at
         // mount, before any card's state arrived; a card that grows when it
         // does (the skill card going from "Checking…" to its full layout)
@@ -103,6 +104,20 @@ enum OffscreenRenderer {
         } catch {
             log("⚠️ write failed for \(name): \(error)")
         }
+    }
+
+    /// Wait for every off-main load the views started (`RenderReadiness`), then
+    /// fail the run if one never finished.
+    ///
+    /// A fixed settle is only a floor: on a slow runner a detached read can
+    /// outlast it and the image is captured with a loading placeholder in it
+    /// (History's PROJECTS read `—`, #452). That image would be committed, so
+    /// a load that does not finish ends the run non-zero, naming it.
+    static func awaitLoads(_ name: String) async {
+        let outcome = await RenderReadiness.shared.waitUntilIdle(timeout: .seconds(60))
+        guard case .timedOut(let pending) = outcome else { return }
+        log("✗ \(name): still loading after 60 s: \(pending.joined(separator: ", ")). Not capturing a placeholder.")
+        exit(4)
     }
 
     static func settle(seconds: Double) async {

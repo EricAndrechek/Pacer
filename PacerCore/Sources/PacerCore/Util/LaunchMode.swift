@@ -40,6 +40,13 @@ public enum LaunchMode: String, CaseIterable, Sendable {
 
     public static func isActive(_ mode: LaunchMode) -> Bool { current.contains(mode) }
 
+    /// A run that draws images (README screenshots, live render): launch
+    /// maintenance that changes nothing a card reads (the record pass, the
+    /// archive mirror) must not compete with the loads the render waits for.
+    public static var skipsLaunchMaintenance: Bool {
+        isActive(.screenshot) || isActive(.liveRender)
+    }
+
     /// The user's own app: no diagnostic mode and not a test process.
     public static var isNormalLaunch: Bool {
         current.isEmpty && !PacerPreferences.isTestProcess

@@ -92,7 +92,7 @@ struct DashboardView: View {
             // Files only, never the keychain, but it reads every Desktop
             // install's config and waits on `DesktopSessionDirectory`'s lock,
             // which the scan holds while it lists Desktop's session folders.
-            self.desktopAvailable = await Task.detached(priority: .utility) {
+            self.desktopAvailable = await RenderReadiness.task("dashboard", priority: .utility) {
                 DesktopOAuth.isClaudeDesktopAvailable
             }.value
         }
@@ -184,7 +184,7 @@ struct RateLimitSourceChip: View {
     @MainActor
     private func refresh() async {
         let container = modelContext.container, account = limitAccountId
-        let read = await Task.detached(priority: .userInitiated) {
+        let read = await RenderReadiness.task("dashboard", priority: .userInitiated) {
             Self.read(container: container, account: account)
         }.value
         // `.task(id:)` cancelled this one for a newer key: that task's read
