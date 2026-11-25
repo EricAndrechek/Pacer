@@ -1,5 +1,19 @@
 import Foundation
+import Testing
 @testable import PacerCore
+
+extension Trait where Self == TimeLimitTrait {
+    /// For a suite whose tests wait on background work (the arena's scorer
+    /// and live lane, a poller's loop): a test still waiting after this long
+    /// is *named* in the log as over its time limit, where a hang used to
+    /// leave the run silent (#431). It names the hang; it does not end it.
+    /// Swift Testing records the issue and cancels the test, but a body stuck
+    /// on a continuation that never resumes stays stuck, and the run with it
+    /// (CI's PacerCore job, 15 minutes in all, times out first there). Far
+    /// past the slowest such test seen in a loaded full `make test` (287 s):
+    /// a marker for a hang, not a deadline for slow work.
+    static var hangBackstop: Self { .timeLimit(.minutes(20)) }
+}
 
 /// Polls `condition` until it holds or `timeout` of wall time has passed, and
 /// says which.
@@ -25,6 +39,36 @@ func eventually(
     while true {
         if try await condition() { return true }
         if ContinuousClock.now >= deadline || Task.isCancelled { return false }
+        try? await Task.sleep(for: .milliseconds(10))
+    }
+}
+
+/// Polls `condition` until it holds, giving up only once `progress` has
+/// stood still for `stall` of wall time, and says which.
+///
+/// For work of many steps (hours of a poller's loop on a virtual clock),
+/// where a fixed deadline measures the machine rather than the code: in a
+/// full `make test` beside other builders, the stagger test's loop took 287 s
+/// of a 300 s `eventually` and then ran out (#431), every step of it still
+/// advancing. What a hang looks like is no step at all, so that is what this
+/// waits out.
+func eventually<Progress: Equatable & Sendable>(
+    progressing progress: () -> Progress,
+    stall: Duration = .seconds(300),
+    isolation: isolated (any Actor)? = #isolation,
+    _ condition: () async throws -> Bool
+) async rethrows -> Bool {
+    var last = progress()
+    var deadline = ContinuousClock.now + stall
+    while true {
+        if try await condition() { return true }
+        let now = progress()
+        if now != last {
+            last = now
+            deadline = ContinuousClock.now + stall
+        } else if ContinuousClock.now >= deadline || Task.isCancelled {
+            return false
+        }
         try? await Task.sleep(for: .milliseconds(10))
     }
 }

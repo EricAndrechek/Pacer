@@ -472,7 +472,7 @@ public actor ArenaHistoryCache {
     /// build reads and prices months of turns, synchronously, and pauses for
     /// the CPU budget (`pace`) while it does. A live request that waits on it
     /// lifts the queue to its own priority for as long as it waits.
-    private let queue = DispatchSerialQueue(label: "com.ericandrechek.pacer.arena.history", qos: .background)
+    private let queue = DispatchSerialQueue(label: "com.ericandrechek.pacer.arena.history", qos: BackgroundQoS.queue)
     public nonisolated var unownedExecutor: UnownedSerialExecutor { queue.asUnownedSerialExecutor() }
 
     /// - Parameter pace: called between the days a build reads (the arena's

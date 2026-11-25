@@ -282,7 +282,7 @@ public enum ArenaWeightStore {
         private func scheduleRetry() {
             guard !stopped, retry == nil, let next = failures.values.map(\.retryAt).min() else { return }
             let wait = max(0, next.timeIntervalSince(now()))
-            let task = Task.detached(priority: .background) { [weak self] in
+            let task = Task.detached(priority: BackgroundQoS.priority) { [weak self] in
                 guard let self else { return }
                 await self.sleep(wait)
                 await self.retryDue()
@@ -321,7 +321,7 @@ public enum ArenaWeightStore {
                 let tmp: URL, response: URLResponse
                 do {
                     let transport = self.transport, request = req
-                    (tmp, response) = try await Task.detached(priority: .background) {
+                    (tmp, response) = try await Task.detached(priority: BackgroundQoS.priority) {
                         try await transport.download(request, resumeData: resume)
                     }.value
                 } catch {
@@ -338,7 +338,7 @@ public enum ArenaWeightStore {
                 guard let http = response as? HTTPURLResponse, http.statusCode == 200 || http.statusCode == 206 else {
                     throw ArenaError.invalid("HTTP \((response as? HTTPURLResponse)?.statusCode ?? -1) for \(f.name)")
                 }
-                let digest = try await Task.detached(priority: .background) { try sha256(of: tmp) }.value
+                let digest = try await Task.detached(priority: BackgroundQoS.priority) { try sha256(of: tmp) }.value
                 guard digest == f.sha256 else {
                     throw ArenaError.invalid("\(f.name): sha256 \(digest) is not the pinned \(f.sha256)")
                 }

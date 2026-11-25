@@ -7,7 +7,7 @@ import SwiftData
 /// engine's selection over their record, and the live path that never waits
 /// on them. The models here are test doubles registered for the suite; the
 /// real ports register in `ArenaRegistry` on their own branches.
-@Suite("Arena runtime: scorer, selection and live path", .serialized)
+@Suite("Arena runtime: scorer, selection and live path", .serialized, .hangBackstop)
 struct RuntimeEngineTests {
 
     // MARK: Fixtures
@@ -116,6 +116,9 @@ struct RuntimeEngineTests {
         func add(_ b: [EngineSelfEval.NewOutcome]) { lock.lock(); batches.append(b); lock.unlock() }
         func live(_ a: Set<String>) { lock.lock(); liveAccounts.append(a); lock.unlock() }
         var all: [EngineSelfEval.NewOutcome] { lock.lock(); defer { lock.unlock() }; return batches.flatMap { $0 } }
+        /// Every live landing so far, read under the lock: a test waits on
+        /// this while the live lane's task appends to it.
+        var lives: [Set<String>] { lock.lock(); defer { lock.unlock() }; return liveAccounts }
     }
 
     static func runtime(_ container: ModelContainer, roster: [ArenaModelSpec],
@@ -390,15 +393,14 @@ struct RuntimeEngineTests {
         #expect(picked.selected == "test-oracle")
         #expect(await engine.arenaModelIds(windowKey: "five_hour") == ["test-oracle"])
 
-        // The refit asked for the live projection without waiting for it;
-        // the request itself hops through a task, so wait for it to land.
-        var redrawn = false
-        for _ in 0..<500 where !redrawn {
-            await rt.live.settle()
-            redrawn = await engine.refreshArenaResolution()
-            if !redrawn { try await Task.sleep(for: .milliseconds(10)) }
-        }
-        #expect(redrawn)
+        // The refit asked for the live projection without waiting for it: the
+        // request hops through a detached task, then takes its turn on the
+        // live lane. Wait for the landing itself (`onLiveLanded`, called once
+        // the projection is in the cache), not a count of sleeps: on a loaded
+        // Mac five seconds of them ran out first (#431). The refit asked for
+        // the oracle only once it was ranked, so this landing is that request.
+        #expect(await eventually { !landed.lives.isEmpty }, "the live projection never landed")
+        #expect(await engine.refreshArenaResolution())
         #expect(await engine.resolvedMethod(windowKey: "five_hour").resolved == "test-oracle")
         let outlook = await engine.ask(.rateLimitOutlook(.fiveHour))
         #expect(outlook.method == "rl-test-oracle")

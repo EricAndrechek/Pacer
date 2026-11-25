@@ -6,7 +6,9 @@ import SwiftData
 /// What the runtime costs on a synthetic heavy account: 120 days of five-hour
 /// and weekly readings every two minutes and ~480 turns a day. Off by
 /// default; `PACER_ARENA_PERF=1 swift test --filter RuntimePerfProbe` prints
-/// the numbers the merge notes quote. Synthetic data only.
+/// the numbers the merge notes quote. Synthetic data only. Add
+/// `PACER_PRODUCTION_QOS=1` to run the arena at the app's QoS: a test process
+/// otherwise runs its background work at utility (`BackgroundQoS`, #431).
 @Suite("Arena runtime: perf probe", .serialized,
        .enabled(if: ProcessInfo.processInfo.environment["PACER_ARENA_PERF"] == "1"))
 struct RuntimePerfProbe {

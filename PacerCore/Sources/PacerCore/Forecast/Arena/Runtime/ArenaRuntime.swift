@@ -25,9 +25,10 @@ import SwiftData
 // not on Swift's shared cooperative pool: their work is long, synchronous and
 // paced by sleeping the thread, which on a pool thread would take a thread
 // the rest of the app's tasks need. The scorer's and the history's queues are
-// background QoS (the lowest CPU and I/O tier macOS has), the live
-// forecaster's utility. The scorer's forecasts run on its worker threads; its
-// queue only reads, plans and saves.
+// background QoS (the lowest CPU and I/O tier macOS has; utility in a test
+// process, which waits on them: `BackgroundQoS`), the live forecaster's
+// utility. The scorer's forecasts run on its worker threads; its queue only
+// reads, plans and saves.
 
 /// What an engine needs from the runtime. A value: the engine reads the
 /// roster and cache synchronously and never awaits the runtime.
@@ -283,7 +284,7 @@ public actor ArenaRecordScorer {
     /// anyone without waiting on this actor.
     let progress: ArenaScoringProgressBoard
     /// See the file header.
-    private let queue = DispatchSerialQueue(label: "com.ericandrechek.pacer.arena.scorer", qos: .background)
+    private let queue = DispatchSerialQueue(label: "com.ericandrechek.pacer.arena.scorer", qos: BackgroundQoS.queue)
     public nonisolated var unownedExecutor: UnownedSerialExecutor { queue.asUnownedSerialExecutor() }
     /// Outcomes scored but not yet saved (`Config.flushInterval`).
     private var unsaved: [(account: String, surface: String, news: [EngineSelfEval.NewOutcome])] = []
@@ -343,7 +344,7 @@ public actor ArenaRecordScorer {
     func start(accounts: @escaping @Sendable () async -> [String],
                beforePass: @escaping @Sendable () async -> Void = {}) {
         guard loop == nil, !roster.isEmpty, !cancel.isSet else { return }
-        loop = Task.detached(priority: .background) { [weak self] in
+        loop = Task.detached(priority: BackgroundQoS.priority) { [weak self] in
             while let self, !Task.isCancelled {
                 await beforePass()
                 let ids = await accounts()
@@ -934,8 +935,9 @@ public actor ArenaRecordScorer {
         for (ci, models) in job.cuts {
             guard !stopped() else { back.abandoned = true; return back }
             // The governor's QoS, read at every cut so a speed-up starting or
-            // ending mid-pass takes hold within one (`ArenaBudgetPolicy.scorerQoS`).
-            ArenaQoS.apply(budget.scorerQoS)
+            // ending mid-pass takes hold within one (`ArenaBudgetPolicy.scorerQoS`);
+            // background as `BackgroundQoS` applies it (utility in a test, #431).
+            ArenaQoS.apply(BackgroundQoS.applied(budget.scorerQoS))
             let cutNow = cycle.cycleStart.addingTimeInterval(duration * grading.cuts[ci])
             let seen = cycle.samples.filter { $0.at <= cutNow }
             // The engine's own rule (`newOutcomesRL`), so both are graded on
@@ -1438,11 +1440,11 @@ public final class ArenaRuntime: Sendable {
             let missing = ids.filter { local($0) == nil }
             guard !missing.isEmpty else { return }
             // Not awaited: a download takes minutes and the pass needs none.
-            Task.detached(priority: .background) { await ensure(missing) }
+            Task.detached(priority: BackgroundQoS.priority) { await ensure(missing) }
         }
         let scorer = self.scorer
         governor?.start()
-        Task.detached(priority: .background) { await scorer.start(accounts: accounts, beforePass: fetchMissing) }
+        Task.detached(priority: BackgroundQoS.priority) { await scorer.start(accounts: accounts, beforePass: fetchMissing) }
     }
 
     /// Stop at the next check inside a model, every worker, and wait for it.

@@ -47,7 +47,7 @@ public final class ArenaStartGate: @unchecked Sendable {
 
     /// Start the safety net's clock.
     public func armSafetyNet(after seconds: TimeInterval = safetyNet) {
-        let task = Task.detached(priority: .background) { [weak self] in
+        let task = Task.detached(priority: BackgroundQoS.priority) { [weak self] in
             try? await Task.sleep(for: .seconds(seconds))
             guard !Task.isCancelled else { return }
             self?.giveUp()

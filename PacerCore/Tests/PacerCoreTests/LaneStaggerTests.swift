@@ -17,7 +17,7 @@ import Testing
 
 // MARK: - End to end: the poller's own loop on a virtual clock
 
-@Suite("Lane stagger through the poller loop (#350)")
+@Suite("Lane stagger through the poller loop (#350)", .hangBackstop)
 struct LaneStaggerPollerTests {
 
     /// Virtual time for a whole loop run. Each nap moves the clock forward by
@@ -150,7 +150,10 @@ struct LaneStaggerPollerTests {
             clock: clock, activityProbe: { nil }, poolStore: pool)
 
         await poller.start()
-        let reachedEnd = await eventually { clock.finished }
+        // Fails if virtual time stops, not after a fixed spell of wall time:
+        // the loop's two hours are ~170 polls, each a few actor hops and a
+        // save, and a loaded Mac stretched them past five minutes (#431).
+        let reachedEnd = await eventually(progressing: { clock.now() }) { clock.finished }
         await poller.stop()
         #expect(reachedEnd, "the loop stopped advancing virtual time")
 

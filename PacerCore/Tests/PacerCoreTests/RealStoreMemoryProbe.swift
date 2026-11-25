@@ -26,6 +26,9 @@ import Testing
 ///     live round finish.
 ///   - `PACER_MEMORY_PROBE_CATALOG=<litellm-pricing.cache.json>`: price without
 ///     the network.
+///   - `PACER_PRODUCTION_QOS=1`: run the arena and the record clean-up at the
+///     app's QoS; a test process otherwise runs that background work at
+///     utility (`BackgroundQoS`, #431).
 @Suite("Real-store memory probe", .serialized,
        .enabled(if: ProcessInfo.processInfo.environment["PACER_MEMORY_PROBE_STORE"] != nil))
 struct RealStoreMemoryProbe {

@@ -7,7 +7,7 @@ import SwiftData
 /// `EngineHost`: the scorer's batches reach the account's engine, and live
 /// projections landing redraw it. The closures below are the app's, word for
 /// word, so this also holds them to PacerCore's types.
-@Suite("Arena runtime: the app's wiring", .serialized)
+@Suite("Arena runtime: the app's wiring", .serialized, .hangBackstop)
 @MainActor
 struct RuntimeWiringTests {
 
@@ -51,12 +51,11 @@ struct RuntimeWiringTests {
         _ = await runtime.scorer.pass(accounts: [account], now: RuntimeEngineTests.now)
         await engine.recompute(now: RuntimeEngineTests.now)
         #expect(await engine.resolvedMethod(windowKey: "five_hour").selected == "test-oracle")
-        // The request and the landed callback each hop through a task.
-        for _ in 0..<500 where redraws.liveAccounts.isEmpty {
-            await runtime.live.settle()
-            try await Task.sleep(for: .milliseconds(10))
-        }
-        #expect(redraws.liveAccounts == [[account]])
+        // The request and the landed callback each hop through a task: wait
+        // for the redraw itself, not a count of sleeps, which a loaded Mac
+        // outlasted (#431).
+        #expect(await eventually { !redraws.lives.isEmpty }, "the live projection never redrew the engine")
+        #expect(redraws.lives == [[account]])
         #expect(await engine.resolvedMethod(windowKey: "five_hour").resolved == "test-oracle")
         await runtime.stop()
     }
