@@ -154,7 +154,8 @@ describe('forwarding to Sentry', () => {
       sdk: { name: 'pacer.site-worker', version: '1.0.0', settings: { infer_ip: 'never' } },
       tags: { kind: 'problem', app_version: '0.9.5', macos: '26.1', model: 'Mac16,8', source: 'website-proxy', site_environment: 'production' },
       contexts: {
-        feedback: { message: 'The 7-day gauge froze after the update.', name: 'problem', source: 'website-proxy' },
+        // No name: Sentry shows it as the reporter's name. The kind is the tag.
+        feedback: { message: 'The 7-day gauge froze after the update.', source: 'website-proxy' },
         os: { name: 'macOS', version: '26.1' },
         device: { family: 'Mac', model: 'Mac16,8' },
         app: { app_version: '0.9.5', app_build: '1795528779' },
@@ -181,7 +182,6 @@ describe('forwarding to Sentry', () => {
     expect(event.user).toEqual({ id: INSTALL_ID }); // and nothing else: no ip_address
     expect(event.contexts.feedback).toEqual({
       message: 'The 7-day gauge froze after the update.',
-      name: 'idea',
       source: 'website-proxy',
       contact_email: 'someone@example.com',
     });
@@ -194,35 +194,37 @@ describe('forwarding to Sentry', () => {
     expect(event.tags).toMatchObject({ kind: 'idea', macos: '26.1' });
   });
 
-  it('sends each attachment as its own item, byte for byte, in the same envelope', async () => {
-    sentry();
-    const png = bytesOf(4096, 1);
-    const json = new TextEncoder().encode('{"a":[1,2,3]}\n');
-    const mov = bytesOf(300_001, 3);
-    await post(
-      valid({
-        attachments: [
-          { filename: 'pacer-window.png', contentType: 'image/png', base64: base64(png) },
-          { filename: 'settings "export".json', contentType: 'application/json', base64: base64(json) },
-          { filename: 'repro.mov', contentType: 'video/quicktime', base64: base64(mov) },
-        ],
-      }),
-    );
-    const envelope = parseEnvelope(sent[0]!.body);
-    expect(envelope.items.map((i) => i.header.type)).toEqual(['feedback', 'attachment', 'attachment', 'attachment']);
-    const [, a, b, c] = envelope.items;
-    expect(a!.header).toEqual({ type: 'attachment', length: 4096, filename: 'pacer-window.png', content_type: 'image/png', attachment_type: 'event.attachment' });
-    expect(b!.header).toMatchObject({ filename: 'settings "export".json', content_type: 'application/json', length: json.byteLength });
-    expect(c!.header).toMatchObject({ filename: 'repro.mov', content_type: 'video/quicktime', length: 300_001 });
-    expect(a!.payload).toEqual(png);
-    expect(b!.payload).toEqual(json);
-    expect(c!.payload).toEqual(mov);
+  it('sends the attachment as its own item, byte for byte, in the same envelope', async () => {
+    const files: [string, string, Uint8Array][] = [
+      ['pacer-window.png', 'image/png', bytesOf(4096, 1)],
+      ['settings "export".json', 'application/json', new TextEncoder().encode('{"a":[1,2,3]}\n')],
+      ['repro.mov', 'video/quicktime', bytesOf(300_001, 3)],
+      ['Capture d’écran 2026-11-25 à 10.00.png', 'image/png', bytesOf(10, 5)],
+    ];
+    for (const [filename, contentType, bytes] of files) {
+      sent = [];
+      sentry();
+      const { response } = await post(valid({ attachments: [{ filename, contentType, base64: base64(bytes) }] }));
+      expect(response.status, filename).toBe(200);
+      const envelope = parseEnvelope(sent[0]!.body);
+      expect(envelope.items.map((i) => i.header.type)).toEqual(['feedback', 'attachment']);
+      expect(envelope.items[1]!.header).toEqual({
+        type: 'attachment',
+        length: bytes.byteLength,
+        filename,
+        content_type: contentType,
+        attachment_type: 'event.attachment',
+      });
+      expect(envelope.items[1]!.payload).toEqual(bytes);
+    }
   });
 
-  it('accepts an attachment of exactly 10 MB', async () => {
+  it('accepts an attachment of exactly 8 MB, within the 12 MB body', async () => {
     sentry();
     const big = bytesOf(MAX_ATTACHMENT_BYTES, 9);
-    const { response } = await post(valid({ attachments: [{ filename: 'big.mov', contentType: 'video/quicktime', base64: base64(big) }] }));
+    const body = JSON.stringify(valid({ message: 'é'.repeat(10_000), attachments: [{ filename: 'big.mov', contentType: 'video/quicktime', base64: base64(big) }] }));
+    expect(body.length).toBeLessThan(MAX_BODY_BYTES);
+    const { response } = await post(null, { body });
     expect(response.status).toBe(200);
     expect(parseEnvelope(sent[0]!.body).items[1]!.payload.byteLength).toBe(MAX_ATTACHMENT_BYTES);
   });
@@ -352,7 +354,7 @@ describe('refused requests', () => {
     expect(sent).toHaveLength(1);
   });
 
-  it('refuses a body whose Content-Length is over 35 MB, before reading any of it', async () => {
+  it('refuses a body whose Content-Length is over 12 MB, before reading any of it', async () => {
     sentry();
     let pulled = 0;
     // highWaterMark 0: the stream is pulled only when something reads it.
@@ -370,19 +372,19 @@ describe('refused requests', () => {
       headers: { 'Content-Length': String(MAX_BODY_BYTES + 1) },
     });
     expect(response.status).toBe(413);
-    expect(json).toEqual({ ok: false, error: 'body larger than 35 MB' });
+    expect(json).toEqual({ ok: false, error: 'body larger than 12 MB' });
     expect(pulled).toBe(0);
     expect(sent).toHaveLength(0);
   });
 
-  it('refuses a body of 35 MB and one byte however it arrives', async () => {
+  it('refuses a body of 12 MB and one byte however it arrives', async () => {
     sentry();
     const { response } = await post(null, { body: new Uint8Array(MAX_BODY_BYTES + 1) });
     expect(response.status).toBe(413);
     expect(sent).toHaveLength(0);
   });
 
-  it('refuses a streamed body (no Content-Length) once it passes 35 MB', async () => {
+  it('refuses a streamed body (no Content-Length) once it passes 12 MB', async () => {
     sentry();
     const chunk = new Uint8Array(1024 * 1024).fill(0x20);
     let pulled = 0;
@@ -396,16 +398,16 @@ describe('refused requests', () => {
     const { response } = await post(null, { body: stream });
     expect(response.status).toBe(413);
     // It stopped reading at the cap, not at the end of the stream.
-    expect(pulled).toBeLessThanOrEqual(38);
+    expect(pulled).toBeLessThanOrEqual(15);
     expect(sent).toHaveLength(0);
   });
 
-  it('refuses an attachment over 10 MB from its size alone', async () => {
+  it('refuses an attachment over 8 MB from its size alone', async () => {
     sentry();
     const { json } = await post(
       valid({ attachments: [{ filename: 'big.mov', contentType: 'video/quicktime', base64: base64(bytesOf(MAX_ATTACHMENT_BYTES + 1)) }] }),
     );
-    expect(json).toEqual({ ok: false, error: 'attachment 1: larger than 10 MB' });
+    expect(json).toEqual({ ok: false, error: 'attachment 1: larger than 8 MB' });
     expect(sent).toHaveLength(0);
   });
 
@@ -435,10 +437,17 @@ describe('refused requests', () => {
     ['an installId that is not one', valid({ installId: 'someone@example.com' }), 'installId is not an install id'],
     ['an installId that is too long', valid({ installId: 'a'.repeat(65) }), 'installId is not an install id'],
     ['attachments that are not a list', valid({ attachments: att() }), 'attachments must be a list'],
-    ['four attachments', valid({ attachments: [att(), att(), att(), att()] }), 'at most 3 attachments'],
+    ['two attachments', valid({ attachments: [att(), att()] }), 'at most 1 attachment'],
     ['an attachment that is not an object', valid({ attachments: ['iVBORw0KGgo='] }), 'attachment 1: must be an object'],
     ['an attachment with an unknown field', valid({ attachments: [att({ path: '/Users/x' })] }), 'attachment 1: unknown field: path'],
-    ['an attachment named with a path', valid({ attachments: [att(), att({ filename: '../../etc/passwd' })] }), 'attachment 2: filename must be a file name'],
+    ['an attachment named with a path', valid({ attachments: [att({ filename: '../../etc/passwd' })] }), 'attachment 1: filename must be a file name'],
+    ['an attachment named with a backslash', valid({ attachments: [att({ filename: 'a\\b.png' })] }), 'attachment 1: filename must be a file name'],
+    ['an attachment named with a C1 control', valid({ attachments: [att({ filename: 'a\u0085b.png' })] }), 'attachment 1: filename must be a file name'],
+    ['an attachment named with a right-to-left override', valid({ attachments: [att({ filename: 'photo\u202egnp.exe' })] }), 'attachment 1: filename must be a file name'],
+    ['an attachment named with a bidi isolate', valid({ attachments: [att({ filename: 'a\u2067b.png' })] }), 'attachment 1: filename must be a file name'],
+    ['an attachment named with a zero-width space', valid({ attachments: [att({ filename: 'a\u200bb.png' })] }), 'attachment 1: filename must be a file name'],
+    ['an attachment named with a left-to-right mark', valid({ attachments: [att({ filename: 'a\u200eb.png' })] }), 'attachment 1: filename must be a file name'],
+    ['an attachment named with a byte-order mark', valid({ attachments: [att({ filename: '\ufeffa.png' })] }), 'attachment 1: filename must be a file name'],
     ['an attachment named ..', valid({ attachments: [att({ filename: '..' })] }), 'attachment 1: filename must be a file name'],
     ['an attachment named with a newline', valid({ attachments: [att({ filename: 'a\nb.png' })] }), 'attachment 1: filename must be a file name'],
     ['an attachment with no name', valid({ attachments: [att({ filename: '' })] }), 'attachment 1: filename must be a file name'],

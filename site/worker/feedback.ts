@@ -9,16 +9,21 @@
 // Sentry, because the envelope is posted by this Worker, from Cloudflare,
 // with its own headers, and asks Sentry not to infer an address.
 //
-// Abuse: only a `Pacer/` User-Agent is served, and a body is at most 35 MB.
+// Abuse: only a `Pacer/` User-Agent is served, and a body is at most 12 MB.
 // There is no per-address rate limit (on the Free plan that would need KV or a
 // Durable Object); Sentry's own project rate limits and spike protection cap
 // what gets stored, and every refused request is logged (reason only).
 
-/** The whole request body, JSON with base64 attachments. */
-export const MAX_BODY_BYTES = 35 * 1024 * 1024;
-/** Each attachment, decoded (the app's Report a Problem sheet uses the same cap). */
-export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
-export const MAX_ATTACHMENTS = 3;
+/**
+ * The whole request body, JSON with a base64 attachment. Held well under the
+ * isolate's 128 MB: the body, its parsed copy, the decoded file and the
+ * envelope are all in memory at once, and an isolate that runs out is
+ * restarted with every request it is serving (the update feed's included).
+ */
+export const MAX_BODY_BYTES = 12 * 1024 * 1024;
+/** The one attachment, decoded: as base64 (a third larger) it fits the body cap with the message. */
+export const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
+export const MAX_ATTACHMENTS = 1;
 export const MAX_MESSAGE_CHARS = 10_000;
 /** Sentry refuses a feedback message longer than this (unicode scalars; sentry-cocoa's SentryFeedbackValidator). */
 export const SENTRY_MESSAGE_MAX = 4096;
@@ -48,8 +53,12 @@ const LOCALE = /^[A-Za-z]{2,3}(?:[-_][0-9A-Za-z]{1,8}){0,5}$/;
 const INSTALL_ID = /^(?:[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}|[0-9A-Fa-f]{16,64})$/;
 /** An address someone typed to be answered at; checked for shape only. */
 const EMAIL = /^[^\s@<>()[\]\\,;:"]{1,64}@[^\s@<>()[\]\\,;:"]+\.[^\s@<>()[\]\\,;:"]{2,63}$/;
-/** A file name, not a path: no separators, no control characters. */
-const FILENAME = /^[^/\\\u0000-\u001f\u007f]{1,128}$/;
+/**
+ * A file name, not a path: no separators, no C0 or C1 controls, and no
+ * zero-width or bidi controls, which could make a name read as something
+ * else in Sentry (`photo\u202Egnp.exe` shows as `photoexe.png`).
+ */
+const FILENAME = /^[^/\\\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]{1,128}$/;
 
 export interface Attachment {
   filename: string;
@@ -108,7 +117,7 @@ export function parseFeedback(body: unknown): Checked<Feedback> {
   const attachments: Attachment[] = [];
   if (b.attachments !== undefined && b.attachments !== null) {
     if (!Array.isArray(b.attachments)) return refuse('attachments must be a list');
-    if (b.attachments.length > MAX_ATTACHMENTS) return refuse(`at most ${MAX_ATTACHMENTS} attachments`);
+    if (b.attachments.length > MAX_ATTACHMENTS) return refuse(`at most ${MAX_ATTACHMENTS} attachment`);
     for (const [i, raw] of b.attachments.entries()) {
       const checked = parseAttachment(raw, i + 1);
       if (!checked.ok) return checked;
@@ -153,7 +162,7 @@ function parseAttachment(raw: unknown, n: number): Checked<Attachment> {
   // Refused by size before decoding anything.
   const padding = base64.endsWith('==') ? 2 : base64.endsWith('=') ? 1 : 0;
   const expected = (base64.length / 4) * 3 - padding;
-  if (expected > MAX_ATTACHMENT_BYTES) return refuse(`attachment ${n}: larger than 10 MB`);
+  if (expected > MAX_ATTACHMENT_BYTES) return refuse(`attachment ${n}: larger than 8 MB`);
   const bytes = decodeBase64(base64);
   // A decoder that skips whitespace would yield fewer bytes than the text implies.
   if (!bytes || bytes.length !== expected || bytes.length === 0) return refuse(`attachment ${n}: base64 is not valid`);
@@ -237,7 +246,8 @@ export function buildEnvelope(f: Feedback, siteEnvironment: string, eventId: str
     attachments.push({ filename: FULL_MESSAGE_FILENAME, contentType: 'text/plain', bytes: new TextEncoder().encode(f.message) });
   }
   const dev = f.devDescribe !== null;
-  const feedback: Record<string, unknown> = { message, name: f.kind, source: 'website-proxy' };
+  // No `name`: Sentry shows it as the reporter's name. The kind is a tag.
+  const feedback: Record<string, unknown> = { message, source: 'website-proxy' };
   if (f.email) feedback.contact_email = f.email;
   const contexts: Record<string, unknown> = {
     feedback,
@@ -349,7 +359,7 @@ export async function feedback(request: Request, env: Env, siteEnvironment: stri
   {
     // Scoped so the text and the parsed JSON can be collected once decoded.
     const text = await readCapped(request, MAX_BODY_BYTES);
-    if (text === null) return refused(413, 'body larger than 35 MB');
+    if (text === null) return refused(413, 'body larger than 12 MB');
     let json: unknown;
     try {
       json = JSON.parse(text);

@@ -248,7 +248,7 @@ and posts it from Cloudflare, so the sender's IP address and request headers
 never reach Sentry.
 
 **Request** (`Content-Type: application/json`, `User-Agent` starting
-`Pacer/`, at most 35 MB):
+`Pacer/`, at most 12 MB):
 
 | Field | Shape |
 | --- | --- |
@@ -261,19 +261,22 @@ never reach Sentry.
 | `model` | `hw.model`, e.g. `Mac16,8` |
 | `locale` | optional; `en_CA` |
 | `installId` | optional; the install id, **sent by the app only while Usage data is on** |
-| `attachments` | optional; at most 3 of `{filename, contentType, base64}`: a file name (no path), `image/png` \| `image/jpeg` \| `text/plain` \| `application/json` \| `video/quicktime`, standard padded base64 of at most 10 MB decoded |
+| `attachments` | optional; at most one `{filename, contentType, base64}`: a file name (no path; no control, zero-width or bidi characters), `image/png` \| `image/jpeg` \| `text/plain` \| `application/json` \| `video/quicktime`, standard padded base64 of at most 8 MB decoded |
 
 Any other field, or any value off its shape, is refused with `400 {ok: false,
 error}` and a short reason; nothing is forwarded. Also refused: not `POST`
-(405), another User-Agent (403), another content type (415), over 35 MB by
-`Content-Length` or as it streams (413). Since base64 is a third larger, the
-35 MB cap holds three attachments to about 26 MB together.
+(405), another User-Agent (403), another content type (415), over 12 MB by
+`Content-Length` or as it streams (413). The caps keep a request well under the
+isolate's 128 MB (the body, its parsed copy, the decoded file and the envelope
+are in memory together): an isolate that runs out is restarted with every
+request it is serving, the update feed's included once it shares the Worker.
 
 **What Sentry gets:** one envelope with a `feedback` item and an attachment
 item per file:
 
-- `contexts.feedback`: `message`, `name` (the kind), `contact_email` (only when
-  given), `source: website-proxy`. Sentry takes 4,096 characters at most, so a
+- `contexts.feedback`: `message`, `contact_email` (only when given), `source:
+  website-proxy`. No `name`: Sentry shows it as the reporter's name; the kind
+  is a tag. Sentry takes 4,096 characters at most, so a
   longer message is cut there with a note, and the whole text goes with it as
   `feedback-message.txt`.
 - tags `kind`, `app_version`, `macos`, `model`, `source: website-proxy`,
@@ -308,10 +311,10 @@ the DSN already allows: it ships in the app, and anyone can post to it
 directly.
 
 **CPU.** A text report costs well under a millisecond of the Worker's CPU. Parsing and decoding
-a body costs about 0.6 ms per MB on a fast Mac (2.7 MB, about 2 ms; 35 MB, about
-22 ms), so on the Workers Free plan's 10 ms a report with attachments of more
-than a few MB may be stopped by Cloudflare (error 1102) and should be retried
-without them, or sent straight to Sentry as Report a Problem does today.
+a body costs about 0.6 ms per MB on a fast Mac (2.7 MB, about 2 ms; 12 MB,
+about 7 ms), so on the Workers Free plan's 10 ms a report with an attachment of
+more than a few MB may be stopped by Cloudflare (error 1102) and should be
+retried without it, or sent straight to Sentry as Report a Problem does today.
 
 ## Memory and slow refits (#389)
 `memory.footprint_mb` gains `pressure`, `thermal`, `low_power`, `load_per_core` (lt1, 1_2, 2_4, 4_8, gt8), `compressor_gb`, `swap_gb`, `ram_gb`, `peak_mb`, `file_mb` (power-of-two bands).
