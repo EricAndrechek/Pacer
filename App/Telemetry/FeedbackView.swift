@@ -29,6 +29,12 @@ final class FeedbackWindow {
         let window = NSWindow(contentViewController: host)
         window.title = FeedbackCopy.windowTitle
         window.styleMask = [.titled, .closable]
+        // The heading inside says what this is; the bar above it stays, for
+        // the close button and for dragging, without a second title or a
+        // line under it. The title is still the window's name in the Window
+        // menu and to VoiceOver.
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
         window.isReleasedWhenClosed = false
         window.center()
         self.window = window
@@ -42,6 +48,11 @@ final class FeedbackWindow {
 /// Feedback to Pacer: an idea, a problem, or something else, chosen up top
 /// (idea by default, so the window reads as an invitation rather than a fault
 /// report).
+///
+/// Laid out as a composer, not a form. A heading that says who reads it, the
+/// kind, then one box: the words, with what is attached and the two ways to
+/// attach in its foot, so the extras are in reach and out of the way. Under
+/// it the email and Send on one line. A one-line idea is: type, Send.
 ///
 /// Sent to the site's feedback endpoint (`FeedbackSubmission`), which forwards
 /// it to Sentry user feedback: the same path whatever the crash-reports toggle
@@ -75,6 +86,9 @@ struct FeedbackView: View {
     }
 
     let onClose: () -> Void
+    /// A diagnostic render's filled-in window: a message, the window picture
+    /// and a file, none of them real.
+    private let isSample: Bool
 
     @State private var kind: FeedbackKind
     @State private var phase: Phase
@@ -92,12 +106,23 @@ struct FeedbackView: View {
     @State private var filesNote: String?
     @FocusState private var editorFocused: Bool
 
-    /// `phase` other than `.editing` is for a diagnostic render, which draws
-    /// the failure state without a send to fail.
-    init(kind: FeedbackKind = .idea, phase: Phase = .editing, onClose: @escaping () -> Void) {
+    /// `phase` other than `.editing` and `sample` are for a diagnostic render,
+    /// which draws the failure, sent and filled-in states without a send.
+    init(kind: FeedbackKind = .idea, phase: Phase = .editing, sample: Bool = false,
+         onClose: @escaping () -> Void) {
         self.onClose = onClose
+        isSample = sample
         _kind = State(initialValue: kind)
         _phase = State(initialValue: phase)
+        if sample {
+            let text = "The weekly chart goes back to Monday when I switch accounts. Token: sk-ant-api03-\(String(repeating: "a", count: 40))"
+            _message = State(initialValue: text)
+            _redaction = State(initialValue: FeedbackRedactor.redact(text))
+            _email = State(initialValue: "sam@example.com")
+            _includeWindow = State(initialValue: true)
+            _files = State(initialValue: [PickedFile(filename: "Pacer.err.log", contentType: "text/plain",
+                                                     data: Data("log".utf8), removed: 0)])
+        }
     }
 
     private var attachmentCount: Int { files.count + (includeWindow ? 1 : 0) }
@@ -117,18 +142,14 @@ struct FeedbackView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        Group {
             if phase == .sent {
-                Text("Sent. Thank you.")
-                    .foregroundStyle(.secondary)
-                Spacer()
-                HStack { Spacer(); Button("Close", action: onClose).keyboardShortcut(.defaultAction) }
+                sent
             } else {
                 form
             }
         }
-        .padding(20)
-        .frame(width: 460, height: phase == .sent ? 120 : 450)
+        .frame(width: 480, height: phase == .sent ? 220 : 344)
         // The cursor waits in the box. Focus alone is not editing, so this
         // never holds an update back (`UpdateInstallPolicy.isEditing`).
         .onAppear {
@@ -151,44 +172,173 @@ struct FeedbackView: View {
         }
     }
 
-    @ViewBuilder private var form: some View {
-        Picker("Kind", selection: $kind) {
-            ForEach(FeedbackKind.allCases) { Text($0.title).tag($0) }
-        }
-        .pickerStyle(.segmented)
-        .labelsHidden()
-        .fixedSize()
-        // Read here, so the question follows the choice.
-        Text(kind.prompt)
-            .font(.headline)
-        TextEditor(text: $message)
-            .font(.body)
-            .frame(minHeight: 140)
-            .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
-            .focused($editorFocused)
-        TextField("Email (optional, for a reply)", text: $email)
-        Toggle("Include a picture of Pacer's window", isOn: $includeWindow)
-            .disabled(!dashboardOpen || (!includeWindow && attachmentCount >= FeedbackSubmission.maxAttachments))
-        HStack {
-            Button("Add File…", action: addFiles)
-                .disabled(attachmentCount >= FeedbackSubmission.maxAttachments)
-            Text(files.map(\.filename).joined(separator: ", "))
-                .font(.caption)
+    private var sent: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 40))
+                .foregroundStyle(.green)
+                .padding(.bottom, 2)
+            Text(FeedbackCopy.sentTitle)
+                .font(.title2)
+                .fontWeight(.semibold)
+            Text(FeedbackCopy.sentDetail)
+                .font(.callout)
                 .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-            if !files.isEmpty {
-                Button("Remove") { files = []; filesNote = nil }.buttonStyle(.link).font(.caption)
-            }
+            Button("Done", action: onClose)
+                .keyboardShortcut(.defaultAction)
+                .padding(.top, 8)
         }
-        if let note = currentNote {
-            Text(note).font(.caption).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        buttons
+        .padding(.bottom, 16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    /// The one line under the form: what stops a send, or why it failed.
+    private var form: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 12) {
+                Image("PacerLogo")
+                    .resizable()
+                    .interpolation(.high)
+                    .frame(width: 40, height: 40)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(FeedbackCopy.heading)
+                        .font(.title2)
+                        .fontWeight(.semibold)
+                    Text(FeedbackCopy.subheading)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Picker("Kind", selection: $kind) {
+                ForEach(FeedbackKind.allCases) { Text($0.title).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            composer
+            if let note = currentNote {
+                // A send that did not go through is a warning; a limit or an
+                // unfinished email is only a note.
+                Label(note, systemImage: noteIsWarning ? "exclamationmark.triangle.fill" : "info.circle")
+                    .font(.callout)
+                    .foregroundStyle(noteIsWarning ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            actions
+        }
+        .padding(.horizontal, 22)
+        // Under the window's own (empty) title bar.
+        .padding(.top, 4)
+        .padding(.bottom, 20)
+    }
+
+    /// The words, and in the same box what goes with them. The editor takes
+    /// the height the window has left, so an attachment or a note below
+    /// borrows from it rather than moving the window.
+    private var composer: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            TextEditor(text: $message)
+                .font(.body)
+                .scrollContentBackground(.hidden)
+                .focused($editorFocused)
+                // The editor insets its own text five points.
+                .padding(.horizontal, 5)
+                .padding(.vertical, 8)
+                .frame(minHeight: 64, maxHeight: .infinity)
+                .overlay(alignment: .topLeading) {
+                    // Read here, so the question follows the choice.
+                    Text(kind.prompt)
+                        .font(.body)
+                        .foregroundStyle(.tertiary)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .opacity(message.isEmpty ? 1 : 0)
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                }
+                .accessibilityLabel(kind.prompt)
+            attachments
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color(nsColor: .textBackgroundColor))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(editorFocused ? Color.accentColor.opacity(0.55) : Color.primary.opacity(0.12),
+                              lineWidth: editorFocused ? 1.5 : 1)
+        )
+    }
+
+    private var attachments: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if attachmentCount > 0 {
+                HStack(spacing: 6) {
+                    if includeWindow {
+                        AttachmentChip(title: FeedbackCopy.windowAttachment, systemImage: "macwindow") {
+                            includeWindow = false
+                            attachmentRemoved()
+                        }
+                    }
+                    ForEach(Array(files.enumerated()), id: \.offset) { index, file in
+                        AttachmentChip(title: file.filename, systemImage: Self.symbol(for: file.contentType)) {
+                            if files.indices.contains(index) { files.remove(at: index) }
+                            attachmentRemoved()
+                        }
+                    }
+                }
+            }
+            HStack(spacing: 14) {
+                Button(action: addFiles) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "paperclip")
+                        Text(FeedbackCopy.attachFile)
+                    }
+                }
+                .disabled(attachmentCount >= FeedbackSubmission.maxAttachments)
+                Button {
+                    includeWindow = true
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "macwindow.badge.plus")
+                        Text(FeedbackCopy.attachWindow)
+                    }
+                }
+                .disabled(!dashboardOpen || includeWindow || attachmentCount >= FeedbackSubmission.maxAttachments)
+                .help(dashboardOpen ? FeedbackCopy.attachWindowHelp : FeedbackCopy.attachWindowClosedHelp)
+                Spacer(minLength: 0)
+                // Counted as typed (and as files are added), so the note is
+                // there before Send is.
+                let removed = redaction.removed + files.reduce(0) { $0 + $1.removed }
+                if let note = FeedbackCopy.removed(removed) {
+                    Text(note)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+            .buttonStyle(.borderless)
+            .font(.callout)
+        }
+        .padding(.horizontal, 10)
+        .padding(.top, 2)
+        .padding(.bottom, 9)
+    }
+
+    private static func symbol(for contentType: String) -> String {
+        if contentType.hasPrefix("image/") { return "photo" }
+        if contentType.hasPrefix("video/") { return "film" }
+        return "doc.text"
+    }
+
+    /// One fewer to send: the limit note no longer holds, and a send that
+    /// failed for size can be tried again.
+    private func attachmentRemoved() {
+        filesNote = nil
+        if isFailed { phase = .editing }
+    }
+
+    /// The one line above the buttons: what stops a send, or why it failed.
     private var currentNote: String? {
         switch phase {
         case .failed(let note): return note
@@ -201,36 +351,35 @@ struct FeedbackView: View {
         return filesNote
     }
 
-    private var buttons: some View {
-        VStack(alignment: .trailing, spacing: 4) {
-            HStack {
-                // Counted as typed (and as files are added), so the note is
-                // there before Send is.
-                let removed = redaction.removed + files.reduce(0) { $0 + $1.removed }
-                if let note = FeedbackCopy.removed(removed) {
-                    Text(note).font(.caption).foregroundStyle(.secondary)
-                }
-                Spacer()
-                if phase == .sending { ProgressView().controlSize(.small) }
-                Button("Cancel", action: onClose)
-                // The fallback, only once the endpoint cannot take this report.
-                if isFailed || phase == .capped || !filesFit {
-                    Button("Open GitHub Issue") { openIssue() }
-                        .keyboardShortcut(phase == .capped ? KeyboardShortcut.defaultAction : nil)
-                }
-                if phase != .capped {
-                    Button(isFailed ? "Try Again" : "Send") { send() }
-                        .keyboardShortcut(.defaultAction)
-                        .disabled(isEmpty || tooLong || !filesFit || !emailIsValid || phase == .sending)
-                }
+    private var noteIsWarning: Bool { isFailed || phase == .capped || !filesFit }
+
+    private var actions: some View {
+        HStack(spacing: 8) {
+            TextField(FeedbackCopy.emailPrompt, text: $email)
+                .textFieldStyle(.roundedBorder)
+                .textContentType(.emailAddress)
+                .frame(minWidth: 140)
+            if phase == .sending { ProgressView().controlSize(.small) }
+            // The fallback, only once the endpoint cannot take this report.
+            if isFailed || phase == .capped || !filesFit {
+                Button("Open GitHub Issue") { openIssue() }
+                    .keyboardShortcut(phase == .capped ? KeyboardShortcut.defaultAction : nil)
             }
-            Text(FeedbackCopy.recipient)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            if phase != .capped {
+                Button {
+                    send()
+                } label: {
+                    Text(isFailed ? "Try Again" : "Send").padding(.horizontal, 8)
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+                .disabled(isEmpty || tooLong || !filesFit || !emailIsValid || phase == .sending)
+            }
         }
     }
 
     private func refreshDashboardOpen() {
+        guard !isSample else { dashboardOpen = true; return }
         dashboardOpen = Self.dashboardWindow() != nil
         if !dashboardOpen { includeWindow = false }
     }
@@ -342,6 +491,42 @@ struct FeedbackView: View {
         Analytics.capture(.feedbackSent(kind: kind, via: .github))
         if let url = parts.url { NSWorkspace.shared.open(url) }
         onClose()
+    }
+}
+
+/// Something attached, with a way to take it back off.
+private struct AttachmentChip: View {
+    let title: String
+    let systemImage: String
+    let remove: () -> Void
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: systemImage)
+                .foregroundStyle(.secondary)
+            // As wide as its name, up to a limit: a long file name loses its
+            // middle rather than pushing the next chip out of the box.
+            Text(title)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(maxWidth: 120)
+                .fixedSize()
+            Button(action: remove) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 12, height: 12)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Remove")
+            .accessibilityLabel("Remove \(title)")
+        }
+        .font(.caption)
+        .padding(.leading, 8)
+        .padding(.trailing, 5)
+        .padding(.vertical, 4)
+        .background(Capsule().fill(Color.primary.opacity(0.08)))
     }
 }
 

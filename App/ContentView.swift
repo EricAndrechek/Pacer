@@ -324,21 +324,9 @@ struct DashboardSidebar: View {
 
             Spacer(minLength: 0)
 
-            // Which Pacer this is, a way to say something about it, and its
-            // update once one is ready: in plain sight, above Settings.
-            SidebarFooter(status: UpdateStatus.shared)
-                .padding(.horizontal, 12)
-                .padding(.bottom, 10)
-
-            Divider().opacity(0.4)
-            VStack(alignment: .leading, spacing: 0) {
-                SidebarItem(
-                    destination: .settings,
-                    selection: selection
-                )
-            }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 8)
+            // The foot: an update once one is ready, then Feedback and
+            // Settings as rows like the ones above, then which Pacer this is.
+            SidebarFooter(status: UpdateStatus.shared, selection: selection)
         }
         // `.navigationSplitViewColumnWidth(min:ideal:max:)` is the
         // single source of truth for sidebar width — the redundant
@@ -443,6 +431,10 @@ struct DashboardSidebar: View {
                     .fontWeight(.semibold)
                     .fixedSize()
             }
+            // The Feedback row is never selected, so it is measured regular.
+            Text(FeedbackCopy.button)
+                .font(.body)
+                .fixedSize()
         }
         // `.fixedSize()` makes each row take its intrinsic width, so the
         // VStack's width is exactly the widest label — independent of the
@@ -474,46 +466,50 @@ struct DashboardSidebar: View {
     }
 }
 
-/// The sidebar's foot: "Pacer 0.9.4" and Send Feedback on one line (two when
-/// the sidebar is too narrow for both), and above them, only while there is
-/// something to show, the update's progress or its install button.
+/// The sidebar's foot, top to bottom: the update row while an update is ready
+/// (`PacerUpdateAction`), a divider, Feedback and Settings as sidebar rows,
+/// and the version line, which says "Downloading 0.9.5…" while one downloads.
+///
+/// Feedback is a row like the destinations, not a control parked above the
+/// divider: it looks like part of the app, and it is as easy to hit as they
+/// are.
 ///
 /// Reads `status.state` in its own body, so it follows the check and the
 /// install hold whatever else redraws.
 private struct SidebarFooter: View {
     let status: UpdateStatus
+    let selection: Binding<ContentView.Destination>
 
     var body: some View {
         let state = status.state
-        VStack(alignment: .leading, spacing: 8) {
-            PacerUpdateAction(state: state) { status.installNow() }
-            // The version and the button side by side when they fit, the
-            // button under the version when they don't (a dev build's label
-            // is longer, and the sidebar can be dragged narrow).
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 8) {
-                    PacerVersionLabel(status.version)
-                    Spacer(minLength: 0)
-                    feedbackButton
-                }
-                VStack(alignment: .leading, spacing: 6) {
-                    PacerVersionLabel(status.version)
-                    feedbackButton
-                }
+        VStack(alignment: .leading, spacing: 0) {
+            // Padded only while it draws something: padding around nothing
+            // is still ten points of gap.
+            if state.readyVersion != nil {
+                PacerUpdateAction(state: state) { status.installNow() }
+                    .padding(.horizontal, 8)
+                    .padding(.bottom, 10)
             }
-        }
-    }
 
-    private var feedbackButton: some View {
-        Button {
-            FeedbackWindow.shared.show(from: .sidebar)
-        } label: {
-            Label(FeedbackCopy.button, systemImage: "bubble.left")
-                .lineLimit(1)
+            Divider().opacity(0.4)
+            VStack(alignment: .leading, spacing: 2) {
+                SidebarRow(title: FeedbackCopy.button, systemImage: "bubble.left.and.text.bubble.right",
+                           isSelected: false) {
+                    FeedbackWindow.shared.show(from: .sidebar)
+                }
+                .help(FeedbackCopy.subheading)
+                SidebarItem(destination: .settings, selection: selection)
+            }
+            .padding(.horizontal, 8)
+            .padding(.top, 8)
+
+            // Under the rows' icons (8 + 10).
+            PacerVersionLabel(status.version, state: state)
+                .padding(.leading, 18)
+                .padding(.trailing, 12)
+                .padding(.top, 6)
+                .padding(.bottom, 10)
         }
-        .buttonStyle(.bordered)
-        .controlSize(.small)
-        .fixedSize()
     }
 }
 
@@ -566,20 +562,33 @@ private struct SidebarSection<Content: View>: View {
 private struct SidebarItem: View {
     let destination: ContentView.Destination
     @Binding var selection: ContentView.Destination
-    @State private var hovering: Bool = false
 
     private var isSelected: Bool { selection == destination }
 
     var body: some View {
-        Button {
+        SidebarRow(title: destination.title, systemImage: destination.systemImage(selected: isSelected),
+                   isSelected: isSelected) {
             selection = destination
-        } label: {
+        }
+    }
+}
+
+/// One sidebar row: a destination (`SidebarItem`) or an action (Feedback).
+private struct SidebarRow: View {
+    let title: String
+    let systemImage: String
+    let isSelected: Bool
+    let action: () -> Void
+    @State private var hovering: Bool = false
+
+    var body: some View {
+        Button(action: action) {
             HStack(spacing: 10) {
-                Image(systemName: destination.systemImage(selected: isSelected))
+                Image(systemName: systemImage)
                     .font(.body.weight(.medium))
                     .frame(width: 18, alignment: .center)
                     .foregroundStyle(isSelected ? Color.white : Color.primary)
-                Text(destination.title)
+                Text(title)
                     .font(.body)
                     .fontWeight(isSelected ? .semibold : .regular)
                     .foregroundStyle(isSelected ? Color.white : Color.primary)

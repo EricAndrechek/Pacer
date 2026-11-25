@@ -22,9 +22,10 @@ import PacerCore
 /// Two pages do not depend on the scope and are drawn once per run, in each
 /// state they have: `sidebar` (the window's sidebar, its footer up to date,
 /// downloading and ready to install; `PACER_RENDER_UPDATE_STATE`, e.g.
-/// `ready:0.9.5` or `downloading:0.9.5,failed`, names the states instead) and
-/// `feedback` (the Send Feedback window, for each kind, and after a failed
-/// send, with the GitHub fallback).
+/// `ready:0.9.5` or `downloading:0.9.5,failed`, names the states instead;
+/// the first and last also in light, the last also at the sidebar's narrowest)
+/// and `feedback` (the Send Feedback window: each kind, a failed send with the
+/// GitHub fallback, filled in with attachments, sent, and two in light).
 ///
 /// Run it alongside the live app:
 ///
@@ -94,25 +95,42 @@ enum LiveRenderMode {
             case .menu: return MenuStatusContent.popoverWidth
             // The sidebar's ideal width (`DashboardSidebar`).
             case .sidebar: return 230
-            case .feedback: return 460
+            case .feedback: return 480
             }
         }
 
         /// The states a scope-independent page is drawn in, each as its own
         /// PNG (`live-<page>-<suffix>.png`); nil for every other page, which
         /// is drawn once per scope.
-        @MainActor var variants: [(suffix: String, view: AnyView)]? {
+        @MainActor var variants: [(suffix: String, scheme: ColorScheme, view: AnyView)]? {
             switch self {
             case .sidebar:
-                return LiveRenderMode.updateStates.map { state in
-                    (state.token, AnyView(SidebarRender(state: state)))
+                let states = LiveRenderMode.updateStates
+                // Every state in dark, then the two ends of the footer in
+                // light, and the ready state at the narrowest the sidebar
+                // drags to, where the version takes a shorter form.
+                return states.map { state in
+                    (state.token, .dark, AnyView(SidebarRender(state: state)))
+                } + [states.first, states.last].compactMap { $0 }.map { state in
+                    ("\(state.token)-light", .light, AnyView(SidebarRender(state: state)))
+                } + [states.last].compactMap { $0 }.map { state in
+                    ("\(state.token)-narrow", .dark, AnyView(SidebarRender(state: state, width: 166)))
                 }
             case .feedback:
-                return FeedbackKind.allCases.map { kind in
-                    (kind.rawValue, AnyView(FeedbackView(kind: kind, onClose: {})))
-                } + [("failed", AnyView(FeedbackView(kind: .problem,
-                                                     phase: .failed(FeedbackCopy.failure(.failed(status: 502)) ?? ""),
-                                                     onClose: {})))]
+                func window(_ view: FeedbackView) -> AnyView {
+                    // Its title bar is empty and transparent: the same gap.
+                    AnyView(view.padding(.top, 28).background(Color(nsColor: .windowBackgroundColor)))
+                }
+                let failed = FeedbackView.Phase.failed(FeedbackCopy.failure(.failed(status: 502)) ?? "")
+                var all: [(String, ColorScheme, AnyView)] = FeedbackKind.allCases.map { kind in
+                    (kind.rawValue, .dark, window(FeedbackView(kind: kind, onClose: {})))
+                }
+                all.append(("failed", .dark, window(FeedbackView(kind: .problem, phase: failed, onClose: {}))))
+                all.append(("filled", .dark, window(FeedbackView(kind: .problem, sample: true, onClose: {}))))
+                all.append(("sent", .dark, window(FeedbackView(phase: .sent, onClose: {}))))
+                all.append(("idea-light", .light, window(FeedbackView(kind: .idea, onClose: {}))))
+                all.append(("filled-light", .light, window(FeedbackView(kind: .problem, sample: true, onClose: {}))))
+                return all
             default:
                 return nil
             }
@@ -272,7 +290,7 @@ enum LiveRenderMode {
                     for variant in variants {
                         await OffscreenRenderer.render(
                             name: "live-\(page.rawValue)-\(variant.suffix)",
-                            width: page.width, scheme: .dark,
+                            width: page.width, scheme: variant.scheme,
                             container: container, engines: host
                         ) { variant.view }
                     }
@@ -301,11 +319,13 @@ enum LiveRenderMode {
 /// view's sidebar material is not drawn off-screen.
 private struct SidebarRender: View {
     let state: UpdateState
+    /// Narrower than the page, to draw the sidebar dragged in.
+    var width: CGFloat?
     @State private var selection: ContentView.Destination = .dashboard
 
     var body: some View {
         DashboardSidebar(selection: $selection)
-            .frame(height: 620)
+            .frame(width: width, height: 620)
             .background(Color(nsColor: .windowBackgroundColor))
             // Set as the view appears, so each variant draws its own state
             // (the renderer draws them one after another).
