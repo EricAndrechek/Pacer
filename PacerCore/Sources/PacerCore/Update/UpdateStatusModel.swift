@@ -166,6 +166,9 @@ public enum UpdateState: Sendable, Equatable {
     case checking
     case downloading(version: String)
     case readyToInstall(version: String)
+    /// The install was started (a click or the policy) and Pacer has not
+    /// relaunched yet: the action is shown, disabled.
+    case installing(version: String)
     case failed
 
     /// What Sparkle reported, in the order its delegate reports it.
@@ -203,10 +206,14 @@ public enum UpdateState: Sendable, Equatable {
 
     /// The state to show: a held update wins over whatever the last check
     /// said, since nothing else can run while it is held.
-    public static func resolve(phase: UpdateState, heldVersion: String?) -> UpdateState {
-        if let heldVersion { return .readyToInstall(version: heldVersion) }
-        if case .readyToInstall = phase { return .upToDate }
-        return phase
+    public static func resolve(phase: UpdateState, heldVersion: String?, installing: Bool = false) -> UpdateState {
+        if let heldVersion {
+            return installing ? .installing(version: heldVersion) : .readyToInstall(version: heldVersion)
+        }
+        switch phase {
+        case .readyToInstall, .installing: return .upToDate
+        default: return phase
+        }
     }
 
     /// Sparkle's "you're up to date" (`SUNoUpdateError`).
@@ -214,9 +221,17 @@ public enum UpdateState: Sendable, Equatable {
         domain == UpdateOutcomeLog.sparkleErrorDomain && code == UpdateOutcomeLog.sparkleNoUpdateCode
     }
 
+    /// The held update's version, ready or already installing.
     public var readyVersion: String? {
-        if case .readyToInstall(let version) = self { return version }
-        return nil
+        switch self {
+        case .readyToInstall(let version), .installing(let version): return version
+        default: return nil
+        }
+    }
+
+    public var isInstalling: Bool {
+        if case .installing = self { return true }
+        return false
     }
 
     /// A render override (`PACER_RENDER_UPDATE_STATE`): `up-to-date`,
@@ -235,6 +250,9 @@ public enum UpdateState: Sendable, Equatable {
         case "ready", "readytoinstall":
             guard let version else { return nil }
             self = .readyToInstall(version: version)
+        case "installing":
+            guard let version else { return nil }
+            self = .installing(version: version)
         default: return nil
         }
     }
@@ -246,6 +264,7 @@ public enum UpdateState: Sendable, Equatable {
         case .checking: return "checking"
         case .downloading(let version): return "downloading-\(version)"
         case .readyToInstall(let version): return "ready-\(version)"
+        case .installing(let version): return "installing-\(version)"
         case .failed: return "failed"
         }
     }
@@ -263,7 +282,8 @@ public enum UpdateCopy {
 
     public static func downloading(_ version: String) -> String { "Downloading \(version)…" }
 
-    /// The status menu's update item: only while an update is ready.
+    /// The status menu's update item: only while an update is ready (shown
+    /// disabled once it is installing, `UpdateState.isInstalling`).
     public static func menuInstallTitle(for state: UpdateState) -> String? {
         state.readyVersion.map(menuInstall)
     }

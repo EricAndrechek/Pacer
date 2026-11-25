@@ -48,13 +48,13 @@ final class FeedbackWindow {
 /// says, and no GitHub account needed. A GitHub issue is offered only when
 /// that send fails or today's limit is reached. The message is the person's
 /// own words, sent on their click, so it is not run through
-/// `TelemetryScrubber`; only credentials come out (`FeedbackRedactor`), and
-/// the window says how many.
+/// `TelemetryScrubber`; only credentials come out (`FeedbackRedactor`), of the
+/// message and of any text or JSON file attached, and the window says how many.
 ///
 /// Attachments are the person's choice per report, three at most: a picture
-/// of Pacer's own window (rendered from Pacer's view hierarchy, never a screen
-/// capture, and off by default because it shows costs and project names) and
-/// any files they pick, 10 MB each.
+/// of Pacer's dashboard window (rendered from its own view hierarchy, never a
+/// screen capture, and off by default because it shows costs and project
+/// names) and any files they pick, 8 MB in all once encoded.
 struct FeedbackView: View {
     enum Phase: Equatable {
         case editing, sending, sent
@@ -64,11 +64,14 @@ struct FeedbackView: View {
         case capped
     }
 
-    /// A file someone picked, measured and typed once, at the pick.
-    private struct PickedFile: Equatable {
-        let url: URL
-        let size: Int
+    /// A file someone picked, read, typed and (for text) redacted once, after
+    /// the pick and off the main thread. Its bytes are what is sent.
+    private struct PickedFile: Equatable, Sendable {
+        let filename: String
         let contentType: String
+        let data: Data
+        /// Credentials taken out of a text or JSON file.
+        let removed: Int
     }
 
     let onClose: () -> Void
@@ -76,8 +79,15 @@ struct FeedbackView: View {
     @State private var kind: FeedbackKind
     @State private var phase: Phase
     @State private var message = ""
+    /// `FeedbackRedactor.redact(message)`, kept current by `.onChange(of:
+    /// message)`: the body reads it three times, and a long paste is not worth
+    /// three passes of a dozen patterns per keystroke.
+    @State private var redaction = FeedbackRedactor.redact("")
     @State private var email = ""
     @State private var includeWindow = false
+    /// The dashboard is on screen, so there is a window to picture. Refreshed
+    /// when any window opens, closes, hides or comes forward.
+    @State private var dashboardOpen = false
     @State private var files: [PickedFile] = []
     @State private var filesNote: String?
     @FocusState private var editorFocused: Bool
@@ -93,7 +103,14 @@ struct FeedbackView: View {
     private var attachmentCount: Int { files.count + (includeWindow ? 1 : 0) }
     private var isEmpty: Bool { message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     /// The picked files alone; the window picture is measured at the send.
-    private var filesFit: Bool { FeedbackSubmission.attachmentsFit(sizes: files.map(\.size)) }
+    private var filesFit: Bool { FeedbackSubmission.attachmentsFit(sizes: files.map(\.data.count)) }
+    private var emailIsValid: Bool {
+        let address = email.trimmingCharacters(in: .whitespacesAndNewlines)
+        return address.isEmpty || FeedbackSubmission.isEmail(address)
+    }
+    private var tooLong: Bool {
+        redaction.text.unicodeScalars.count > FeedbackSubmission.maxMessageCharacters
+    }
     private var isFailed: Bool {
         if case .failed = phase { return true }
         return false
@@ -111,10 +128,27 @@ struct FeedbackView: View {
             }
         }
         .padding(20)
-        .frame(width: 460, height: phase == .sent ? 120 : 420)
+        .frame(width: 460, height: phase == .sent ? 120 : 450)
         // The cursor waits in the box. Focus alone is not editing, so this
         // never holds an update back (`UpdateInstallPolicy.isEditing`).
-        .onAppear { editorFocused = true }
+        .onAppear {
+            editorFocused = true
+            refreshDashboardOpen()
+        }
+        .onChange(of: message) { _, new in redaction = FeedbackRedactor.redact(new) }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.willCloseNotification)) { _ in
+            // After the close, which this notification comes just before.
+            DispatchQueue.main.async { refreshDashboardOpen() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeMainNotification)) { _ in
+            refreshDashboardOpen()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didMiniaturizeNotification)) { _ in
+            refreshDashboardOpen()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didDeminiaturizeNotification)) { _ in
+            refreshDashboardOpen()
+        }
     }
 
     @ViewBuilder private var form: some View {
@@ -134,11 +168,11 @@ struct FeedbackView: View {
             .focused($editorFocused)
         TextField("Email (optional, for a reply)", text: $email)
         Toggle("Include a picture of Pacer's window", isOn: $includeWindow)
-            .disabled(!includeWindow && attachmentCount >= FeedbackSubmission.maxAttachments)
+            .disabled(!dashboardOpen || (!includeWindow && attachmentCount >= FeedbackSubmission.maxAttachments))
         HStack {
             Button("Add File…", action: addFiles)
                 .disabled(attachmentCount >= FeedbackSubmission.maxAttachments)
-            Text(files.map(\.url.lastPathComponent).joined(separator: ", "))
+            Text(files.map(\.filename).joined(separator: ", "))
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
@@ -163,33 +197,42 @@ struct FeedbackView: View {
         }
         if !filesFit { return FeedbackCopy.tooLarge }
         if tooLong { return FeedbackCopy.tooLong }
+        if !emailIsValid { return FeedbackCopy.badEmail }
         return filesNote
     }
 
-    private var tooLong: Bool {
-        FeedbackRedactor.redact(message).text.unicodeScalars.count > FeedbackSubmission.maxMessageCharacters
+    private var buttons: some View {
+        VStack(alignment: .trailing, spacing: 4) {
+            HStack {
+                // Counted as typed (and as files are added), so the note is
+                // there before Send is.
+                let removed = redaction.removed + files.reduce(0) { $0 + $1.removed }
+                if let note = FeedbackCopy.removed(removed) {
+                    Text(note).font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                if phase == .sending { ProgressView().controlSize(.small) }
+                Button("Cancel", action: onClose)
+                // The fallback, only once the endpoint cannot take this report.
+                if isFailed || phase == .capped || !filesFit {
+                    Button("Open GitHub Issue") { openIssue() }
+                        .keyboardShortcut(phase == .capped ? KeyboardShortcut.defaultAction : nil)
+                }
+                if phase != .capped {
+                    Button(isFailed ? "Try Again" : "Send") { send() }
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(isEmpty || tooLong || !filesFit || !emailIsValid || phase == .sending)
+                }
+            }
+            Text(FeedbackCopy.recipient)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
     }
 
-    private var buttons: some View {
-        HStack {
-            // Counted as typed, so the note is there before Send is.
-            if let note = FeedbackCopy.removed(FeedbackRedactor.redact(message).removed) {
-                Text(note).font(.caption).foregroundStyle(.secondary)
-            }
-            Spacer()
-            if phase == .sending { ProgressView().controlSize(.small) }
-            Button("Cancel", action: onClose)
-            // The fallback, only once the endpoint cannot take this report.
-            if isFailed || phase == .capped || !filesFit {
-                Button("Open GitHub Issue") { openIssue() }
-                    .keyboardShortcut(phase == .capped ? KeyboardShortcut.defaultAction : nil)
-            }
-            if phase != .capped {
-                Button(isFailed ? "Try Again" : "Send") { send() }
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(isEmpty || tooLong || !filesFit || phase == .sending)
-            }
-        }
+    private func refreshDashboardOpen() {
+        dashboardOpen = Self.dashboardWindow() != nil
+        if !dashboardOpen { includeWindow = false }
     }
 
     private func addFiles() {
@@ -199,56 +242,67 @@ struct FeedbackView: View {
         // Only what the endpoint accepts; anything else it refuses.
         panel.allowedContentTypes = [.png, .jpeg, .plainText, .json, .quickTimeMovie]
         guard panel.runModal() == .OK else { return }
-        let picked = panel.urls.compactMap { url -> PickedFile? in
-            guard let type = FeedbackSubmission.contentType(forFileExtension: url.pathExtension) else { return nil }
-            let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
-            return PickedFile(url: url, size: size, contentType: type)
-        }
+        let urls = panel.urls
         let room = max(0, FeedbackSubmission.maxAttachments - attachmentCount)
-        let added = Array(picked.prefix(room))
-        files.append(contentsOf: added)
-        filesNote = added.count < panel.urls.count ? FeedbackCopy.filesLimit : nil
         if isFailed { phase = .editing }
+        // Read off the main thread: a file can be 8 MB, and redacting a large
+        // log is a few passes over it.
+        Task { @MainActor in
+            let picked = await Task.detached(priority: .userInitiated) { Self.read(urls) }.value
+            let added = Array(picked.prefix(room))
+            files.append(contentsOf: added)
+            filesNote = added.count < urls.count ? FeedbackCopy.filesLimit : nil
+        }
+    }
+
+    /// The files that can go: an accepted type, not empty, 8 MB or less, read
+    /// whole; text and JSON with their credentials taken out.
+    private nonisolated static func read(_ urls: [URL]) -> [PickedFile] {
+        urls.compactMap { url -> PickedFile? in
+            guard let type = FeedbackSubmission.contentType(forFileExtension: url.pathExtension),
+                  let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+                  size > 0, size <= FeedbackSubmission.maxAttachmentBytes,
+                  var data = try? Data(contentsOf: url), !data.isEmpty else { return nil }
+            var removed = 0
+            if type == "text/plain" || type == "application/json", let text = String(data: data, encoding: .utf8) {
+                let clean = FeedbackRedactor.redact(text)
+                data = Data(clean.text.utf8)
+                removed = clean.removed
+            }
+            return PickedFile(filename: FeedbackSubmission.cleanFilename(url.lastPathComponent),
+                              contentType: type, data: data, removed: removed)
+        }
     }
 
     private func send() {
-        guard !isEmpty, !tooLong, filesFit, phase != .sending else { return }
+        guard !isEmpty, !tooLong, filesFit, emailIsValid, phase != .sending else { return }
         // Only the person's own app sends: never a render, a probe or a test.
         guard LaunchMode.isNormalLaunch else { phase = .failed(FeedbackCopy.failure(.failed(status: nil)) ?? ""); return }
         // On the main thread: it draws a window. Everything else goes off it.
-        let windowPNG = includeWindow ? Self.mainWindowPNG() : nil
-        let sizes = files.map(\.size) + (windowPNG.map { [$0.count] } ?? [])
+        let windowPNG = includeWindow ? Self.dashboardPNG() : nil
+        var attachments = files.map {
+            FeedbackSubmission.Attachment(filename: $0.filename, contentType: $0.contentType, data: $0.data)
+        }
+        if let windowPNG {
+            attachments.insert(.init(filename: "pacer-window.png", contentType: "image/png", data: windowPNG), at: 0)
+        }
+        let context = FeedbackContext.current()
+        let submission = FeedbackSubmission(
+            kind: kind, message: redaction.text, email: email, appVersion: context.version.reportVersion,
+            appBuild: context.build, devDescribe: context.version.reportDescribe, macOS: context.macOS,
+            model: context.model, locale: context.locale, installId: context.installId,
+            attachments: attachments)
         // Measured before the budget is spent: too large is fixed by removing
         // a file, not by spending one of the day's five.
-        guard FeedbackSubmission.attachmentsFit(sizes: sizes) else { phase = .failed(FeedbackCopy.tooLarge); return }
+        guard submission.attachmentsFit else { phase = .failed(FeedbackCopy.tooLarge); return }
         // Five a day per Mac: the endpoint is public, and this keeps a stuck
         // key or a repeated click from sending the same report all day.
         guard TelemetryBudget.shared.take(.feedback) else { phase = .capped; return }
         phase = .sending
-        let context = FeedbackContext.current()
         let kind = kind
-        let files = files
-        let text = FeedbackRedactor.redact(message).text
-        let email = email
         Task { @MainActor in
-            let outcome = await Task.detached(priority: .userInitiated) { () -> FeedbackSender.Outcome in
-                var attachments: [FeedbackSubmission.Attachment] = []
-                if let windowPNG {
-                    attachments.append(.init(filename: "pacer-window.png", contentType: "image/png", data: windowPNG))
-                }
-                for file in files {
-                    guard let data = try? Data(contentsOf: file.url) else { continue }
-                    attachments.append(.init(filename: file.url.lastPathComponent, contentType: file.contentType,
-                                             data: data))
-                }
-                let submission = FeedbackSubmission(
-                    kind: kind, message: text, email: email, appVersion: context.version.reportVersion,
-                    appBuild: context.build, devDescribe: context.version.reportDescribe, macOS: context.macOS,
-                    model: context.model, locale: context.locale, installId: context.installId,
-                    attachments: attachments)
-                // A file that grew since it was picked.
-                guard submission.attachmentsFit else { return .failed(status: 413) }
-                return await FeedbackSender.send(submission, userAgent: context.userAgent)
+            let outcome = await Task.detached(priority: .userInitiated) {
+                await FeedbackSender.send(submission, userAgent: context.userAgent)
             }.value
             switch outcome {
             case .sent:
@@ -256,20 +310,26 @@ struct FeedbackView: View {
                 Analytics.capture(.feedbackSent(kind: kind, via: .site))
                 phase = .sent
             case .refused, .rateLimited, .failed:
+                // Only what the server kept, or rate-limited, spends one of
+                // the day's five; a report it never took is given back, so
+                // fixing it or coming back online can still send.
+                if outcome != .rateLimited { TelemetryBudget.shared.refund(.feedback) }
                 Log.write("Feedback", "send failed (\(outcome))")
                 phase = .failed(FeedbackCopy.failure(outcome) ?? "")
             }
         }
     }
 
-    /// Pacer's dashboard window, drawn from its own view hierarchy into a PNG.
-    /// Not a screen capture: nothing outside Pacer's window can appear in it.
-    private static func mainWindowPNG() -> Data? {
-        let candidates = NSApp.windows.filter {
-            $0.isVisible && $0.title != FeedbackCopy.windowTitle && $0.contentView != nil
-        }
-        guard let view = (candidates.first { $0.isMainWindow } ?? candidates.max { $0.frame.width < $1.frame.width })?
-                .contentView,
+    /// The dashboard window, by the identity the app registered for it
+    /// (`MainWindowPlacement.isDashboard`), when it is on screen.
+    private static func dashboardWindow() -> NSWindow? {
+        NSApp.windows.first { MainWindowPlacement.isDashboard($0) && $0.isVisible && $0.contentView != nil }
+    }
+
+    /// The dashboard, drawn from its own view hierarchy into a PNG. Not a
+    /// screen capture: nothing outside Pacer's window can appear in it.
+    private static func dashboardPNG() -> Data? {
+        guard let view = dashboardWindow()?.contentView,
               let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return nil }
         view.cacheDisplay(in: view.bounds, to: rep)
         return rep.representation(using: .png, properties: [:])
@@ -278,7 +338,7 @@ struct FeedbackView: View {
     private func openIssue() {
         var parts = URLComponents(string: "https://github.com/ericandrechek/Pacer/issues/new")!
         // The kind and the text; files are dragged into the issue there.
-        parts.queryItems = [URLQueryItem(name: "body", value: kind.report(FeedbackRedactor.redact(message).text))]
+        parts.queryItems = [URLQueryItem(name: "body", value: kind.report(redaction.text))]
         Analytics.capture(.feedbackSent(kind: kind, via: .github))
         if let url = parts.url { NSWorkspace.shared.open(url) }
         onClose()

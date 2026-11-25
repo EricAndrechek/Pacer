@@ -487,12 +487,19 @@ CLI crashes are not reported.
    `kind` (`idea`/`problem`/`other`), `message`, `email` (optional, the person's own), `appVersion`,
    `appBuild`, `devDescribe` (dev builds' `git describe`), `macOS`, `model` (`hw.model`), `locale`,
    `installId` (only while "Usage data" is on), `attachments` (≤ 3; PNG, JPEG, plain text, JSON or
-   QuickTime; ≤ 8 MB in all once base64-encoded, under the Worker's CPU budget on Cloudflare's free
+   QuickTime; none empty; ≤ 8 MB each decoded and ≤ 8 MB in all once base64-encoded, under the Worker's CPU budget on Cloudflare's free
    plan; the window picture is off by default). Answers: 2xx sent; 400 shows the endpoint's reason;
    429 "try again later"; anything else, or no answer, offers the GitHub issue. The message is the person's own words, sent on their click,
    so it is **not** run through `TelemetryScrubber`: `FeedbackRedactor` removes only credentials
-   (`Authorization:` values, bearer tokens, `sk-ant-…`/`sk-…`, GitHub tokens, JWTs, other 40+
-   character random tokens) and the window shows "1 token removed"; paths, emails and hex ids stay.
+   (`Authorization:` values with a scheme or token, bearer tokens, PEM private keys, `sk-ant-…`,
+   `sk-…`, GitHub, Sentry `sntrys_`/`sntryu_`, PostHog `phx_`, Slack `xox?-`, AWS `AKIA…`, Google
+   `AIza…` keys, JWTs, values named as secrets (`…_TOKEN=`, `password:`), other 40+ character
+   random tokens, also right after `=` or `:`), from the message and from attached text and JSON
+   files, and the window shows "1 token removed"; paths, emails, hex ids and the public PostHog
+   `phc_` token stay. File names are cleaned (no separators, controls or bidi marks, ≤ 128
+   characters), the email is shape-checked before sending, and a send the server did not keep (no
+   answer, 400, 413, 415, other errors) gives its budget take back (`TelemetryBudget.refund`):
+   only a 2xx or a 429 spends one of the day's five.
    Only a normal launch sends (`LaunchMode.isNormalLaunch`). And
    `pacer feedback` POSTs a `feedback` envelope with the DSN (scrubbed, ≤ 4096 chars, 3 s timeout,
    falls back to today's local inbox + issue link). Off with `--local`, `PACER_FEEDBACK=local`, or

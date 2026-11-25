@@ -43,6 +43,12 @@ final class UpdateInstallScheduler {
     /// the sidebar footer and the status menu offer it too (`UpdateStatus`).
     private(set) var readyVersion: String?
 
+    /// The install block has been called and Pacer has not relaunched yet:
+    /// the update buttons grey out, and a second click does nothing. Cleared
+    /// when the hold ends, or when `retryAfter` passes with Pacer still here
+    /// (the block can be called again then).
+    private(set) var isInstalling = false
+
     @ObservationIgnored private var install: (() -> Void)?
     @ObservationIgnored private weak var updater: SPUUpdater?
     @ObservationIgnored private var readyAt: Date?
@@ -115,6 +121,7 @@ final class UpdateInstallScheduler {
         readyVersion = nil
         readyAt = nil
         firedAt = nil
+        isInstalling = false
         installingByPolicy = false
         timer?.invalidate()
         timer = nil
@@ -128,9 +135,15 @@ final class UpdateInstallScheduler {
     }
 
     /// "Update to … — Restart" (`UpdateStatus.installNow`): someone asked, so
-    /// no policy applies.
+    /// no policy applies. That includes the editing guard, on purpose: the
+    /// policy never relaunches over text being typed because nobody asked it
+    /// to, and here somebody did, with a click (the field that was being
+    /// edited lost focus to it).
     func installNow() {
-        guard install != nil else { return }
+        guard install != nil, !isInstalling else { return }
+        // The same check the timer makes: a session that closed without
+        // telling the delegate leaves a block that installs nothing.
+        guard updater?.sessionInProgress == true else { release(); return }
         fire(reason: "chosen", byPolicy: false)
     }
 
@@ -143,7 +156,11 @@ final class UpdateInstallScheduler {
         // the block is dead and "Update to … — Restart" would do nothing.
         guard updater?.sessionInProgress == true else { release(); return }
         let now = Date()
-        if let firedAt, now.timeIntervalSince(firedAt) < Self.retryAfter { return }
+        if let firedAt {
+            if now.timeIntervalSince(firedAt) < Self.retryAfter { return }
+            // Still here after the wait: the block may be called again.
+            isInstalling = false
+        }
         switch UpdateInstallPolicy.decide(signals(now: now, readyAt: readyAt)) {
         case .wait(let reason):
             if reason != lastWait {
@@ -158,6 +175,7 @@ final class UpdateInstallScheduler {
     private func fire(reason: String, byPolicy: Bool) {
         Log.write("Update", "installing \(readyVersion ?? "update") (\(reason)); Pacer relaunches")
         firedAt = Date()
+        isInstalling = true
         installingByPolicy = byPolicy
         install?()
     }
