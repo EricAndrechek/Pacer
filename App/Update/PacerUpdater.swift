@@ -157,6 +157,7 @@ private class PacerUpdaterDelegate: NSObject, SPUUpdaterDelegate {
     // releases). Nothing X-Pacer-* may reach them, the id least of all.
     func updater(_ updater: SPUUpdater, willDownloadUpdate item: SUAppcastItem, with request: NSMutableURLRequest) {
         FeedRequestHeaders.strip(request)
+        note(.downloadStarted(version: item.displayVersionString))
     }
 
     func updater(_ updater: SPUUpdater, shouldDownloadReleaseNotesForUpdate updateItem: SUAppcastItem) -> Bool {
@@ -176,10 +177,6 @@ private class PacerUpdaterDelegate: NSObject, SPUUpdaterDelegate {
     func updaterDidNotFindUpdate(_ updater: SPUUpdater) {
         UpdateOutcomeLog.record(.noUpdate)
         note(.noUpdate)
-    }
-
-    func updater(_ updater: SPUUpdater, willDownloadUpdate item: SUAppcastItem, with request: NSMutableURLRequest) {
-        note(.downloadStarted(version: item.displayVersionString))
     }
 
     // Extracted is as far as the progress goes: what follows is the hold
