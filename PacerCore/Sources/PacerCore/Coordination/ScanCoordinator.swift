@@ -566,6 +566,13 @@ public final class ScanCoordinator {
     /// Tests hold the cycle open here, or throw. `nil` in the app.
     var beforeRecomputeHook: (@ScanActor () async throws -> Void)?
 
+    /// Test seam: runs at the start of the startup stale-cursor prune. The
+    /// OAuth poller must already be reading by then (#463). `nil` in the app.
+    var beforeStartupPruneHook: (@ScanActor () async throws -> Void)?
+    /// Test seam: runs right after the prune, before the first cycle (whose
+    /// cost-recompute rebuild may clear every cursor anyway). `nil` in the app.
+    var afterStartupPruneHook: (@ScanActor () async throws -> Void)?
+
     /// Whether a scan cycle or an alias migration currently owns the
     /// persister's dirty sets, and who is queued behind it.
     private var markPassInFlight = false
@@ -1070,24 +1077,6 @@ public final class ScanCoordinator {
         resolvedRoots = try resolveAllRoots()
         let stream = await watcher.triggers()
         if await abandonIfStopped() { return }
-        // One-shot stale-cursor prune: walk the JSONLFileCursor table
-        // and drop rows whose paths no longer exist on disk. On the
-        // live machine the table had drifted to 1072 cursors vs ~900
-        // real JSONL files — 170+ stale rows that the cache (kept
-        // hot per-cycle) was paying memory + iteration cost on. Disk
-        // failures (e.g. transient network home dir) won't drop
-        // active cursors because Claude Code's `~/.claude` is a local
-        // path; the next genuine FSEvent for a path we deleted will
-        // simply re-create the cursor at offset 0 (correct: we'd be
-        // seeing a new file).
-        do {
-            let pruned = try pruneStaleCursors()
-            if pruned > 0 {
-                log("startup: pruned \(pruned) stale JSONLFileCursor row(s)")
-            }
-        } catch {
-            log("startup: stale-cursor prune failed: \(error)")
-        }
         // The poller and the watcher start BEFORE the first cycle (#328).
         // Neither needs it: the poller owns its own context and cadence, and
         // the watcher only records which transcripts changed. Started after
@@ -1134,6 +1123,30 @@ public final class ScanCoordinator {
         // seen during the first cycle queues behind it (`followLoginChange`).
         startLoginWatcher()
 
+        // Last, after the poller and LoginWatch (#463): the prune is a full-table
+        // fetch plus a stat of every path, milliseconds on an idle Mac and ~37 s
+        // on a starved `.utility` actor, and with it ahead of them the first
+        // usage reading came 46 s after launch. Same rows pruned, same log line.
+        // One-shot stale-cursor prune: walk the JSONLFileCursor table
+        // and drop rows whose paths no longer exist on disk. On the
+        // live machine the table had drifted to 1072 cursors vs ~900
+        // real JSONL files — 170+ stale rows that the cache (kept
+        // hot per-cycle) was paying memory + iteration cost on. Disk
+        // failures (e.g. transient network home dir) won't drop
+        // active cursors because Claude Code's `~/.claude` is a local
+        // path; the next genuine FSEvent for a path we deleted will
+        // simply re-create the cursor at offset 0 (correct: we'd be
+        // seeing a new file).
+        do {
+            try await beforeStartupPruneHook?()
+            let pruned = try pruneStaleCursors()
+            if pruned > 0 {
+                log("startup: pruned \(pruned) stale JSONLFileCursor row(s)")
+            }
+            try await afterStartupPruneHook?()
+        } catch {
+            log("startup: stale-cursor prune failed: \(error)")
+        }
         do {
             let report = try await runScanCycle()
             log("startup: \(formatReport(report))")
