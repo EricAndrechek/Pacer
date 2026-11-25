@@ -10,6 +10,19 @@ struct FeedbackRedactorTests {
     static let oauth = "sk-ant-oat01-ZyXwVuTsRqPoNmLkJiHgFeDcBa9876543210abcdefghij"
     static let jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
     static let randomToken = "Qm9vZ1hY3k2LmZ7aWxsYXJkcz8xOTk3VGhpc0lzQUxvbmdUb2tlbjQ1Njc4OTA"
+    // Vendor-shaped fakes, built from pieces so no line of this file is itself
+    // a credential-shaped string: GitHub's push protection refuses a commit
+    // carrying one, fake or not.
+    static let github = "ghp" + "_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+    static let sentryOrg = "sntrys" + "_" + "eyJpYXQiOjE3MDAwMDAwMDAuMCwidXJsIjoiaHR0cHM6Ly9zZW50cnkuaW8ifQ==_AbCdEf0123456789"
+    static let posthogPersonal = "phx" + "_" + "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"
+    static let slackBot = ["xoxb", "123456789012", "1234567890123", "AbCdEfGhIjKlMnOpQrStUvWx"].joined(separator: "-")
+    static let slackUser = ["xoxp", "123456789012", "1234567890123", "1234567890123",
+                            "abcdef0123456789abcdef0123456789"].joined(separator: "-")
+    static let awsKeyId = "AK" + "IA" + "IOSFODNN7EXAMPLE"
+    static let awsSecret = "wJalrXUtnFEMI" + "/K7MDENG/" + "bPxRfiCYEXAMPLEKEY"
+    static let google = "AI" + "za" + "SyD-9tSrke72PouQMnMX-a7eZSW0jkFMBWY"
+    static let openai = "sk" + "-" + "proj-AbCdEfGhIjKlMnOpQrStUvWx0123456789"
 
     @Test("an Anthropic API key and an OAuth token are removed")
     func anthropic() {
@@ -44,7 +57,7 @@ struct FeedbackRedactorTests {
 
     @Test("GitHub tokens are removed")
     func github() {
-        let out = FeedbackRedactor.redact("ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8")
+        let out = FeedbackRedactor.redact(Self.github)
         #expect(out.text == "<redacted>")
     }
 
@@ -63,11 +76,111 @@ struct FeedbackRedactorTests {
             "NSHostingControllerSizingOptionsStandardBoundsAndMore",
             "The 5-hour limit hit 100% at 14:05 on account 2 of 4, after 1,234,567 tokens.",
             "authorization failed",
+            "authorization: works on account 1 but not 2",
+            "max_tokens: 4096 and input_tokens=1234567890123456",
+            "token_path=/Users/alice/.config/pacer/token-store.json",
+            "oauth_callback_token_url=https://localhost:8080/callback/abc",
+            "POSTHOG_PROJECT_TOKEN=phc_rCT9m6F6y7DwcDSJ5BgHpZECFyvpmsPoyUiLx5pa693A",
+            "commit:c4bc89de1180fe83c60eeb25673caab894ec80d4",
+            "TERM_SESSION_ID=w0t0p0:7F1E2D3C-4B5A-6978-8A9B-0C1D2E3F4A5B",
         ]
         for text in kept {
             let out = FeedbackRedactor.redact(text)
             #expect(out.text == text, "\(text)")
             #expect(out.removed == 0, "\(text)")
+        }
+    }
+
+    @Test("a token right after = or : is removed")
+    func afterEqualsOrColon() {
+        for text in ["ANTHROPIC_AUTH_TOKEN=\(Self.randomToken)", "https://x.example/cb?access_token=\(Self.randomToken)&a=1",
+                     "token:\(Self.randomToken)", "id:\(Self.randomToken)"] {
+            let out = FeedbackRedactor.redact(text)
+            #expect(out.removed == 1, "\(text)")
+            #expect(!out.text.contains(Self.randomToken), "\(text)")
+        }
+        // A short secret is caught by its name.
+        #expect(FeedbackRedactor.redact("password: hunter2hunter2hunter2").text == "password: <redacted>")
+        #expect(FeedbackRedactor.redact(#""client_secret": "a1b2c3d4e5f6g7h8i9""#).text
+                == #""client_secret": "<redacted>""#)
+    }
+
+    @Test("vendor keys by their prefix; a PostHog project token is public and stays")
+    func vendorKeys() {
+        let secrets = [
+            Self.sentryOrg,
+            "sntryu" + "_" + String(repeating: "a1b2c3d4", count: 8),
+            Self.posthogPersonal,
+            "gho" + "_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8",
+            "ghs" + "_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8",
+            "github" + "_pat_" + "11ABCDEFG0123456789_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJ",
+            Self.slackBot,
+            Self.slackUser,
+            Self.awsKeyId,
+            Self.google,
+            Self.openai,
+            "sk" + "-" + "AbCdEfGhIjKlMnOpQrStUvWx0123456789AbCdEfGhIjKl",
+        ]
+        for secret in secrets {
+            let out = FeedbackRedactor.redact("x \(secret) y")
+            #expect(out.text == "x <redacted> y", "\(secret)")
+            #expect(out.removed == 1, "\(secret)")
+        }
+        let project = "phc_rCT9m6F6y7DwcDSJ5BgHpZECFyvpmsPoyUiLx5pa693A"
+        #expect(FeedbackRedactor.redact("token \(project)").text == "token \(project)")
+    }
+
+    @Test("a private key block goes whole")
+    func privateKey() {
+        let text = """
+        before
+        -----BEGIN OPENSSH PRIVATE KEY-----
+        b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
+        QyNTUxOQAAACBhYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ejAxMjM0NQAAAJg=
+        -----END OPENSSH PRIVATE KEY-----
+        after
+        """
+        let out = FeedbackRedactor.redact(text)
+        #expect(out.text == "before\n<redacted>\nafter")
+        #expect(out.removed == 1)
+        #expect(FeedbackRedactor.redact("-----BEGIN RSA PRIVATE KEY-----\nMIIE\n-----END RSA PRIVATE KEY-----").removed == 1)
+    }
+
+    @Test("an env dump loses every secret and keeps everything else")
+    func envDump() {
+        let dump = """
+        SHELL=/bin/zsh
+        HOME=/Users/alice
+        PATH=/opt/homebrew/bin:/usr/bin:/bin
+        LANG=en_US.UTF-8
+        EDITOR=vim
+        CLAUDE_CONFIG_DIR=/Users/alice/.claude
+        ANTHROPIC_API_KEY=\(Self.apiKey)
+        ANTHROPIC_AUTH_TOKEN=\(Self.randomToken)
+        CLAUDE_CODE_OAUTH_TOKEN=\(Self.oauth)
+        GITHUB_TOKEN=\(Self.github)
+        SENTRY_AUTH_TOKEN=\(Self.sentryOrg)
+        POSTHOG_PERSONAL_API_KEY=\(Self.posthogPersonal)
+        POSTHOG_PROJECT_TOKEN=phc_rCT9m6F6y7DwcDSJ5BgHpZECFyvpmsPoyUiLx5pa693A
+        AWS_ACCESS_KEY_ID=\(Self.awsKeyId)
+        AWS_SECRET_ACCESS_KEY=\(Self.awsSecret)
+        SLACK_BOT_TOKEN=\(Self.slackBot)
+        GOOGLE_API_KEY=\(Self.google)
+        OPENAI_API_KEY=\(Self.openai)
+        DATABASE_PASSWORD=Tr0ub4dor-3xyzabcdEF
+        GIT_COMMIT=c4bc89de1180fe83c60eeb25673caab894ec80d4
+        """
+        let out = FeedbackRedactor.redact(dump)
+        #expect(out.removed == 12)
+        for kept in ["SHELL=/bin/zsh", "HOME=/Users/alice", "PATH=/opt/homebrew/bin:/usr/bin:/bin",
+                     "LANG=en_US.UTF-8", "EDITOR=vim", "CLAUDE_CONFIG_DIR=/Users/alice/.claude",
+                     "POSTHOG_PROJECT_TOKEN=phc_rCT9m6F6y7DwcDSJ5BgHpZECFyvpmsPoyUiLx5pa693A",
+                     "GIT_COMMIT=c4bc89de1180fe83c60eeb25673caab894ec80d4"] {
+            #expect(out.text.contains(kept), "\(kept)")
+        }
+        for gone in ["sk-ant", Self.randomToken, Self.github, Self.sentryOrg, Self.posthogPersonal, Self.awsKeyId,
+                     Self.awsSecret, Self.slackBot, Self.google, Self.openai, "Tr0ub4dor"] {
+            #expect(!out.text.contains(gone), "\(gone)")
         }
     }
 
@@ -147,11 +260,39 @@ struct FeedbackSubmissionTests {
         #expect(FeedbackSubmission.attachmentsFit(sizes: [6 * mb]))
         #expect(!FeedbackSubmission.attachmentsFit(sizes: [6 * mb + 1]))
         #expect(!FeedbackSubmission.attachmentsFit(sizes: [1, 1, 1, 1]))
-        #expect(!FeedbackSubmission.attachmentsFit(sizes: [11 * mb]))
+        #expect(!FeedbackSubmission.attachmentsFit(sizes: [9 * mb]))
+        // An empty file is refused.
+        #expect(!FeedbackSubmission.attachmentsFit(sizes: [0]))
+        #expect(FeedbackSubmission.maxAttachmentBytes == 8 * mb)
         let png = FeedbackSubmission.Attachment(filename: "w.png", contentType: "image/png", data: Data(count: 10))
         let zip = FeedbackSubmission.Attachment(filename: "x.zip", contentType: "application/zip", data: Data(count: 10))
         #expect(submission(attachments: [png]).attachmentsFit)
         #expect(!submission(attachments: [png, zip]).attachmentsFit)
+    }
+
+    @Test("file names are cleaned: no separators, controls or bidi marks, 128 characters with the extension")
+    func filenames() {
+        #expect(FeedbackSubmission.cleanFilename("pacer.log") == "pacer.log")
+        #expect(FeedbackSubmission.cleanFilename("a/b\\c.txt") == "abc.txt")
+        #expect(FeedbackSubmission.cleanFilename("evil\u{202E}txt.exe.png") == "eviltxt.exe.png")
+        #expect(FeedbackSubmission.cleanFilename("z\u{200B}w\u{FEFF}j\u{2066}.json") == "zwj.json")
+        #expect(FeedbackSubmission.cleanFilename("tab\there\u{0085}.txt") == "tabhere.txt")
+        #expect(FeedbackSubmission.cleanFilename("\u{202A}") == "attachment")
+        #expect(FeedbackSubmission.cleanFilename("..") == "attachment")
+        let long = FeedbackSubmission.cleanFilename(String(repeating: "x", count: 300) + ".log")
+        #expect(long.count == 128)
+        #expect(long.hasSuffix("x.log"))
+    }
+
+    @Test("an email is checked for the endpoint's shape before sending")
+    func emails() {
+        #expect(FeedbackSubmission.isEmail("alice@example.com"))
+        #expect(FeedbackSubmission.isEmail("a.b+c@sub.example.co"))
+        #expect(!FeedbackSubmission.isEmail("alice"))
+        #expect(!FeedbackSubmission.isEmail("alice@example"))
+        #expect(!FeedbackSubmission.isEmail("alice @example.com"))
+        #expect(!FeedbackSubmission.isEmail("a@b.c"))
+        #expect(!FeedbackSubmission.isEmail(String(repeating: "a", count: 250) + "@example.com"))
     }
 
     @Test("a file's type, as the endpoint accepts it, from its extension")

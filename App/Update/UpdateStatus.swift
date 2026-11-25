@@ -39,7 +39,9 @@ final class UpdateStatus {
 
     var state: UpdateState {
         if let forced { return forced }
-        return UpdateState.resolve(phase: phase, heldVersion: UpdateInstallScheduler.shared.readyVersion)
+        let scheduler = UpdateInstallScheduler.shared
+        return UpdateState.resolve(phase: phase, heldVersion: scheduler.readyVersion,
+                                   installing: scheduler.isInstalling)
     }
 
     func note(_ event: UpdateState.Event) {
@@ -51,8 +53,9 @@ final class UpdateStatus {
     /// Install the held update now and relaunch into it. An explicit click, so
     /// `UpdateInstallPolicy` does not apply: its never-interrupt rules (an open
     /// menu, text being edited) guard against a relaunch nobody asked for, and
-    /// this one was asked for (`UpdateInstallScheduler.installNow`). Decided at
-    /// the click: with no hold in hand it does nothing.
+    /// this one was asked for (`UpdateInstallScheduler.installNow`). Bypassing
+    /// the editing guard is deliberate. Decided at the click: with no hold in
+    /// hand, or an install already started, it does nothing.
     func installNow() {
         UpdateInstallScheduler.shared.installNow()
     }

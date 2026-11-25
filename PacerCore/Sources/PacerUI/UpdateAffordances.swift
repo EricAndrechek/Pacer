@@ -24,7 +24,8 @@ public struct PacerVersionLabel: View {
 /// The in-window update action. Nothing while there is nothing to act on
 /// (up to date, checking, a failed check), a quiet "Downloading 0.9.5…"
 /// while one downloads, and a prominent "Update to 0.9.5 · Restart" once it is
-/// ready. `install` runs on the click; the caller decides what that does.
+/// ready, greyed out once the install has started. `install` runs on the
+/// click; the caller decides what that does.
 ///
 /// Takes the state as a value, so the caller's body is what reads the
 /// observable status, and this redraws with it.
@@ -39,7 +40,9 @@ public struct PacerUpdateAction: View {
 
     public var body: some View {
         switch state {
-        case .readyToInstall(let version):
+        // One case for both, so the button keeps its identity when a click
+        // starts the install and only greys out.
+        case .readyToInstall(let version), .installing(let version):
             Button(action: install) {
                 Label(UpdateCopy.sidebarInstall(version), systemImage: "arrow.down.circle")
                     .lineLimit(1)
@@ -50,6 +53,7 @@ public struct PacerUpdateAction: View {
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.regular)
+            .disabled(state.isInstalling)
         case .downloading(let version):
             Text(UpdateCopy.downloading(version))
                 .font(.caption)

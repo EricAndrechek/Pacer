@@ -287,7 +287,8 @@ struct CheckForUpdatesView: View {
 
     var body: some View {
         // Read here, in this body, so the title follows the hold.
-        let ready = UpdateStatus.shared.state.readyVersion
+        let state = UpdateStatus.shared.state
+        let ready = state.readyVersion
         Button(ready.map(UpdateCopy.menuInstall) ?? UpdateCopy.checkForUpdates) {
             // Decided at the click, not from the render: the hold can end
             // between the two.
@@ -297,7 +298,7 @@ struct CheckForUpdatesView: View {
                 checker.updater.checkForUpdates()
             }
         }
-        .disabled(ready == nil && !checker.canCheckForUpdates)
+        .disabled(state.isInstalling || (ready == nil && !checker.canCheckForUpdates))
     }
 }
 

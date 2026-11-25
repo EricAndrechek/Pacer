@@ -140,6 +140,21 @@ struct UpdateStateTests {
         #expect(UpdateState.resolve(phase: .readyToInstall(version: "0.9.5"), heldVersion: nil) == .upToDate)
     }
 
+    @Test("an install under way shows as installing, so the action greys out")
+    func installing() {
+        let state = UpdateState.resolve(phase: .upToDate, heldVersion: "0.9.5", installing: true)
+        #expect(state == .installing(version: "0.9.5"))
+        #expect(state.isInstalling)
+        #expect(state.readyVersion == "0.9.5")
+        #expect(!UpdateState.readyToInstall(version: "0.9.5").isInstalling)
+        // The hold gone: nothing to install, whatever was under way.
+        #expect(UpdateState.resolve(phase: .upToDate, heldVersion: nil, installing: true) == .upToDate)
+        // The menu keeps its item (shown disabled).
+        #expect(UpdateCopy.menuInstallTitle(for: state) == "Update to 0.9.5 — Restart")
+        #expect(UpdateState(override: "installing:0.9.5") == state)
+        #expect(state.token == "installing-0.9.5")
+    }
+
     @Test("a failure stands until the next check")
     func failure() {
         let failedDownload = run([.checkStarted, .downloadStarted(version: "0.9.5"), .downloadFailed])

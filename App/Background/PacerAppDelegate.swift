@@ -1554,9 +1554,13 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let status = UpdateStatus.shared
         statusMenuVersionItem?.title = status.version.title
         guard let updateItem = statusMenuUpdateItem else { return }
-        if let title = UpdateCopy.menuInstallTitle(for: status.state) {
+        let state = status.state
+        if let title = UpdateCopy.menuInstallTitle(for: state) {
             updateItem.title = title
             updateItem.isHidden = false
+            // Greyed out once the install has started: a second click would
+            // call a block that is already running.
+            updateItem.isEnabled = !state.isInstalling
         } else {
             updateItem.isHidden = true
         }

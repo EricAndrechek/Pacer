@@ -41,9 +41,12 @@ public enum FeedbackCopy {
     public static let windowTitle = "Send Feedback"
 
     public static let tooLarge = "Over 8 MB in all. Remove a file, or open a GitHub issue."
+    public static let badEmail = "That email doesn't look right."
+    /// Under Send: who reads it.
+    public static let recipient = "Goes to the Pacer developer."
     public static let tooLong = "Up to 10,000 characters."
     public static let capped = "Today's limit is reached."
-    public static let filesLimit = "Up to 3 files: PNG, JPEG, text, JSON or QuickTime."
+    public static let filesLimit = "Up to 3 files, not empty: PNG, JPEG, text, JSON or QuickTime."
 
     /// What the window says when a send did not go through; nil when it did.
     public static func failure(_ outcome: FeedbackSender.Outcome) -> String? {
@@ -104,23 +107,45 @@ public enum FeedbackRedactor {
     /// In order: specific shapes first, so a header line is one removal, not
     /// a header and then its token again.
     private static let rules: [Rule] = [
-        // `Authorization: Bearer …`, `Proxy-Authorization: Basic …`, to the end of the line.
-        rule(#"(?i)\b((?:proxy-)?authorization)\s*[:=]\s*[^\r\n]+"#, "$1: \(placeholder)"),
+        // A PEM private key, the whole block.
+        rule(#"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----"#),
+        // `Authorization: Bearer …`, `Proxy-Authorization: Basic …`: only with a
+        // scheme or a token after it, so "authorization: works on account 1"
+        // stays as written.
+        rule(#"(?i)\b((?:proxy-)?authorization)\s*[:=]\s*(?:(?:bearer|basic|token)\s+[^\s"',;]+|[A-Za-z0-9._~+/=-]{12,})"#,
+             "$1: \(placeholder)"),
         // A bearer token anywhere else (`curl -H "Bearer …"`, a log line).
         rule(#"(?i)\b(bearer)\s+[A-Za-z0-9._~+/=-]{12,}"#, "$1 \(placeholder)"),
         // Anthropic API keys and OAuth tokens: `sk-ant-api03-…`, `sk-ant-oat01-…`.
         rule(#"\bsk-ant-[A-Za-z0-9_-]{8,}"#),
-        // Other vendors' keys of the same family: `sk-…`, `sk-proj-…`.
-        rule(#"\bsk-[A-Za-z0-9_-]{32,}"#),
+        // OpenAI and others of the family: `sk-…`, `sk-proj-…`.
+        rule(#"\bsk-[A-Za-z0-9_-]{20,}"#),
         // GitHub tokens.
         rule(#"\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,})"#),
+        // Sentry auth tokens (org `sntrys_`, user `sntryu_`).
+        rule(#"\bsntry[su]_[A-Za-z0-9+/=_-]{20,}"#),
+        // PostHog personal API keys. A project token (`phc_`) is public by
+        // design and stays.
+        rule(#"\bphx_[A-Za-z0-9]{20,}"#),
+        // Slack tokens.
+        rule(#"\bxox[abpr]-[A-Za-z0-9-]{10,}"#),
+        // AWS access key ids.
+        rule(#"\bAKIA[0-9A-Z]{16}\b"#),
+        // Google API keys.
+        rule(#"\bAIza[0-9A-Za-z_-]{35}"#),
         // JWTs: three base64url segments, the first a JSON header (`eyJ`).
         rule(#"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*"#),
+        // A value named as a secret: `ANTHROPIC_AUTH_TOKEN=…`, `?access_token=…`,
+        // `"client_secret": "…"`, `password: …`. Values that are paths, URLs,
+        // numbers or a public `phc_` token stay.
+        rule(#"(?i)\b([A-Za-z0-9_.-]*(?:token|secret|passw(?:or)?d|api[_-]?key|access[_-]?key|private[_-]?key|credential)s?)(["']?\s*[:=]\s*["']?)([^\s"'&,;<>]{16,})"#,
+             "$1$2\(placeholder)", accepts: { looksLikeSecretValue($0) }),
         // Any other long random token: 40+ base64 characters with upper and
-        // lower case and several digits. Hex ids (commits, hashes) are kept,
-        // and so are paths: a run that starts at a `/` or follows `~`, `.` or
-        // `:` (a URL) is a path, not a token.
-        rule(#"(?<![A-Za-z0-9+/=_~.:-])[A-Za-z0-9+/_-]{40,}={0,2}(?![A-Za-z0-9+/=_-])"#,
+        // lower case and several digits, including one right after `=` or `:`
+        // (`token:…`, a query string). Hex ids (commits, hashes) are kept, and
+        // so are paths: a run that starts at a `/` or follows `~` or `.` is a
+        // path, not a token, and a URL's `//` starts with one.
+        rule(#"(?<![A-Za-z0-9+/_~.-])[A-Za-z0-9+/_-]{40,}={0,2}(?![A-Za-z0-9+/=_-])"#,
              accepts: { looksRandom($0) }),
     ]
 
@@ -153,11 +178,26 @@ public enum FeedbackRedactor {
     /// pattern (`Sources/PacerCore/Update/UpdateStatusModel`) has words, not
     /// digits.
     static func looksRandom(_ run: String) -> Bool {
-        if run.hasPrefix("/") { return false }
+        if run.hasPrefix("/") || isPublic(run) { return false }
         let core = run.trimmingCharacters(in: CharacterSet(charactersIn: "="))
         if core.allSatisfy(\.isHexDigit) { return false }
         let digits = core.filter(\.isNumber).count
         return digits >= 4 && core.contains(where: \.isUppercase) && core.contains(where: \.isLowercase)
+    }
+
+    /// A PostHog project token is public by design (it only sends events),
+    /// so a report can quote it.
+    static func isPublic(_ token: String) -> Bool { token.hasPrefix("phc_") }
+
+    /// The value part of a `name=value` match (after its `=` or `:` and any
+    /// quote) is a secret unless it is a path, a URL, a public token, or has
+    /// no letter or no digit (a count, a word).
+    static func looksLikeSecretValue(_ match: String) -> Bool {
+        guard let separator = match.firstIndex(where: { $0 == "=" || $0 == ":" }) else { return false }
+        let value = match[match.index(after: separator)...]
+            .trimmingCharacters(in: CharacterSet(charactersIn: "\"' \t"))
+        if value.hasPrefix("/") || value.hasPrefix("~") || value.contains("://") || isPublic(value) { return false }
+        return value.contains(where: \.isLetter) && value.contains(where: \.isNumber)
     }
 }
 
@@ -183,8 +223,8 @@ public struct FeedbackSubmission: Sendable, Equatable {
 
     public static let endpoint = URL(string: "https://pacer.andrechek.com/api/feedback")!
     public static let maxAttachments = 3
-    /// The endpoint's per-file cap, decoded.
-    public static let maxAttachmentBytes = 10 * 1024 * 1024
+    /// The endpoint's per-file cap, decoded (`site/worker/feedback.ts`).
+    public static let maxAttachmentBytes = 8 * 1024 * 1024
     /// All attachments together, base64-encoded. Lower than the endpoint's
     /// body cap: the Worker runs on Cloudflare's free plan, about 10 ms of CPU
     /// a request, and a bigger body can fail there (error 1102).
@@ -238,11 +278,38 @@ public struct FeedbackSubmission: Sendable, Equatable {
     public static func encodedSize(_ bytes: Int) -> Int { (bytes + 2) / 3 * 4 }
 
     /// Whether these attachments fit what the endpoint takes: three at most,
-    /// each of an accepted type and 10 MB or less, 8 MB in all once encoded.
-    /// The window checks before sending, so it can say so instead of failing.
+    /// none empty, each of an accepted type and 8 MB or less, 8 MB in all once
+    /// encoded. The window checks before sending, so it can say so instead of
+    /// failing.
     public static func attachmentsFit(sizes: [Int]) -> Bool {
-        sizes.count <= maxAttachments && sizes.allSatisfy { $0 <= maxAttachmentBytes }
+        sizes.count <= maxAttachments && sizes.allSatisfy { $0 > 0 && $0 <= maxAttachmentBytes }
             && sizes.reduce(0) { $0 + encodedSize($1) } <= maxEncodedAttachmentBytes
+    }
+
+    /// The endpoint's email shape (`EMAIL` in `site/worker/feedback.ts`),
+    /// checked here so a typo is caught before the send, not by a 400.
+    public static func isEmail(_ text: String) -> Bool {
+        let shape = #"^[^\s@<>()\[\]\\,;:"]{1,64}@[^\s@<>()\[\]\\,;:"]+\.[^\s@<>()\[\]\\,;:"]{2,63}$"#
+        return text.count <= 254 && text.range(of: shape, options: .regularExpression) != nil
+    }
+
+    /// A file name the endpoint takes (`FILENAME`): no separators, controls
+    /// (C0, DEL, C1), zero-width or bidi marks (which can make `exe.txt` read as
+    /// `txt.exe`), at most 128 characters with the extension kept.
+    public static func cleanFilename(_ raw: String) -> String {
+        let hidden: [ClosedRange<UInt32>] = [
+            0x00...0x1F, 0x7F...0x9F, 0x200B...0x200F, 0x202A...0x202E, 0x2066...0x2069, 0xFEFF...0xFEFF,
+        ]
+        let kept = raw.unicodeScalars.filter { scalar in
+            scalar != "/" && scalar != "\\" && !hidden.contains { $0.contains(scalar.value) }
+        }
+        var name = String(String.UnicodeScalarView(kept)).trimmingCharacters(in: .whitespaces)
+        if name.isEmpty || name == "." || name == ".." { name = "attachment" }
+        guard name.count > 128 else { return name }
+        let ext = (name as NSString).pathExtension
+        let suffix = ext.isEmpty || ext.count > 16 ? "" : "." + ext
+        let stem = suffix.isEmpty ? name : String(name.dropLast(suffix.count))
+        return String(stem.prefix(128 - suffix.count)) + suffix
     }
 
     public var attachmentsFit: Bool {
@@ -319,11 +386,17 @@ public enum FeedbackSender {
         case failed(status: Int?)
     }
 
-    public static let urlSession: Transport = { request in
+    /// One ephemeral session for the app's life: a session per send would
+    /// never be invalidated, and each holds its delegate and caches until then.
+    private static let session: URLSession = {
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 60
         config.timeoutIntervalForResource = 180
-        return try await URLSession(configuration: config).data(for: request)
+        return URLSession(configuration: config)
+    }()
+
+    public static let urlSession: Transport = { request in
+        try await session.data(for: request)
     }
 
     public static func send(_ submission: FeedbackSubmission, userAgent: String,
