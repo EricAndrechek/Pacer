@@ -15,15 +15,17 @@
 // what gets stored, and every refused request is logged (reason only).
 
 /**
- * The whole request body, JSON with a base64 attachment. Held well under the
- * isolate's 128 MB: the body, its parsed copy, the decoded file and the
- * envelope are all in memory at once, and an isolate that runs out is
- * restarted with every request it is serving (the update feed's included).
+ * The whole request body, JSON with base64 attachments. This is what bounds
+ * memory, whatever the number of files: the body, its parsed copy, the
+ * decoded files and the envelope are all in memory at once, held well under
+ * the isolate's 128 MB, and an isolate that runs out is restarted with every
+ * request it is serving (the update feed's included).
  */
 export const MAX_BODY_BYTES = 12 * 1024 * 1024;
-/** The one attachment, decoded: as base64 (a third larger) it fits the body cap with the message. */
+/** Each attachment, decoded: as base64 (a third larger) it fits the body cap with the message. */
 export const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
-export const MAX_ATTACHMENTS = 1;
+/** The app sends at most three (its own window picture and two files, or three files), 8 MB in all once encoded. */
+export const MAX_ATTACHMENTS = 3;
 export const MAX_MESSAGE_CHARS = 10_000;
 /** Sentry refuses a feedback message longer than this (unicode scalars; sentry-cocoa's SentryFeedbackValidator). */
 export const SENTRY_MESSAGE_MAX = 4096;
@@ -45,8 +47,8 @@ const BUILD = /^\d{1,12}(?:\.\d{1,6}){0,2}$/;
 const DEV_DESCRIBE = /^[0-9A-Za-z][0-9A-Za-z._+-]{0,79}$/;
 /** The macOS version, optionally with its build: `26.1`, `15.7.2`, `26.1 (25B78)`. */
 const MACOS = /^\d{1,2}(?:\.\d{1,3}){0,2}(?: \([0-9A-Za-z]{1,12}\))?$/;
-/** hw.model: Mac16,8, MacBookPro18,3, VirtualMac2,1. */
-const MODEL = /^[A-Za-z]{2,24}\d{1,3},\d{1,3}$/;
+/** hw.model: Mac16,8, MacBookPro18,3, VirtualMac2,1; or `unknown`, the app's word when sysctl fails (DailyCheckIn.sysctlString). */
+const MODEL = /^(?:[A-Za-z]{2,24}\d{1,3},\d{1,3}|unknown)$/;
 /** A locale identifier: en, en_CA, en-CA, zh-Hans_CN. */
 const LOCALE = /^[A-Za-z]{2,3}(?:[-_][0-9A-Za-z]{1,8}){0,5}$/;
 /** Pacer's install id: Sentry's INSTALLATION id (an uppercase UUID), or a hex token. */
@@ -117,7 +119,7 @@ export function parseFeedback(body: unknown): Checked<Feedback> {
   const attachments: Attachment[] = [];
   if (b.attachments !== undefined && b.attachments !== null) {
     if (!Array.isArray(b.attachments)) return refuse('attachments must be a list');
-    if (b.attachments.length > MAX_ATTACHMENTS) return refuse(`at most ${MAX_ATTACHMENTS} attachment`);
+    if (b.attachments.length > MAX_ATTACHMENTS) return refuse(`at most ${MAX_ATTACHMENTS} attachments`);
     for (const [i, raw] of b.attachments.entries()) {
       const checked = parseAttachment(raw, i + 1);
       if (!checked.ok) return checked;

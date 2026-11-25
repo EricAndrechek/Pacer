@@ -51,8 +51,8 @@ included, so no Worker bug can take the feed down.
   The visitor's IP address is never sent. Crawlers, `HEAD`, and visitors
   sending Do Not Track or Global Privacy Control are not counted.
 - **`/api/feedback`** (`worker/feedback.ts`) takes the app's feedback, a
-  `POST` of JSON from a `Pacer/` User-Agent (12 MB at most, one attachment
-  of 8 MB at most), checks every field against a fixed shape (anything
+  `POST` of JSON from a `Pacer/` User-Agent (12 MB at most, up to three
+  attachments of 8 MB each), checks every field against a fixed shape (anything
   else: `400` with a short reason), and forwards it to Sentry as user feedback
   in the app's project (`SENTRY_DSN` in `wrangler.jsonc`, the app's public
   DSN; empty turns the endpoint off with `503`). The envelope is built here

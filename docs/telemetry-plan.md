@@ -258,17 +258,18 @@ never reach Sentry.
 | `appVersion`, `appBuild` | `X.Y.Z[-pre]`; the build number |
 | `devDescribe` | optional; `git describe` of a dev build (makes it `development`) |
 | `macOS` | `26.1`, or `26.1 (25B78)` |
-| `model` | `hw.model`, e.g. `Mac16,8` |
+| `model` | `hw.model`, e.g. `Mac16,8`, or `unknown` (the app's word when sysctl fails) |
 | `locale` | optional; `en_CA` |
 | `installId` | optional; the install id, **sent by the app only while Usage data is on** |
-| `attachments` | optional; at most one `{filename, contentType, base64}`: a file name (no path; no control, zero-width or bidi characters), `image/png` \| `image/jpeg` \| `text/plain` \| `application/json` \| `video/quicktime`, standard padded base64 of at most 8 MB decoded |
+| `attachments` | optional; at most three `{filename, contentType, base64}` (the app keeps them to 8 MB in all once encoded): a file name (no path; no control, zero-width or bidi characters), `image/png` \| `image/jpeg` \| `text/plain` \| `application/json` \| `video/quicktime`, standard padded base64 of at most 8 MB decoded |
 
 Any other field, or any value off its shape, is refused with `400 {ok: false,
 error}` and a short reason; nothing is forwarded. Also refused: not `POST`
 (405), another User-Agent (403), another content type (415), over 12 MB by
 `Content-Length` or as it streams (413). The caps keep a request well under the
-isolate's 128 MB (the body, its parsed copy, the decoded file and the envelope
-are in memory together): an isolate that runs out is restarted with every
+isolate's 128 MB (the body, its parsed copy, the decoded files and the
+envelope are in memory together; the body cap bounds that, whatever the number
+of files): an isolate that runs out is restarted with every
 request it is serving, the update feed's included once it shares the Worker.
 
 **What Sentry gets:** one envelope with a `feedback` item and an attachment
@@ -295,10 +296,11 @@ The app answers on `{ok: true, id}` (the event id) or an error: `429` passes
 Sentry's rate limit on with its `Retry-After`, and Sentry refusing, failing or
 taking over 20 s is `502`.
 
-**Before sending, the app** scrubs the message with `TelemetryScrubber` (the
-Worker checks shapes; it does not clean free text) and takes
-`TelemetryBudget.take(.feedback)` (five a day per Mac), as Report a Problem does
-today.
+**Before sending, the app** takes credentials out of the message with
+`FeedbackRedactor` (not `TelemetryScrubber`: the message is the person's own
+words, sent on their click, so paths and emails in it stay; the owner's
+decision, 2026-11-25; the Worker checks shapes and does not clean free text),
+and takes `TelemetryBudget.take(.feedback)` (five a day per Mac).
 
 **Abuse.** There is no per-address rate limit: on Cloudflare's Free plan that
 would need KV or a Durable Object. What bounds it: only a `Pacer/` User-Agent

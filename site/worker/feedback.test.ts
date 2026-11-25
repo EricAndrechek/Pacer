@@ -219,6 +219,43 @@ describe('forwarding to Sentry', () => {
     }
   });
 
+  it('sends three attachments, as the app does (its window picture and two files), in one envelope', async () => {
+    sentry();
+    const png = bytesOf(4096, 1);
+    const json = new TextEncoder().encode('{"a":[1,2,3]}\n');
+    const mov = bytesOf(300_001, 3);
+    const { response } = await post(
+      valid({
+        attachments: [
+          { filename: 'pacer-window.png', contentType: 'image/png', base64: base64(png) },
+          { filename: 'settings.json', contentType: 'application/json', base64: base64(json) },
+          { filename: 'repro.mov', contentType: 'video/quicktime', base64: base64(mov) },
+        ],
+      }),
+    );
+    expect(response.status).toBe(200);
+    const envelope = parseEnvelope(sent[0]!.body);
+    expect(envelope.items.map((i) => [i.header.type, i.header.filename ?? null])).toEqual([
+      ['feedback', null],
+      ['attachment', 'pacer-window.png'],
+      ['attachment', 'settings.json'],
+      ['attachment', 'repro.mov'],
+    ]);
+    expect(envelope.items[1]!.payload).toEqual(png);
+    expect(envelope.items[2]!.payload).toEqual(json);
+    expect(envelope.items[3]!.payload).toEqual(mov);
+  });
+
+  it('holds three large attachments to the 12 MB body, whatever each one weighs', async () => {
+    sentry();
+    // Three of 3.5 MB: each well under 8 MB, together over 12 MB as base64.
+    const files = [1, 2, 3].map((seed) => ({ filename: `f${seed}.mov`, contentType: 'video/quicktime', base64: base64(bytesOf(3_500_000, seed)) }));
+    const { response, json } = await post(valid({ attachments: files }));
+    expect(response.status).toBe(413);
+    expect(json).toEqual({ ok: false, error: 'body larger than 12 MB' });
+    expect(sent).toHaveLength(0);
+  });
+
   it('accepts an attachment of exactly 8 MB, within the 12 MB body', async () => {
     sentry();
     const big = bytesOf(MAX_ATTACHMENT_BYTES, 9);
@@ -433,14 +470,15 @@ describe('refused requests', () => {
     ['a macOS that is a sentence', valid({ macOS: 'Version 26.1 (Build 25B78)' }), 'macOS must be a version like 26.1'],
     ['no model', valid({ model: undefined }), 'model must be a Mac model identifier'],
     ['a model that is a name', valid({ model: "Somebody's MacBook Pro" }), 'model must be a Mac model identifier'],
+    ['a model of unknown in another case', valid({ model: 'Unknown' }), 'model must be a Mac model identifier'],
     ['a locale that is not one', valid({ locale: 'English (Canada)' }), 'locale is not a locale identifier'],
     ['an installId that is not one', valid({ installId: 'someone@example.com' }), 'installId is not an install id'],
     ['an installId that is too long', valid({ installId: 'a'.repeat(65) }), 'installId is not an install id'],
     ['attachments that are not a list', valid({ attachments: att() }), 'attachments must be a list'],
-    ['two attachments', valid({ attachments: [att(), att()] }), 'at most 1 attachment'],
+    ['four attachments', valid({ attachments: [att(), att(), att(), att()] }), 'at most 3 attachments'],
     ['an attachment that is not an object', valid({ attachments: ['iVBORw0KGgo='] }), 'attachment 1: must be an object'],
     ['an attachment with an unknown field', valid({ attachments: [att({ path: '/Users/x' })] }), 'attachment 1: unknown field: path'],
-    ['an attachment named with a path', valid({ attachments: [att({ filename: '../../etc/passwd' })] }), 'attachment 1: filename must be a file name'],
+    ['an attachment named with a path', valid({ attachments: [att(), att({ filename: '../../etc/passwd' })] }), 'attachment 2: filename must be a file name'],
     ['an attachment named with a backslash', valid({ attachments: [att({ filename: 'a\\b.png' })] }), 'attachment 1: filename must be a file name'],
     ['an attachment named with a C1 control', valid({ attachments: [att({ filename: 'a\u0085b.png' })] }), 'attachment 1: filename must be a file name'],
     ['an attachment named with a right-to-left override', valid({ attachments: [att({ filename: 'photo\u202egnp.exe' })] }), 'attachment 1: filename must be a file name'],
@@ -474,6 +512,10 @@ describe('refused requests', () => {
 });
 
 describe('parsing', () => {
+  it("parseFeedback takes the app's own fallback model, `unknown`", () => {
+    expect(parseFeedback(valid({ model: 'unknown' }))).toMatchObject({ ok: true, value: { model: 'unknown' } });
+  });
+
   it('parseFeedback accepts the smallest valid report and treats a blank email as none', () => {
     const parsed = parseFeedback(valid({ email: '   ', attachments: null, installId: null }));
     expect(parsed).toMatchObject({ ok: true, value: { email: null, installId: null, attachments: [], locale: null, devDescribe: null } });
