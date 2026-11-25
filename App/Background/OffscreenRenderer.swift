@@ -88,7 +88,11 @@ enum OffscreenRenderer {
         hosting.displayIfNeeded()
         await settle(seconds: 1.0)
 
-        defer { window.orderOut(nil) }
+        // Closed, not just ordered out: an earlier page's views keep their
+        // `.task` loops (NowStrip reads once a second) for as long as the window
+        // lives, and each tick is a tracked load the idle wait would have to
+        // outlast.
+        defer { window.orderOut(nil); window.contentView = nil; window.close() }
         guard let rep = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds) else {
             log("⚠️ could not allocate bitmap for \(name)"); return
         }
@@ -114,7 +118,7 @@ enum OffscreenRenderer {
     /// (History's PROJECTS read `—`, #452). That image would be committed, so
     /// a load that does not finish ends the run non-zero, naming it.
     static func awaitLoads(_ name: String) async {
-        let outcome = await RenderReadiness.shared.waitUntilIdle(timeout: .seconds(60))
+        let outcome = await RenderReadiness.shared.waitUntilIdle(timeout: .seconds(60), quiet: .milliseconds(500))
         guard case .timedOut(let pending) = outcome else { return }
         log("✗ \(name): still loading after 60 s: \(pending.joined(separator: ", ")). Not capturing a placeholder.")
         exit(4)
