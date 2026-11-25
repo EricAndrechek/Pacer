@@ -256,5 +256,6 @@ record-relaunch:
 ## Usage: make render-live            (all accounts + each account)
 ##        make render-live SCOPES=all
 ##        make render-live PAGES=menu,pace
+##        make render-live UNPRICED=claude-opus-4-7   (draw that model as price pending)
 render-live:
-	@PACER_RENDER_PAGES="$(PAGES)" bin/dev-render-live.sh "$(or $(SCOPES),auto)" "$(or $(OUT),$(PWD)/screenshots/live)"
+	@PACER_RENDER_PAGES="$(PAGES)" PACER_RENDER_UNPRICED="$(UNPRICED)" bin/dev-render-live.sh "$(or $(SCOPES),auto)" "$(or $(OUT),$(PWD)/screenshots/live)"

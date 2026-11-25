@@ -35,6 +35,11 @@ import PacerCore
 /// `auto` means all-accounts plus every account. Or name scopes explicitly:
 /// `PACER_RENDER_LIVE=all,<accountId>`.
 ///
+/// `PACER_RENDER_UNPRICED=<model>[,<model>…]` (make: `UNPRICED=`) draws those
+/// raw model ids as having no price yet, beside the ones the store says have
+/// none, so the "price pending" mark can be looked at on real rows: e.g.
+/// `make render-live SCOPES=all PAGES=dashboard,models UNPRICED=claude-opus-4-7`.
+///
 /// Safety, in order of how badly each would go wrong:
 ///
 /// - **Read-only container.** A second process writing the live store while the
@@ -245,11 +250,25 @@ enum LiveRenderMode {
             configurations: ModelConfiguration(url: try PacerStore.storeURL(), allowsSave: false))
     }
 
+    /// Models to draw as unpriced on top of the store's, from
+    /// `PACER_RENDER_UNPRICED`.
+    static var forcedUnpriced: Set<String> {
+        let raw = ProcessInfo.processInfo.environment["PACER_RENDER_UNPRICED"] ?? ""
+        return Set(raw.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty })
+    }
+
     static func run(container: ModelContainer) async {
         let context = ModelContext(container)
         let host = EngineHost(container: container)
         let targets = scopes(in: context)
         log("rendering \(targets.count) scope(s) → \(ScreenshotMode.outputDirectory.path)")
+
+        // No scan runs here to publish the unpriced set, so take the one the
+        // app's last reconcile stored, plus any forced for a look at the mark.
+        let unpriced = UnpricedModels.stored(in: context).union(forcedUnpriced)
+        PricePending.shared.update(unpriced)
+        if !unpriced.isEmpty { log("price pending: \(unpriced.sorted().joined(separator: ", "))") }
 
         // Warm every engine the store has, not just the requested scopes. In
         // parallel mode the pace card asks *each account's* engine even when
