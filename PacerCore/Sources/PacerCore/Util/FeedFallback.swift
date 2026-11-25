@@ -18,10 +18,6 @@ public enum FeedFallback {
     public static let priceHistoryURL = URL(string:
         "https://raw.githubusercontent.com/EricAndrechek/Pacer/main/site/public/price-history.json")!
 
-    public static func isFallbackHost(_ url: URL?) -> Bool {
-        url?.host?.lowercased() == "raw.githubusercontent.com"
-    }
-
     /// Why a feed could not be read: our own enumerable words, never a description.
     public struct Failure: Error, Sendable, Equatable {
         public let domain: String
@@ -45,27 +41,41 @@ public enum FeedFallback {
 
     private static let sparkleDomain = "SUSparkleErrorDomain"
     private static let sparkleAppcastParseError = 1000   // SUAppcastParseError
-    private static let sparkleAppcastError = 1002        // SUAppcastError: the fetch or its verification failed
+    private static let sparkleDownloadError = 2001       // SUDownloadError
 
     /// The failure of a finished Sparkle cycle, or nil when the error says
-    /// nothing about reaching the feed: `SUNoUpdateError` ("up to date"), a
-    /// failed archive download, an install problem. Only a network error, or
-    /// Sparkle's two appcast errors (the second wraps the network error in
-    /// `NSUnderlyingErrorKey`), count.
-    public static func appcastFailure(domain: String, code: Int,
-                                      underlyingDomain: String? = nil,
-                                      underlyingCode: Int? = nil) -> Failure? {
-        if domain == NSURLErrorDomain {
-            return code == NSURLErrorCancelled ? nil : Failure(domain: domain, code: code)
-        }
-        guard domain == sparkleDomain,
-              code == sparkleAppcastError || code == sparkleAppcastParseError else { return nil }
-        if let underlyingDomain, underlyingDomain == NSURLErrorDomain, let underlyingCode,
-           underlyingCode != NSURLErrorCancelled {
-            return Failure(domain: underlyingDomain, code: underlyingCode)
-        }
-        return Failure(domain: domain, code: code)
+    /// nothing about reaching the feed.
+    ///
+    /// A failed appcast fetch (DNS, TLS, timeout, HTTP 4xx/5xx) arrives as
+    /// `SUDownloadError` (2001) wrapped three times around the `NSURLError`
+    /// (`SPUDownloader`, `SPUDownloadDriver`, `SUAppcastDriver`), and a failed
+    /// update *archive* download is the same 2001. The code cannot tell them
+    /// apart; `feedLoaded` (Sparkle's `didFinishLoadingAppcast` fired in this
+    /// cycle) does: a 2001 or parse error (1000) before the appcast loaded is
+    /// the feed, one after it is not. "Up to date" (1001) is never a failure.
+    /// The failure keeps the innermost error's domain and code.
+    public static func appcastFailure(_ error: NSError, feedLoaded: Bool) -> Failure? {
+        guard !feedLoaded else { return nil }
+        let isFeedError = error.domain == NSURLErrorDomain
+            || (error.domain == sparkleDomain
+                && (error.code == sparkleDownloadError || error.code == sparkleAppcastParseError))
+        guard isFeedError else { return nil }
+        var innermost = error
+        while let next = innermost.userInfo[NSUnderlyingErrorKey] as? NSError, next !== innermost { innermost = next }
+        if innermost.domain == NSURLErrorDomain, innermost.code == NSURLErrorCancelled { return nil }
+        let status = innermost.domain == NSURLErrorDomain && innermost.code == NSURLErrorBadServerResponse
+            ? (innermost.userInfo["statusCode"] as? Int) : nil
+        return Failure(domain: innermost.domain, code: innermost.code, httpStatus: status)
     }
+
+    /// Offline is the Mac's state, not the feed's: counted, never an issue.
+    public static func isOffline(_ failure: Failure) -> Bool {
+        failure.domain == NSURLErrorDomain
+            && (failure.code == NSURLErrorNotConnectedToInternet || failure.code == NSURLErrorDataNotAllowed)
+    }
+
+    /// After the primary appcast failed, one more check this soon reads the fallback.
+    public static let failoverRecheckDelay: TimeInterval = 15 * 60
 
     // MARK: Which appcast URL
 
@@ -107,6 +117,7 @@ public enum FeedFallback {
     static let problemInterval: TimeInterval = 24 * 3600
     public static let problemMessage = "feed unreachable"
     public static func counterKey(_ feed: Feed) -> String { "feed.fallback_used.\(feed.rawValue)" }
+    public static func offlineCounterKey(_ feed: Feed) -> String { "feed.offline.\(feed.rawValue)" }
 
     public static func problemAttributes(feed: Feed, failure: Failure, fallbackOK: Bool) -> Telemetry.Attributes {
         var out: Telemetry.Attributes = [
@@ -125,8 +136,13 @@ public enum FeedFallback {
     /// release a backlog.
     @discardableResult
     public static func report(feed: Feed, failure: Failure, fallbackOK: Bool, now: Date = Date(),
-                              store: UserDefaults = PacerPreferences.store) -> Bool {
-        TelemetryCounters.add(counterKey(feed))
+                              store: UserDefaults = PacerPreferences.store,
+                              counter: (String) -> Void = { TelemetryCounters.add($0) }) -> Bool {
+        if isOffline(failure) {
+            counter(offlineCounterKey(feed))
+            return false
+        }
+        counter(counterKey(feed))
         return sendProblem(problemMessage, feed: feed, now: now, store: store,
                            attributes: problemAttributes(feed: feed, failure: failure, fallbackOK: fallbackOK))
     }

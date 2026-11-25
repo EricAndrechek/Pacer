@@ -84,6 +84,9 @@ final class PacerUpdater: ObservableObject {
         guard UpdateRetryPolicy.needsCatchUpCheck(previousBuild: previous, currentBuild: build) else { return }
         let updater = controller.updater
         DispatchQueue.main.asyncAfter(deadline: .now() + UpdateRetryPolicy.catchUpDelay) {
+            // Sparkle does not enforce the user's "check automatically" choice
+            // on a call like this one.
+            guard updater.automaticallyChecksForUpdates else { return }
             updater.checkForUpdatesInBackground()
         }
     }
@@ -118,6 +121,7 @@ private class PacerUpdaterDelegate: NSObject, SPUUpdaterDelegate {
         // `.updates` is the user's "Check for Updates…"; the launch and
         // scheduled checks (`.updatesInBackground`) and the info-only probe
         // are `scheduled`.
+        feedLoaded = false
         let last = FeedRequestHeaders.previousCheck(
             key: PacerPreferenceKeys.appcastLastCheck, store: PacerPreferences.store,
             now: Date(), record: LaunchMode.isNormalLaunch)
@@ -153,6 +157,10 @@ private class PacerUpdaterDelegate: NSObject, SPUUpdaterDelegate {
         return FeedRequestHeaders.isPacerSite(url)
     }
 
+    func updater(_ updater: SPUUpdater, didFinishLoading appcast: SUAppcast) {
+        feedLoaded = true
+    }
+
     func updater(_ updater: SPUUpdater, didFindValidUpdate item: SUAppcastItem) {
         UpdateOutcomeLog.record(.found, version: item.displayVersionString)
     }
@@ -174,11 +182,24 @@ private class PacerUpdaterDelegate: NSObject, SPUUpdaterDelegate {
         // Sooner than the 6 h interval, with backoff: 30 min, 2 h, then normal.
         downloadFailures += 1
         if let delay = UpdateRetryPolicy.downloadRetryDelay(afterFailures: downloadFailures) {
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak updater] in
-                updater?.checkForUpdatesInBackground()
-            }
+            recheck(updater, after: delay)
         }
     }
+
+    /// One extra background check, never when the user turned automatic checks
+    /// off (Sparkle does not enforce that on a direct call). If a session is
+    /// already running Sparkle ignores it.
+    private func recheck(_ updater: SPUUpdater, after delay: TimeInterval) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak updater] in
+            guard let updater, updater.automaticallyChecksForUpdates else { return }
+            updater.checkForUpdatesInBackground()
+        }
+    }
+
+    /// Set by `didFinishLoadingAppcast`, cleared before every check: what
+    /// separates "the feed was unreachable" from "the archive download failed",
+    /// which are both `SUDownloadError`.
+    private var feedLoaded = false
 
     /// Failed downloads in a row; a download that gets to install ends the run.
     private var downloadFailures = 0
@@ -226,15 +247,16 @@ private class PacerUpdaterDelegate: NSObject, SPUUpdaterDelegate {
         let ns = error as NSError?
         let underlying = ns?.userInfo[NSUnderlyingErrorKey] as? NSError
         // "Up to date" arrives as an error too; only a feed that could not be
-        // reached counts, and only the cycle that read the primary or the
-        // fallback (it is always one of them).
-        let failure = ns.flatMap {
-            FeedFallback.appcastFailure(domain: $0.domain, code: $0.code,
-                                        underlyingDomain: underlying?.domain, underlyingCode: underlying?.code)
-        }
+        // reached counts (see `FeedFallback.appcastFailure`).
+        let failure = ns.flatMap { FeedFallback.appcastFailure($0, feedLoaded: feedLoaded) }
+        let wasFallback = feedChooser.usesFallback
         if case .report(let primary, let fallbackOK) = feedChooser.finished(failure: failure) {
             FeedFallback.report(feed: .appcast, failure: primary, fallbackOK: fallbackOK)
         }
+        // The primary just failed: read the fallback soon, not in ~6 h.
+        if !wasFallback, feedChooser.usesFallback { recheck(updater, after: FeedFallback.failoverRecheckDelay) }
+        // A check that got through (an answer, even "up to date") ends the backoff.
+        if ns == nil || (ns?.domain == "SUSparkleErrorDomain" && ns?.code == 1001) { downloadFailures = 0 }
         guard let ns else { return }
         // Domain and code only (and the underlying error's): never the description.
         UpdateOutcomeLog.recordEndOfCycle(domain: ns.domain, code: ns.code,

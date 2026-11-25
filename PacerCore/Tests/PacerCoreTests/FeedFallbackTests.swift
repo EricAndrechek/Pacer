@@ -45,7 +45,7 @@ struct FeedFallbackTests {
     }
 
     func run(site: FeedStubProtocol.Reply, raw: FeedStubProtocol.Reply, asOf: String = "2999-01-01")
-        async -> (ok: Bool, hosts: [String], requests: [URLRequest], store: UserDefaults, cache: URL) {
+        async -> (ok: Bool, hosts: [String], requests: [URLRequest], problemReported: Bool) {
         FeedStubProtocol.lock.withLock {
             FeedStubProtocol.replies = [Self.site: site, Self.raw: raw]; FeedStubProtocol.seen = []
         }
@@ -55,7 +55,10 @@ struct FeedFallbackTests {
         let cache = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID()).json")
         let ok = await CuratedPriceHistory.refresh(urlSession: FeedStubProtocol.session(), cacheURL: cache, store: store)
         let seen = FeedStubProtocol.lock.withLock { FeedStubProtocol.seen }
-        return (ok, seen.compactMap { $0.url?.host }, seen, store, cache)
+        let reported = store.object(forKey: FeedFallback.problemKey(.priceHistory)) is Date
+        store.removePersistentDomain(forName: suite)
+        try? FileManager.default.removeItem(at: cache)
+        return (ok, seen.compactMap { $0.url?.host }, seen, reported)
     }
 
     // MARK: price history
@@ -64,7 +67,7 @@ struct FeedFallbackTests {
         let r = await run(site: .body(fixture(asOf: "2999-01-01"), 200), raw: .network(-1))
         #expect(r.ok)
         #expect(r.hosts == [Self.site])
-        #expect(r.store.object(forKey: FeedFallback.problemKey(.priceHistory)) == nil)
+        #expect(!r.problemReported)
     }
 
     @Test func notNewerIsNotAFailure() async {
@@ -75,7 +78,6 @@ struct FeedFallbackTests {
 
     @Test(arguments: [
         FeedStubProtocol.Reply.network(NSURLErrorTimedOut),
-        .network(NSURLErrorNotConnectedToInternet),
         .body(Data(), 503),
         .body(Data("<html>captive</html>".utf8), 200),
         .body(Data(#"{"schema":9,"asOf":"2999-01-01","records":[]}"#.utf8), 200),
@@ -84,7 +86,7 @@ struct FeedFallbackTests {
         let r = await run(site: primary, raw: .body(fixture(asOf: "2999-01-01"), 200))
         #expect(r.ok)
         #expect(r.hosts == [Self.site, Self.raw])
-        #expect(r.store.object(forKey: FeedFallback.problemKey(.priceHistory)) is Date)
+        #expect(r.problemReported)
     }
 
     @Test func fallbackIsValidatedToo() async {
@@ -128,29 +130,70 @@ struct FeedFallbackTests {
         #expect(c.feedURLString == nil)
     }
 
-    @Test func appcastFailureClassification() {
-        let a = FeedFallback.appcastFailure
-        #expect(a(NSURLErrorDomain, NSURLErrorNotConnectedToInternet, nil, nil)?.code == NSURLErrorNotConnectedToInternet)
-        #expect(a(NSURLErrorDomain, NSURLErrorCancelled, nil, nil) == nil)
-        #expect(a("SUSparkleErrorDomain", 1001, nil, nil) == nil)               // up to date
-        #expect(a("SUSparkleErrorDomain", 2001, NSURLErrorDomain, -1001) == nil) // archive download
-        #expect(a("SUSparkleErrorDomain", 1002, NSURLErrorDomain, -1009) == .init(domain: NSURLErrorDomain, code: -1009))
-        #expect(a("SUSparkleErrorDomain", 1002, nil, nil) == .init(domain: "SUSparkleErrorDomain", code: 1002))
-        #expect(a("SUSparkleErrorDomain", 1000, nil, nil)?.code == 1000)
+    /// The shape Sparkle 2.10.1 really raises: 2001 wrapped three times around the NSURLError.
+    static func nested2001(_ inner: NSError) -> NSError {
+        var e = inner
+        for _ in 0..<3 { e = NSError(domain: "SUSparkleErrorDomain", code: 2001, userInfo: [NSUnderlyingErrorKey: e]) }
+        return e
+    }
+
+    @Test(arguments: [NSURLErrorTimedOut, NSURLErrorCannotFindHost, NSURLErrorSecureConnectionFailed,
+                      NSURLErrorServerCertificateUntrusted, NSURLErrorBadServerResponse])
+    func aFailedFeedFetchIsTheInnermostNetworkError(code: Int) {
+        let e = Self.nested2001(NSError(domain: NSURLErrorDomain, code: code))
+        #expect(FeedFallback.appcastFailure(e, feedLoaded: false) == .init(domain: NSURLErrorDomain, code: code))
+    }
+
+    @Test func anHttp503ComesThroughWithItsStatus() {
+        let inner = NSError(domain: NSURLErrorDomain, code: NSURLErrorBadServerResponse, userInfo: ["statusCode": 503])
+        #expect(FeedFallback.appcastFailure(Self.nested2001(inner), feedLoaded: false)?.httpStatus == 503)
+    }
+
+    @Test func anArchiveFailureAfterTheFeedLoadedIsNotTheFeed() {
+        let e = Self.nested2001(NSError(domain: NSURLErrorDomain, code: NSURLErrorTimedOut))
+        #expect(FeedFallback.appcastFailure(e, feedLoaded: true) == nil)
+    }
+
+    @Test func otherCyclesEndingsAreNotFeedFailures() {
+        let none = NSError(domain: "SUSparkleErrorDomain", code: 1001)
+        #expect(FeedFallback.appcastFailure(none, feedLoaded: false) == nil)           // up to date
+        #expect(FeedFallback.appcastFailure(NSError(domain: "SUSparkleErrorDomain", code: 4005), feedLoaded: false) == nil)  // install
+        #expect(FeedFallback.appcastFailure(Self.nested2001(NSError(domain: NSURLErrorDomain, code: NSURLErrorCancelled)),
+                                            feedLoaded: false) == nil)
+        #expect(FeedFallback.appcastFailure(NSError(domain: "SUSparkleErrorDomain", code: 1000), feedLoaded: false)?.code == 1000)
+        #expect(FeedFallback.appcastFailure(NSError(domain: NSURLErrorDomain, code: -1001), feedLoaded: false)?.code == -1001)
     }
 
     // MARK: reporting
 
     @Test func problemIsRateLimitedPerFeedPerDay() {
-        let store = UserDefaults(suiteName: "feedfallback.\(UUID().uuidString)")!
+        let suite = "feedfallback.\(UUID().uuidString)"
+        let store = UserDefaults(suiteName: suite)!
+        defer { store.removePersistentDomain(forName: suite) }
         let f = FeedFallback.Failure(domain: NSURLErrorDomain, code: -1001)
         let t0 = Date(timeIntervalSince1970: 1_800_000_000)
-        let before = TelemetryCounters.peek()["feed.fallback_used.appcast", default: 0]
-        #expect(FeedFallback.report(feed: .appcast, failure: f, fallbackOK: true, now: t0, store: store))
-        #expect(!FeedFallback.report(feed: .appcast, failure: f, fallbackOK: true, now: t0 + 23 * 3600, store: store))
-        #expect(FeedFallback.report(feed: .priceHistory, failure: f, fallbackOK: true, now: t0 + 3600, store: store))
-        #expect(FeedFallback.report(feed: .appcast, failure: f, fallbackOK: false, now: t0 + 24 * 3600, store: store))
-        #expect(TelemetryCounters.peek()["feed.fallback_used.appcast", default: 0] - before == 3)
+        var counts: [String: Int] = [:]
+        let count: (String) -> Void = { counts[$0, default: 0] += 1 }
+        #expect(FeedFallback.report(feed: .appcast, failure: f, fallbackOK: true, now: t0, store: store, counter: count))
+        #expect(!FeedFallback.report(feed: .appcast, failure: f, fallbackOK: true, now: t0 + 23 * 3600, store: store, counter: count))
+        #expect(FeedFallback.report(feed: .priceHistory, failure: f, fallbackOK: true, now: t0 + 3600, store: store, counter: count))
+        #expect(FeedFallback.report(feed: .appcast, failure: f, fallbackOK: false, now: t0 + 24 * 3600, store: store, counter: count))
+        #expect(counts["feed.fallback_used.appcast"] == 3)
+        #expect(counts["feed.fallback_used.price_history"] == 1)
+    }
+
+    @Test func offlineIsCountedNeverAProblem() {
+        let suite = "feedfallback.\(UUID().uuidString)"
+        let store = UserDefaults(suiteName: suite)!
+        defer { store.removePersistentDomain(forName: suite) }
+        var counts: [String: Int] = [:]
+        for code in [NSURLErrorNotConnectedToInternet, NSURLErrorDataNotAllowed] {
+            let f = FeedFallback.Failure(domain: NSURLErrorDomain, code: code)
+            #expect(!FeedFallback.report(feed: .priceHistory, failure: f, fallbackOK: false, store: store,
+                                         counter: { counts[$0, default: 0] += 1 }))
+        }
+        #expect(counts == ["feed.offline.price_history": 2])
+        #expect(store.object(forKey: FeedFallback.problemKey(.priceHistory)) == nil)
     }
 
     @Test func attributesAreAllowListed() {
@@ -190,7 +233,9 @@ struct UpdateRetryPolicyTests {
                       "error.underlying_code": .int(-1001)])
         #expect(FeedFallback.downloadProblemAttributes(domain: "weird/path", code: 1, underlyingDomain: nil, underlyingCode: nil)
             == ["feed": .string("update_archive"), "error.domain": .string("other"), "error.code": .int(1)])
-        let store = UserDefaults(suiteName: "feedfallback.\(UUID().uuidString)")!
+        let suite = "feedfallback.\(UUID().uuidString)"
+        let store = UserDefaults(suiteName: suite)!
+        defer { store.removePersistentDomain(forName: suite) }
         let t = Date(timeIntervalSince1970: 1_800_000_000)
         #expect(FeedFallback.reportDownloadFailure(domain: "x", code: 1, underlyingDomain: nil, underlyingCode: nil, now: t, store: store))
         #expect(!FeedFallback.reportDownloadFailure(domain: "x", code: 1, underlyingDomain: nil, underlyingCode: nil, now: t + 3600, store: store))
