@@ -202,6 +202,30 @@ Status: PLAN, not built. Branch `exp/sentry-telemetry`, rebased on main aa7fbf7a
 this tree, sentry-cocoa 9.30 source, Sentry docs, and live tests against the `ericandrechek/pacer`
 project.
 
+## Feed requests (since 0.9.5, owner's decision 2026-11-25)
+
+The two periodic requests Pacer makes to its own site, the Sparkle appcast
+(`/appcast.xml`) and the curated price history (`/price-history.json`), carry
+headers so the site can count active Macs and versions from its request logs.
+Nothing goes to Sentry or PostHog for this. The `X-Pacer-*` headers only ever
+reach pacer.andrechek.com: Sparkle also puts its `httpHeaders` on update
+archive/delta downloads and release-notes fetches (GitHub releases), so the
+updater delegate strips every `X-Pacer-*` header from those requests
+(`willDownloadUpdate`) and declines release notes hosted anywhere else.
+
+| Header | Value | Sent |
+| --- | --- | --- |
+| `X-Pacer-Check` | `manual` (the user chose "Check for Updates…") or `scheduled` (Sparkle's launch and background checks, every price fetch) | every Mac, every request |
+| `X-Pacer-Since-Last-Check` | `lt1h`, `1-6h`, `6-12h`, `12-24h`, `1-7d`, `gt7d` or `never`: time since the previous request of the same kind, from Pacer's own persisted dates (`pacer.appcast.lastCheck`, `pacer.priceHistory.lastFetch`; Sparkle's `lastUpdateCheckDate` is already "now" when the delegate runs) | every Mac, every request |
+| `X-Pacer-Version` | `CFBundleShortVersionString` | price history only (the appcast's Sparkle User-Agent has it) |
+| `X-Pacer-Id` | the install id, the same as PostHog's `distinct_id` | **only while Usage data is on**, decided for each request; absent when off, with `PACER_TELEMETRY=off`, in tests, in diagnostic launch modes, and before the id exists |
+
+The appcast headers are set on `SPUUpdater.httpHeaders` from
+`updater(_:mayPerform:)`, which runs before every check; the price-history
+headers come from `FeedRequestHeaderProvider`, whose extra (the id) the app
+installs from `App/Telemetry/FeedRequestIdentity.swift`. Nothing else about
+either request changes. Code: `PacerCore/Util/FeedRequestHeaders.swift`.
+
 ## The website (pacer.andrechek.com, `site/`)
 
 The site reports to the app's PostHog project (the owner's decision,

@@ -90,6 +90,38 @@ final class PacerUpdater: ObservableObject {
 /// Sparkle calls every method here on the main thread (`SPUUpdater` is
 /// main-thread only), which is what the `assumeIsolated` calls rely on.
 private class PacerUpdaterDelegate: NSObject, SPUUpdaterDelegate {
+    /// Sparkle calls this right before every check and reads `httpHeaders`
+    /// only afterwards. Setting them here, from scratch each time, makes a
+    /// toggle change land on the very next request. Sparkle has already
+    /// stamped `lastUpdateCheckDate` with now by this point (SPUUpdater.m),
+    /// so "since the last check" comes from Pacer's own previous-check date,
+    /// read before it is written. Never throws: it only decorates the request.
+    func updater(_ updater: SPUUpdater, mayPerform updateCheck: SPUUpdateCheck) throws {
+        // `.updates` is the user's "Check for Updates…"; the launch and
+        // scheduled checks (`.updatesInBackground`) and the info-only probe
+        // are `scheduled`.
+        let last = FeedRequestHeaders.previousCheck(
+            key: PacerPreferenceKeys.appcastLastCheck, store: PacerPreferences.store,
+            now: Date(), record: LaunchMode.isNormalLaunch)
+        updater.httpHeaders = FeedRequestHeaders.headers(
+            check: updateCheck == .updates ? .manual : .scheduled,
+            since: last,
+            id: FeedRequestIdentity.idHeader())
+    }
+
+    // Sparkle also puts `httpHeaders` on the update archive and delta
+    // downloads and on release-notes fetches, which are not our site (GitHub
+    // releases). Nothing X-Pacer-* may reach them, the id least of all.
+    func updater(_ updater: SPUUpdater, willDownloadUpdate item: SUAppcastItem, with request: NSMutableURLRequest) {
+        FeedRequestHeaders.strip(request)
+    }
+
+    func updater(_ updater: SPUUpdater, shouldDownloadReleaseNotesForUpdate updateItem: SUAppcastItem) -> Bool {
+        // Notes are inline today; a notes URL elsewhere would get the headers.
+        guard let url = updateItem.releaseNotesURL ?? updateItem.fullReleaseNotesURL else { return true }
+        return FeedRequestHeaders.isPacerSite(url)
+    }
+
     func updater(_ updater: SPUUpdater, didFindValidUpdate item: SUAppcastItem) {
         UpdateOutcomeLog.record(.found, version: item.displayVersionString)
     }
@@ -220,7 +252,8 @@ private final class PacerUserDriverDelegate: NSObject, SPUStandardUserDriverDele
 ///
 /// Compiled out of Release builds entirely.
 private final class DevBuildUpdaterDelegate: PacerUpdaterDelegate {
-    func updater(_ updater: SPUUpdater, mayPerform updateCheck: SPUUpdateCheck) throws {
+    override func updater(_ updater: SPUUpdater, mayPerform updateCheck: SPUUpdateCheck) throws {
+        try super.updater(updater, mayPerform: updateCheck)
         // `.updatesInBackground` is the launch/scheduled check;
         // `.updates` is the user clicking "Check for Updates…".
         if updateCheck == .updatesInBackground {

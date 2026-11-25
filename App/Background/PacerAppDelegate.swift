@@ -220,6 +220,8 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         TelemetryController.shared.startIfAllowed()
         // PostHog usage events (the "Usage data" toggle), beside Sentry.
         AnalyticsController.shared.startIfAllowed()
+        // The id header on the price-history fetch (Sparkle's is set per check).
+        FeedRequestIdentity.installPriceHistoryHeaders()
 
         // Open the store here, synchronously, when that is an ordinary open —
         // every launch but the first after a schema change, which keeps
