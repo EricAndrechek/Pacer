@@ -18,14 +18,14 @@ read from `https://pacer.andrechek.com/` (`SUFeedURL`,
 | `src/lib/faq.ts` | FAQ text, used by the page and its `FAQPage` JSON-LD |
 | `../docs/screenshots/` | The README screenshots, imported directly (`@screenshots/...`), so the site never falls behind the app |
 | `public/appcast.xml`, `public/price-history.json` | The update feed and the price history. Written by releases; hand edits only as `docs/releasing.md` says |
-| `worker/index.ts`, `worker/lib.ts` | The Worker: `/download/` only |
+| `worker/index.ts`, `worker/lib.ts`, `worker/feedback.ts` | The Worker: `/download/` and `/api/feedback` |
 | `scripts/` | `lastmod.mjs` (sitemap dates from git), `llms-full.mjs` (`/llms-full.txt` from the built pages), `csp-hashes.mjs`, `indexnow.mjs`, `feeds.mjs` + `check-feeds.mjs` (the feed's deploy gate) |
 | `public/_headers` | Security headers and the CSP (inline-script hashes filled in by `pnpm build`) |
 
 ## The Worker
 
-Only `/download/` reaches Worker code (`run_worker_first` in
-`wrangler.jsonc`); everything else is a static asset, the update feed
+Only `/download/` and `/api/feedback` reach Worker code (`run_worker_first`
+in `wrangler.jsonc`); everything else is a static asset, the update feed
 included, so no Worker bug can take the feed down.
 
 - **`/appcast.xml`, `/price-history.json`** are `public/` files.
@@ -50,6 +50,18 @@ included, so no Worker bug can take the feed down.
   `$process_person_profile: false`, `$ip: null`.
   The visitor's IP address is never sent. Crawlers, `HEAD`, and visitors
   sending Do Not Track or Global Privacy Control are not counted.
+- **`/api/feedback`** (`worker/feedback.ts`) takes the app's feedback, a
+  `POST` of JSON from a `Pacer/` User-Agent (35 MB at most, up to three
+  attachments of 10 MB), checks every field against a fixed shape (anything
+  else: `400` with a short reason), and forwards it to Sentry as user feedback
+  in the app's project (`SENTRY_DSN` in `wrangler.jsonc`, the app's public
+  DSN; empty turns the endpoint off with `503`). The envelope is built here
+  from the checked values and posted by the Worker, so the sender's IP address
+  and headers never reach Sentry. It answers `{ok: true, id}` once Sentry has
+  it. There is no per-address rate limit (that needs KV or a Durable Object);
+  refusals are logged with their reason. What is sent, field by field, and the
+  abuse and CPU limits: [docs/telemetry-plan.md](../docs/telemetry-plan.md),
+  "Feedback".
 - **workers.dev stays out of search:** production's workers.dev route is
   off (`"workers_dev": false`); branch previews still get workers.dev URLs.
   `public/_headers` has a host rule (`https://:worker.:account.workers.dev/*`,
@@ -100,7 +112,8 @@ pnpm exec wrangler deploy --dry-run --outdir /tmp/pacer-site   # validate the bu
 ```
 
 Analytics are off on localhost. `pnpm dev:worker` with `--var POSTHOG_TOKEN:`
-keeps a test `/download/` from reaching PostHog.
+keeps a test `/download/` from reaching PostHog, and `--var SENTRY_DSN:` keeps
+a test `/api/feedback` from reaching Sentry (it then answers `503`).
 
 ## How it deploys (Cloudflare Workers Builds)
 
