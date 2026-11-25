@@ -477,9 +477,11 @@ public struct PacerShareList<Extra: PacerUsageExtra>: View {
                             .foregroundStyle(emphasised ? Color.primary : Color.secondary)
                             .monospacedDigit()
                             .lineLimit(1)
-                            .help(text.help)
                     }
+                    // The whole cell, as before the mark: every list's
+                    // tooltip area. The mark's own tooltip sits inside it.
                     .frame(maxWidth: .infinity, alignment: .trailing)
+                    .help(text.help)
                 }
             }
         }

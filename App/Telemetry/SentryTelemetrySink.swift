@@ -52,31 +52,30 @@ struct SentryTelemetrySink: Telemetry.Sink {
         SentrySDK.addBreadcrumb(crumb)
     }
 
-    /// An error event with our fixed message. `beforeSend` applies the crash
-    /// toggle, the `.error` cap and the scrubber again. Strings and bools are
-    /// tags (searchable, few values); numbers go in extra data, where a
-    /// duration does not spawn a tag value per event. A fingerprint replaces
-    /// Sentry's grouping (the message) with ours, scrubbed like the tags.
-    func problem(_ message: String, attributes: Telemetry.Attributes, fingerprint: [String]?) {
-        guard TelemetryController.crashAllowed else { return }
+    /// An error event with our fixed message (`Telemetry.ProblemFields`).
+    /// The `.error` budget is spent here rather than in `beforeSend`, so the
+    /// caller learns whether the event goes; `beforeSend` skips the budget
+    /// for it (`TelemetryController.notePrebudgeted`) and applies the toggle
+    /// and the scrubber again.
+    func problem(_ message: String, attributes: Telemetry.Attributes, fingerprint: [String]?) -> Bool {
+        guard TelemetryController.crashAllowed, TelemetryBudget.shared.take(.error) else { return false }
+        let fields = Telemetry.ProblemFields(message, attributes: attributes, fingerprint: fingerprint)
         let event = Event(level: .error)
-        event.message = SentryMessage(formatted: TelemetryScrubber.scrub(message))
-        var tags: [String: String] = [:]
+        event.message = SentryMessage(formatted: fields.message)
+        event.tags = fields.tags
         var extra: [String: Any] = [:]
-        for (key, value) in attributes {
+        for (key, value) in fields.extra {
             switch value {
-            case .string(let s): tags[key] = TelemetryScrubber.scrub(s)
-            case .bool(let b): tags[key] = b ? "true" : "false"
             case .int(let i): extra[key] = i
-            case .double(let d): if d.isFinite { extra[key] = d }
+            case .double(let d): extra[key] = d
+            case .string, .bool: break
             }
         }
-        event.tags = tags
         if !extra.isEmpty { event.extra = extra }
-        if let fingerprint, !fingerprint.isEmpty {
-            event.fingerprint = fingerprint.map { TelemetryScrubber.scrub($0) }
-        }
+        if let fingerprint = fields.fingerprint { event.fingerprint = fingerprint }
+        TelemetryController.notePrebudgeted(event)
         SentrySDK.capture(event: event)
+        return true
     }
 
     // MARK: - Mapping
