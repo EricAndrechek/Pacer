@@ -1742,5 +1742,71 @@ colour, which had quietly flattened every stacked view.</p>]]></description>
                 sparkle:edSignature="UOJ7PJEa1F6e9lvsCiA6Ya9K2n0s/iD+EtWOjMB4GZ9IHGfY1wD87EicAaNMAdGWX3aavJc49MJoL9bBUxroDQ==" />
         </sparkle:deltas>
     </item>
+            <item>
+        <title>Version 0.9.4</title>
+        <description><![CDATA[<p>Freeze reports that say what the Mac was doing, a track record that ignores the moments Pacer wasn't reading, and updates that now come from Pacer's own site.</p>
+<h2>Freeze reports</h2>
+<p>When Pacer freezes and none of Pacer's own code is involved, the report used to land in one catch-all. Reports are now grouped by what the Mac was doing at the time, such as laying out a window, drawing to a display or waiting on a system lock, so each cause can be found and fixed on its own.</p>
+<h2>Smoother</h2>
+<p>Checking your accounts' usage now saves what it reads away from the main thread, so the window stalls less on a busy Mac.</p>
+<h2>Forecast accuracy</h2>
+<p>Pacer's track record, and the calibrated ranges built from it, no longer count moments when it wasn't reading, such as while the Mac was asleep or Pacer was closed. Those gaps used to skew the score. Pacer re-grades its forecast history once, at first launch. It takes a few seconds.</p>
+<h2>Updates from Pacer's own site</h2>
+<p>Updates and price data now come from pacer.andrechek.com instead of GitHub Pages. Older versions keep working, and still get this update from the old address. The share card shows the new address.</p>
+<h2>Privacy</h2>
+<p>Freeze reports (sent only while crash reports are on in Settings → Privacy) now include the names of macOS's own system functions, only Apple's code, never yours and never file paths. That is a new kind of data in a report, and it lets us tell one cause of a freeze from another. Pacer still never sends prompts, projects, files, accounts or costs.</p>
+<p><strong>Your data is untouched.</strong></p>]]></description>
+        <pubDate>Wed, 25 Nov 2026 12:12:38 +0000</pubDate>
+        <sparkle:version>1795607386</sparkle:version>
+        <sparkle:shortVersionString>0.9.4</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.4/Pacer-0.9.4.dmg"
+            length="159652568"
+            type="application/octet-stream"
+            sparkle:edSignature="UxAYRIhv7lLQLUTuaEiWSe6DdvF1my7psLVur9FRwPfF3nLLZ1I5wIG33yaYMgDhFxiLy+8dzOv52SmYLrm7AQ==" />
+        <sparkle:deltas>
+            <enclosure
+                url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.4/Pacer-0.9.4-from-0.9.3.delta"
+                sparkle:deltaFrom="1795528779"
+                length="4843494"
+                type="application/octet-stream"
+                sparkle:deltaFromSparkleExecutableSize="976432"
+                sparkle:deltaFromSparkleLocales="ar,ca,cs,da,de,el,es"
+                sparkle:edSignature="5Lfpx+C1B9wGcjFMReLJAPrfoVHkcJFzm6eVYHhYxYjCQkEVF8plq5c4hUHDiuAkcoCVeZqC6LQoGLB+SpkcBw==" />
+            <enclosure
+                url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.4/Pacer-0.9.4-from-0.9.2.delta"
+                sparkle:deltaFrom="1794840834"
+                length="6394810"
+                type="application/octet-stream"
+                sparkle:deltaFromSparkleExecutableSize="976432"
+                sparkle:deltaFromSparkleLocales="ar,ca,cs,da,de,el,es"
+                sparkle:edSignature="rVjadfwJfM7klhW2IJr2ibKEIboELh2LgYzQNLO1T0XqUSD9ar9jdSkDERkqzkSDw3h0bad/6zRBJsRi5FMYCw==" />
+            <enclosure
+                url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.4/Pacer-0.9.4-from-0.9.1.delta"
+                sparkle:deltaFrom="1794605188"
+                length="7060274"
+                type="application/octet-stream"
+                sparkle:deltaFromSparkleExecutableSize="976432"
+                sparkle:deltaFromSparkleLocales="ar,ca,cs,da,de,el,es"
+                sparkle:edSignature="9vcRF5PlyTeBI61aMfeqvR2mD/QWjRyRtG9e8/1D89pEJQOmju1It1BJ50wfk2j88b+W1dNFE/tVafEF/oj+BQ==" />
+            <enclosure
+                url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.4/Pacer-0.9.4-from-0.9.0.delta"
+                sparkle:deltaFrom="1794528744"
+                length="7498482"
+                type="application/octet-stream"
+                sparkle:deltaFromSparkleExecutableSize="976432"
+                sparkle:deltaFromSparkleLocales="ar,ca,cs,da,de,el,es"
+                sparkle:edSignature="9WCPcfyU7OOyCUwVdeG1L/qeG8fWRE/dspQTmYEVjMahiaTt0JEDapZiLw99EBCcVM81F56KCujjE/c8GLzNBA==" />
+            <enclosure
+                url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.4/Pacer-0.9.4-from-0.8.3.delta"
+                sparkle:deltaFrom="1794413280"
+                length="8152158"
+                type="application/octet-stream"
+                sparkle:deltaFromSparkleExecutableSize="976432"
+                sparkle:deltaFromSparkleLocales="ar,ca,cs,da,de,el,es"
+                sparkle:edSignature="mb9em2UG8yGaMgdYsQYGeVHgQ/N0dNaQLv4C7ZyZTxSWBWDgASenab2jMCB1Fw98tUMN3jf7kk9GcAVA6i2dBw==" />
+        </sparkle:deltas>
+    </item>
         </channel>
 </rss>
