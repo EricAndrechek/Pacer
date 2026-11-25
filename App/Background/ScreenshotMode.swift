@@ -42,6 +42,13 @@ enum ScreenshotMode {
         LaunchMode.isActive(.screenshot)
     }
 
+    /// The version the README's sidebar footer and status menu show, pinned
+    /// like its clock (`ScreenshotClock`): the run is a Debug build, which
+    /// would read "dev", and a version that followed each release would put a
+    /// screenshot commit on the first PR after it whatever that PR changed.
+    /// Bump it by hand when the README should show a newer number.
+    static let pinnedVersion = AppVersionLabel(kind: .release("0.9.4"))
+
     /// `LayoutShiftProbe` records each named view's frame (window points,
     /// top-left) here, in a screenshot run only, for crops of the real window.
     static let recordsViewFrames = isActive
@@ -1277,6 +1284,7 @@ enum ScreenshotMode {
         // Spin the run loop so SwiftUI mounts, @Query fetches land, the
         // @State scan-tick caches refresh, and Charts lay out.
         await settle(seconds: 2.6)
+        await OffscreenRenderer.awaitLoads(name)
         hosting.layoutSubtreeIfNeeded()
         hosting.displayIfNeeded()
         await settle(seconds: 1.0)
@@ -1418,6 +1426,7 @@ enum ScreenshotMode {
         // As long as the view-snapshot path waits: SwiftUI mounts, @Query
         // fetches land, caches refresh, Charts lay out, the engine answers.
         await settle(seconds: 3.6)
+        await OffscreenRenderer.awaitLoads(name)
 
         log("\(name): title=\"\(window.title)\" subtitle=\"\(window.subtitle)\" toolbar=\(window.toolbar.map { "\($0.items.count) item(s), visible \($0.isVisible)" } ?? "none") style=\(window.toolbarStyle.rawValue) key=\(window.isKeyWindow) policy=\(NSApp.activationPolicy().rawValue)")
         var sheets: [NSWindow] = []
@@ -1566,6 +1575,7 @@ enum ScreenshotMode {
         NotificationCenter.default.post(name: .pacerEngineDidRecompute, object: nil)
         // Let the label lay out and its @Query fetches and engine answers land.
         await settle(seconds: 3.5)
+        await OffscreenRenderer.awaitLoads(name)
         // One open and close first. The menu refreshes its content as it
         // opens, so the very first open shows what it had before — the light
         // image read "Outlook —" where the dark one, taken on a second open,

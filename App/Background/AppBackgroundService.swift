@@ -233,8 +233,11 @@ final class AppBackgroundService {
         guard coordinator != nil else { return }
         Log.write("AppBackground", "stopping")
         arenaGate?.cancel()
-        // The arena scorer's workers stop at their next check; the outcomes so
-        // far are saved, and the next launch resumes after them.
+        // The arena scorer's workers stop at their next check, raised out of
+        // background QoS so a busy Mac runs them; the outcomes back so far are
+        // saved, and the next launch resumes after them. Never more than
+        // `ArenaRuntime.stopBound`: the scan's own flush below matters more
+        // than a worker the Mac is not running (#446).
         await arena?.stop()
         if let coord = coordinator {
             await coord.stop()

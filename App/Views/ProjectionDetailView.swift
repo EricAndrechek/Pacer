@@ -244,7 +244,7 @@ struct ProjectionCompareModal: View {
         let container = modelContext.container
         let key = windowKey, account = limitAccountId, fixed = isFixed
         let cutoff = Date().addingTimeInterval(-8 * 86400)
-        let loaded = await Task.detached(priority: .userInitiated) {
+        let loaded = await RenderReadiness.task("projection-detail", priority: .userInitiated) {
             () -> (points: [LimitSamplePoint], scoped: [ScopedSamplePoint], latest: ScopedWindowRow?) in
             let context = ModelContext(container)
             if fixed {
@@ -280,7 +280,7 @@ struct ProjectionCompareModal: View {
         guard let account else { return }
         let resets = fixed ? loaded.points.last?.resetsAt : loaded.latest?.resetsAt
         let window = duration
-        liveReview = await Task.detached(priority: .utility) {
+        liveReview = await RenderReadiness.task("projection-detail", priority: .utility) {
             let now = Date()
             let cycleStart = resets.map { $0.addingTimeInterval(-window) } ?? now.addingTimeInterval(-window)
             return LiveMeterDrift.review(context: ModelContext(container), account: account, window: key,

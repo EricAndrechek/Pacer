@@ -11,8 +11,9 @@ import Foundation
 /// so a fresh offline install prices history correctly, and a newer copy is
 /// fetched from the site next to the appcast (site/public/ on main, written by
 /// each release) and cached in the App Group.
-/// Whichever has the later `asOf` wins. The request carries no parameters;
-/// it's a static file.
+/// Whichever has the later `asOf` wins. The request carries no parameters
+/// (it's a static file) but four headers that let the site count Macs and
+/// versions (`FeedRequestHeaders`).
 ///
 /// ## Format
 ///
@@ -178,22 +179,67 @@ public struct CuratedPriceHistory: Sendable, Equatable {
         return cached.asOf >= bundled.asOf ? cached : bundled
     }
 
+    /// The fetch's request: `data(from:)`'s plain GET plus the feed headers.
+    /// The previous fetch time is stamped as the request is built (an attempt
+    /// counts, a failure included), and only in the user's own app. The
+    /// fallback host gets neither: `X-Pacer-*` reach only our own site.
+    static func request(url: URL = remoteURL, now: Date = Date(), store: UserDefaults = PacerPreferences.store,
+                        headers: FeedRequestHeaderProvider = .priceHistory,
+                        record: Bool = LaunchMode.isNormalLaunch) -> URLRequest {
+        var request = URLRequest(url: url)
+        guard FeedRequestHeaders.isPacerSite(url) else { return request }
+        let key = PacerPreferenceKeys.priceHistoryLastFetch
+        let last = store.object(forKey: key) as? Date
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
+        for (k, v) in headers.headers(lastFetch: last, now: now, version: version) {
+            request.setValue(v, forHTTPHeaderField: k)
+        }
+        if record { store.set(now, forKey: key) }
+        return request
+    }
+
+    /// One fetch that is only a success if it is a 200 that decodes.
+    private static func fetch(_ request: URLRequest, urlSession: URLSession) async
+        -> Result<(history: CuratedPriceHistory, data: Data), FeedFallback.Failure> {
+        let data: Data, response: URLResponse
+        do { (data, response) = try await urlSession.data(for: request) } catch {
+            let ns = error as NSError
+            return .failure(.init(domain: ns.domain, code: ns.code))
+        }
+        if let http = response as? HTTPURLResponse, http.statusCode != 200 {
+            return .failure(.init(domain: "http", code: http.statusCode, httpStatus: http.statusCode))
+        }
+        guard let history = try? decode(data) else { return .failure(.init(domain: "decode", code: 0)) }
+        return .success((history, data))
+    }
+
     /// Fetch the published copy and cache it if it is valid and no older
     /// than what we have. Best-effort: any failure keeps the current copy.
+    /// When the site's copy cannot be read (no answer, not a 200, does not
+    /// decode; not merely "not newer"), the same file on `main` is tried once
+    /// with the same checks (`FeedFallback`) and the failure is reported.
     @discardableResult
-    public static func refresh(urlSession: URLSession = .shared, cacheURL: URL? = nil) async -> Bool {
+    public static func refresh(urlSession: URLSession = .shared, cacheURL: URL? = nil,
+                               primary: URL = remoteURL, fallback: URL = FeedFallback.priceHistoryURL,
+                               store: UserDefaults = PacerPreferences.store) async -> Bool {
+        var fetched = await fetch(request(url: primary, store: store), urlSession: urlSession)
+        if case .failure(let failure) = fetched {
+            Log.write("PricingTable", "price-history refresh failed (\(failure.domain) \(failure.code)) — trying the fallback")
+            fetched = await fetch(request(url: fallback, store: store), urlSession: urlSession)
+            var fallbackOK = false
+            if case .success = fetched { fallbackOK = true }
+            FeedFallback.report(feed: .priceHistory, failure: failure, fallbackOK: fallbackOK, store: store)
+        }
+        guard case .success(let (history, data)) = fetched else { return false }
         do {
-            let (data, response) = try await urlSession.data(from: remoteURL)
-            if let http = response as? HTTPURLResponse, http.statusCode != 200 { return false }
-            let fetched = try decode(data)
-            guard fetched.asOf >= load(cacheURL: cacheURL).asOf,
+            guard history.asOf >= load(cacheURL: cacheURL).asOf,
                   let destination = cacheURL ?? cacheFileURL() else { return false }
             try FileManager.default.createDirectory(
                 at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
             try data.write(to: destination, options: [.atomic])
             return true
         } catch {
-            Log.write("PricingTable", "price-history refresh failed (\(error)) — keeping the current copy")
+            Log.write("PricingTable", "price-history cache write failed (\(error)) — keeping the current copy")
             return false
         }
     }

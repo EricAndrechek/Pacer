@@ -22,6 +22,12 @@ import Synchronization
 // the poller does can interleave with one. The main actor gets only finished
 // values: the signals, posted after the save has landed.
 //
+// The poller's executor is a serial dispatch queue of its own (#445,
+// `OAuthPoller.queue`), so a section that blocks, a page-in under memory
+// pressure, say, holds that queue's thread and not one of the cooperative
+// pool's. Do not move a writer onto a detached task to get it off the poller:
+// the writes would lose their order and the switcher ingest its atomicity.
+//
 // A context of its own reads and writes what is saved, which is all the
 // main-actor versions did. They made a fresh context too; none of them used the
 // main context. So a reader that refreshes on the signal sees the same rows it

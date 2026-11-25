@@ -52,6 +52,10 @@ restore() { ensure_running; }
 trap restore EXIT INT TERM
 
 mkdir -p "$OUT"
+# Stale PNGs from an earlier run would be listed as this one's output.
+# Only this script's own renders (LiveRenderMode names them live-<page>-<scope>):
+# $OUT can be any folder the caller passes, and other PNGs in it are not ours.
+rm -f "$OUT"/live-*.png
 
 # The render opens the store read-only, and SwiftData needs a *write* to apply
 # a schema migration — so the first render after a model change fails until the
@@ -62,7 +66,10 @@ echo "==> Rendering scopes [$SCOPES] to $OUT"
 PACER_SCREENSHOT_MODE=1 \
 PACER_RENDER_LIVE="$SCOPES" \
 PACER_SCREENSHOT_DIR="$OUT" \
-  "$BIN" 2>&1 | grep -E '^\[Pacer (render|live-render)\]' || true
+  "$BIN" > "$OUT/.render.log" 2>&1 && status=0 || status=$?
+grep -E '^\[Pacer (render|live-render)\]' "$OUT/.render.log" || true
+rm -f "$OUT/.render.log"
 
 echo
 ls -1 "$OUT"/*.png 2>/dev/null | sed 's|^|    |' || echo "    (nothing rendered)"
+[ "${status:-0}" -eq 0 ] || { echo "render failed (exit $status)" >&2; exit "$status"; }

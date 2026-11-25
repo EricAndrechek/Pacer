@@ -123,7 +123,7 @@ struct NowStrip: View {
         let container = modelContext.container
         let account = scope.accountId
         let limitAccount = scope.limitAccountId
-        let snapshot = await Task.detached(priority: .userInitiated) {
+        let snapshot = await RenderReadiness.task("now-strip", priority: .userInitiated) {
             Self.read(container: container, account: account,
                       limitAccount: limitAccount, now: Date())
         }.value

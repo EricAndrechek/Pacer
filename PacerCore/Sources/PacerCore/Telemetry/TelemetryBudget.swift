@@ -138,7 +138,7 @@ public final class TelemetryBudget: @unchecked Sendable {  // UserDefaults is th
     /// transactions a day on 2026-11-04 and 11-05, and ~360 spans a day were
     /// discarded as `before_send`. Transactions are budgeted where they are
     /// sampled (`tracesSampler`, `takeTransaction`). Feedback is budgeted
-    /// where it is sent (the Report a Problem sheet, the CLI).
+    /// where it is sent (the Send Feedback window, the CLI).
     public static func kind(eventType: String?, mechanism: String?, fatal: Bool, handled: Bool?) -> Kind? {
         if eventType == "transaction" || eventType == "feedback" { return nil }
         if mechanism == "AppHang" { return .hang }
@@ -204,6 +204,22 @@ public final class TelemetryBudget: @unchecked Sendable {  // UserDefaults is th
             if let name { TelemetryCounters.add("telemetry.capped.\(kind.rawValue).\(name)") }
         }
         return allowed
+    }
+
+    /// Gives back one `take` that sent nothing in the end: a feedback POST the
+    /// server did not keep (no answer, or a 400, 413 or 415), so a person who
+    /// fixes the report or comes back online is not out one of the day's
+    /// five. Never below zero.
+    public func refund(_ kind: Kind, name: String? = nil) {
+        let key = name.map { "\(kind.rawValue):\($0)" } ?? kind.rawValue
+        let changed = state.withLock { s -> Bool in
+            roll(&s)
+            guard let count = s.counts[key], count > 0 else { return false }
+            s.counts[key] = count - 1
+            s.dirty = true
+            return true
+        }
+        if changed { save(waiting: false) }
     }
 
     /// A PostHog event: under its per-name cap AND the all-names cap, both

@@ -73,6 +73,7 @@ verify: vendor  ## Verification build (no signing, no install) — fastest sanit
 		-destination 'platform=macOS' \
 		-derivedDataPath "$(REPO_ROOT)/Build" \
 		CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO \
+		$$(bin/build-git-info.sh "$(REPO_ROOT)") \
 		build | (grep -E '(error:|warning:|FAILED|SUCCEEDED)' || true)
 
 # Convenience alias.
@@ -151,6 +152,7 @@ app: vendor  ## Signed Debug build of Pacer.app (output: Build/Build/Products/De
 		-destination 'platform=macOS' \
 		-derivedDataPath "$(REPO_ROOT)/Build" \
 		-allowProvisioningUpdates \
+		$$(bin/build-git-info.sh "$(REPO_ROOT)") \
 		build | (grep -E '(error:|warning:|FAILED|SUCCEEDED)' || true)
 
 # ------------------------------------------------------------------

@@ -351,7 +351,7 @@ struct ProjectDetailView: View {
         let account = scope.accountId
         let mode = CostMode(rawValue: costModeRaw) ?? .auto
         Task {
-            let load = await Task.detached(priority: .userInitiated) {
+            let load = await RenderReadiness.task("project-detail", priority: .userInitiated) {
                 Self.loadDetail(container: container, projectPath: path,
                                 since: since, accountId: account, mode: mode)
             }.value
@@ -567,7 +567,7 @@ struct ProjectDetailView: View {
         // Keyed on the path and the scan tick: the two inputs that change the answer.
         .task(id: ExistenceKey(path: projectPath, tick: existenceTick)) {
             let path = projectPath
-            let found = await Task.detached(priority: .utility) {
+            let found = await RenderReadiness.task("project-detail", priority: .utility) {
                 FileManager.default.fileExists(atPath: path)
             }.value
             guard !Task.isCancelled else { return }
@@ -685,7 +685,7 @@ struct ProjectDetailView: View {
         let generation = knownPathsGeneration &+ 1
         knownPathsGeneration = generation
         Task {
-            let paths = await Task.detached(priority: .utility) {
+            let paths = await RenderReadiness.task("project-detail", priority: .utility) {
                 Self.loadKnownProjectPaths(container: container)
             }.value
             guard generation == knownPathsGeneration else { return }
