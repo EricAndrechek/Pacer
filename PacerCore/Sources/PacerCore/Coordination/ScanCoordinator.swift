@@ -569,6 +569,9 @@ public final class ScanCoordinator {
     /// Test seam: runs at the start of the startup stale-cursor prune. The
     /// OAuth poller must already be reading by then (#463). `nil` in the app.
     var beforeStartupPruneHook: (@ScanActor () async throws -> Void)?
+    /// Test seam: runs right after the prune, before the first cycle (whose
+    /// cost-recompute rebuild may clear every cursor anyway). `nil` in the app.
+    var afterStartupPruneHook: (@ScanActor () async throws -> Void)?
 
     /// Whether a scan cycle or an alias migration currently owns the
     /// persister's dirty sets, and who is queued behind it.
@@ -1140,6 +1143,7 @@ public final class ScanCoordinator {
             if pruned > 0 {
                 log("startup: pruned \(pruned) stale JSONLFileCursor row(s)")
             }
+            try await afterStartupPruneHook?()
         } catch {
             log("startup: stale-cursor prune failed: \(error)")
         }

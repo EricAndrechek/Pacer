@@ -142,8 +142,7 @@ import Testing
             configuration: .init(costMode: .display, watcherMode: .manual, probeStatsCache: false),
             resolver: ClaudePathResolver(environment: ["CLAUDE_CONFIG_DIR": r.path]))
         let atFirstCycle = Box<[String]>([]), reached = Box(false)
-        coordinator.beforeRecomputeHook = {
-            guard !reached.value else { return }
+        coordinator.afterStartupPruneHook = {
             atFirstCycle.value = ((try? ModelContext(container).fetch(FetchDescriptor<JSONLFileCursor>())) ?? [])
                 .map(\.path)
             reached.value = true
