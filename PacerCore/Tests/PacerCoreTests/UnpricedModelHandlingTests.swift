@@ -250,12 +250,13 @@ import Testing
         #expect(times.count == 24)
         #expect(zip(times, times.dropFirst()).allSatisfy { $1 - $0 == 3600 })
 
-        #expect(await LoopRig().run(hours: 48) == [0, 24 * 3600])
+        // `as [TimeInterval]`: Swift 6.0 (macOS 15 CI) infers an Int array here.
+        #expect(await LoopRig().run(hours: 48) == [0, 24 * 3600] as [TimeInterval])
 
         // Hourly for the first 3 h: back to daily, counted from the last refresh.
         let ends = LoopRig()
         ends.hourly = { $0 < 3 * 3600 }
-        #expect(await ends.run(hours: 48) == [0, 3600, 7200, 26 * 3600])
+        #expect(await ends.run(hours: 48) == [0, 3600, 7200, 26 * 3600] as [TimeInterval])
     }
 
     @MainActor
