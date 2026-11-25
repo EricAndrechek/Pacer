@@ -55,8 +55,9 @@ struct SentryTelemetrySink: Telemetry.Sink {
     /// An error event with our fixed message. `beforeSend` applies the crash
     /// toggle, the `.error` cap and the scrubber again. Strings and bools are
     /// tags (searchable, few values); numbers go in extra data, where a
-    /// duration does not spawn a tag value per event.
-    func problem(_ message: String, attributes: Telemetry.Attributes) {
+    /// duration does not spawn a tag value per event. A fingerprint replaces
+    /// Sentry's grouping (the message) with ours, scrubbed like the tags.
+    func problem(_ message: String, attributes: Telemetry.Attributes, fingerprint: [String]?) {
         guard TelemetryController.crashAllowed else { return }
         let event = Event(level: .error)
         event.message = SentryMessage(formatted: TelemetryScrubber.scrub(message))
@@ -72,6 +73,9 @@ struct SentryTelemetrySink: Telemetry.Sink {
         }
         event.tags = tags
         if !extra.isEmpty { event.extra = extra }
+        if let fingerprint, !fingerprint.isEmpty {
+            event.fingerprint = fingerprint.map { TelemetryScrubber.scrub($0) }
+        }
         SentrySDK.capture(event: event)
     }
 

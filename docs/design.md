@@ -342,7 +342,8 @@ setting, distinct UI.
 
 1. **Build-time snapshot** embedded in `PacerCore` as a Swift package
    resource. Default for fast paths. Ships fully offline-capable.
-2. **Runtime refresh** on a 24h cadence (background fetch, atomic swap).
+2. **Runtime refresh** on a 24h cadence, hourly while a model with usage
+   has no price (background fetch, atomic swap; `PricingRefreshSchedule`).
    Falls back to embedded snapshot on failure.
 
 Tiered pricing at 200k for 1M-context models per ccusage's

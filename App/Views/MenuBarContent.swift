@@ -691,6 +691,9 @@ struct MenuStatusContent: View {
     /// key's read lands, a few milliseconds later, rather than "$0.00" or
     /// empty bars in between. A render makes its own.
     @State private var feed: MenuDropdownFeed
+    /// Models with no price yet: a Today total that includes one carries the
+    /// mark. Read in `body`, and the dropdown re-runs `body` on every open.
+    @State private var pricePending = PricePending.shared
 
     /// An input, not a read of the stored value: a render walks scopes
     /// ephemerally (`UsageScope.selectEphemeral`), and the live menu follows the
@@ -973,7 +976,8 @@ struct MenuStatusContent: View {
                 // starts when it builds the menu: never a "$0.00" that is
                 // really "not read yet".
                 todayValueRow(label: "Today", value: todayCost.map(pacerCost) ?? "—",
-                              tooltip: todayCost.map(pacerCostExact))
+                              tooltip: todayCost.map(pacerCostExact),
+                              pricePending: pricePending.pending(in: feed.today?.today.map(\.model) ?? []))
                 outlookRow(spendSoFar: todayCost ?? 0)
             }
         }
@@ -1181,19 +1185,23 @@ struct MenuStatusContent: View {
     }
 
     @ViewBuilder
-    private func todayValueRow(label: String, value: String, tooltip: String? = nil) -> some View {
+    private func todayValueRow(label: String, value: String, tooltip: String? = nil,
+                               pricePending: [String] = []) -> some View {
         HStack(spacing: 8) {
             Text(label)
                 .font(.system(size: 12))
                 .foregroundStyle(.primary)
                 .frame(width: 48, alignment: .leading)
             Spacer()
-            Text(value)
-                .font(.system(size: 13, weight: .semibold, design: .rounded))
-                .monospacedDigit()
-                .foregroundStyle(.primary)
-                .help(tooltip ?? value)
-                .pacerToolTip(tooltip ?? value)
+            HStack(spacing: 4) {
+                PacerPricePendingMark(models: pricePending, size: 10, menuBar: true)
+                Text(value)
+                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(.primary)
+                    .help(tooltip ?? value)
+                    .pacerToolTip(tooltip ?? value)
+            }
         }
     }
 }

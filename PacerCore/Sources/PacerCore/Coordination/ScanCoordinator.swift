@@ -303,6 +303,11 @@ public final class ScanCoordinator {
         /// ended, any rebuild in it included: what launch work that should not
         /// compete with the first cycle waits for (`ArenaStartGate`).
         public var onFirstCycleEnded: (@Sendable () -> Void)?
+        /// Told the models with usage and no price at the first ledger
+        /// reconcile of the coordinator and whenever that set changes:
+        /// `UnpricedModels.publish` (the "price pending" mark, the hourly
+        /// price checks, the Sentry report) unless a test passes its own.
+        public var onUnpricedModels: @Sendable (Set<String>) -> Void
 
         public init(
             costMode: CostMode = .auto,
@@ -313,7 +318,8 @@ public final class ScanCoordinator {
             bulkImporter: BulkTranscriptImporter? = nil,
             desktopSessions: DesktopSessionDirectory? = .shared,
             loginMarker: DefaultLoginMarkerPublisher = DefaultLoginMarkerPublisher(),
-            onFirstCycleEnded: (@Sendable () -> Void)? = nil
+            onFirstCycleEnded: (@Sendable () -> Void)? = nil,
+            onUnpricedModels: @escaping @Sendable (Set<String>) -> Void = { UnpricedModels.publish($0) }
         ) {
             self.costMode = costMode
             self.watcherMode = watcherMode
@@ -324,6 +330,7 @@ public final class ScanCoordinator {
             self.desktopSessions = desktopSessions
             self.loginMarker = loginMarker
             self.onFirstCycleEnded = onFirstCycleEnded
+            self.onUnpricedModels = onUnpricedModels
         }
     }
 
@@ -1184,6 +1191,15 @@ public final class ScanCoordinator {
         // is what the store holds, not those (#395).
         persister?.writeDedupIndexIfNeeded(force: true)
         await stopRunningParts()
+    }
+
+    /// Run a cycle now, for a change no transcript shows: new prices, which
+    /// the next cycle syncs into the ledger and reprices history with. On a
+    /// quiet machine the next cycle is otherwise the backstop's. Buffered
+    /// like a login switch's (`JSONLWatcher.requestScan`); a no-op before
+    /// `runForever` has started the watcher.
+    public func requestScan() async {
+        await watcher.requestScan()
     }
 
     /// Set by `stop()`, and never cleared: a stopped coordinator stays
@@ -2199,6 +2215,10 @@ public final class ScanCoordinator {
         if configuration.costMode != .display {
             rebuildStep(.updatingPrices)
             try await reconcilePriceLedger(persister: activePersister)
+        } else {
+            // Display mode shows Claude Code's own cost and prices nothing,
+            // so no cost is waiting on a price.
+            publishUnpriced([])
         }
         try saveCursors(result.updatedCursors)
         phase.saveCursorsMs = tickMs()
@@ -2850,12 +2870,14 @@ public final class ScanCoordinator {
             }
         }
 
-        guard !used.isEmpty else { return }
+        guard !used.isEmpty else {
+            publishUnpriced([])
+            return
+        }
         let ledger = SampleCostCache.current().ledger
         let unpriced = used.filter { !ledger.isPriced($0) }
-        let previously: Set<String> = (try fetchMeta(ClaudeCodeMetaKey.unpricedModels))
-            .flatMap { Data($0.utf8) }
-            .flatMap { try? JSONDecoder().decode(Set<String>.self, from: $0) } ?? []
+        let previously = UnpricedModels.decode(try fetchMeta(ClaudeCodeMetaKey.unpricedModels))
+        publishUnpriced(unpriced)
 
         // Left the unpriced set => gained a price. Its buckets carry a
         // `none|…` token, so the ledger change above already queued exactly
@@ -2876,6 +2898,20 @@ public final class ScanCoordinator {
                 log("pricing: no price yet for \(unpriced.sorted().joined(separator: ", ")) — cost reads low until there is")
             }
         }
+    }
+
+    /// The unpriced set last handed to `configuration.onUnpricedModels`; nil
+    /// until the first reconcile of this coordinator, which always hands it
+    /// over (a launch starts with nothing published).
+    private var publishedUnpriced: Set<String>?
+
+    /// Hand the unpriced set on when it differs from the last one handed on:
+    /// a set comparison per cycle, and a call only when a model loses or
+    /// gains its price.
+    private func publishUnpriced(_ unpriced: Set<String>) {
+        guard publishedUnpriced != unpriced else { return }
+        publishedUnpriced = unpriced
+        configuration.onUnpricedModels(unpriced)
     }
 
     /// Queue for a from-scratch rebuild every bucket a price change reaches

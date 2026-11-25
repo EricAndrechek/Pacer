@@ -11,6 +11,8 @@
 # only those pages (`LiveRenderMode.Page`); `menu` is the menu bar's dropdown,
 # written as live-menu-<scope>.png. The live meter is built once from the
 # read-only store first, so the renders show estimates as the app does.
+# `PACER_RENDER_UNPRICED=<model>,…` (make: `UNPRICED=`) draws those models as
+# having no price yet, so the "price pending" mark shows on real rows.
 #
 # Why this is a script and not a one-liner
 # ---------------------------------------
