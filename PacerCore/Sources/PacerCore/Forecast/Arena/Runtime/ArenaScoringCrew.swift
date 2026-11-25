@@ -48,7 +48,7 @@ final class ArenaWakeup: @unchecked Sendable {
 }
 
 /// The scorer's worker threads running now, so a stop can raise them to the
-/// class of whatever waits on it (#446).
+/// class of the quit waiting on it (#446).
 ///
 /// A worker runs at background QoS (`ArenaBudgetPolicy.scorerQoS`), and a
 /// saturated Mac schedules nothing at that class: in #431 four sat runnable
@@ -65,6 +65,24 @@ final class ArenaWakeup: @unchecked Sendable {
 /// and leaves under the same lock `hurry` takes, before the thread ends, so
 /// no override is started on a thread that has gone.
 final class ArenaWorkerThreads: @unchecked Sendable {
+    /// How an override is started and ended: the kernel's, or a test's
+    /// record of the calls. What a raise does to scheduling is the kernel's
+    /// business and depends on the machine (a process the system clamps to
+    /// utility cannot be raised past it); which thread is raised, to what and
+    /// until when is this type's, and is what tests check.
+    struct Overrides: Sendable {
+        /// An override of `thread` to `qos`, or nil if none was started.
+        var start: @Sendable (_ thread: pthread_t, _ qos: qos_class_t) -> OpaquePointer?
+        var end: @Sendable (_ override: OpaquePointer) -> Void
+
+        /// The SDK imports the start's result as never nil, though the call
+        /// returns NULL for a class or priority it does not take: read the
+        /// bits as they are.
+        static let kernel = Overrides(
+            start: { unsafeBitCast(pthread_override_qos_class_start_np($0, $1, 0), to: OpaquePointer?.self) },
+            end: { _ = pthread_override_qos_class_end_np($0) })
+    }
+
     private struct Entry {
         let thread: pthread_t
         var override: OpaquePointer?
@@ -75,13 +93,20 @@ final class ArenaWorkerThreads: @unchecked Sendable {
     private var entries: [Int: Entry] = [:]
     private var next = 0
     private var hurriedTo: qos_class_t?
+    private var calls = Overrides.kernel
+
+    /// The override calls (tests record them).
+    var overrides: Overrides {
+        get { lock.lock(); defer { lock.unlock() }; return calls }
+        set { lock.lock(); calls = newValue; lock.unlock() }
+    }
 
     /// The calling thread begins its work; `leave` with what this returns.
     func enter() -> Int {
         let me = pthread_self()
         lock.lock(); defer { lock.unlock() }
         next += 1
-        entries[next] = Entry(thread: me, override: hurriedTo.flatMap { Self.override(me, $0) })
+        entries[next] = Entry(thread: me, override: hurriedTo.flatMap { calls.start(me, $0) })
         return next
     }
 
@@ -90,8 +115,9 @@ final class ArenaWorkerThreads: @unchecked Sendable {
     func leave(_ token: Int) {
         lock.lock()
         let entry = entries.removeValue(forKey: token)
+        let end = calls.end
         lock.unlock()
-        if let o = entry?.override { pthread_override_qos_class_end_np(o) }
+        if let o = entry?.override { end(o) }
     }
 
     /// Run every worker at `qos` or above from now until it leaves, those
@@ -105,7 +131,7 @@ final class ArenaWorkerThreads: @unchecked Sendable {
         hurriedTo = to
         var raised = 0
         for (token, entry) in entries where entry.override == nil {
-            guard let o = Self.override(entry.thread, to) else { continue }
+            guard let o = calls.start(entry.thread, to) else { continue }
             entries[token]?.override = o
             raised += 1
         }
@@ -123,13 +149,6 @@ final class ArenaWorkerThreads: @unchecked Sendable {
         set { lock.lock(); beginning = newValue; lock.unlock() }
     }
     private var beginning: (@Sendable () -> Void)?
-
-    /// An override of `thread` to `qos`, or nil if the kernel refused one.
-    /// The SDK imports the result as never nil, though the call returns NULL
-    /// for a class or priority it does not take: read the bits as they are.
-    private static func override(_ thread: pthread_t, _ qos: qos_class_t) -> OpaquePointer? {
-        unsafeBitCast(pthread_override_qos_class_start_np(thread, qos, 0), to: OpaquePointer?.self)
-    }
 }
 
 /// One phase's workers: which cycle goes to which thread, and what comes back.

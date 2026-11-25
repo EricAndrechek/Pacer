@@ -22,13 +22,13 @@ struct RuntimeStopTests {
         private var armed = false
         private var skip = 0
         private var holding = false
-        private var holder: pthread_t?
+        private var holder: UInt64?
         private let release = DispatchSemaphore(value: 0)
 
         func arm(skipping n: Int = 0) { lock.withLock { armed = true; skip = n } }
         var isHolding: Bool { lock.withLock { holding } }
-        /// The thread held now: valid while `isHolding`, which it is until `open`.
-        var heldThread: pthread_t? { lock.withLock { holding ? holder : nil } }
+        /// The held thread's id (`pthread_threadid_np`), while it is held.
+        var heldID: UInt64? { lock.withLock { holding ? holder : nil } }
         func open() { release.signal() }
 
         func holdIfArmed() {
@@ -37,7 +37,7 @@ struct RuntimeStopTests {
                 guard skip == 0 else { skip -= 1; return false }
                 armed = false
                 holding = true
-                holder = pthread_self()
+                holder = RuntimeStopTests.threadID(pthread_self())
                 return true
             }
             guard hold else { return }
@@ -47,6 +47,48 @@ struct RuntimeStopTests {
     }
 
     static let gate = Gate()
+
+    static func threadID(_ thread: pthread_t) -> UInt64 {
+        var id: UInt64 = 0
+        pthread_threadid_np(thread, &id)
+        return id
+    }
+
+    /// Takes the kernel's place for a runtime's workers and records each
+    /// override: which thread, to what class, and when it ends. What a raise
+    /// then does to scheduling depends on the machine, not on this code: CI's
+    /// runners clamp the test process, so a worker already at utility cannot
+    /// be raised past it (`aStopRaisesItsWorkersUntilTheyLeave` checks the
+    /// kernel's part, where it can).
+    final class Overrides: @unchecked Sendable {
+        struct Start: Equatable {
+            let thread: UInt64
+            let qos: qos_class_t
+        }
+        private let lock = NSLock()
+        private var byToken: [Int: UInt64] = [:]
+        private var nextToken = 0x1000
+        private var startList: [Start] = []
+        private var endList: [UInt64] = []
+
+        var starts: [Start] { lock.withLock { startList } }
+        var ends: [UInt64] { lock.withLock { endList } }
+
+        var calls: ArenaWorkerThreads.Overrides {
+            ArenaWorkerThreads.Overrides(start: { [self] thread, qos in
+                let id = RuntimeStopTests.threadID(thread)
+                return lock.withLock {
+                    nextToken += 16
+                    byToken[nextToken] = id
+                    startList.append(Start(thread: id, qos: qos))
+                    return OpaquePointer(bitPattern: nextToken)
+                }
+            }, end: { [self] o in
+                let key = Int(bitPattern: UnsafeRawPointer(o))
+                lock.withLock { endList.append(byToken[key] ?? 0) }
+            })
+        }
+    }
 
     /// `RuntimeEngineTests.Peeker`, behind the gate.
     final class Held: ArenaModel {
@@ -107,6 +149,8 @@ struct RuntimeStopTests {
 
         let container = try Fixtures.seeded(cycles: 6)
         let rt = Self.runtime(container, workers: 2)
+        let overrides = Overrides()
+        rt.scorer.workers.overrides = overrides.calls
         Self.gate.arm()
         rt.start(accounts: { [Fixtures.account] })
         // One worker held at its first forecast; the other has graded every
@@ -115,20 +159,19 @@ struct RuntimeStopTests {
                 "the pass never reached the held forecast")
         #expect(try RuntimeWorkersTests.rows(container).isEmpty, "nothing is saved before the stop")
 
-        let held = try #require(Self.gate.heldThread)
-        let before = Self.priority(held)
-        // From a user-initiated task, as a quit's is: the class the workers
-        // are raised to is the waiter's.
-        let (wound, took) = await Task(priority: .userInitiated) { () -> (Bool, Duration) in
-            let began = ContinuousClock.now
-            let wound = await rt.stop()
-            return (wound, ContinuousClock.now - began)
-        }.value
+        let held = try #require(Self.gate.heldID)
+        #expect(overrides.starts.isEmpty, "nothing is raised before a stop")
+
+        let began = ContinuousClock.now
+        let wound = await rt.stop()
+        let took = ContinuousClock.now - began
         #expect(!wound, "the held worker cannot have handed back")
-        // The runtime's own worker, raised by the stop out of the class it
-        // was started at (utility here, `BackgroundQoS`; background in the
-        // app), and still raised while it is out.
-        #expect(Self.priority(held) > before, "the stop did not raise the scorer's worker")
+        // The runtime's own held worker, raised by the stop (`beginStop`,
+        // `hurry`) once, to a quit's class, and still raised while it is out;
+        // the other worker had gone, so nothing else.
+        #expect(overrides.starts == [.init(thread: held, qos: QOS_CLASS_USER_INITIATED)],
+                "the stop did not raise the scorer's own worker")
+        #expect(overrides.ends.isEmpty, "a worker still out stays raised")
         // Its bound, give or take a loaded Mac; a stop that waited for the
         // worker would wait out the gate (`Gate.giveUp`).
         #expect(took < .seconds(30), "the stop waited \(took) for a worker that never ran")
@@ -149,9 +192,13 @@ struct RuntimeStopTests {
         _ = await Self.runtime(container, workers: 2).scorer.pass(accounts: [Fixtures.account], now: Fixtures.now)
         #expect(try RuntimeWorkersTests.rows(container) == whole)
 
-        // The abandoned worker runs at last: it finds the stop and leaves.
+        // The abandoned worker runs at last: it finds the stop and leaves,
+        // and its override ends with it.
         Self.gate.open()
         #expect(await eventually { rt.scorer.workers.count == 0 }, "the released worker never left")
+        #expect(await eventually(timeout: .seconds(60)) { overrides.ends == [held] },
+                "the override did not end when the worker left")
+        #expect(overrides.starts.count == 1)
         await rt.scorer.stop()
         #expect(try RuntimeWorkersTests.rows(container) == whole)
     }
@@ -167,6 +214,8 @@ struct RuntimeStopTests {
 
         let container = try Fixtures.seeded(cycles: 6)
         let rt = Self.runtime(container, workers: 2)
+        let overrides = Overrides()
+        rt.scorer.workers.overrides = overrides.calls
         let notYet = Gate()
         notYet.arm(skipping: 1)
         rt.scorer.workers.beforeBeginning = { notYet.holdIfArmed() }
@@ -180,16 +229,25 @@ struct RuntimeStopTests {
         let wound = await rt.stop(within: .seconds(60))
         #expect(wound, "the stop waited for a worker that holds nothing")
         #expect(try RuntimeWorkersTests.rows(container) == whole)
+        #expect(overrides.starts.isEmpty, "no worker was running to raise")
 
+        // It begins at last: raised as it enters, since the stop came first,
+        // and let go as it leaves, holding nothing.
         notYet.open()
-        #expect(await eventually { !notYet.isHolding && rt.scorer.workers.count == 0 },
-                "the late worker never left")
+        #expect(await eventually(timeout: .seconds(60)) { overrides.ends.count == 1 }, "the late worker never left")
+        let late = overrides.starts
+        #expect(late.map(\.qos) == [QOS_CLASS_USER_INITIATED])
+        #expect(late.map(\.thread) == overrides.ends)
+        #expect(rt.scorer.workers.count == 0)
         #expect(try RuntimeWorkersTests.rows(container) == whole)
     }
 
-    /// A stop raises every running worker to its class until the worker
-    /// leaves, and one that starts after the stop as it starts; the thread's
-    /// own class is left as it was.
+    /// The kernel's part, as far as this process can see it: a raised worker
+    /// is scheduled above the class it asked for until it leaves, one that
+    /// starts after the stop as it enters. Where the system clamps the whole
+    /// process (CI's runners hold it at utility), only what the clamp leaves
+    /// room for is checked; which thread is raised, to what and until when is
+    /// checked anywhere, from the calls themselves (`Overrides`).
     @Test func aStopRaisesItsWorkersUntilTheyLeave() async throws {
         final class Worker: @unchecked Sendable {
             let threads: ArenaWorkerThreads
@@ -197,6 +255,8 @@ struct RuntimeStopTests {
             let mayLeave = DispatchSemaphore(value: 0)
             let mayEnd = DispatchSemaphore(value: 0)
             var thread: pthread_t?
+            /// Its priority at utility, before it asked for background.
+            var atUtility: Int32 = -1
             init(_ threads: ArenaWorkerThreads) {
                 self.threads = threads
                 // Started at utility so it is scheduled to enter on a busy
@@ -204,6 +264,7 @@ struct RuntimeStopTests {
                 // (`ArenaQoS`), and waits without needing a core.
                 let t = Thread { [self] in
                     let token = threads.enter()
+                    atUtility = RuntimeStopTests.priority(pthread_self())
                     pthread_set_qos_class_self_np(QOS_CLASS_BACKGROUND, 0)
                     thread = pthread_self()
                     entered.signal()
@@ -224,7 +285,11 @@ struct RuntimeStopTests {
         #expect(threads.count == 1)
 
         #expect(threads.hurry(to: QOS_CLASS_USER_INITIATED) == 1)
-        #expect(await eventually { Self.priority(t1) > background })
+        // Raised at least as far as utility runs here; a process clamped at
+        // background has no room to raise anything.
+        if before.atUtility > background {
+            #expect(await eventually { Self.priority(t1) >= before.atUtility })
+        }
         let raised = Self.priority(t1)
         #expect(threads.hurry(to: QOS_CLASS_USER_INITIATED) == 0, "a worker is raised once")
 
@@ -241,19 +306,6 @@ struct RuntimeStopTests {
         after.mayLeave.signal()
         #expect(await eventually { threads.count == 0 })
         after.mayEnd.signal()
-    }
-
-    /// The waiter's class, kept out of the tier a busy Mac starves and off
-    /// the event loop's.
-    @Test func theWorkersAreRaisedToTheWaitersClass() {
-        let cases: [(qos_class_t, qos_class_t)] = [
-            (QOS_CLASS_BACKGROUND, QOS_CLASS_UTILITY), (QOS_CLASS_UTILITY, QOS_CLASS_UTILITY),
-            (QOS_CLASS_DEFAULT, QOS_CLASS_DEFAULT), (QOS_CLASS_USER_INITIATED, QOS_CLASS_USER_INITIATED),
-            (QOS_CLASS_USER_INTERACTIVE, QOS_CLASS_USER_INITIATED), (QOS_CLASS_UNSPECIFIED, QOS_CLASS_UTILITY),
-        ]
-        for (waiter, raised) in cases {
-            #expect(ArenaRuntime.hurryQoS(waiter: waiter) == raised)
-        }
     }
 
     /// Work that finishes is waited for; work that does not is waited for

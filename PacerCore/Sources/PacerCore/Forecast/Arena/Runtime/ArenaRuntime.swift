@@ -1511,11 +1511,18 @@ public final class ArenaRuntime: Sendable {
     ///
     /// A quit waits here (`AppBackgroundService.stop`), and must not wait on
     /// work the Mac is not running (#446). The workers run at background QoS,
-    /// which a saturated Mac does not schedule at all, so the stop raises each
-    /// one to its own class first (`ArenaWorkerThreads`); the scorer's queue
-    /// is raised by dispatch for the job the wait puts on it. The scorer saves
+    /// which a saturated Mac does not schedule at all, so the stop first
+    /// raises each one to `qos` (`ArenaWorkerThreads`); the scorer's queue is
+    /// raised by dispatch for the job the wait puts on it. The scorer saves
     /// what has come back as soon as it wakes, without waiting for the workers
     /// still out (`run`).
+    ///
+    /// `qos` is user-initiated, not the caller's class: a quit is
+    /// user-initiated whoever asks for it (the user, logout, an installer),
+    /// and a class inherited from the calling task depends on which thread
+    /// made it. The quit's task is made on the main thread and inherits its
+    /// class there; nothing guarantees that, and a waiter at utility would
+    /// have raised the workers to nothing.
     ///
     /// Past `bound`, what is still out is left to the process's exit, and
     /// nothing of it is lost that matters: a worker holds only its cycle's
@@ -1523,12 +1530,12 @@ public final class ArenaRuntime: Sendable {
     /// transactions, which SQLite commits whole or not at all; and the next
     /// launch's pass grades whatever is missing (`RuntimeStopTests`).
     @discardableResult
-    public func stop(within bound: Duration = ArenaRuntime.stopBound) async -> Bool {
+    public func stop(within bound: Duration = ArenaRuntime.stopBound,
+                     raisingTo qos: qos_class_t = QOS_CLASS_USER_INITIATED) async -> Bool {
         let began = ContinuousClock.now
-        let waiter = qos_class_t(rawValue: UInt32(Task.currentPriority.rawValue))
         cancel.set(true)
         governor?.stop()
-        let raised = scorer.beginStop(hurryingTo: Self.hurryQoS(waiter: waiter))
+        let raised = scorer.beginStop(hurryingTo: qos)
         let scorer = self.scorer
         let done = await BoundedWait.atMost(bound) { await scorer.stop() }
         FMScratch.release()
@@ -1541,14 +1548,5 @@ public final class ArenaRuntime: Sendable {
                       + "worker(s) still out; what they hold is graded again at the next launch")
         }
         return done
-    }
-
-    /// The class a stop raises the scorer's workers to: the waiter's, as a
-    /// priority inversion is resolved, but never below utility (out of the
-    /// tier a busy Mac starves, as `BackgroundQoS` does for tests) and never
-    /// above user-initiated (interactive is for the event loop).
-    static func hurryQoS(waiter: qos_class_t) -> qos_class_t {
-        let lo = QOS_CLASS_UTILITY.rawValue, hi = QOS_CLASS_USER_INITIATED.rawValue
-        return qos_class_t(rawValue: min(hi, max(lo, waiter.rawValue)))
     }
 }
