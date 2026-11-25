@@ -271,8 +271,43 @@ public actor OAuthPoller: TokenPoolTesting {
     private let configuration: Configuration
     private let clock: PollerClock
     private let scheduler: OAuthPollScheduler
-    private let activityProbe: @Sendable () async -> Date?
+    /// Nil for the store's own answer (`latestActivity`), read synchronously
+    /// on the poller's queue. A nonisolated async closure would run those two
+    /// fetches on the cooperative pool instead.
+    private let activityProbe: (@Sendable () async -> Date?)?
     private let random: RandomSource
+
+    /// The poller's executor: a serial dispatch queue of its own (#445), the
+    /// shape `ArenaRuntime`'s actors use.
+    ///
+    /// Its work blocks. A poll is a couple of saves and a handful of fetches,
+    /// the keychain reads of discovery, cswap's cache read off disk, and the
+    /// hourly eviction over three tables, all synchronous by design: each
+    /// store write is one section from its first fetch to its save, which is
+    /// what keeps the writes in order and the switcher ingest atomic
+    /// (OAuthPoller+Store.swift). As a default actor that ran on a thread of
+    /// the cooperative pool, which has one per core for every task in the app.
+    /// Under memory pressure one fetch can take seconds, and for that long the
+    /// pool was a thread short. On this queue the same sections hold a
+    /// dispatch thread of their own instead. The actor is still serial, so
+    /// the order and the atomicity are unchanged.
+    ///
+    /// Utility, the class the loop already ran at (it is started from the
+    /// scan loop, at `ScanCoordinator.loopPriority`), so in steady state
+    /// nothing runs sooner or later than before. Not background
+    /// (`BackgroundQoS`): that tier is for work nothing waits on. It is
+    /// throttled for CPU and I/O, and a saturated Mac can give it no CPU at
+    /// all (#431). A poll that does not run is a stale meter and an alert that
+    /// cannot fire, and a slow page-in is exactly when I/O throttling would
+    /// cost the most. Not higher either: nothing here is UI work. The queue's
+    /// class is a floor, not a cap: a higher-priority caller (the Settings
+    /// Test button, from main) has its job run at its own priority. The class
+    /// is the same in a test process, so tests run the poller the way the
+    /// app does.
+    private let queue = DispatchSerialQueue(label: OAuthPoller.queueLabel, qos: .utility)
+    public nonisolated var unownedExecutor: UnownedSerialExecutor { queue.asUnownedSerialExecutor() }
+    /// The queue's label: what a stack or a hang report names the thread by.
+    nonisolated static let queueLabel = "com.ericandrechek.pacer.oauth-poller"
 
     private var lanes: [Lane] = []
     /// The active account's org (nil when the header was absent). Kept for
@@ -372,7 +407,7 @@ public actor OAuthPoller: TokenPoolTesting {
         self.clock = clock
         self.switcherCache = switcherCache
         self.scheduler = OAuthPollScheduler(tuning: configuration.scheduler)
-        self.activityProbe = activityProbe ?? Self.defaultActivityProbe(container: container)
+        self.activityProbe = activityProbe
         self.poolStore = poolStore
         self.random = random
     }
@@ -915,7 +950,7 @@ public actor OAuthPoller: TokenPoolTesting {
         while !stopping && !Task.isCancelled {
             ensureLanes()
             _ = ingestSwitcherCache()
-            let activity = await activityProbe()
+            let activity = await currentActivity()
             lastActivityAt = activity
 
             if lanes.isEmpty {
@@ -1946,8 +1981,12 @@ public actor OAuthPoller: TokenPoolTesting {
     ///
     /// Off the main actor (#417): the loop asks once per pass, and two fetches
     /// on main per poll are the PACER-19 shape. A fresh context, as before.
-    private static func defaultActivityProbe(container: ModelContainer) -> @Sendable () async -> Date? {
-        { @Sendable in latestActivity(container: container) }
+    /// Called here rather than through a closure, so the fetches run on the
+    /// poller's queue with its other store work (#445). An injected probe
+    /// (tests) is awaited wherever it runs.
+    private func currentActivity() async -> Date? {
+        if let activityProbe { return await activityProbe() }
+        return Self.latestActivity(container: container)
     }
 
     /// The newest `TokenSample` or `SessionInfo` moment, on a context of its
