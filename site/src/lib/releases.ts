@@ -8,6 +8,27 @@ import { Marked } from 'marked';
 
 // site/ is the working directory of every build (`pnpm build` runs there).
 const NOTES_DIR = resolve(process.cwd(), '..', 'docs', 'release-notes');
+// The update feed this site serves (bin/publish-feeds.sh writes it at release).
+const APPCAST = resolve(process.cwd(), 'public', 'appcast.xml');
+
+/**
+ * The versions the update feed offers. Release notes land on main before the
+ * tag (they become the GitHub release text), so a notes file alone doesn't
+ * mean the version is out; the feed does. A release pulled from the feed
+ * drops off the changelog too. Null (list every notes file) only if the feed
+ * can't be read, so a missing file never empties the page.
+ */
+function offeredVersions(): Set<string> | null {
+  try {
+    const xml = readFileSync(APPCAST, 'utf8');
+    const versions = [...xml.matchAll(/<sparkle:shortVersionString>([^<]+)<\/sparkle:shortVersionString>/g)].map(
+      (m) => m[1].trim(),
+    );
+    return versions.length ? new Set(versions) : null;
+  } catch {
+    return null;
+  }
+}
 
 export interface Release {
   version: string;
@@ -67,11 +88,13 @@ const plain = (md: string) =>
 
 let cached: Release[] | undefined;
 
-/** Every release, newest first. */
+/** Every released version (one the update feed offers), newest first. */
 export function releases(): Release[] {
   if (cached) return cached;
+  const offered = offeredVersions();
   cached = readdirSync(NOTES_DIR)
     .filter((f) => /^\d+\.\d+\.\d+\.md$/.test(f))
+    .filter((f) => !offered || offered.has(f.replace(/\.md$/, '')))
     .map((f) => {
       const version = f.replace(/\.md$/, '');
       const md = readFileSync(join(NOTES_DIR, f), 'utf8').trim();
