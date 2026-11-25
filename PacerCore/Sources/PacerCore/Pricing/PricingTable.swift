@@ -485,7 +485,12 @@ public actor PricingTable {
         let decoder = JSONDecoder()
         for (key, value) in json {
             if key == "sample_spec" { continue }
-            guard let entryData = try? JSONSerialization.data(withJSONObject: value) else {
+            // A catalog is a third-party file. `JSONSerialization.data` raises an
+            // Objective-C exception (not a Swift error, so `try?` can't catch it)
+            // for a value that isn't an object or array, so one string or number
+            // at the top level would crash every Mac on its next price refresh.
+            guard value is [String: Any],
+                  let entryData = try? JSONSerialization.data(withJSONObject: value) else {
                 continue
             }
             guard let entry = try? decoder.decode(LiteLLMModelPricing.self, from: entryData) else {
