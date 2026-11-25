@@ -48,6 +48,42 @@ public enum FeedRequestHeaders {
         return out
     }
 
+    /// The pacer.andrechek.com hosts these headers may reach.
+    public static func isPacerSite(_ url: URL?) -> Bool {
+        guard let host = url?.host?.lowercased() else { return false }
+        return host == "pacer.andrechek.com"
+    }
+
+    /// Removes every `X-Pacer-*` header. Sparkle's `httpHeaders` also ride on
+    /// the update archive/delta download and the release-notes fetch, which go
+    /// to GitHub (a 302 to release-assets.githubusercontent.com): the ID and
+    /// the rest must only ever reach our own site, so the delegate strips
+    /// them from those requests.
+    public static func strippingPacerHeaders(_ headers: [String: String]) -> [String: String] {
+        headers.filter { !$0.key.lowercased().hasPrefix("x-pacer-") }
+    }
+
+    public static func strip(_ request: NSMutableURLRequest) {
+        for key in (request.allHTTPHeaderFields ?? [:]).keys where key.lowercased().hasPrefix("x-pacer-") {
+            request.setValue(nil, forHTTPHeaderField: key)
+        }
+    }
+
+    /// No id when telemetry is switched off from the environment, which
+    /// PostHog and Sentry both honour and `isNormalLaunch` does not cover.
+    public static func mayCarryId(isNormalLaunch: Bool, environment: [String: String]) -> Bool {
+        isNormalLaunch && environment["PACER_TELEMETRY"] != "off"
+    }
+
+    /// The previous check's time, then (when `record`) now. Read before
+    /// write: Sparkle stamps its own `lastUpdateCheckDate` before the
+    /// delegate runs, so it cannot answer "since the last check".
+    public static func previousCheck(key: String, store: UserDefaults, now: Date, record: Bool) -> Date? {
+        let last = store.object(forKey: key) as? Date
+        if record { store.set(now, forKey: key) }
+        return last
+    }
+
     /// `X-Pacer-Id` iff this is the user's own app, the Usage-data toggle is on
     /// and an id already exists. Every input is a closure read right now.
     public static func idHeader(usageAllowed: () -> Bool, isNormalLaunch: () -> Bool,

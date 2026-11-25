@@ -96,4 +96,45 @@ struct FeedRequestHeadersTests {
                                                headers: provider, record: true)
         #expect(next.value(forHTTPHeaderField: "X-Pacer-Since-Last-Check") == "1-7d")
     }
+
+    @Test("X-Pacer-* is stripped from download requests, other headers stay")
+    func strip() {
+        let r = NSMutableURLRequest(url: URL(string: "https://github.com/x.dmg")!)
+        r.setValue("abc", forHTTPHeaderField: "X-Pacer-Id")
+        r.setValue("manual", forHTTPHeaderField: "x-pacer-check")
+        r.setValue("Sparkle", forHTTPHeaderField: "User-Agent")
+        FeedRequestHeaders.strip(r)
+        #expect(r.allHTTPHeaderFields == ["User-Agent": "Sparkle"])
+        #expect(FeedRequestHeaders.strippingPacerHeaders(["X-Pacer-Id": "a", "Accept": "*/*"]) == ["Accept": "*/*"])
+    }
+
+    @Test("only our own site counts for release notes")
+    func site() {
+        #expect(FeedRequestHeaders.isPacerSite(URL(string: "https://pacer.andrechek.com/n.html")))
+        #expect(!FeedRequestHeaders.isPacerSite(URL(string: "https://github.com/n.html")))
+        #expect(!FeedRequestHeaders.isPacerSite(nil))
+    }
+
+    @Test("PACER_TELEMETRY=off removes the id")
+    func envOff() {
+        #expect(FeedRequestHeaders.mayCarryId(isNormalLaunch: true, environment: [:]))
+        #expect(!FeedRequestHeaders.mayCarryId(isNormalLaunch: true, environment: ["PACER_TELEMETRY": "off"]))
+        #expect(!FeedRequestHeaders.mayCarryId(isNormalLaunch: false, environment: [:]))
+    }
+
+    @Test("previous check is read before it is overwritten")
+    func previous() throws {
+        let suite = "feed-prev-\(UUID().uuidString)"
+        let store = try #require(UserDefaults(suiteName: suite))
+        defer { store.removePersistentDomain(forName: suite) }
+        let k = "k"
+        #expect(FeedRequestHeaders.previousCheck(key: k, store: store, now: Self.now, record: true) == nil)
+        let later = Self.now.addingTimeInterval(7 * 3600)
+        let seen = FeedRequestHeaders.previousCheck(key: k, store: store, now: later, record: true)
+        #expect(seen == Self.now)
+        #expect(FeedRequestHeaders.sinceBucket(since: seen, now: later) == "6-12h")
+        // Not recorded outside a normal launch.
+        _ = FeedRequestHeaders.previousCheck(key: k, store: store, now: later.addingTimeInterval(99), record: false)
+        #expect(store.object(forKey: k) as? Date == later)
+    }
 }

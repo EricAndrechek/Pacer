@@ -15,7 +15,10 @@ enum FeedRequestIdentity {
     static func idHeader() -> [String: String] {
         FeedRequestHeaders.idHeader(
             usageAllowed: { TelemetryController.analyticsAllowed },
-            isNormalLaunch: { LaunchMode.isNormalLaunch },
+            isNormalLaunch: {
+                FeedRequestHeaders.mayCarryId(isNormalLaunch: LaunchMode.isNormalLaunch,
+                                              environment: ProcessInfo.processInfo.environment)
+            },
             installId: {
                 AnalyticsIdentity.existingInstallId(in: URL(fileURLWithPath: TelemetryController.cacheDirectory))
             })

@@ -138,6 +138,9 @@ public enum PacerPreferenceKeys {
     /// When Pacer last asked the site for the curated price history, as a
     /// `Date`; it becomes the `X-Pacer-Since-Last-Check` bucket of the next
     /// request (`FeedRequestHeaders`).
+    /// When the appcast was last requested (Sparkle's own date is already
+    /// "now" when the delegate runs).
+    public static let appcastLastCheck = "pacer.appcast.lastCheck"
     public static let priceHistoryLastFetch = "pacer.priceHistory.lastFetch"
     /// Set once the two-toggle migration has run (`TelemetryConsent.migrate`).
     public static let telemetryMigrated = "pacer.telemetry.migratedTwoToggles"

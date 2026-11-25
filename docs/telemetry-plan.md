@@ -206,15 +206,19 @@ project.
 
 The two periodic requests Pacer makes to its own site, the Sparkle appcast
 (`/appcast.xml`) and the curated price history (`/price-history.json`), carry
-headers so the site can count active Macs and versions. This is the site's own
-access log, not Sentry or PostHog.
+headers so the site can count active Macs and versions from its request logs.
+Nothing goes to Sentry or PostHog for this. The `X-Pacer-*` headers only ever
+reach pacer.andrechek.com: Sparkle also puts its `httpHeaders` on update
+archive/delta downloads and release-notes fetches (GitHub releases), so the
+updater delegate strips every `X-Pacer-*` header from those requests
+(`willDownloadUpdate`) and declines release notes hosted anywhere else.
 
 | Header | Value | Sent |
 | --- | --- | --- |
 | `X-Pacer-Check` | `manual` (the user chose "Check for Updates…") or `scheduled` (Sparkle's launch and background checks, every price fetch) | every Mac, every request |
-| `X-Pacer-Since-Last-Check` | `lt1h`, `1-6h`, `6-12h`, `12-24h`, `1-7d`, `gt7d` or `never`: time since Sparkle's `lastUpdateCheckDate`, or since the previous price fetch (persisted, `pacer.priceHistory.lastFetch`) | every Mac, every request |
+| `X-Pacer-Since-Last-Check` | `lt1h`, `1-6h`, `6-12h`, `12-24h`, `1-7d`, `gt7d` or `never`: time since the previous request of the same kind, from Pacer's own persisted dates (`pacer.appcast.lastCheck`, `pacer.priceHistory.lastFetch`; Sparkle's `lastUpdateCheckDate` is already "now" when the delegate runs) | every Mac, every request |
 | `X-Pacer-Version` | `CFBundleShortVersionString` | price history only (the appcast's Sparkle User-Agent has it) |
-| `X-Pacer-Id` | the install id, the same as PostHog's `distinct_id` | **only while Usage data is on**, decided for each request; absent when off, in tests, in diagnostic launch modes, and before the id exists |
+| `X-Pacer-Id` | the install id, the same as PostHog's `distinct_id` | **only while Usage data is on**, decided for each request; absent when off, with `PACER_TELEMETRY=off`, in tests, in diagnostic launch modes, and before the id exists |
 
 The appcast headers are set on `SPUUpdater.httpHeaders` from
 `updater(_:mayPerform:)`, which runs before every check; the price-history
