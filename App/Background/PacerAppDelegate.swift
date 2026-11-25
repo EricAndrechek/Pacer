@@ -224,6 +224,8 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         TelemetryController.shared.startIfAllowed()
         // PostHog usage events (the "Usage data" toggle), beside Sentry.
         AnalyticsController.shared.startIfAllowed()
+        // The id header on the price-history fetch (Sparkle's is set per check).
+        FeedRequestIdentity.installPriceHistoryHeaders()
 
         // Open the store here, synchronously, when that is an ordinary open —
         // every launch but the first after a schema change, which keeps
@@ -689,6 +691,7 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // clean (stuck shutdown killed by `make install` or logout) is still
         // a quit, never a crash to relaunch from (#412).
         CrashRelauncher.standDown()
+        let began = ContinuousClock.now
         Task { @MainActor in
             // A quit during a migration waits for it: SQLite would roll an
             // interrupted transaction back, but there is no reason to find out
@@ -705,6 +708,9 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             await TelemetryController.shared.prepareForTermination()
             await AnalyticsController.shared.prepareForTermination()
             DailyCheckIn.markCleanExit()
+            // How long the quit's own work took: what a quit on a loaded Mac
+            // is checked by (#446).
+            Log.write("Lifecycle", "shut down in \(Int((ContinuousClock.now - began) / .milliseconds(1))) ms")
             // Log lines are written on a background queue (`Log`); make sure
             // the last ones (this shutdown's) are on disk before the process ends.
             await Task.detached { Log.flush() }.value

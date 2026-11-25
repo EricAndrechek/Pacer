@@ -1284,6 +1284,7 @@ enum ScreenshotMode {
         // Spin the run loop so SwiftUI mounts, @Query fetches land, the
         // @State scan-tick caches refresh, and Charts lay out.
         await settle(seconds: 2.6)
+        await OffscreenRenderer.awaitLoads(name)
         hosting.layoutSubtreeIfNeeded()
         hosting.displayIfNeeded()
         await settle(seconds: 1.0)
@@ -1425,6 +1426,7 @@ enum ScreenshotMode {
         // As long as the view-snapshot path waits: SwiftUI mounts, @Query
         // fetches land, caches refresh, Charts lay out, the engine answers.
         await settle(seconds: 3.6)
+        await OffscreenRenderer.awaitLoads(name)
 
         log("\(name): title=\"\(window.title)\" subtitle=\"\(window.subtitle)\" toolbar=\(window.toolbar.map { "\($0.items.count) item(s), visible \($0.isVisible)" } ?? "none") style=\(window.toolbarStyle.rawValue) key=\(window.isKeyWindow) policy=\(NSApp.activationPolicy().rawValue)")
         var sheets: [NSWindow] = []
@@ -1573,6 +1575,7 @@ enum ScreenshotMode {
         NotificationCenter.default.post(name: .pacerEngineDidRecompute, object: nil)
         // Let the label lay out and its @Query fetches and engine answers land.
         await settle(seconds: 3.5)
+        await OffscreenRenderer.awaitLoads(name)
         // One open and close first. The menu refreshes its content as it
         // opens, so the very first open shows what it had before — the light
         // image read "Outlook —" where the dark one, taken on a second open,

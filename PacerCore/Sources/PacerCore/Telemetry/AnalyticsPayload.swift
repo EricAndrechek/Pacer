@@ -139,6 +139,15 @@ public enum AnalyticsIdentity {
 
     public static let fileName = "INSTALLATION"
 
+    /// The id if one already exists; never creates it. A request header must
+    /// not be what establishes an identity.
+    public static func existingInstallId(in directory: URL) -> String? {
+        guard let raw = try? String(contentsOf: directory.appendingPathComponent(fileName), encoding: .utf8)
+        else { return nil }
+        let id = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return id.isEmpty ? nil : id
+    }
+
     /// The id in `directory/INSTALLATION`, created in Sentry's own format (an
     /// uppercase UUID string, `SentryInstallation`) when it is missing, so
     /// Sentry adopts it if it starts later. Nil only when the folder cannot
