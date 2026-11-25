@@ -284,31 +284,42 @@ export function environmentOf(hostname: string): 'production' | 'preview' | 'dev
 /**
  * One anonymous PostHog event per download: a fresh random id (so no person
  * profile and nothing to join on), the country Cloudflare already resolved,
- * and the version. The visitor's IP address is never sent: the request comes
- * from this Worker, `$ip` is null, and GeoIP is skipped, which would otherwise
- * place every download at the Cloudflare data centre that sent it.
+ * and the version. The visitor's IP address is never sent (`sendEvent`).
  */
 export async function captureDownload(env: Env, request: Request, version: string | null): Promise<void> {
+  await sendEvent(env, 'website_download', crypto.randomUUID(), {
+    surface: 'website',
+    environment: environmentOf(new URL(request.url).hostname),
+    country: countryOf(request),
+    version,
+  });
+}
+
+/** The country Cloudflare resolved for the request, or null. */
+function countryOf(request: Request): string | null {
+  const cf = (request as Request & { cf?: { country?: unknown } }).cf;
+  return typeof cf?.country === 'string' ? cf.country : null;
+}
+
+/**
+ * Post one event to PostHog from this Worker. Nothing of the visitor's
+ * request goes with it: the POST is the Worker's own (its own headers, from
+ * Cloudflare's address), `$ip` is null and GeoIP is skipped, which would
+ * otherwise place every event at the Cloudflare data centre that sent it.
+ * No person profile is created or updated. Callers run it in
+ * `ctx.waitUntil`, never before their response.
+ */
+export async function sendEvent(env: Env, event: string, distinctId: string, properties: Record<string, unknown>): Promise<void> {
   const token = env.POSTHOG_TOKEN;
   if (!token) return;
   const host = (env.POSTHOG_HOST || 'https://us.i.posthog.com').replace(/\/+$/, '');
-  const cf = (request as Request & { cf?: { country?: unknown } }).cf;
-  const country = typeof cf?.country === 'string' ? cf.country : null;
   const body = {
     api_key: token,
-    event: 'website_download',
-    distinct_id: crypto.randomUUID(),
+    event,
+    distinct_id: distinctId,
     timestamp: new Date().toISOString(),
-    properties: {
-      surface: 'website',
-      environment: environmentOf(new URL(request.url).hostname),
-      country,
-      version,
-      $process_person_profile: false,
-      $ip: null,
-      $geoip_disable: true,
-      $lib: 'pacer-site-worker',
-    },
+    // The fixed four last, so no caller's property can replace them.
+    properties: { ...properties, $process_person_profile: false, $ip: null, $geoip_disable: true, $lib: 'pacer-site-worker' },
   };
   const response = await fetch(`${host}/i/v0/e/`, {
     method: 'POST',
@@ -316,5 +327,193 @@ export async function captureDownload(env: Env, request: Request, version: strin
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(ORIGIN_TIMEOUT_MS),
   });
-  if (!response.ok) console.error(JSON.stringify({ message: 'posthog capture rejected', status: response.status }));
+  if (!response.ok) console.error(JSON.stringify({ message: 'posthog capture rejected', event, status: response.status }));
+}
+
+// ---------------------------------------------------------------------------
+// The update feed and the price history
+//
+// Every Pacer from 0.9.4 on finds its updates in /appcast.xml (Sparkle's
+// SUFeedURL) and its dated prices in /price-history.json, and only an update
+// could move them. They are static assets (public/). wrangler.jsonc's
+// run_worker_first routes only /price-history.json through this Worker, for
+// one reason: to count the requests (one a day per running Mac), which is how
+// many Macs run Pacer and on which versions, telemetry toggles or not. The
+// appcast is not routed, so the update feed never runs this code; the
+// counting below would handle it too, should that ever change. The answer is
+// the static asset, untouched: the
+// very Response the assets binding returns, so its bytes, status, headers,
+// ETag and 304s are the assets layer's own. The count happens afterwards in
+// ctx.waitUntil, and nothing in it can throw into the answer or delay it.
+
+/** The two files, by path, and the name each is counted under. */
+const FEED_FILES: Readonly<Record<string, FeedFile>> = { '/appcast.xml': 'appcast', '/price-history.json': 'price_history' };
+export type FeedFile = 'appcast' | 'price_history';
+
+export function feedFileOf(pathname: string): FeedFile | null {
+  return Object.hasOwn(FEED_FILES, pathname) ? FEED_FILES[pathname]! : null;
+}
+
+/**
+ * The static asset, exactly as the assets layer answers it, and a count of the
+ * request in the background. Throws only if the assets binding does
+ * (worker/index.ts then asks it once more).
+ */
+export async function serveFeed(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  let file: FeedFile | null = null;
+  try {
+    file = feedFileOf(new URL(request.url).pathname);
+  } catch {
+    // Not counted; still served.
+  }
+  const response = await env.ASSETS.fetch(request);
+  if (file) countFeedRequest(request, env, ctx, file, response.status);
+  return response;
+}
+
+/** Schedules the feed_request event. Never throws, never awaits. */
+export function countFeedRequest(request: Request, env: Env, ctx: ExecutionContext, file: FeedFile, status: number): void {
+  try {
+    // HEAD fetches nothing a client acts on; a conditional GET (304) is still a check.
+    if (request.method !== 'GET' || !env.POSTHOG_TOKEN) return;
+    ctx.waitUntil(captureFeedRequest(env, request, file, status).catch(captureFailed));
+  } catch (err) {
+    captureFailed(err);
+  }
+}
+
+function captureFailed(err: unknown): void {
+  try {
+    console.error(JSON.stringify({ message: 'feed request capture failed', error: String(err) }));
+  } catch {
+    // Nothing left to tell.
+  }
+}
+
+async function captureFeedRequest(env: Env, request: Request, file: FeedFile, status: number): Promise<void> {
+  const event = feedEvent(request, file, status, new Date());
+  if (event) await sendEvent(env, 'feed_request', event.distinctId, event.properties);
+}
+
+export interface FeedEvent {
+  distinctId: string;
+  properties: Record<string, unknown>;
+}
+
+/**
+ * The feed_request event for one request, or null when it is not counted:
+ * only Pacer's own clients are (a User-Agent starting `Pacer/`: Sparkle's
+ * `Pacer/<version> Sparkle/<version>` for the appcast, CFNetwork's
+ * `Pacer/<build> CFNetwork/<v> Darwin/<v>` for the price history), so
+ * crawlers, `curl` (the release workflow's and `bin/ship.sh`'s checks) and
+ * browsers are not; nor is anything sent with Do Not Track or GPC.
+ *
+ * Every value is our own enumerable shape, checked here: the request's
+ * headers themselves, its IP address and anything else are never sent.
+ * `distinct_id` is the Mac's install id from `X-Pacer-Id`, which Pacer sends
+ * only while its Usage data toggle is on, so the count joins that Mac's own
+ * analytics; otherwise a new random id per request. No person profile either
+ * way (`sendEvent`).
+ */
+export function feedEvent(request: Request, file: FeedFile, status: number, now: Date): FeedEvent | null {
+  const client = pacerClient(request.headers.get('User-Agent'));
+  if (!client || optedOut(request)) return null;
+  const id = pacerId(request.headers.get('X-Pacer-Id'));
+  const properties: Record<string, unknown> = {
+    surface: 'feed',
+    environment: environmentOf(new URL(request.url).hostname),
+    file,
+    status,
+    app_version: shortVersion(request.headers.get('X-Pacer-Version')) ?? client.version,
+    app_build: client.build,
+    sparkle_version: client.sparkle,
+    macos_major: macosMajor(client.darwin),
+    darwin_major: client.darwin,
+    country: countryOf(request),
+    window_6h: window6h(now),
+    pacer_id_present: id !== null,
+  };
+  const check = allowListed(request.headers.get('X-Pacer-Check'), CHECK_KINDS);
+  if (check) properties.check_kind = check;
+  const since = allowListed(request.headers.get('X-Pacer-Since-Last-Check'), SINCE_LAST_CHECK);
+  if (since) properties.since_last_check = since;
+  return { distinctId: id ?? crypto.randomUUID(), properties };
+}
+
+/** X-Pacer-Check (Pacer 0.9.5+): the user's Check for Updates, or Sparkle's own schedule (price fetches: scheduled). */
+const CHECK_KINDS = ['manual', 'scheduled'] as const;
+/** X-Pacer-Since-Last-Check (Pacer 0.9.5+): how long since this Mac last checked, as a band. */
+const SINCE_LAST_CHECK = ['lt1h', '1-6h', '6-12h', '12-24h', '1-7d', 'gt7d', 'never'] as const;
+
+/** A header from a fixed list: the value itself, `unknown` for anything else, null when absent. */
+function allowListed(value: string | null, allowed: readonly string[]): string | null {
+  if (value === null) return null;
+  return allowed.includes(value) ? value : 'unknown';
+}
+
+/** What the User-Agent says about a Pacer client, every field checked; null for anything that is not Pacer. */
+export interface PacerClient {
+  /** The marketing version (Sparkle's UA carries CFBundleShortVersionString). */
+  version: string | null;
+  /** The build number (CFNetwork's UA carries CFBundleVersion). */
+  build: string | null;
+  sparkle: string | null;
+  darwin: number | null;
+}
+
+export function pacerClient(userAgent: string | null): PacerClient | null {
+  // Case-sensitive: the app's bundle name. Pacer's OAuth client sends `pacer/1.0`, and never to this site.
+  if (!userAgent?.startsWith('Pacer/')) return null;
+  const ua = userAgent.slice(0, 512);
+  const product = /^Pacer\/(\S{1,40})/.exec(ua)?.[1] ?? '';
+  const sparkle = /(?:^|\s)Sparkle\/(\S{1,40})/.exec(ua)?.[1] ?? '';
+  const darwin = /(?:^|\s)Darwin\/(\d{1,3})(?:[.\s]|$)/.exec(ua)?.[1];
+  return {
+    version: shortVersion(product),
+    build: shortVersion(product) ? null : BUILD.test(product) ? product : null,
+    sparkle: SPARKLE_VERSION.test(sparkle) ? sparkle : null,
+    darwin: darwin === undefined ? null : Number(darwin),
+  };
+}
+
+/** X.Y.Z, with an optional pre-release (any v*.*.* tag releases): what CFBundleShortVersionString holds. */
+const SHORT_VERSION = /^\d{1,4}\.\d{1,4}\.\d{1,4}(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?$/;
+/** CFBundleVersion: digits (a release's is a timestamp; a local build's is 1), maybe dotted. */
+const BUILD = /^\d{1,12}(?:\.\d{1,6}){0,2}$/;
+const SPARKLE_VERSION = /^\d{1,4}(?:\.\d{1,4}){0,3}(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?$/;
+
+export function shortVersion(value: string | null): string | null {
+  return value !== null && value.length <= 20 && SHORT_VERSION.test(value) ? value : null;
+}
+
+/**
+ * The macOS major version a Darwin major version ships with, where known:
+ * Darwin 20–24 are macOS 11–15, macOS 26 kept Darwin 25, and macOS 27 reports
+ * Darwin 27 (`uname -r` on 27.0.1), which this assumes carries on. The raw
+ * `darwin_major` goes with every event, so a wrong guess here can be redone
+ * in a query.
+ */
+export function macosMajor(darwin: number | null): number | null {
+  if (darwin === null) return null;
+  if (darwin >= 20 && darwin <= 24) return darwin - 9;
+  if (darwin === 25) return 26;
+  if (darwin >= 27 && darwin <= 60) return darwin;
+  return null;
+}
+
+/** Pacer's install id: Sentry's INSTALLATION id (an uppercase UUID), or a hex token; anything else is ignored. */
+const PACER_ID = /^(?:[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}|[0-9A-Fa-f]{16,64})$/;
+
+export function pacerId(value: string | null): string | null {
+  // Kept exactly as sent: distinct_id is case-sensitive, and the app's events use this same string.
+  return value !== null && PACER_ID.test(value) ? value : null;
+}
+
+/**
+ * The UTC day and which of its four 6-hour windows (0–3), e.g. `2026-11-25/2`
+ * for 12:00–17:59. Sparkle checks every 6 hours, so appcast requests counted
+ * per window approximate the Macs running then, without any id.
+ */
+export function window6h(now: Date): string {
+  return `${now.toISOString().slice(0, 10)}/${Math.floor(now.getUTCHours() / 6)}`;
 }
