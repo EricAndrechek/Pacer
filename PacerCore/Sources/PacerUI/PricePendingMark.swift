@@ -13,16 +13,33 @@ public enum PacerPricePending {
 
     /// The tooltip for a cost that includes `models` (raw ids), or nil when
     /// it includes none, which is also when no mark is drawn.
+    ///
+    /// Only a versioned Claude model is promised a price
+    /// (`UnpricedModelReport.reports`, what Sentry hears of and what the
+    /// hourly checks wait for). Another backend's model, or an alias, gets
+    /// no price unless a catalog happens to list it, so it is only named.
     public static func help(_ models: [String]) -> String? {
         guard !models.isEmpty else { return nil }
-        // Named by the canonical model a price is added under, so two
-        // spellings of one model (a `[1m]` variant, a Bedrock id) name it once.
-        var names: [String] = []
+        var promised: [String] = []
+        var others: [String] = []
         for model in models {
-            let name = pacerModelDisplayName(CanonicalModelID.parse(model).model)
-            if !names.contains(name) { names.append(name) }
+            if let report = UnpricedModelReport.reports(for: [model]).first {
+                // Named by the canonical model a price is added under, so two
+                // spellings of one model (a `[1m]` variant, a Bedrock id) name
+                // it once.
+                let name = pacerModelDisplayName(report.model)
+                if !promised.contains(name) { promised.append(name) }
+            } else {
+                let name = pacerModelDisplayName(model)
+                if !others.contains(name) { others.append(name) }
+            }
         }
-        return "No price yet for \(names.joined(separator: ", ")); costs update once one is published"
+        var lines: [String] = []
+        if !promised.isEmpty {
+            lines.append("No price yet for \(promised.joined(separator: ", ")); costs update once one is published")
+        }
+        if !others.isEmpty { lines.append("No price for \(others.joined(separator: ", "))") }
+        return lines.joined(separator: ". ")
     }
 }
 
