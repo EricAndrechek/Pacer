@@ -42,6 +42,13 @@ enum ScreenshotMode {
         LaunchMode.isActive(.screenshot)
     }
 
+    /// The version the README's sidebar footer and status menu show, pinned
+    /// like its clock (`ScreenshotClock`): the run is a Debug build, which
+    /// would read "dev", and a version that followed each release would put a
+    /// screenshot commit on the first PR after it whatever that PR changed.
+    /// Bump it by hand when the README should show a newer number.
+    static let pinnedVersion = AppVersionLabel(kind: .release("0.9.4"))
+
     /// `LayoutShiftProbe` records each named view's frame (window points,
     /// top-left) here, in a screenshot run only, for crops of the real window.
     static let recordsViewFrames = isActive

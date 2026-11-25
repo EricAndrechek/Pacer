@@ -89,6 +89,10 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// the host would deallocate and SwiftData would re-fetch every
     /// time the user clicked the status item.
     private var statusMenuContentController: NSViewController?
+    /// The status menu's version line and its "Update to … — Restart" item,
+    /// retitled and shown or hidden each time the menu opens (`menuWillOpen`).
+    private var statusMenuVersionItem: NSMenuItem?
+    private var statusMenuUpdateItem: NSMenuItem?
     private var menuBarHostingView: SizingHostingView?
     private var menuBarPrefObserver: NSObjectProtocol?
     // Tracked at class scope so the observer block doesn't capture a
@@ -1261,6 +1265,8 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menuBarHostingView = nil
         statusMenu = nil
         statusMenuContentController = nil
+        statusMenuVersionItem = nil
+        statusMenuUpdateItem = nil
     }
 
     /// Build the dropdown menu attached to the status item via
@@ -1346,17 +1352,33 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         settingsItem.target = self
         menu.addItem(settingsItem)
 
-        // Where people are when something goes wrong: the menu bar, not the
-        // Help menu of a window that may not be open (PACER-A).
-        let reportItem = NSMenuItem(
-            title: "Report a Problem…",
-            action: #selector(menuReportProblem),
+        // Where people are when something goes wrong, or have an idea: the
+        // menu bar, not the Help menu of a window that may not be open
+        // (PACER-A).
+        let feedbackItem = NSMenuItem(
+            title: FeedbackCopy.menuItem,
+            action: #selector(menuSendFeedback),
             keyEquivalent: ""
         )
-        reportItem.target = self
-        menu.addItem(reportItem)
+        feedbackItem.target = self
+        menu.addItem(feedbackItem)
 
         menu.addItem(NSMenuItem.separator())
+
+        // Which Pacer this is, in plain sight: a disabled line, the way menu
+        // items that state a fact are drawn. Titles are set in `menuWillOpen`.
+        let versionItem = NSMenuItem(title: UpdateStatus.shared.version.title, action: nil, keyEquivalent: "")
+        versionItem.isEnabled = false
+        menu.addItem(versionItem)
+        statusMenuVersionItem = versionItem
+
+        // Only while a downloaded update waits to be installed.
+        let updateItem = NSMenuItem(title: "", action: #selector(menuInstallUpdate), keyEquivalent: "")
+        updateItem.target = self
+        updateItem.isHidden = true
+        menu.addItem(updateItem)
+        statusMenuUpdateItem = updateItem
+        refreshStatusMenuUpdateItems()
 
         let quitItem = NSMenuItem(
             title: "Quit Pacer",
@@ -1394,6 +1416,9 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         StatusMenuOpening.shared.willOpen()
         TelemetryCounters.add("ui.menu.open")
         Analytics.capture(.menubarOpened())
+        // The menu is built once; the update can arrive at any time. Read at
+        // the open, which is when anyone can see these items.
+        refreshStatusMenuUpdateItems()
         guard let view = statusMenuContentController?.view else { return }
         view.layoutSubtreeIfNeeded()
         let fitting = view.fittingSize
@@ -1518,10 +1543,32 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         ensureMainWindowVisible()
     }
 
-    @objc private func menuReportProblem() {
+    @objc private func menuSendFeedback() {
         TelemetryCounters.add("ui.menu.item.report_problem")
         Analytics.capture(.menubarItemClicked(.reportProblem))
-        ReportProblemWindow.shared.show(from: .statusMenu)
+        FeedbackWindow.shared.show(from: .statusMenu)
+    }
+
+    /// The version line and the update item, from `UpdateStatus`.
+    private func refreshStatusMenuUpdateItems() {
+        let status = UpdateStatus.shared
+        statusMenuVersionItem?.title = status.version.title
+        guard let updateItem = statusMenuUpdateItem else { return }
+        if let title = UpdateCopy.menuInstallTitle(for: status.state) {
+            updateItem.title = title
+            updateItem.isHidden = false
+        } else {
+            updateItem.isHidden = true
+        }
+    }
+
+    /// "Update to 0.9.5 — Restart": install the held update and relaunch into
+    /// it. An NSMenu action, so the relaunch's terminate runs from event
+    /// handling (AGENTS.md, real-run bug 6).
+    @objc private func menuInstallUpdate() {
+        TelemetryCounters.add("ui.menu.item.install_update")
+        Analytics.capture(.menubarItemClicked(.installUpdate))
+        UpdateStatus.shared.installNow()
     }
 
     @objc private func menuOpenSettings() {

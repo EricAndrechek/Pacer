@@ -138,7 +138,7 @@ public final class TelemetryBudget: @unchecked Sendable {  // UserDefaults is th
     /// transactions a day on 2026-11-04 and 11-05, and ~360 spans a day were
     /// discarded as `before_send`. Transactions are budgeted where they are
     /// sampled (`tracesSampler`, `takeTransaction`). Feedback is budgeted
-    /// where it is sent (the Report a Problem sheet, the CLI).
+    /// where it is sent (the Send Feedback window, the CLI).
     public static func kind(eventType: String?, mechanism: String?, fatal: Bool, handled: Bool?) -> Kind? {
         if eventType == "transaction" || eventType == "feedback" { return nil }
         if mechanism == "AppHang" { return .hang }

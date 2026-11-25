@@ -187,8 +187,21 @@ targets:
         # send events. Empty either one and the app never sends usage data.
         PacerPostHogToken: $(PACER_POSTHOG_TOKEN)
         PacerPostHogHost: $(PACER_POSTHOG_HOST)
+        # Which commit a local build was made from, which the sidebar footer,
+        # the status menu and About show as "0.9.4+14 · dev (9eb8c89)"
+        # (AppVersionLabel): a local build's MARKETING_VERSION is the
+        # placeholder below, so it cannot say which build it is.
+        # `bin/build-git-info.sh` fills these for `bin/dev-install.sh`,
+        # `make verify` and `make app`; a release build leaves them empty and
+        # shows its version.
+        PacerGitDescribe: $(PACER_GIT_DESCRIBE)
+        PacerGitSHA: $(PACER_GIT_SHA)
+        PacerGitDirty: $(PACER_GIT_DIRTY)
     settings:
       base:
+        PACER_GIT_DESCRIBE: ""
+        PACER_GIT_SHA: ""
+        PACER_GIT_DIRTY: ""
         PACER_SENTRY_DSN: https://4538a70956bdb802f903aa6ceba5ba32@o4506596663427072.ingest.us.sentry.io/4512290674049024
         PACER_POSTHOG_TOKEN: phc_rCT9m6F6y7DwcDSJ5BgHpZECFyvpmsPoyUiLx5pa693A
         PACER_POSTHOG_HOST: https://us.i.posthog.com

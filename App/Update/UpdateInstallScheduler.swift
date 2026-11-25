@@ -39,7 +39,8 @@ final class UpdateInstallScheduler {
     static let shared = UpdateInstallScheduler()
 
     /// The version waiting to be installed. "Check for Updates…" turns into
-    /// "Relaunch to Update" while there is one, since no check can run.
+    /// "Update to … — Restart" while there is one, since no check can run, and
+    /// the sidebar footer and the status menu offer it too (`UpdateStatus`).
     private(set) var readyVersion: String?
 
     @ObservationIgnored private var install: (() -> Void)?
@@ -126,7 +127,8 @@ final class UpdateInstallScheduler {
         CrashRelauncher.standDown()
     }
 
-    /// "Relaunch to Update": someone asked, so no policy applies.
+    /// "Update to … — Restart" (`UpdateStatus.installNow`): someone asked, so
+    /// no policy applies.
     func installNow() {
         guard install != nil else { return }
         fire(reason: "chosen", byPolicy: false)
@@ -138,7 +140,7 @@ final class UpdateInstallScheduler {
         guard install != nil, let readyAt else { return }
         // The documented contract keeps the session open while the driver
         // holds the block; if it ever closes without telling the delegate,
-        // the block is dead and "Relaunch to Update" would do nothing.
+        // the block is dead and "Update to … — Restart" would do nothing.
         guard updater?.sessionInProgress == true else { release(); return }
         let now = Date()
         if let firedAt, now.timeIntervalSince(firedAt) < Self.retryAfter { return }
