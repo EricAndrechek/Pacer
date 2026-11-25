@@ -127,6 +127,23 @@ public struct AppVersionLabel: Sendable, Equatable {
     /// The sidebar footer's and the status menu's line: "Pacer 0.9.4".
     public var title: String { "Pacer \(text)" }
 
+    /// The same label from longest to shortest, for a line that shows the
+    /// most that fits rather than cutting one off mid-commit: "Pacer 0.9.4+14
+    /// · dev (9eb8c89)", "0.9.4+14 · dev (9eb8c89)", "0.9.4+14 · dev", "dev".
+    /// A release has two: "Pacer 0.9.4", "0.9.4".
+    public var fittedTitles: [String] {
+        var forms = [title, text]
+        if case .dev(let dev) = kind {
+            if let base = dev.base {
+                let version = (dev.ahead ?? 0) > 0 ? "\(base)+\(dev.ahead ?? 0)" : base
+                forms.append("\(version) · dev")
+            }
+            forms.append("dev")
+        }
+        var seen = Set<String>()
+        return forms.filter { seen.insert($0).inserted }
+    }
+
     /// The About window's line: "Version 0.9.4".
     public var aboutLine: String { "Version \(text)" }
 
@@ -274,8 +291,12 @@ public enum UpdateState: Sendable, Equatable {
 public enum UpdateCopy {
     public static let checkForUpdates = "Check for Updates…"
 
-    /// The sidebar footer's button.
-    public static func sidebarInstall(_ version: String) -> String { "Update to \(version) · Restart" }
+    /// The sidebar footer's update row, while one is ready: what the click
+    /// does, and under it what is waiting.
+    public static let sidebarInstall = "Restart to Update"
+    public static func sidebarReady(_ version: String) -> String { "Pacer \(version) is ready" }
+    /// The same row once the install has started.
+    public static let sidebarInstalling = "Restarting…"
 
     /// The status menu's and the app menu's item.
     public static func menuInstall(_ version: String) -> String { "Update to \(version) — Restart" }

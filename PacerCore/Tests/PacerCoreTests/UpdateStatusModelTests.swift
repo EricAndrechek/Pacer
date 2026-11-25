@@ -42,6 +42,16 @@ struct AppVersionLabelTests {
         #expect(label.reportDescribe == "v0.9.4-14-g9eb8c89")
     }
 
+    @Test("the forms a narrow line falls back through, never cut mid-commit")
+    func fittedTitles() {
+        #expect(dev(describe: "v0.9.4-14-g9eb8c89", sha: "9eb8c89d", dirty: "0").fittedTitles
+                == ["Pacer 0.9.4+14 · dev (9eb8c89)", "0.9.4+14 · dev (9eb8c89)", "0.9.4+14 · dev", "dev"])
+        #expect(dev(describe: "v0.9.4-0-gc4bc89de", dirty: "0").fittedTitles
+                == ["Pacer 0.9.4 · dev (c4bc89d)", "0.9.4 · dev (c4bc89d)", "0.9.4 · dev", "dev"])
+        #expect(dev().fittedTitles == ["Pacer dev", "dev"])
+        #expect(AppVersionLabel(kind: .release("0.9.4")).fittedTitles == ["Pacer 0.9.4", "0.9.4"])
+    }
+
     @Test("uncommitted changes put a * after the commit")
     func dirty() {
         let label = dev(describe: "v0.9.4-14-g9eb8c89", sha: "9eb8c89d", dirty: "1")
@@ -200,7 +210,8 @@ struct UpdateFeedbackCopyTests {
 
     @Test("the update strings, per surface")
     func updateStrings() {
-        #expect(UpdateCopy.sidebarInstall("0.9.5") == "Update to 0.9.5 · Restart")
+        #expect(UpdateCopy.sidebarInstall == "Restart to Update")
+        #expect(UpdateCopy.sidebarReady("0.9.5") == "Pacer 0.9.5 is ready")
         #expect(UpdateCopy.menuInstall("0.9.5") == "Update to 0.9.5 — Restart")
         #expect(UpdateCopy.downloading("0.9.5") == "Downloading 0.9.5…")
         #expect(UpdateCopy.checkForUpdates == "Check for Updates…")
@@ -217,7 +228,7 @@ struct UpdateFeedbackCopyTests {
     @Test("the feedback entry points and window")
     func feedbackStrings() {
         #expect(FeedbackCopy.menuItem == "Send Feedback…")
-        #expect(FeedbackCopy.button == "Send Feedback")
+        #expect(FeedbackCopy.button == "Feedback")
         #expect(FeedbackCopy.windowTitle == "Send Feedback")
     }
 
@@ -225,8 +236,8 @@ struct UpdateFeedbackCopyTests {
     func kinds() {
         #expect(FeedbackKind.allCases == [.idea, .problem, .other])
         #expect(FeedbackKind.allCases.map(\.title) == ["Idea", "Problem", "Something else"])
-        #expect(FeedbackKind.idea.prompt == "What would make Pacer better?")
-        #expect(FeedbackKind.problem.prompt == "What went wrong?")
+        #expect(FeedbackKind.idea.prompt == "What would make Pacer better? A line is plenty.")
+        #expect(FeedbackKind.problem.prompt == "What went wrong, and what did you expect?")
         #expect(FeedbackKind.other.prompt == "What's on your mind?")
         #expect(FeedbackKind.idea.report("Dark mode please") == "[Idea] Dark mode please")
         #expect(FeedbackKind.other.report("Hi") == "[Something else] Hi")

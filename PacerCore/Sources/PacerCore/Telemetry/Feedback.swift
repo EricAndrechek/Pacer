@@ -18,11 +18,11 @@ public enum FeedbackKind: String, Sendable, CaseIterable, Identifiable {
         }
     }
 
-    /// The question above the text box.
+    /// What the empty text box asks.
     public var prompt: String {
         switch self {
-        case .idea: return "What would make Pacer better?"
-        case .problem: return "What went wrong?"
+        case .idea: return "What would make Pacer better? A line is plenty."
+        case .problem: return "What went wrong, and what did you expect?"
         case .other: return "What's on your mind?"
         }
     }
@@ -36,14 +36,26 @@ public enum FeedbackKind: String, Sendable, CaseIterable, Identifiable {
 public enum FeedbackCopy {
     /// The status menu, the Help menu and Settings → Privacy.
     public static let menuItem = "Send Feedback…"
-    /// The sidebar footer's button.
-    public static let button = "Send Feedback"
+    /// The sidebar's row: a noun, like the rows around it, and no wider than
+    /// they are, so the sidebar's minimum width does not grow for it.
+    public static let button = "Feedback"
     public static let windowTitle = "Send Feedback"
+
+    /// The window's heading, and under it what to send and who reads it.
+    public static let heading = "Help shape Pacer"
+    public static let subheading = "Ideas, problems, anything. The developer reads every one."
+    public static let emailPrompt = "Email, if you'd like a reply"
+    public static let attachFile = "Attach File…"
+    /// Adds a picture of the dashboard, and names it once added.
+    public static let attachWindow = "Include Pacer's Window"
+    public static let windowAttachment = "Pacer's window"
+    public static let attachWindowHelp = "A picture of the dashboard as it is now, costs and project names included."
+    public static let attachWindowClosedHelp = "Open the dashboard to include a picture of it."
+    public static let sentTitle = "Thank you"
+    public static let sentDetail = "Sent to the developer."
 
     public static let tooLarge = "Over 8 MB in all. Remove a file, or open a GitHub issue."
     public static let badEmail = "That email doesn't look right."
-    /// Under Send: who reads it.
-    public static let recipient = "Goes to the Pacer developer."
     public static let tooLong = "Up to 10,000 characters."
     public static let capped = "Today's limit is reached."
     public static let filesLimit = "Up to 3 files, not empty: PNG, JPEG, text, JSON or QuickTime."
