@@ -236,11 +236,12 @@ These are subtle, easy to miss, and break user-visible numbers:
   `site/public/price-history.json` on `main`, served by the site at
   `https://pacer.andrechek.com/` (Pacer 0.9.4 and later read them:
   `SUFeedURL`, `CuratedPriceHistory.remoteURL`, pinned by
-  `FeedLocationTests`). The appcast is a plain static file: its requests
-  never run Worker code, and it stays out of `run_worker_first` (a test
-  fails if it is added). The price
-  history's requests run the site's Worker, which counts them and returns the
-  file as the assets layer answers it (`site/README.md`, "The Worker").
+  `FeedLocationTests`). Both files' requests run the site's Worker, which
+  counts them and returns the file as the assets layer answers it, untouched
+  (`site/README.md`, "The Worker"). That puts update checks under the Workers
+  Free plan's account-wide daily request limit: past it, they get 429 until
+  00:00 UTC; 0.9.5 and later then read `main` on raw.githubusercontent.com,
+  0.9.4 has no fallback (accepted by the owner, 2026-11-25).
   Releases write them (`bin/publish-feeds.sh`);
   `gh-pages` is only a byte-for-byte mirror for 0.9.3 and earlier. A Pacer
   pointed at a feed that stops getting releases is stranded for good, so a

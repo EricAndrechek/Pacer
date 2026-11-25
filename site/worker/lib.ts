@@ -336,12 +336,10 @@ export async function sendEvent(env: Env, event: string, distinctId: string, pro
 // Every Pacer from 0.9.4 on finds its updates in /appcast.xml (Sparkle's
 // SUFeedURL) and its dated prices in /price-history.json, and only an update
 // could move them. They are static assets (public/). wrangler.jsonc's
-// run_worker_first routes only /price-history.json through this Worker, for
-// one reason: to count the requests (one a day per running Mac), which is how
-// many Macs run Pacer and on which versions, telemetry toggles or not. The
-// appcast is not routed, so the update feed never runs this code; the
-// counting below would handle it too, should that ever change. The answer is
-// the static asset, untouched: the
+// run_worker_first routes both through this Worker for one reason: to count
+// the requests (update checks at launch and every 6 hours, prices about once a
+// day), which is how many Macs run Pacer and on which versions, telemetry
+// toggles or not. The answer is the static asset, untouched: the
 // very Response the assets binding returns, so its bytes, status, headers,
 // ETag and 304s are the assets layer's own. The count happens afterwards in
 // ctx.waitUntil, and nothing in it can throw into the answer or delay it.
