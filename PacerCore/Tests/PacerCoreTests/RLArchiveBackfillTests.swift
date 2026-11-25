@@ -21,7 +21,9 @@ struct RLArchiveBackfillTests {
         let ctx = ModelContext(container)
         ctx.insert(Account(id: Self.account, organizationId: Self.account, displayName: "A", isActive: true,
                            firstSeenAt: Self.now.addingTimeInterval(-90 * 86400), lastSeenAt: Self.now))
-        // Six weekly cycles 40–80 days back, only in the archive; one recent cycle live.
+        // Six weekly cycles 40–80 days back, only in the archive; one recent
+        // cycle live. Read every 30 minutes, so no cut sits in a gap (#424).
+        let step: TimeInterval = 1800, rise = 3.0 / 12
         for c in 0..<6 {
             let start = Self.now.addingTimeInterval(-80 * 86400 + Double(c) * Self.week)
             let reset = start.addingTimeInterval(Self.week)
@@ -30,7 +32,7 @@ struct RLArchiveBackfillTests {
                 ctx.insert(AccountUsageArchive(accountId: Self.account, kind: AccountUsageArchive.kindRateLimit,
                                                sampledAt: t, window: "seven_day", usedPercentage: min(90, pct),
                                                resetsAt: reset, source: "oauth"))
-                t = t.addingTimeInterval(6 * 3600); pct += 3
+                t = t.addingTimeInterval(step); pct += rise
             }
         }
         let liveStart = Self.now.addingTimeInterval(-2 * 86400)
@@ -39,7 +41,7 @@ struct RLArchiveBackfillTests {
         while t <= Self.now {
             ctx.insert(RateLimitSample(sampledAt: t, window: "seven_day", usedPercentage: pct,
                                        resetsAt: liveReset, source: "oauth", accountId: Self.account))
-            t = t.addingTimeInterval(6 * 3600); pct += 3
+            t = t.addingTimeInterval(step); pct += rise
         }
         try ctx.save()
         return container
@@ -118,7 +120,7 @@ struct RLArchiveBackfillTests {
         var cycles: [BurnTrajectory.Cycle] = []
         for c in 0..<7 {
             let s = start.addingTimeInterval(Double(c) * Self.week), r = s.addingTimeInterval(Self.week)
-            let samples = stride(from: 0.0, through: Self.week, by: 6 * 3600).map {
+            let samples = stride(from: 0.0, through: Self.week, by: 1800).map {
                 BurnTrajectory.Sample(at: s.addingTimeInterval($0), usedPercentage: min(95, $0 / 3600 * (0.4 + 0.05 * Double(c))))
             }
             cycles.append(.init(samples: samples, cycleStart: s, resetsAt: r))

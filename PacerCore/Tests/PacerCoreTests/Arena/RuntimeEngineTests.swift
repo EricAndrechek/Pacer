@@ -488,7 +488,9 @@ struct RuntimeEngineTests {
         for c in 0...5 {
             let start = liveStart.addingTimeInterval(-Double(5 - c) * week)
             let reset = start.addingTimeInterval(week)
-            var t = start.addingTimeInterval(3600)
+            // Read every half hour from 10 minutes in, so no cut sits in a
+            // gap and the window's start counts (#424, #425).
+            var t = start.addingTimeInterval(600)
             while t < reset && t <= Self.now {
                 let d = t.timeIntervalSince(start) / 86400
                 let pct = d < 6 ? d * 4 : 24 + (d - 6) * Double(40 + c * 5)
@@ -496,7 +498,7 @@ struct RuntimeEngineTests {
                                             label: "Fable", percent: pct.rounded(), resetsAt: reset, severity: "ok",
                                             isActive: false, modelId: "claude-fable", modelDisplayName: "Fable",
                                             source: "oauth", accountId: Self.account))
-                t = t.addingTimeInterval(4 * 3600)
+                t = t.addingTimeInterval(1800)
             }
         }
         try ctx.save()

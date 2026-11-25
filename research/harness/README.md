@@ -15,6 +15,7 @@ uv run sweep.py                   # grid-sweep the EngineParams knobs
 uv run sweep.py --full --json     # bigger grid, machine-readable
 uv run sweep.py --selection        # rate-limit selection knobs (#305), harness-only until adopted
 uv run selection_strategies.py    # rules vs a rule-picker vs combining models (~25 s)
+uv run gap_rules.py               # the reading-gap grading rule (#424), on and off, same cases
 uv run weekly_check.py            # the standing check (drift/sweep)
 uv run weekly_check.py --install-agent   # LaunchAgent: Mondays 09:23
 ```
@@ -57,6 +58,16 @@ sweep prints is the tag the app will record into its prediction snapshots
 (`PredictionSnapshot.paramsVersion`, exported at `/v1/predictions/history`).
 `EngineParamsTests.versionTagMatchesPythonHarness` pins the cross-language
 parity — if either side drifts, CI fails.
+
+## Reading gaps
+
+A gap is two consecutive polls more than 30 minutes apart (`ReadingCoverage.maxGap`).
+`GapRules` holds the grading rule the app applies, as its default: no grade at a cut
+whose last reading is more than 30 minutes before it (#424). `censor` (no truth on a
+cycle whose readings stopped before its reset) is what #424 first asked for; it measured
+worse and is off. `EVAL_CLEAN` scores only the cases the readings show, whatever the
+rules, so a comparison with a rule off scores the same cases. `gap_rules.py` prints the
+comparison.
 
 ## What it does / doesn't replay
 

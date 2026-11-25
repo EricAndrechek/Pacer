@@ -1,5 +1,11 @@
 {
-  "_comment": "Reference scores for weekly_check.py drift alarms — update when a deliberate change moves them (2026-10-20, params v1-c13c3f81: per-account replay of the displayed value over FULL history — the live 35-day cache plus AccountUsageArchive, #300/#303 — one selection floor for every model, and selection by half of the window with a 5% relative tie, #305). Each window is judged by its headline error (headline_key): the median on 5h, the mean on 7d, whose median is ~1 pp for every model. The 5h median is above the 3.04 of the cache-only replay because the archive adds the older, harder cycles (3921 cases vs 1410).",
-  "five_hour": {"medianAbsErrorPP": 3.59, "coverage80": 0.778},
-  "seven_day": {"meanAbsErrorPP": 8.18, "coverage80": 0.844}
+  "_comment": "Reference scores for weekly_check.py drift alarms — update when a deliberate change moves them (2026-11-24, params v1-5e0f894b: no grade at a cut inside a reading gap, #424, and every replay scored only where the readings show the meter (EVAL_CLEAN): cycles whose end was seen, cuts outside a gap. Earlier values: 2026-10-20, v1-c13c3f81, 5h median 3.59 / 7d mean 8.18 over the history of then; the same store with the old rule and the clean cases gives 3.29 / 12.12, the store having grown harder weekly cycles since). Each window is judged by its headline error (headline_key): the median on 5h, the mean on 7d, whose median is ~1 pp for every model.",
+  "five_hour": {
+    "medianAbsErrorPP": 3.21,
+    "coverage80": 0.789
+  },
+  "seven_day": {
+    "meanAbsErrorPP": 12.24,
+    "coverage80": 0.812
+  }
 }
