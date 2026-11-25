@@ -124,6 +124,26 @@ and the release that writes it also checks it is being served.
 | Read by | Pacer 0.9.4 and later (`SUFeedURL`, `CuratedPriceHistory.remoteURL`) | Pacer 0.9.3 and earlier |
 | Written by | the release workflow, and reviewed hand edits | a copy of the site copy, never edited on its own |
 
+### The fallback source
+
+If the site cannot be read, Pacer 0.9.5 and later read
+`https://raw.githubusercontent.com/EricAndrechek/Pacer/main/site/public/appcast.xml`
+and `.../price-history.json`: the files the site deploys from, so byte-identical
+once deployed, and nothing extra to publish. Not the `gh-pages` mirror, which is
+frozen. The appcast moves to it for one check after a failed one (EdDSA signatures,
+not hosts, are trusted); `X-Pacer-*` headers never go there; each failure is a
+Sentry problem at most once a day (`docs/telemetry-plan.md`, "Feed fallbacks").
+Never rename or move those paths on `main` without a migration plan.
+
+Two more things keep Macs current (`UpdateRetryPolicy`, `App/Update/PacerUpdater.swift`):
+a failed update download (`updater(_:failedToDownloadUpdate:error:)`) schedules a
+background re-check after 30 minutes, then 2 hours, then leaves it to the 6-hour
+interval (reset when an update gets to install), and reports "update download
+failed" (`feed=update_archive`, same once-a-day limit); and a launch whose
+`CFBundleVersion` differs from the previous launch's (Pacer just updated) runs
+`checkForUpdatesInBackground()` once, two minutes later, so a Mac that installed an
+older held update finds the newest quickly.
+
 ### How a release publishes it
 
 The `Publish the update feed` step runs `bin/publish-feeds.sh release`
