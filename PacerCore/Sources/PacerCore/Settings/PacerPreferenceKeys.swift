@@ -135,6 +135,10 @@ public enum PacerPreferenceKeys {
     /// missing value means on. Until 2026-11 this key also covered Sentry's
     /// performance data; see `TelemetryConsent` for the migration.
     public static let telemetryUsageData = "pacer.telemetry.usageData"
+    /// When Pacer last asked the site for the curated price history, as a
+    /// `Date`; it becomes the `X-Pacer-Since-Last-Check` bucket of the next
+    /// request (`FeedRequestHeaders`).
+    public static let priceHistoryLastFetch = "pacer.priceHistory.lastFetch"
     /// Set once the two-toggle migration has run (`TelemetryConsent.migrate`).
     public static let telemetryMigrated = "pacer.telemetry.migratedTwoToggles"
     /// Set by the migration when the old usage toggle was off: Sentry then

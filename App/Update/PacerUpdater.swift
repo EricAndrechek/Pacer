@@ -90,6 +90,22 @@ final class PacerUpdater: ObservableObject {
 /// Sparkle calls every method here on the main thread (`SPUUpdater` is
 /// main-thread only), which is what the `assumeIsolated` calls rely on.
 private class PacerUpdaterDelegate: NSObject, SPUUpdaterDelegate {
+    /// Sparkle calls this right before every check and reads `httpHeaders`
+    /// only afterwards (SPUUpdater.m: `mayPerformUpdateCheck` precedes
+    /// `checkForUpdatesAtAppcastURL:...httpHeaders:`), and `lastUpdateCheckDate`
+    /// is still the previous check's (it is stamped on completion). Setting the
+    /// headers here, from scratch each time, is what makes a toggle change land
+    /// on the very next request. Never throws: it only decorates the request.
+    func updater(_ updater: SPUUpdater, mayPerform updateCheck: SPUUpdateCheck) throws {
+        // `.updates` is the user's "Check for Updates…"; the launch and
+        // scheduled checks (`.updatesInBackground`) and the info-only probe
+        // are `scheduled`.
+        updater.httpHeaders = FeedRequestHeaders.headers(
+            check: updateCheck == .updates ? .manual : .scheduled,
+            since: updater.lastUpdateCheckDate,
+            id: FeedRequestIdentity.idHeader())
+    }
+
     func updater(_ updater: SPUUpdater, didFindValidUpdate item: SUAppcastItem) {
         UpdateOutcomeLog.record(.found, version: item.displayVersionString)
     }
@@ -220,7 +236,8 @@ private final class PacerUserDriverDelegate: NSObject, SPUStandardUserDriverDele
 ///
 /// Compiled out of Release builds entirely.
 private final class DevBuildUpdaterDelegate: PacerUpdaterDelegate {
-    func updater(_ updater: SPUUpdater, mayPerform updateCheck: SPUUpdateCheck) throws {
+    override func updater(_ updater: SPUUpdater, mayPerform updateCheck: SPUUpdateCheck) throws {
+        try super.updater(updater, mayPerform: updateCheck)
         // `.updatesInBackground` is the launch/scheduled check;
         // `.updates` is the user clicking "Check for Updates…".
         if updateCheck == .updatesInBackground {
