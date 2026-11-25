@@ -23,24 +23,30 @@ struct RenderReadinessTests {
         #expect(ended.get())
     }
 
+    /// "b" begins 300 ms after "a" ends: long enough that a waiter polling
+    /// every 10 ms sees the idle gap (so a wait without a quiet window would
+    /// return early), and far inside the 10 s quiet window, so only a sleep
+    /// overrunning by more than 9 s could make "b" miss it. (An earlier version
+    /// used a 2 s window and failed under a full parallel run.) The waiter
+    /// records whether "b" had ended when it returned.
     @Test func aLoadStartedDuringTheQuietWindowIsWaitedFor() async {
         let t = RenderReadinessTracker(isEnabled: true)
-        let secondBegan = Mutex2(false), secondEnded = Mutex2(false)
+        let secondEnded = Mutex2(false)
         let first = t.begin("a")
-        Task.detached {
-            try? await Task.sleep(for: .milliseconds(50))
-            t.end(first)
-            // Inside the quiet window, which is wide (2 s) so an overslept
-            // sleep on a loaded runner still lands in it.
-            try? await Task.sleep(for: .milliseconds(100))
-            let second = t.begin("b")
-            secondBegan.set(true)
-            try? await Task.sleep(for: .milliseconds(100))
-            secondEnded.set(true)
-            t.end(second)
+        let waiter = Task.detached {
+            let outcome = await t.waitUntilIdle(timeout: .seconds(300), quiet: .seconds(10), poll: .milliseconds(10))
+            return (outcome, secondEnded.get())
         }
-        #expect(await t.waitUntilIdle(timeout: .seconds(60), quiet: .seconds(2)) == .idle)
-        #expect(secondBegan.get() && secondEnded.get())
+        try? await Task.sleep(for: .milliseconds(100))   // let the waiter start polling
+        t.end(first)
+        try? await Task.sleep(for: .milliseconds(300))   // the idle gap a poll sees
+        let second = t.begin("b")
+        try? await Task.sleep(for: .milliseconds(500))
+        secondEnded.set(true)
+        t.end(second)
+        let (outcome, sawSecondEnd) = await waiter.value
+        #expect(outcome == .idle)
+        #expect(sawSecondEnd, "the wait returned while the load that began in its quiet window was still pending")
     }
 
     @Test func timeoutNamesThePendingLoads() async {
