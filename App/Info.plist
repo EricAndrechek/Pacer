@@ -42,6 +42,12 @@
 	<true/>
 	<key>NSHumanReadableCopyright</key>
 	<string>Copyright © 2026 Eric Andrechek</string>
+	<key>PacerGitDescribe</key>
+	<string>$(PACER_GIT_DESCRIBE)</string>
+	<key>PacerGitDirty</key>
+	<string>$(PACER_GIT_DIRTY)</string>
+	<key>PacerGitSHA</key>
+	<string>$(PACER_GIT_SHA)</string>
 	<key>PacerPostHogHost</key>
 	<string>$(PACER_POSTHOG_HOST)</string>
 	<key>PacerPostHogToken</key>

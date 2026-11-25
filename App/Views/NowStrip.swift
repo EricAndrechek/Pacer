@@ -56,6 +56,9 @@ struct NowStrip: View {
     /// without needing the scope threaded through an initialiser.
     @State private var todayAggregates: [DailyRow] = []
     @State private var scope = UsageScope.shared
+    /// Models with no price yet: a Today total that includes one carries the
+    /// mark. Read in `body` (`costTile`), so a price arriving redraws it.
+    @State private var pricePending = PricePending.shared
     /// Hour buckets for "recent" activity — the two most-recent hour
     /// buckets approximate a rolling last-hour rate (between exactly 1h
     /// and ~2h of span). Cost is baked into HourlyAggregate at recompute
@@ -268,6 +271,9 @@ struct NowStrip: View {
         var todayCost: Double = 0
         var todayTokens: Int64 = 0
         var extraUsageUSD: Double?
+        /// The models today's rows are for, which the price-pending mark
+        /// checks against `PricePending`.
+        var todayModels: [String] = []
     }
 
     @State private var todayEOD: Estimate?
@@ -281,6 +287,7 @@ struct NowStrip: View {
         next.todayCost = todayAggregates.reduce(0) { $0 + $1.totalCostUSD }
         next.todayTokens = todayAggregates.reduce(0) { $0 + $1.tokens.all }
         next.extraUsageUSD = extraUsageUSD
+        next.todayModels = Set(todayAggregates.map(\.model)).sorted()
         if next != cached { cached = next }
     }
 
@@ -527,13 +534,19 @@ struct NowStrip: View {
     }
 
     private var costTile: some View {
-        StripTile(label: "Today", onTap: onTodayTap, tapHelp: "Open today's breakdown") {
+        // Read here, in NowStrip's body, not inside the tile's stored content
+        // closure: the strip is what must redraw when a price arrives.
+        let pending = pricePending.pending(in: cached.todayModels)
+        return StripTile(label: "Today", onTap: onTodayTap, tapHelp: "Open today's breakdown") {
             VStack(alignment: .leading, spacing: 8) {
-                Text(pacerCost(cached.todayCost)).help(pacerCostExact(cached.todayCost))
-                    .font(.system(size: 32, weight: .semibold, design: .rounded))
-                    .monospacedDigit()
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.7)
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(pacerCost(cached.todayCost)).help(pacerCostExact(cached.todayCost))
+                        .font(.system(size: 32, weight: .semibold, design: .rounded))
+                        .monospacedDigit()
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                    PacerPricePendingMark(models: pending, size: 13)
+                }
                 // Always a chip's height, chip or not. The outlook chip comes
                 // from the engine a beat after the tile first draws, and a chip
                 // is 3 pt taller than the bare token count — so its arrival

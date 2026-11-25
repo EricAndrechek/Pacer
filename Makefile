@@ -73,6 +73,7 @@ verify: vendor  ## Verification build (no signing, no install) — fastest sanit
 		-destination 'platform=macOS' \
 		-derivedDataPath "$(REPO_ROOT)/Build" \
 		CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO \
+		$$(bin/build-git-info.sh "$(REPO_ROOT)") \
 		build | (grep -E '(error:|warning:|FAILED|SUCCEEDED)' || true)
 
 # Convenience alias.
@@ -151,6 +152,7 @@ app: vendor  ## Signed Debug build of Pacer.app (output: Build/Build/Products/De
 		-destination 'platform=macOS' \
 		-derivedDataPath "$(REPO_ROOT)/Build" \
 		-allowProvisioningUpdates \
+		$$(bin/build-git-info.sh "$(REPO_ROOT)") \
 		build | (grep -E '(error:|warning:|FAILED|SUCCEEDED)' || true)
 
 # ------------------------------------------------------------------
@@ -254,5 +256,6 @@ record-relaunch:
 ## Usage: make render-live            (all accounts + each account)
 ##        make render-live SCOPES=all
 ##        make render-live PAGES=menu,pace
+##        make render-live UNPRICED=claude-opus-4-7   (draw that model as price pending)
 render-live:
-	@PACER_RENDER_PAGES="$(PAGES)" bin/dev-render-live.sh "$(or $(SCOPES),auto)" "$(or $(OUT),$(PWD)/screenshots/live)"
+	@PACER_RENDER_PAGES="$(PAGES)" PACER_RENDER_UNPRICED="$(UNPRICED)" bin/dev-render-live.sh "$(or $(SCOPES),auto)" "$(or $(OUT),$(PWD)/screenshots/live)"

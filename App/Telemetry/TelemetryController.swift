@@ -1,6 +1,7 @@
 import Foundation
 import Observation
 import PacerCore
+import Synchronization
 @preconcurrency import Sentry
 
 /// Crash reports and performance data, sent to Pacer's Sentry project.
@@ -191,8 +192,10 @@ final class TelemetryController {
         o.beforeSend = { event in
             guard TelemetryController.crashAllowed else { return nil }
             // Transactions arrive here too and are budgeted in `tracesSampler`;
-            // feedback is budgeted where it is sent (ReportProblemView).
-            if let kind = TelemetryController.budgetKind(event), !TelemetryBudget.shared.take(kind) {
+            // feedback is budgeted where it is sent (FeedbackView); a problem
+            // event the sink already budgeted (`takePrebudgeted`) spends nothing here.
+            if !TelemetryController.takePrebudgeted(event),
+               let kind = TelemetryController.budgetKind(event), !TelemetryBudget.shared.take(kind) {
                 return nil
             }
             TelemetryController.demoteGraderCPUReport(event)
@@ -214,6 +217,22 @@ final class TelemetryController {
                   TelemetryBudget.shared.takeMetric(metric.name) else { return nil }
             return metric
         }
+    }
+
+    /// Events whose budget was spent where they were made (`Telemetry.problem`,
+    /// which reports whether it was taken), by event id, so `beforeSend`
+    /// does not spend it twice.
+    nonisolated private static let prebudgeted = Mutex<Set<String>>([])
+
+    nonisolated static func notePrebudgeted(_ event: Event) {
+        let id = event.eventId.sentryIdString
+        prebudgeted.withLock { _ = $0.insert(id) }
+    }
+
+    /// True once for an event noted above, which is then forgotten.
+    nonisolated static func takePrebudgeted(_ event: Event) -> Bool {
+        let id = event.eventId.sentryIdString
+        return prebudgeted.withLock { $0.remove(id) != nil }
     }
 
     /// Which daily budget an event spends (`TelemetryBudget.kind`); nil for

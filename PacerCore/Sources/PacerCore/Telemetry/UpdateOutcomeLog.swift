@@ -33,7 +33,7 @@ public enum UpdateOutcomeLog {
         case found = "found"
         case downloadFailed = "download_failed"
         /// Installing because someone chose to: Sparkle's own dialog, or the
-        /// "Relaunch to Update" item.
+        /// "Update to … — Restart" items (`UpdateCopy`).
         case willInstall = "will_install"
         /// Downloaded and prepared, waiting for a moment Pacer can relaunch
         /// unnoticed (`UpdateInstallPolicy`). A Mac that stays here for days is

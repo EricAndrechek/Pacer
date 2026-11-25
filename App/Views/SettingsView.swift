@@ -2759,7 +2759,7 @@ private struct TelemetryCard: View {
                 Toggle("Crash reports and performance", isOn: userChange($crashReports))
                 Toggle("Usage data", isOn: userChange($usageData))
                 HStack {
-                    Button("Report a Problem…") { ReportProblemWindow.shared.show(from: .settings) }
+                    Button(FeedbackCopy.menuItem) { FeedbackWindow.shared.show(from: .settings) }
                         .pacerDenseControl()
                     Spacer()
                     Link("What is sent",

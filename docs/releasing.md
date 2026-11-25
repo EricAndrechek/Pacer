@@ -120,7 +120,7 @@ and the release that writes it also checks it is being served.
 | | Site copy (primary) | Legacy mirror |
 | --- | --- | --- |
 | Source | `site/public/appcast.xml`, `site/public/price-history.json` on `main` | `appcast.xml`, `price-history.json` at the root of `gh-pages` |
-| Served at | `https://pacer.andrechek.com/appcast.xml` (static files of the Cloudflare site; no Worker code runs for them) | `https://ericandrechek.github.io/Pacer/appcast.xml` (GitHub Pages) |
+| Served at | `https://pacer.andrechek.com/appcast.xml` (static files of the Cloudflare site; their requests run the Worker, which counts them and returns the file untouched; past the Workers Free plan's daily request limit they answer 429 until 00:00 UTC, when 0.9.5+ reads `main` on raw.githubusercontent.com and 0.9.4 waits; `site/README.md`, "The Worker") | `https://ericandrechek.github.io/Pacer/appcast.xml` (GitHub Pages) |
 | Read by | Pacer 0.9.4 and later (`SUFeedURL`, `CuratedPriceHistory.remoteURL`) | Pacer 0.9.3 and earlier |
 | Written by | the release workflow, and reviewed hand edits | a copy of the site copy, never edited on its own |
 

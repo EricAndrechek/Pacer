@@ -63,7 +63,15 @@ counters (`data.*`, `oauth.*`, `cred.*`, `telemetry.*`, `main_thread.*`,
 - Not sent while a debugger is attached.
 `beforeSend` budgets errors, hangs, crashes and MetricKit (`TelemetryBudget.kind`). Transactions also pass through it, spend nothing there, and are budgeted in `tracesSampler`.
 The check-in also runs when the Sentry release differs from `pacer.telemetry.checkin.lastRelease`, with `checkin.reason` = `day`/`version`. A `version` check-in omits `cli.*`, `widget.timeline_ms`, `widget_inventory` `refreshes.*` and `forecast.*`. Count Macs by unique users.
-`Telemetry.problem`: a fixed message, with string/bool attributes as tags and numbers as extra; crash toggle and `.error` cap. First use is "Store prepare failed": `error.domain`, `error.code`, `error.underlying_*`, `store.before`, extra `elapsed_ms`. Second is the data canary's "Session totals disagree with Claude Code" (see "Data canary" below). Third is "feed unreachable" (see "Feed fallbacks" below).
+`Telemetry.problem`: a fixed message, with string/bool attributes as tags and numbers as extra, and an optional fingerprint of our own enumerable parts that replaces Sentry's grouping (scrubbed in the sink and again in `beforeSend`); crash toggle and `.error` cap. The sink spends the `.error` budget itself and returns whether the event was taken (toggle on, budget left; false with no sink), so `beforeSend` does not spend it twice for those events. First use is "Store prepare failed": `error.domain`, `error.code`, `error.underlying_*`, `store.before`, extra `elapsed_ms`. Second is the data canary's "Session totals disagree with Claude Code" (see "Data canary" below). Third is "feed unreachable" (see "Feed fallbacks" below). Fourth is "Model has no price" (see "Unpriced models" below), the first with a fingerprint.
+
+## Unpriced models (after 0.9.4)
+A model Claude Code uses before any pricing source lists it costs $0 until one does (the silent-$0 class). The scan's ledger reconcile carries the models with usage and no price (`unpriced_models` meta) and, after the cycle's save, hands the state on when it changes (`UnpricedModels`).
+- **The issue:** `Telemetry.problem("Model has no price")`, once per model per Mac, with fingerprint `["unpriced-model", <model>]`, so every Mac's report of one model is one Sentry issue and a new model is a new issue (and the "new problem" email). Tags: `model`, the canonical Claude model id (`CanonicalModelID.model`: `claude-sonnet-5-6` for `claude-sonnet-5-6[1m]`, a date-pinned id or a Bedrock one, so the spellings of one model are one issue), and `source`, the lookup step that ran out: `catalog` (a Claude API id: no catalog, built-in or curated price for it or for the same model on a partner cloud's global endpoint) or `partner_only` (only Bedrock, Vertex, Foundry or regional ids, whose Claude API model has no price either).
+  - Only versioned Claude ids: `claude-`, lowercase words, then a version number (`claude-sonnet-5-6`, `claude-3-5-sonnet`). A model from another backend, or an alias without a version (`claude-sonnet-acme-prod`), can be a private deployment's name and is never a tag or a fingerprint.
+  - Only the user's own app (`LaunchMode.isNormalLaunch`). A model is marked reported (`pacer.telemetry.unpricedModelsReported` in the app's defaults, at most 100) only when the sink took its event; one refused (crash reports off, budget spent) is tried at a later publish or launch. At most 3 reports per launch; the rest go on later launches.
+  - Also counted, as before, in `data.unpriced_model` (Sentry metric) and `format.unknown_model` (`model` attribute, first sighting).
+- **The hourly checks:** while a reportable Claude model has no price and its first day of usage (the daily rollup's earliest day for it) is under 7 days ago, the pricing refresh (catalogs and curated history) runs hourly instead of daily (`PricingRefreshSchedule`, `UnpricedModels.wantsHourlyChecks`). Another backend's model, an alias, or a model unpriced for over a week leaves it daily, so it never re-downloads the catalogs hourly for good. `pricing.refresh_ms` therefore arrives up to 24 times a day for a week after a Claude model launches unpriced; a failed fetch, or a cache it could not write, still waits an hour. Nothing new is sent for it.
 
 ## Crash relaunch (since 0.9.1, #412)
 `PacerRelauncher` brings Pacer back after it exits without quitting (AGENTS.md, "Relaunch after a crash"). Three health counters (not usage: Sentry metrics, and `counter.*` in PostHog's `daily_checkin`), no ids, no paths:
@@ -176,10 +184,11 @@ frame or forecast):
 | `detail_opened` | modal root set or pushed; each sheet/popover appears | `which`: `day`, `project`, `session`, `projection` (prediction details / compare models), `alias_manager`, `alias_editor`, `collections_manager`, `collection_editor`, `bulk_merge`, `chart_share`; `pushed` |
 | `control_changed` | card controls (`AnalyticsSettings` watch list, plus the project budget toggle) | `card`, `control`, `value`: History/Models/Projects `range` (`7d`…`all`), Models `grouping`, heatmap `metric`, table `sort` columns, toolbar `account_scope` (`all` / `one`, never the id), `project_budget` `enabled` |
 | `export_used` | after a successful export | `flavor`: `daily_totals_csv`, `daily_by_model_csv`, `project_totals_csv`, `chart_image_copy`, `chart_image_save`, `chart_image_share` |
-| `report_problem_opened` | Report a Problem window | `from`: `help_menu`, `status_menu`, `settings` |
+| `report_problem_opened` | Send Feedback window opened (named for its old title, "Report a Problem", so the series carries on) | `from`: `help_menu`, `status_menu`, `settings`, `sidebar` |
+| `feedback_sent` | Send Feedback window: accepted by the site's endpoint, or handed to Open GitHub Issue | `kind`: `idea`, `problem`, `other`; `via`: `site`, `github`. Never the text, the email or the files |
 | `setting_changed` | `AnalyticsSettings` watch list | `setting`; `value` only for bools and fixed sets (icon style, alert source, cost mode, time range, chips summary, icon driver as window kind); thresholds, ports, hours send the key alone; tokens, hosts and paths are not watched |
 | `menubar_opened` | `menuWillOpen` | — |
-| `menubar_item_clicked` | status menu items | `item`: `open_pacer`, `settings`, `report_problem`, `quit` |
+| `menubar_item_clicked` | status menu items | `item`: `open_pacer`, `settings`, `report_problem` (Send Feedback…), `install_update` (Update to … — Restart), `quit` |
 | `menubar_context_action` | defined, not fired: the status item has no right-click menu today | `item` |
 | `widget_inventory` | daily check-in, `WidgetCenter.getCurrentConfigurations` | `widgets`: list of {`kind`, `family`, `primary_window` / `secondary_window` (window kind or `default`), `range`, `pinned_project` (bool)}; `count`; `refreshes.<Kind>` (yesterday's granted timelines, `WidgetRefreshLog`) |
 | `widget_tapped` | app opened by `pacer://widget?kind=&family=` (widgets carry `widgetURL`) | `kind`, `family` |
@@ -206,8 +215,9 @@ project.
 
 The two periodic requests Pacer makes to its own site, the Sparkle appcast
 (`/appcast.xml`) and the curated price history (`/price-history.json`), carry
-headers so the site can count active Macs and versions from its request logs.
-Nothing goes to Sentry or PostHog for this. The `X-Pacer-*` headers only ever
+headers so the site can count active Macs and versions. The site turns each
+of these requests into one `feed_request` event in PostHog ("Feed request
+counting on the site", below). Nothing goes to Sentry for this. The `X-Pacer-*` headers only ever
 reach pacer.andrechek.com: Sparkle also puts its `httpHeaders` on update
 archive/delta downloads and release-notes fetches (GitHub releases), so the
 updater delegate strips every `X-Pacer-*` header from those requests
@@ -314,7 +324,7 @@ error}` and a short reason; nothing is forwarded. Also refused: not `POST`
 isolate's 128 MB (the body, its parsed copy, the decoded files and the
 envelope are in memory together; the body cap bounds that, whatever the number
 of files): an isolate that runs out is restarted with every
-request it is serving, the update feed's included once it shares the Worker.
+request it is serving, price-history requests included.
 
 **What Sentry gets:** one envelope with a `feedback` item and an attachment
 item per file:
@@ -361,6 +371,81 @@ a body costs about 0.6 ms per MB on a fast Mac (2.7 MB, about 2 ms; 12 MB,
 about 7 ms), so on the Workers Free plan's 10 ms a report with an attachment of
 more than a few MB may be stopped by Cloudflare (error 1102) and should be
 retried without it, or sent straight to Sentry as Report a Problem does today.
+
+## Feed request counting on the site (since 2026-11-25, `site/worker/lib.ts`)
+
+How many Macs run Pacer, and on which versions, counted from every Mac,
+telemetry toggles or not: every Pacer from 0.9.4 on fetches the update feed
+(`/appcast.xml`, Sparkle: at launch and every 6 hours) and the price history
+(`/price-history.json`, about once a day on the catalog's 24-hour refresh,
+retried hourly after a failure) from pacer.andrechek.com. Both paths run the
+site's Worker (`run_worker_first`), which returns the static file exactly as
+the assets layer answers it, untouched, and then, in `ctx.waitUntil`, posts
+one event to the app's PostHog project. Nothing about the count can change or
+delay the answer (`site/README.md`, "The Worker").
+
+The cost (owner's decision, 2026-11-25): the site is on the Workers Free plan,
+whose request limit is daily and account-wide. Past it, Worker-first paths
+answer 429 until 00:00 UTC, update checks included. Pacer 0.9.5 and later
+then read both files from `main` on raw.githubusercontent.com ("Feed
+fallbacks"); 0.9.4 has no fallback, so its checks fail until the reset.
+Accepted until Macs are on 0.9.5.
+
+**Counted:** GETs whose User-Agent starts `Pacer/` (304s too: a conditional GET
+is still a check). Not HEAD or any other method, crawlers, browsers, `curl`
+(the release workflow's and `bin/ship.sh`'s own checks), or a request with Do
+Not Track or Global Privacy Control.
+
+| Event | When | Properties |
+| --- | --- | --- |
+| `feed_request` | a counted GET of either file | `surface: 'feed'`; `environment` (`production` on pacer.andrechek.com, `preview` on workers.dev, else `development`); `file` (`appcast` \| `price_history`); `status` (the asset's: 200, 304, …); `app_version` (`X-Pacer-Version` when it is X.Y.Z[-pre], 20 characters at most, else the version in Sparkle's `Pacer/<version> Sparkle/<version>`, else null); `app_build` (the build in CFNetwork's `Pacer/<build> CFNetwork/<v> Darwin/<v>`, the price history's request, else null); `sparkle_version`; `darwin_major` and `macos_major` (from `Darwin/<v>`: 20–24 → 11–15, 25 → 26, 27 on → the same number; null when unknown); `country` (Cloudflare's); `window_6h` (UTC day and 6-hour window, `2026-11-25/2`); `pacer_id_present`; `check_kind` and `since_last_check` (below; left out when the header is absent); `$process_person_profile: false`, `$ip: null`, `$geoip_disable: true`, `$lib: 'pacer-site-worker'` |
+
+**Request headers** ("Feed requests" above has what the app sends and when):
+each value is checked against its list here, and anything else is recorded as
+`unknown`; an absent header leaves its property out.
+
+- `X-Pacer-Check` → `check_kind` (`manual`, `scheduled`).
+- `X-Pacer-Since-Last-Check` → `since_last_check` (`lt1h`, `1-6h`, `6-12h`,
+  `12-24h`, `1-7d`, `gt7d`, `never`).
+- `X-Pacer-Version` → `app_version`, over the User-Agent's (CFNetwork's carries
+  only the build).
+- `X-Pacer-Id`, sent **only while the Usage data toggle is on**: taken as
+  `distinct_id` verbatim (a UUID, or a hex token of 16–64 characters; anything
+  else is ignored), so the count joins that Mac's own analytics;
+  `pacer_id_present: true`. Still no person profile. Without it, `distinct_id`
+  is a new random UUID per request, `pacer_id_present: false`, and nothing ties
+  one request to another.
+
+**Never sent:** the client's IP address (the POST is the Worker's own, from
+Cloudflare, and `$ip` is null with GeoIP off), the request's headers, the
+User-Agent itself, cookies, the query string. Every property is one of the
+checked shapes above, so there is no free text for `TelemetryScrubber` to
+clean; the Worker never runs the app's code.
+
+**Reading it.** Macs with Usage data on: distinct `distinct_id` where
+`pacer_id_present`. All Macs: `check_kind = 'scheduled'` appcast requests per
+`window_6h` (each Mac checks about once per window, and a launch adds a
+check), split by `app_version` (Sparkle's User-Agent carries it); or
+price-history requests per UTC day, about one per running Mac (count
+`since_last_check` other than `lt1h` to leave out hourly retries), whose
+`app_version` comes from `X-Pacer-Version` (0.9.5+) and before that only
+`app_build`, which maps to its version through the appcast's
+`sparkle:version`. Before 0.9.5 there is no `check_kind`, so manual checks
+inflate the appcast count a little. A Mac that is offline is not seen, nor is
+a request that fell back to raw.githubusercontent.com ("Feed fallbacks"). The website's events (`surface: 'website'`) and these
+(`surface: 'feed'`) never mix.
+
+**Volume and caps.** About five events a day per Mac, on PostHog's free
+quota with the app's own; no per-Mac cap applies (there is no Mac to cap, only
+requests), and anyone can send a `Pacer/` User-Agent: a flood shows up as an
+outlier in `country` and `window_6h`. Every feed request is also a Worker
+request, so a flood of any User-Agent can use up the account's daily request
+limit, and the feed then answers 429 until 00:00 UTC (above; `site/README.md`,
+"What routing the feed through the Worker costs").
+
+**Privacy page:** no new disclosure, the owner's decision (2026-11-25). It
+lists update checks and the price history among the connections Pacer makes;
+its line saying those carry no usage data was removed.
 
 ## Memory and slow refits (#389)
 `memory.footprint_mb` gains `pressure`, `thermal`, `low_power`, `load_per_core` (lt1, 1_2, 2_4, 4_8, gt8), `compressor_gb`, `swap_gb`, `ram_gb`, `peak_mb`, `file_mb` (power-of-two bands).
@@ -434,8 +519,9 @@ Debug is `#if DEBUG` (`build.config` debug).
 
 - **Where applied**: `beforeSend` (errors, hangs, crashes, MetricKit; returns
   nil over budget), `tracesSampler` (root transactions; over budget samples at
-  0), `beforeSendMetric` (per name; stall has its own), the Report a Problem
-  sheet (offers the GitHub issue instead), the CLI's `pacer feedback` POST, and
+  0), `beforeSendMetric` (per name; stall has its own), the Send Feedback
+  window (its endpoint POST; over the cap it offers the GitHub issue instead),
+  the CLI's `pacer feedback` POST, and
   `CrashReportForwardingService` (widget/CLI crash envelopes; these bypass the
   SDK's hooks, so they spend the crash budget directly).
 - **State**: App Group defaults, one dictionary (UTC day + counts), so a
@@ -553,7 +639,28 @@ CLI crashes are not reported.
    one child span per phase, rebuilt from `ScanReport.phaseTimings`; capped 20 per Mac per day.
    PacerCore emits through a small `TelemetrySink` protocol (no Sentry import in PacerCore).
 4. **Crashes, hangs, diagnostics** as above.
-5. **Problem reports**: Help → "Report a Problem…" sheet → `SentrySDK.capture(feedback:)`; and
+5. **Feedback**: "Send Feedback…" (sidebar footer, status menu, Help menu, Settings → Privacy) →
+   `POST https://pacer.andrechek.com/api/feedback` (`FeedbackSubmission`, `FeedbackSender`), which
+   forwards to Sentry user feedback. Since 2026-11-25 (the owner's decision) it always goes that way,
+   whatever the crash-reports toggle, and needs no GitHub account; a GitHub issue is offered only
+   when the POST fails or the day's 5 are spent (`TelemetryBudget.take(.feedback)`). JSON body:
+   `kind` (`idea`/`problem`/`other`), `message`, `email` (optional, the person's own), `appVersion`,
+   `appBuild`, `devDescribe` (dev builds' `git describe`), `macOS`, `model` (`hw.model`), `locale`,
+   `installId` (only while "Usage data" is on), `attachments` (≤ 3; PNG, JPEG, plain text, JSON or
+   QuickTime; none empty; ≤ 8 MB each decoded and ≤ 8 MB in all once base64-encoded, under the Worker's CPU budget on Cloudflare's free
+   plan; the window picture is off by default). Answers: 2xx sent; 400 shows the endpoint's reason;
+   429 "try again later"; anything else, or no answer, offers the GitHub issue. The message is the person's own words, sent on their click,
+   so it is **not** run through `TelemetryScrubber`: `FeedbackRedactor` removes only credentials
+   (`Authorization:` values with a scheme or token, bearer tokens, PEM private keys, `sk-ant-…`,
+   `sk-…`, GitHub, Sentry `sntrys_`/`sntryu_`, PostHog `phx_`, Slack `xox?-`, AWS `AKIA…`, Google
+   `AIza…` keys, JWTs, values named as secrets (`…_TOKEN=`, `password:`), other 40+ character
+   random tokens, also right after `=` or `:`), from the message and from attached text and JSON
+   files, and the window shows "1 token removed"; paths, emails, hex ids and the public PostHog
+   `phc_` token stay. File names are cleaned (no separators, controls or bidi marks, ≤ 128
+   characters), the email is shape-checked before sending, and a send the server did not keep (no
+   answer, 400, 413, 415, other errors) gives its budget take back (`TelemetryBudget.refund`):
+   only a 2xx or a 429 spends one of the day's five.
+   Only a normal launch sends (`LaunchMode.isNormalLaunch`). And
    `pacer feedback` POSTs a `feedback` envelope with the DSN (scrubbed, ≤ 4096 chars, 3 s timeout,
    falls back to today's local inbox + issue link). Off with `--local`, `PACER_FEEDBACK=local`, or
    the crash-reports toggle. This replaces #290's Worker + GitHub App design.
@@ -564,7 +671,8 @@ CLI crashes are not reported.
   (`-Users-<name>-…`) → `<project>`; emails → `<email>`; `Bearer …`, `sk-ant-…`, `sk-…`,
   `ghp_…`, `github_pat_…`, hex ≥ 32 and base64 ≥ 40 → `<redacted>`.
 - Applied to event message, exception values, breadcrumbs, tags/contexts, span descriptions and
-  data, metric attributes, feedback text.
+  data, metric attributes, `pacer feedback` text (the window's feedback uses `FeedbackRedactor`
+  instead, item 5).
 
 ## Release pipeline
 

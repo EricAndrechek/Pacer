@@ -1,6 +1,7 @@
 import SwiftUI
 import Sparkle
 import PacerUI
+import PacerCore
 
 /// Custom "About Pacer" window. Replaces `orderFrontStandardAboutPanel`
 /// — the system panel renders a bare icon + version + credits blob with
@@ -27,12 +28,9 @@ struct AboutView: View {
     private static let issuesURL = URL(string: "https://github.com/EricAndrechek/Pacer/issues")!
     private static let releasesURL = URL(string: "https://github.com/EricAndrechek/Pacer/releases")!
 
-    private var version: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0"
-    }
-    private var build: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?"
-    }
+    /// The same label the sidebar footer and the status menu show: a dev
+    /// build is "dev · <commit>", not project.yml's placeholder version.
+    private var version: AppVersionLabel { UpdateStatus.shared.version }
     private var copyright: String {
         Bundle.main.object(forInfoDictionaryKey: "NSHumanReadableCopyright") as? String
             ?? "Copyright © 2026 Eric Andrechek"
@@ -56,10 +54,10 @@ struct AboutView: View {
                 // (a unix-timestamp, meaningful only to Sparkle's update
                 // ordering) is tucked into a hover tooltip so it's still
                 // available for bug reports without cluttering the line.
-                Text("Version \(version)")
+                Text(version.aboutLine)
                     .font(.callout)
                     .foregroundStyle(.secondary)
-                    .help("Build \(build)")
+                    .help(version.buildLine ?? version.aboutLine)
                 // Reuses the menu item's Sparkle integration (KVO-driven
                 // disable while a check is in flight). `.link` style
                 // renders it as a quiet hyperlink right under the version

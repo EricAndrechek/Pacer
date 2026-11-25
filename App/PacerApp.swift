@@ -191,8 +191,8 @@ struct PacerApp: App {
             // shows an error sheet — surfacing logs / the data store
             // is more useful for a tracking utility.
             CommandGroup(replacing: .help) {
-                Button("Report a Problem…") {
-                    ReportProblemWindow.shared.show(from: .helpMenu)
+                Button(FeedbackCopy.menuItem) {
+                    FeedbackWindow.shared.show(from: .helpMenu)
                 }
                 #if DEBUG
                 // Development builds only: the end-to-end check of crash and
