@@ -113,7 +113,7 @@ struct SettingsView: View {
 
     /// Off the main actor: the listing walks every generic-password item.
     private func loadSwitcherStatus() async {
-        switcherStatus = await Task.detached(priority: .utility) {
+        switcherStatus = await RenderReadiness.task("settings", priority: .utility) {
             ParkedCredentialStore.shared.switcherStatus()
         }.value
     }
@@ -1877,7 +1877,7 @@ private struct DesktopCredentialsCard: View {
 
     private func loadInstalls() async {
         let added = Set(extraFolders.map(expand))
-        let rows = await Task.detached(priority: .utility) { () -> [InstallRow] in
+        let rows = await RenderReadiness.task("settings", priority: .utility) { () -> [InstallRow] in
             let directory = DesktopSessionDirectory.shared
             directory.refresh()
             let found = directory.installs
@@ -2618,7 +2618,7 @@ private struct StorageCard: View {
                 .appendingPathComponent("Library/Logs/Pacer")
             let claudeDirs = (try? ClaudePathResolver().resolve())?
                 .map(\.projectsDirectory) ?? []
-            let snap = await Task.detached(priority: .utility) {
+            let snap = await RenderReadiness.task("settings", priority: .utility) {
                 StorageInspector.snapshot(
                     storeURL: storeURL,
                     logsDirectory: logsDir,

@@ -47,6 +47,110 @@ final class ArenaWakeup: @unchecked Sendable {
     }
 }
 
+/// The scorer's worker threads running now, so a stop can raise them to the
+/// class of the quit waiting on it (#446).
+///
+/// A worker runs at background QoS (`ArenaBudgetPolicy.scorerQoS`), and a
+/// saturated Mac schedules nothing at that class: in #431 four sat runnable
+/// at priority 4 with 0.0% CPU for minutes. A quit waiting for them to reach
+/// their next check waited that long too. Once a stop has `hurry`ed them,
+/// every worker runs at the stop's class until it leaves, through a kernel
+/// override (`pthread_override_qos_class_start_np`): the thread's own class,
+/// and the cut-by-cut `ArenaQoS.apply`, are untouched, and the override ends
+/// when it leaves. A worker that starts after the stop is raised as it
+/// enters. Nothing here changes what a worker runs at before a stop
+/// (`BackgroundQoS`, #443).
+///
+/// Only a running thread is ever raised: a worker enters on its own thread
+/// and leaves under the same lock `hurry` takes, before the thread ends, so
+/// no override is started on a thread that has gone.
+final class ArenaWorkerThreads: @unchecked Sendable {
+    /// How an override is started and ended: the kernel's, or a test's
+    /// record of the calls. What a raise does to scheduling is the kernel's
+    /// business and depends on the machine (a process the system clamps to
+    /// utility cannot be raised past it); which thread is raised, to what and
+    /// until when is this type's, and is what tests check.
+    struct Overrides: Sendable {
+        /// An override of `thread` to `qos`, or nil if none was started.
+        var start: @Sendable (_ thread: pthread_t, _ qos: qos_class_t) -> OpaquePointer?
+        var end: @Sendable (_ override: OpaquePointer) -> Void
+
+        /// The SDK imports the start's result as never nil, though the call
+        /// returns NULL for a class or priority it does not take: read the
+        /// bits as they are.
+        static let kernel = Overrides(
+            start: { unsafeBitCast(pthread_override_qos_class_start_np($0, $1, 0), to: OpaquePointer?.self) },
+            end: { _ = pthread_override_qos_class_end_np($0) })
+    }
+
+    private struct Entry {
+        let thread: pthread_t
+        var override: OpaquePointer?
+    }
+
+    private let lock = NSLock()
+    // Guarded by `lock`.
+    private var entries: [Int: Entry] = [:]
+    private var next = 0
+    private var hurriedTo: qos_class_t?
+    private var calls = Overrides.kernel
+
+    /// The override calls (tests record them).
+    var overrides: Overrides {
+        get { lock.lock(); defer { lock.unlock() }; return calls }
+        set { lock.lock(); calls = newValue; lock.unlock() }
+    }
+
+    /// The calling thread begins its work; `leave` with what this returns.
+    func enter() -> Int {
+        let me = pthread_self()
+        lock.lock(); defer { lock.unlock() }
+        next += 1
+        entries[next] = Entry(thread: me, override: hurriedTo.flatMap { calls.start(me, $0) })
+        return next
+    }
+
+    /// The calling thread is done: anything waiting on it has been told, and
+    /// it goes back to its own class to end.
+    func leave(_ token: Int) {
+        lock.lock()
+        let entry = entries.removeValue(forKey: token)
+        let end = calls.end
+        lock.unlock()
+        if let o = entry?.override { end(o) }
+    }
+
+    /// Run every worker at `qos` or above from now until it leaves, those
+    /// that start later included. Returns how many running workers it raised.
+    /// Once is what a stop needs: a second call raises only the workers the
+    /// first did not reach, to the first's class.
+    @discardableResult
+    func hurry(to qos: qos_class_t) -> Int {
+        lock.lock(); defer { lock.unlock() }
+        let to = hurriedTo ?? qos
+        hurriedTo = to
+        var raised = 0
+        for (token, entry) in entries where entry.override == nil {
+            guard let o = calls.start(entry.thread, to) else { continue }
+            entries[token]?.override = o
+            raised += 1
+        }
+        return raised
+    }
+
+    /// Workers running now.
+    var count: Int { lock.lock(); defer { lock.unlock() }; return entries.count }
+
+    /// Tests: runs on each worker's thread before it begins, standing in for
+    /// the wait a busy Mac can give a new background thread before its first
+    /// instruction (`ArenaScoringCrew.isFinished`).
+    var beforeBeginning: (@Sendable () -> Void)? {
+        get { lock.lock(); defer { lock.unlock() }; return beginning }
+        set { lock.lock(); beginning = newValue; lock.unlock() }
+    }
+    private var beginning: (@Sendable () -> Void)?
+}
+
 /// One phase's workers: which cycle goes to which thread, and what comes back.
 ///
 /// The cycles go out in the order one thread would take them (each window's
@@ -93,20 +197,25 @@ final class ArenaScoringCrew: @unchecked Sendable {
     private let wake: ArenaWakeup
     private let budget: ArenaCPUBudget
     private let cancel: ArenaCancelFlag
+    private let threads: ArenaWorkerThreads
     private let lock = NSLock()
     // Guarded by `lock`.
     private var streams: [Scorer.Stream]
     private var declined: Set<String>
     private var cursor = -1
     private var turnLeft = 0
+    /// Workers started (`staff`) and not yet gone.
     private var active = Set<Int>()
+    /// Of those, the ones whose thread has begun: only these can hold a cycle.
+    private var running = Set<Int>()
     private var handed: [Handback] = []
     private var plan: Scorer.ProgressPlan
 
     init(scorer: Scorer, phase: Scorer.Phase, streams: [Scorer.Stream], declined: Set<String>,
-         plan: Scorer.ProgressPlan, wake: ArenaWakeup, budget: ArenaCPUBudget, cancel: ArenaCancelFlag) {
+         plan: Scorer.ProgressPlan, wake: ArenaWakeup, budget: ArenaCPUBudget, cancel: ArenaCancelFlag,
+         threads: ArenaWorkerThreads) {
         self.scorer = scorer; self.phase = phase; self.streams = streams; self.declined = declined
-        self.plan = plan; self.wake = wake; self.budget = budget; self.cancel = cancel
+        self.plan = plan; self.wake = wake; self.budget = budget; self.cancel = cancel; self.threads = threads
     }
 
     /// What the actor gets back once the phase is over.
@@ -127,11 +236,16 @@ final class ArenaScoringCrew: @unchecked Sendable {
         return streams.contains { !$0.queue.isEmpty }
     }
 
-    /// Whether the phase is over: every worker gone, and nothing queued (or
-    /// the scorer is stopping, and what is queued waits for the next launch).
+    /// Whether the phase is over: every worker gone, and nothing queued. Or
+    /// the scorer is stopping, and every worker that has begun is gone: what
+    /// is queued waits for the next launch, and a thread started but not yet
+    /// run holds nothing. It finds the stop at its first claim and leaves; on
+    /// a saturated Mac a background thread can wait minutes for that first
+    /// instruction, and a stop must not wait with it (#446).
     var isFinished: Bool {
         lock.lock(); defer { lock.unlock() }
-        return active.isEmpty && (cancel.isSet || !streams.contains { !$0.queue.isEmpty })
+        if cancel.isSet { return running.isEmpty }
+        return active.isEmpty && !streams.contains { !$0.queue.isEmpty }
     }
 
     /// What has come back since the last call.
@@ -185,6 +299,13 @@ final class ArenaScoringCrew: @unchecked Sendable {
 
     /// A worker thread, from its first cycle until nothing is left for it.
     private func work(_ index: Int) {
+        threads.beforeBeginning?()
+        // Before the first claim, so a stop that finds this worker running
+        // can raise it (`ArenaWorkerThreads`), and waits for it (`isFinished`).
+        let token = threads.enter()
+        lock.lock()
+        running.insert(index)
+        lock.unlock()
         let stopped = ArenaCancelFlag()
         let budget = self.budget, cancel = self.cancel
         let shouldStop: @Sendable () -> Bool = {
@@ -214,8 +335,12 @@ final class ArenaScoringCrew: @unchecked Sendable {
         budget.leave()
         lock.lock()
         active.remove(index)
+        running.remove(index)
         lock.unlock()
         wake.signal()
+        // Last: a stop may be waiting on the signal above, at the class it
+        // raised this thread to.
+        threads.leave(token)
     }
 
     /// The next cycle, in the order one thread would take them: each window's

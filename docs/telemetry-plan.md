@@ -249,7 +249,8 @@ Also "update download failed" (`feed=update_archive`, `error.domain`, `error.cod
 ## The website (pacer.andrechek.com, `site/`)
 
 The site reports to the app's PostHog project (the owner's decision,
-2026-11-24), never to Sentry. Every event carries `surface: 'website'`, so web
+2026-11-24), never to Sentry; the one thing it sends Sentry is the app's own
+feedback, relayed (see "Feedback" below). Every event carries `surface: 'website'`, so web
 and app events never mix, and `environment` (`production` on
 pacer.andrechek.com, `preview` on workers.dev, else `development`). Nothing
 links a web visitor to an install: conversion is read in aggregate,
@@ -280,6 +281,86 @@ for the app); posthog-js cannot drop it.
 The visitor's IP never reaches PostHog from the Worker: the request is the
 Worker's own. The site's Privacy page says all of this in plain words; change
 both together.
+
+## Feedback (`POST /api/feedback`, `site/worker/feedback.ts`)
+
+The site's Worker takes the app's feedback and forwards it to Sentry as **user
+feedback**, in the app's own project (the DSN in `site/wrangler.jsonc` is
+`project.yml`'s `PACER_SENTRY_DSN`, public by design). The app posts JSON; the
+Worker checks every field, builds the envelope itself from the checked values,
+and posts it from Cloudflare, so the sender's IP address and request headers
+never reach Sentry.
+
+**Request** (`Content-Type: application/json`, `User-Agent` starting
+`Pacer/`, at most 12 MB):
+
+| Field | Shape |
+| --- | --- |
+| `kind` | `idea` \| `problem` \| `other` |
+| `message` | 1–10,000 characters, not blank |
+| `email` | optional; an address, ≤ 254 characters (blank counts as none) |
+| `appVersion`, `appBuild` | `X.Y.Z[-pre]`; the build number |
+| `devDescribe` | optional; `git describe` of a dev build (makes it `development`) |
+| `macOS` | `26.1`, or `26.1 (25B78)` |
+| `model` | `hw.model`, e.g. `Mac16,8`, or `unknown` (the app's word when sysctl fails) |
+| `locale` | optional; `en_CA` |
+| `installId` | optional; the install id, **sent by the app only while Usage data is on** |
+| `attachments` | optional; at most three `{filename, contentType, base64}` (the app keeps them to 8 MB in all once encoded): a file name (no path; no control, zero-width or bidi characters), `image/png` \| `image/jpeg` \| `text/plain` \| `application/json` \| `video/quicktime`, standard padded base64 of at most 8 MB decoded |
+
+Any other field, or any value off its shape, is refused with `400 {ok: false,
+error}` and a short reason; nothing is forwarded. Also refused: not `POST`
+(405), another User-Agent (403), another content type (415), over 12 MB by
+`Content-Length` or as it streams (413). The caps keep a request well under the
+isolate's 128 MB (the body, its parsed copy, the decoded files and the
+envelope are in memory together; the body cap bounds that, whatever the number
+of files): an isolate that runs out is restarted with every
+request it is serving, the update feed's included once it shares the Worker.
+
+**What Sentry gets:** one envelope with a `feedback` item and an attachment
+item per file:
+
+- `contexts.feedback`: `message`, `contact_email` (only when given), `source:
+  website-proxy`. No `name`: Sentry shows it as the reporter's name; the kind
+  is a tag. Sentry takes 4,096 characters at most, so a
+  longer message is cut there with a note, and the whole text goes with it as
+  `feedback-message.txt`.
+- tags `kind`, `app_version`, `macos`, `model`, `source: website-proxy`,
+  `site_environment` (`production`, or `preview` on workers.dev).
+- contexts `os` (macOS, version, build), `device` (Mac, model), `app`
+  (version, build, `dev_describe`), `culture` (locale).
+- `release` and `environment` as the app's own SDK names them
+  (`com.ericandrechek.pacer@<version>+<build>`, `production`; a dev build
+  `@dev+<build>`, `development`), so a report sits beside that build's
+  crashes.
+- `user: {id: installId}` only when the app sent one; never an address.
+  `platform: other` and `sdk.settings.infer_ip: never`, so Sentry does not
+  infer one either (it would only ever see Cloudflare's).
+
+The app answers on `{ok: true, id}` (the event id) or an error: `429` passes
+Sentry's rate limit on with its `Retry-After`, and Sentry refusing, failing or
+taking over 20 s is `502`.
+
+**Before sending, the app** takes credentials out of the message with
+`FeedbackRedactor` (not `TelemetryScrubber`: the message is the person's own
+words, sent on their click, so paths and emails in it stay; the owner's
+decision, 2026-11-25; the Worker checks shapes and does not clean free text),
+and takes `TelemetryBudget.take(.feedback)` (five a day per Mac).
+
+**Abuse.** There is no per-address rate limit: on Cloudflare's Free plan that
+would need KV or a Durable Object. What bounds it: only a `Pacer/` User-Agent
+is served, bodies are capped, every field is shape-checked, every refusal is
+logged (`feedback refused` with the reason, never the address), and the
+feedback category is Sentry's own, not the errors quota. Sentry's spike
+protection applies; per-key rate limits are a Business-plan feature
+("Send caps"), so the free plan has none. None of this lets anyone do more than
+the DSN already allows: it ships in the app, and anyone can post to it
+directly.
+
+**CPU.** A text report costs well under a millisecond of the Worker's CPU. Parsing and decoding
+a body costs about 0.6 ms per MB on a fast Mac (2.7 MB, about 2 ms; 12 MB,
+about 7 ms), so on the Workers Free plan's 10 ms a report with an attachment of
+more than a few MB may be stopped by Cloudflare (error 1102) and should be
+retried without it, or sent straight to Sentry as Report a Problem does today.
 
 ## Memory and slow refits (#389)
 `memory.footprint_mb` gains `pressure`, `thermal`, `low_power`, `load_per_core` (lt1, 1_2, 2_4, 4_8, gt8), `compressor_gb`, `swap_gb`, `ram_gb`, `peak_mb`, `file_mb` (power-of-two bands).

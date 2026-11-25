@@ -633,7 +633,152 @@ struct OAuthPollerStoreTests {
     }
 }
 
+// MARK: - The poller's own queue (#445)
+
+// The poller's executor is a serial dispatch queue of its own, so its blocking
+// store work holds that queue's thread and not one of the cooperative pool's.
+// These pin where that work runs, through the poller's real entry points, and
+// that it still takes turns.
+@Suite("OAuthPoller runs on a serial queue of its own (#445)")
+struct OAuthPollerQueueTests {
+
+    /// A poll, a roster ingest, a switch that creates its row and a rename.
+    /// Every save (`ModelContext.didSave`, posted on the saving thread), every
+    /// keychain read of discovery and every read of cswap's cache runs on the
+    /// poller's queue: not on main, and not on a cooperative-pool thread. A
+    /// control read from a plain task shows the label tells the two apart.
+    @Test("Every save, keychain read and cswap cache read runs on the poller's queue")
+    func storeWorkRunsOnThePollersQueue() async throws {
+        let container = try makeContainer()
+        let key = "acme-queue-\(UUID().uuidString.prefix(8))"
+        let roster = SwitcherUsageCache.Contents(
+            accounts: [.init(organizationId: "acme-queue-roster", emailAddress: "side@example.com", slot: 2)],
+            readings: [])
+        let keychainReads = QueueLog()
+        let cacheReads = QueueLog()
+        let poller = OAuthPoller(client: client(org: key, fiveHour: 42, onKeychainRead: keychainReads.note),
+                                 container: container, clock: TestClock(),
+                                 switcherCache: { cacheReads.note(); return roster })
+        await poller.stopPublishingScopeForTesting()
+        let saves = SaveQueueSpy(container)
+
+        #expect(await poller.runOnce() == .success(fiveHourPct: 42, sevenDayPct: nil))
+        await poller.ingestSwitcherCacheNow()
+        await poller.setActiveAccount(id: "acme-queue-new",
+                                      seed: Account.Seed(id: "acme-queue-new", organizationId: "acme-queue-new"),
+                                      seenAt: nil)
+        await poller.renameAccount(id: key, to: "Work")
+        #expect(fiveHour(container, key) == 42 && laneMeta(container) == 1)
+
+        let label = OAuthPoller.queueLabel
+        #expect(saves.labels.count >= 6, "the poll and its lane meta, roster, activation and its lane meta, rename")
+        #expect(saves.labels.allSatisfy { $0 == label }, "every save on the poller's queue: \(saves.labels)")
+        #expect(!keychainReads.seen.isEmpty && keychainReads.seen.allSatisfy { $0 == label },
+                "discovery's keychain reads: \(keychainReads.seen)")
+        #expect(!cacheReads.seen.isEmpty && cacheReads.seen.allSatisfy { $0 == label },
+                "cswap's cache reads: \(cacheReads.seen)")
+
+        // The control: a task on the shared pool is on a cooperative queue.
+        let pooled = await Task.detached { currentQueueLabel() }.value
+        #expect(pooled != label && pooled.contains("cooperative"), "a pool thread reads as one: \(pooled)")
+    }
+
+    /// Polls and switcher ingests asked for all at once, with a transport that
+    /// suspends so the polls overlap at their request. The actor is still
+    /// serial: no two saves are ever in flight together, every one is on the
+    /// poller's queue, cswap's reading lands once however many ingests read
+    /// it, and each account is one row.
+    @Test("Concurrent polls and switcher ingests still take turns, and a reading lands once")
+    func concurrentCallsSerialize() async throws {
+        let container = try makeContainer()
+        let key = "acme-turns-\(UUID().uuidString.prefix(8))"
+        let side = "acme-turns-side-\(UUID().uuidString.prefix(8))"
+        let contents = SwitcherUsageCache.Contents(
+            accounts: [.init(organizationId: side, emailAddress: "side@example.com", slot: 2)],
+            readings: [SwitcherUsageCache.Reading(
+                organizationId: side, fetchedAt: now.addingTimeInterval(-60), lastAttemptAt: nil,
+                nextPollAt: nil, pollInterval: 600,
+                fiveHour: .init(percent: 30, resetsAt: now.addingTimeInterval(3_600)),
+                sevenDay: nil, scoped: [])])
+        let poller = OAuthPoller(client: client(org: key, fiveHour: 42, requestDelay: .milliseconds(20)),
+                                 container: container, clock: TestClock(), switcherCache: { contents })
+        await poller.stopPublishingScopeForTesting()
+        let saves = SaveQueueSpy(container)
+
+        let rounds = 6
+        await withTaskGroup(of: Void.self) { group in
+            for _ in 0..<rounds {
+                group.addTask { _ = await poller.runOnce() }
+                group.addTask { await poller.ingestSwitcherCacheNow() }
+            }
+        }
+
+        #expect(saves.deepest == 1, "two saves in flight at once: \(saves.deepest)")
+        #expect(saves.labels.count >= rounds, "a save per poll at least")
+        #expect(saves.labels.allSatisfy { $0 == OAuthPoller.queueLabel }, "\(saves.labels)")
+        #expect(samples(container, side) == 1, "cswap's reading recorded once, not once per ingest")
+        #expect(accountRows(container, key) == 1 && accountRows(container, side) == 1)
+        #expect(fiveHour(container, key) == 42 && fiveHour(container, side) == 30)
+        #expect(laneMeta(container) == 1)
+    }
+}
+
 // MARK: - Scaffolding
+
+/// The label of the dispatch queue the caller runs on. A job of the poller's
+/// runs on `OAuthPoller.queueLabel`; a default actor's job, or any task on the
+/// shared pool, on `com.apple.root.<class>-qos.cooperative`.
+private func currentQueueLabel() -> String { String(cString: __dispatch_queue_get_label(nil)) }
+
+/// The queue each call of `note` ran on, in order.
+private final class QueueLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [String] = []
+
+    @Sendable func note() {
+        let label = currentQueueLabel()
+        lock.withLock { values.append(label) }
+    }
+
+    var seen: [String] { lock.withLock { values } }
+}
+
+/// The queue each save of a context on `container` ran on, and the most saves
+/// ever in flight at once (`willSave` to `didSave`, both posted on the saving
+/// thread). One, if the saves take turns.
+private final class SaveQueueSpy: @unchecked Sendable {
+    private let lock = NSLock()
+    private var saved: [String] = []
+    private var inFlight = 0
+    private var maxInFlight = 0
+    private var observers: [any NSObjectProtocol] = []
+
+    init(_ container: ModelContainer) {
+        let center = NotificationCenter.default
+        observers.append(center.addObserver(forName: ModelContext.willSave, object: nil, queue: nil) {
+            [weak self] note in
+            guard let self, (note.object as? ModelContext)?.container === container else { return }
+            lock.withLock {
+                inFlight += 1
+                maxInFlight = max(maxInFlight, inFlight)
+            }
+        })
+        observers.append(center.addObserver(forName: ModelContext.didSave, object: nil, queue: nil) {
+            [weak self] note in
+            guard let self, (note.object as? ModelContext)?.container === container else { return }
+            let label = currentQueueLabel()
+            lock.withLock {
+                inFlight -= 1
+                saved.append(label)
+            }
+        })
+    }
+
+    deinit { for observer in observers { NotificationCenter.default.removeObserver(observer) } }
+
+    var labels: [String] { lock.withLock { saved } }
+    var deepest: Int { lock.withLock { maxInFlight } }
+}
 
 /// Whether each save of a context on `container` ran on the main thread, in
 /// order. `ModelContext.didSave` is posted by the saving context, on the
@@ -703,16 +848,26 @@ private func laneMeta(_ container: ModelContainer) -> Int {
     (try? ModelContext(container).fetchCount(FetchDescriptor<TokenLaneMeta>())) ?? 0
 }
 
-private func client(org: String, fiveHour: Double) -> OAuthClient {
+private func accountRows(_ container: ModelContainer, _ id: String) -> Int {
+    (try? ModelContext(container).fetchCount(FetchDescriptor<Account>(
+        predicate: #Predicate { $0.id == id }))) ?? 0
+}
+
+/// `onKeychainRead` is called on every read of the canned keychain item;
+/// `requestDelay` makes each usage request suspend that long first.
+private func client(org: String, fiveHour: Double,
+                    onKeychainRead: @escaping @Sendable () -> Void = {},
+                    requestDelay: Duration? = nil) -> OAuthClient {
     let blob = try! JSONSerialization.data(withJSONObject: ["claudeAiOauth": [
         "accessToken": "tok-429-\(org)",
         "expiresAt": Int64(Date().addingTimeInterval(3600).timeIntervalSince1970) * 1000,
     ]])
     let body = #"{"five_hour":{"utilization":\#(fiveHour),"resets_at":"2026-05-06T17:00:00Z"}}"#
     return OAuthClient(
-        keychain: KeychainOAuth(rawReader: { .success(blob) }),
+        keychain: KeychainOAuth(rawReader: { onKeychainRead(); return .success(blob) }),
         transport: { _ in
-            try HTTPOutcome.success(jsonBody: body, headers: ["anthropic-organization-id": org]).materialize()
+            if let requestDelay { try await Task.sleep(for: requestDelay) }
+            return try HTTPOutcome.success(jsonBody: body, headers: ["anthropic-organization-id": org]).materialize()
         },
         desktopEnabled: { false })
 }

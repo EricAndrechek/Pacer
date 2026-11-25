@@ -799,7 +799,7 @@ private struct ProjectsContent: View {
             .task(id: ExistenceKey(paths: existencePaths, tick: existenceTick)) {
                 let paths = existencePaths
                 guard !paths.isEmpty else { return }
-                let found = await Task.detached(priority: .utility) {
+                let found = await RenderReadiness.task("projects", priority: .utility) {
                     Self.existence(of: paths)
                 }.value
                 guard !Task.isCancelled, found != existsByPath else { return }
