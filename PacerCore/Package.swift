@@ -47,7 +47,9 @@ let package = Package(
             // The forecast arena's port fixtures (`research/arena`,
             // `arena port-fixtures`): synthetic inputs and the Python
             // reference's outputs, which the Swift ports must reproduce.
-            resources: [.copy("ArenaFixtures")]
+            // `HangFixtures`: real main-thread stacks of "App Hanging" events
+            // (`HangFingerprintTests`).
+            resources: [.copy("ArenaFixtures"), .copy("HangFixtures")]
         ),
         .testTarget(
             name: "PacerPaceTests",
