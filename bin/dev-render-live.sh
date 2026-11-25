@@ -51,7 +51,9 @@ trap restore EXIT INT TERM
 
 mkdir -p "$OUT"
 # Stale PNGs from an earlier run would be listed as this one's output.
-rm -f "$OUT"/*.png
+# Only this script's own renders (LiveRenderMode names them live-<page>-<scope>):
+# $OUT can be any folder the caller passes, and other PNGs in it are not ours.
+rm -f "$OUT"/live-*.png
 
 # The render opens the store read-only, and SwiftData needs a *write* to apply
 # a schema migration — so the first render after a model change fails until the

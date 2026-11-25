@@ -30,14 +30,16 @@ struct RenderReadinessTests {
         Task.detached {
             try? await Task.sleep(for: .milliseconds(50))
             t.end(first)
-            try? await Task.sleep(for: .milliseconds(100))   // inside the 400 ms quiet window
+            // Inside the quiet window, which is wide (2 s) so an overslept
+            // sleep on a loaded runner still lands in it.
+            try? await Task.sleep(for: .milliseconds(100))
             let second = t.begin("b")
             secondBegan.set(true)
             try? await Task.sleep(for: .milliseconds(100))
             secondEnded.set(true)
             t.end(second)
         }
-        #expect(await t.waitUntilIdle(timeout: .seconds(60), quiet: .milliseconds(400)) == .idle)
+        #expect(await t.waitUntilIdle(timeout: .seconds(60), quiet: .seconds(2)) == .idle)
         #expect(secondBegan.get() && secondEnded.get())
     }
 
