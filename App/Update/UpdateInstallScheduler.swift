@@ -30,7 +30,8 @@ import Sparkle
 /// displayingUserInterface:NO`). An armed hold is called at once; a hold no arm
 /// led to (an update pending for `UpdateDeferral.fallbackAfter`, a critical
 /// one) waits for the policy as before #470, bounded by `maxWait` and
-/// `ceiling`. If Pacer quits first, Sparkle installs on quit as it always did.
+/// `ceiling`, counted for the fallback from the update's first sighting. If
+/// Pacer quits first, Sparkle installs on quit as it always did.
 /// An update that is only available is not installed on quit: nothing is
 /// downloaded yet. That is the cost, bounded by the 72 h fallback.
 ///
@@ -174,24 +175,23 @@ final class UpdateInstallScheduler {
         firedAt = nil
         lastWait = nil
         let action = schedule.held(version: version)
+        let armed: Bool
+        if case .held(_, _, let reason) = schedule.phase { armed = reason != nil } else { armed = false }
+        if armed { TelemetryCounters.add(UpdateSchedule.ArmOutcome.held.counterKey) }
         persist()
         startTimer()
         switch action {
         case .installNow:
-            TelemetryCounters.add(UpdateSchedule.ArmOutcome.held.counterKey)
             readyAt = Date()
             Log.write("Update", "\(version) downloaded on request")
             fire(reason: "chosen", byPolicy: false)
-        case .evaluate(let since):
-            TelemetryCounters.add(UpdateSchedule.ArmOutcome.held.counterKey)
-            // From the first sighting: the policy said install a moment ago,
-            // and says it again unless someone has come back since.
-            readyAt = since
-            Log.write("Update", "\(version) downloaded at the install moment")
-            evaluate()
-        case .hold:
-            readyAt = Date()
-            Log.write("Update", "\(version) downloaded; installs when Pacer is not in use")
+        case .policy(let since):
+            // An armed hold counts from the first sighting: the policy said
+            // install a moment ago, and says it again unless someone came back.
+            // So does the 72 h fallback, whose ceiling is then behind it.
+            readyAt = since ?? Date()
+            Log.write("Update", armed ? "\(version) downloaded at the install moment"
+                                      : "\(version) downloaded; installs when Pacer is not in use")
             evaluate()
         }
         return true

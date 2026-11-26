@@ -230,7 +230,7 @@ struct UpdateScheduleTests {
         var policy = available(at: t0)
         policy.armed(.policy, now: t0.addingTimeInterval(3600))
         let r9 = policy.held(version: "0.9.7")
-        #expect(r9 == .evaluate(since: t0))
+        #expect(r9 == .policy(since: t0))
         #expect(policy.heldVersion == "0.9.7")
         #expect(policy.offeredVersion == "0.9.7")
         #expect(!policy.isInstalling)
@@ -245,18 +245,19 @@ struct UpdateScheduleTests {
         #expect(r11 == .installNow)
     }
 
-    @Test("a hold no arm led to waits as before #470")
+    @Test("a hold no arm led to waits for the policy: the fallback from the first sighting, a critical one from now")
     func unarmedHolds() {
-        // The 72 h fallback: downloaded while merely available.
+        // The 72 h fallback: downloaded while merely available. Its clock is
+        // the first sighting's, so the policy's ceiling is already behind it.
         var fallback = available()
         let r12 = fallback.held(version: "0.9.6")
-        #expect(r12 == .hold)
+        #expect(r12 == .policy(since: t0))
         fallback.released()
         #expect(fallback.phase == .available(.init(version: "0.9.6", build: "1806", since: t0, fromBuild: "1800")))
         // A critical update, nothing pending.
         var critical = S()
         let r13 = critical.held(version: "0.9.6")
-        #expect(r13 == .hold)
+        #expect(r13 == .policy(since: nil))
         critical.released()
         #expect(critical.phase == .idle)
     }
@@ -438,7 +439,7 @@ struct UpdateScheduleTests {
         s.armed(.policy, now: at)
         // Sparkle reads the feed at the arm and hands over C.
         let r27 = s.held(version: "C")
-        #expect(r27 == .evaluate(since: t0))
+        #expect(r27 == .policy(since: t0))
         s.fired()
         #expect(s.phase == .installing(version: "C",
                                        pending: .init(version: "C", build: "3", since: t0, fromBuild: "1"),

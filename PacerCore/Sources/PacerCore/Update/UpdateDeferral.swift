@@ -230,11 +230,13 @@ public struct UpdateSchedule: Sendable, Equatable {
     public enum HoldAction: Sendable, Equatable {
         /// Someone asked: install at once.
         case installNow
-        /// Ask the policy, counting from `since` (an armed hold: the policy
-        /// said install a moment ago, and says it again unless someone came back).
-        case evaluate(since: Date)
-        /// A hold no arming led to: the policy, counting from now, as before #470.
-        case hold
+        /// Ask `UpdateInstallPolicy`, counting "since ready" from `since`: the
+        /// first sighting of the pending update, or now (nil) for a hold that
+        /// had none. An armed hold: the policy said install a moment ago and
+        /// says it again unless someone came back. The 72 h fallback: the
+        /// policy's `ceiling` is already behind it, so the hold is bounded
+        /// from the first sighting, not from the download.
+        case policy(since: Date?)
     }
 
     public enum Click: Sendable, Equatable {
@@ -369,14 +371,15 @@ public struct UpdateSchedule: Sendable, Equatable {
         switch phase {
         case .arming(let p, let reason):
             phase = .held(version: version, pending: p, armed: reason)
-            return reason == .requested ? .installNow : .evaluate(since: p.since)
+            return reason == .requested ? .installNow : .policy(since: p.since)
         case .available(let p):
             // The fallback: downloaded without arming, after `fallbackAfter`.
             phase = .held(version: version, pending: p, armed: nil)
-            return .hold
+            return .policy(since: p.since)
         case .idle, .held, .installing:
+            // A critical update, or nothing was pending: as before #470.
             phase = .held(version: version, pending: nil, armed: nil)
-            return .hold
+            return .policy(since: nil)
         }
     }
 
