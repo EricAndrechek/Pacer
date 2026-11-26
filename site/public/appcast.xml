@@ -1808,5 +1808,82 @@ colour, which had quietly flattened every stacked view.</p>]]></description>
                 sparkle:edSignature="mb9em2UG8yGaMgdYsQYGeVHgQ/N0dNaQLv4C7ZyZTxSWBWDgASenab2jMCB1Fw98tUMN3jf7kk9GcAVA6i2dBw==" />
         </sparkle:deltas>
     </item>
+            <item>
+        <title>Version 0.9.5</title>
+        <description><![CDATA[<p>Version, update and feedback buttons in plain sight, a "price pending" mark for models Pacer can't price yet, and updates and prices that keep arriving when Pacer's site can't be reached.</p>
+<h2>Version, updates and feedback</h2>
+<p>The dashboard sidebar now has a Feedback row beside Settings, with Pacer's version under them (and download progress while an update downloads). When an update is ready, a "Restart to Update" row appears above them, and the menu-bar menu offers "Update to X — Restart". The old "Relaunch to Update" item reads the same way now.</p>
+<h2>Send Feedback</h2>
+<p>The form is shorter and friendlier: pick Idea, Problem or Something else, type, and send. Files and a picture of Pacer's window attach right in the message box, and an email is there if you'd like a reply. Feedback now goes through pacer.andrechek.com straight to the developer, so it works with crash reports off and without a GitHub account. Only credentials, such as keys and tokens, are removed from what you type, and the form tells you when it removes one.</p>
+<h2>New models</h2>
+<p>When Claude Code uses a model Pacer has no price for yet, its costs now show a small hourglass ("price pending") instead of quietly reading $0. Pacer checks for a price every hour for a week, and past costs update on their own once one is published.</p>
+<h2>More reliable updates and prices</h2>
+<ul>
+<li>If pacer.andrechek.com can't be reached, Pacer reads the update feed and price list from GitHub instead.</li>
+<li>A failed update download is retried within 30 minutes, not 6 hours.</li>
+<li>Right after an update, Pacer checks once more, so you reach the newest version quickly.</li>
+</ul>
+<h2>Smoother</h2>
+<ul>
+<li>Quitting is fast again on a busy Mac. It no longer waits for background forecast work the Mac isn't running.</li>
+<li>The first usage reading after launch arrives sooner on a busy Mac.</li>
+<li>Usage polling is steadier when the Mac is under load.</li>
+<li>A malformed entry in one of the outside price lists can no longer crash Pacer.</li>
+</ul>
+<h2>Privacy</h2>
+<p>Update checks and price fetches now include Pacer's version and, only while Usage data is on, its anonymous install id. They go only to pacer.andrechek.com, never to GitHub. Pacer still never sends prompts, projects, files, accounts or costs.</p>
+<p><strong>Your data is untouched.</strong></p>]]></description>
+        <pubDate>Thu, 26 Nov 2026 12:36:27 +0000</pubDate>
+        <sparkle:version>1795695348</sparkle:version>
+        <sparkle:shortVersionString>0.9.5</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.5/Pacer-0.9.5.dmg"
+            length="160174224"
+            type="application/octet-stream"
+            sparkle:edSignature="Raw29uhHqHflHQUWxCgEf7DhVrXWr3RAhQ4Tct6WaThCuicXpIXsWBKK2filCcOLrOSoCFblH6KpA1dq7sfqDQ==" />
+        <sparkle:deltas>
+            <enclosure
+                url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.5/Pacer-0.9.5-from-0.9.4.delta"
+                sparkle:deltaFrom="1795607386"
+                length="6352274"
+                type="application/octet-stream"
+                sparkle:deltaFromSparkleExecutableSize="976432"
+                sparkle:deltaFromSparkleLocales="ar,ca,cs,da,de,el,es"
+                sparkle:edSignature="Xez9b/Uh3pIuEIFnEwmfRFPNBdLU34SKiXxaCOE8d1GQRMUWd6Q3mBmM9zA1tEeIBkT7gQ758n7ZS6t07L0QBg==" />
+            <enclosure
+                url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.5/Pacer-0.9.5-from-0.9.3.delta"
+                sparkle:deltaFrom="1795528779"
+                length="6854942"
+                type="application/octet-stream"
+                sparkle:deltaFromSparkleExecutableSize="976432"
+                sparkle:deltaFromSparkleLocales="ar,ca,cs,da,de,el,es"
+                sparkle:edSignature="8v5eWszlhcXMPFKrcRIUBTfk+l+BNQuWCNkpWSdTO6q59jMYiQth6RyKf7+kWsI5ADjxmfCyPqXvjV5HE5RABA==" />
+            <enclosure
+                url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.5/Pacer-0.9.5-from-0.9.2.delta"
+                sparkle:deltaFrom="1794840834"
+                length="7559710"
+                type="application/octet-stream"
+                sparkle:deltaFromSparkleExecutableSize="976432"
+                sparkle:deltaFromSparkleLocales="ar,ca,cs,da,de,el,es"
+                sparkle:edSignature="15TfFDbRYstNnKeFURXDR9WaY9fNlj/2W6ffQYa+j5o1WvnpQ5Cn2KkJUOQhJKr4ECMiGzVUjMCRcM5jvB5cDg==" />
+            <enclosure
+                url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.5/Pacer-0.9.5-from-0.9.1.delta"
+                sparkle:deltaFrom="1794605188"
+                length="8002978"
+                type="application/octet-stream"
+                sparkle:deltaFromSparkleExecutableSize="976432"
+                sparkle:deltaFromSparkleLocales="ar,ca,cs,da,de,el,es"
+                sparkle:edSignature="4nlPnwS7z7Q+gOELhuJVQaCTIFFOKl3Z6VsCX6X32MPily17LgEzsC2VVmycipvgQK3LkoIyj+/TfjW2A72MAg==" />
+            <enclosure
+                url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.5/Pacer-0.9.5-from-0.9.0.delta"
+                sparkle:deltaFrom="1794528744"
+                length="8350642"
+                type="application/octet-stream"
+                sparkle:deltaFromSparkleExecutableSize="976432"
+                sparkle:deltaFromSparkleLocales="ar,ca,cs,da,de,el,es"
+                sparkle:edSignature="vUyNpClrgxLjMtncJel99CbYFT2Qrf8j6zf8pVF2UpqKZdkYl4he+Jv8501/7BQHilHj5WoMfR805mQ63lzZAQ==" />
+        </sparkle:deltas>
+    </item>
         </channel>
 </rss>
