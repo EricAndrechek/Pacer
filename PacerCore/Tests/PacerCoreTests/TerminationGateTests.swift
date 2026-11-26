@@ -241,21 +241,54 @@ struct TerminationGateTests {
 
     // MARK: - Exit guard
 
-    @Test func theExitGuardLogsThenExitsAfterItsGrace() async {
-        final class Box: @unchecked Sendable {
-            let lock = NSLock()
-            var events: [String] = []
-            func add(_ e: String) { lock.lock(); events.append(e); lock.unlock() }
-            var snapshot: [String] { lock.lock(); defer { lock.unlock() }; return events }
-        }
-        let box = Box()
+    final class Events: @unchecked Sendable {
+        private let lock = NSLock()
+        private var events: [String] = []
+        func add(_ e: String) { lock.withLock { events.append(e) } }
+        var snapshot: [String] { lock.withLock { events } }
+    }
+
+    private func guardRecording(_ events: Events) -> QuitExitGuard {
+        QuitExitGuard(log: { events.add("log:" + $0) }, exit: { events.add("exit") })
+    }
+
+    private func waitFor(_ events: Events, count: Int, within seconds: Double = 5) async {
         let started = Date()
-        QuitExitGuard.arm(grace: .milliseconds(50), log: { box.add("log:" + $0) }, exit: { box.add("exit") })
-        #expect(box.snapshot.isEmpty)  // not before its grace
-        while box.snapshot.count < 2, Date().timeIntervalSince(started) < 5 {
+        while events.snapshot.count < count, Date().timeIntervalSince(started) < seconds {
             try? await Task.sleep(for: .milliseconds(10))
         }
-        #expect(box.snapshot == ["log:still running 0 s after replying to terminate; exiting", "exit"])
+    }
+
+    @Test func afterTheReplyTheGuardLogsThenExitsAfterItsGrace() async {
+        let events = Events()
+        let started = Date()
+        guardRecording(events).armAfterReply(grace: .milliseconds(50))
+        await waitFor(events, count: 2, within: 30)
+        #expect(events.snapshot == ["log:still running 0 s after replying to terminate; exiting", "exit"])
         #expect(Date().timeIntervalSince(started) >= 0.05)
+    }
+
+    /// A shutdown that never replies is ended at the backstop.
+    @Test func theBackstopEndsAShutdownThatNeverReplies() async {
+        let events = Events()
+        let started = Date()
+        guardRecording(events).armShutdownBackstop(bound: .milliseconds(50))
+        await waitFor(events, count: 2, within: 30)
+        #expect(events.snapshot == ["log:no reply to terminate 0 s after the quit began; exiting", "exit"])
+        #expect(Date().timeIntervalSince(started) >= 0.05)
+    }
+
+    /// Once the reply is sent the backstop stands down: only the after-reply
+    /// deadline ends the process, once. Checked by what was logged, not by
+    /// when: on a loaded Mac the two timers can fire in either order.
+    @Test func theBackstopStandsDownOnceTheReplyIsSent() async {
+        let events = Events()
+        let quit = guardRecording(events)
+        quit.armShutdownBackstop(bound: .milliseconds(50))
+        quit.armAfterReply(grace: .milliseconds(150))
+        await waitFor(events, count: 2, within: 30)
+        // Long past both deadlines, so a backstop that did fire has logged.
+        try? await Task.sleep(for: .milliseconds(300))
+        #expect(events.snapshot == ["log:still running 0 s after replying to terminate; exiting", "exit"])
     }
 }

@@ -1245,6 +1245,15 @@ public final class ScanCoordinator {
     /// else marks them. Running to the end is what avoids that. Past the
     /// bound the pass is left running. Then the quit's exit guard ends the
     /// process under it (`QuitExitGuard`), which is that same crash case.
+    ///
+    /// **Not covered, on purpose.** A few writes run outside the passes:
+    /// the fire-and-forget poller tasks a cycle starts
+    /// (`oauthPoller.refreshSignedInCredential`, `.setActiveAccount`), and
+    /// `followLoginChange(.switcher)`, which ingests the switcher's cache
+    /// without a pass. They can still save after this returns. Each is
+    /// a small transaction of its own, which SQLite's WAL keeps atomic
+    /// beside another process's writes, and each repeats harmlessly at the
+    /// next launch. Bringing them under the wait is out of scope for #475.
     @discardableResult
     public func stop() async -> Bool {
         // First, before anything suspends: `runForever` reads it after each

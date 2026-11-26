@@ -697,11 +697,20 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // drawn as it was, so the next launch restores it.
         TerminationGate.shared.begin()
         let began = ContinuousClock.now
+        // The whole shutdown before the reply gets 90 s (#475): each step has
+        // a bound or is short, but nothing bounded them together. Armed here,
+        // not in the task below, which a starved main thread may not start for
+        // a while. Not across a migration, which the quit waits for on purpose
+        // and which can take minutes: then it is armed once that is done.
+        if storeOpenTask == nil { QuitExitGuard.shared.armShutdownBackstop() }
         Task { @MainActor in
             // A quit during a migration waits for it: SQLite would roll an
             // interrupted transaction back, but there is no reason to find out
             // whether every step of SwiftData's migration is one.
-            await storeOpenTask?.value
+            if let storeOpenTask {
+                await storeOpenTask.value
+                QuitExitGuard.shared.armShutdownBackstop()
+            }
             await backgroundService?.stop()
             // Sparkle relaunches Pacer straight after an update, which can now
             // happen with nobody watching (`UpdateInstallScheduler`): "Pacer
@@ -728,7 +737,7 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // AppKit ends the process after the reply, on this run loop. A
             // starved one can take far longer than the shutdown did, with a
             // new Pacer already launched beside it; the guard bounds that.
-            QuitExitGuard.arm()
+            QuitExitGuard.shared.armAfterReply()
             NSApp.reply(toApplicationShouldTerminate: true)
         }
         return .terminateLater

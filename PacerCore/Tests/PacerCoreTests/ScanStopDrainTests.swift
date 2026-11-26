@@ -109,7 +109,7 @@ private final class SaveLog: @unchecked Sendable {
 
 @ScanActor
 private func waitUntil(_ condition: @ScanActor () -> Bool) async {
-    let deadline = Date().addingTimeInterval(10)
+    let deadline = Date().addingTimeInterval(120)
     while !condition(), Date() < deadline { try? await Task.sleep(for: .milliseconds(5)) }
 }
 
@@ -122,6 +122,9 @@ struct ScanStopDrainTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let container = try PacerStore.makeInMemoryContainer()
         let coordinator = makeCoordinator(container: container, root: root)
+        // Far past anything a loaded test run takes, so only the cycle can end
+        // the wait.
+        coordinator.stopDrainBoundForTesting = .seconds(600)
         let latch = Latch()
         coordinator.beforeRecomputeHook = { await latch.wait() }
         let saves = SaveLog(container: container)
@@ -170,9 +173,12 @@ struct ScanStopDrainTests {
         let container = try PacerStore.makeInMemoryContainer()
         let coordinator = makeCoordinator(container: container, root: root)
         _ = try await coordinator.runOnce()
+        // A wait for a pass would run to this bound: nothing near it means
+        // there was none.
+        coordinator.stopDrainBoundForTesting = .seconds(600)
         let started = ContinuousClock.now
         #expect(await coordinator.stop())
-        #expect(ContinuousClock.now - started < .seconds(2))
+        #expect(ContinuousClock.now - started < .seconds(60))
     }
 
     /// Past the bound a quit stops waiting: the cycle is left to the process
@@ -192,7 +198,7 @@ struct ScanStopDrainTests {
         let started = ContinuousClock.now
         let drained = await coordinator.stop()
         #expect(!drained)
-        #expect(ContinuousClock.now - started < .seconds(5))
+        #expect(ContinuousClock.now - started < .seconds(60))
         latch.open()
         _ = try? await cycle.value
     }

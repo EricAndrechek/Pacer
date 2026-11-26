@@ -251,14 +251,32 @@ final class AppBackgroundService {
             archiveObserver = nil
         }
         if let coord = coordinator {
+            // Raise the scan loop to the quit's priority while its pass is
+            // waited for: it runs at `loopPriority` (utility), which a starved
+            // Mac barely schedules, and awaiting a task's result escalates
+            // that task, the cycle in flight with it. The waiting task
+            // ends when the loop does, right after.
+            if let loop = coordinatorTask {
+                Task(priority: .userInitiated) { _ = await loop.result }
+            }
             // Waits for the scan pass in flight to finish, bounded; nothing
             // starts after it (`ScanCoordinator.stop`).
             scanStopDrained = await coord.stop()
         }
         // And for a sync already running or queued on the scan actor: it is
         // synchronous there, so this hop runs after it, and any queued after
-        // this sees the flag.
-        await closeArchive()
+        // this sees the flag. Bounded: a sync's 30-day reconcile is seconds
+        // of work, more on a starved Mac. Past the bound the quit goes on, and
+        // the sync may still be writing when the process ends. That costs
+        // nothing lasting: DuckDB replays its WAL on the next open and drops
+        // what had not committed, and the next sync starts from the archive's
+        // own watermark, so it appends whatever this one did not.
+        let closedInTime = await BoundedWait.atMost(Self.archiveCloseBound) { [self] in
+            await self.closeArchive()
+        }
+        if !closedInTime {
+            Log.write("AppBackground", "archive sync still running after \(Self.archiveCloseBound); not waiting for it")
+        }
         coordinatorTask?.cancel()
         coordinatorTask = nil
         coordinator = nil
@@ -578,6 +596,8 @@ final class AppBackgroundService {
     @ScanActor private var archiveSync: ArchiveSync?
     /// Set by `stop()`: no archive sync runs after it (#475).
     @ScanActor private var archiveClosed = false
+    /// The longest `stop()` waits for an archive sync already running (#475).
+    static let archiveCloseBound: Duration = .seconds(10)
 
     @ScanActor
     private func closeArchive() {
