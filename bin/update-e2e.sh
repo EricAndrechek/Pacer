@@ -109,8 +109,9 @@ build() {
         # Where Xcode puts products under -derivedDataPath moves between
         # versions, and a project-relative build location wins over it on some
         # setups (AGENTS.md, "Build-path drift"): find it by its suffix.
-        product="$(find "${out}/dd" "${REPO_ROOT}/UpdateE2E/Build" -type d \
-            -path "*/Products/Release/${APP_NAME}.app" -prune 2>/dev/null | head -1)"
+        local roots=() root
+        for root in "${out}/dd" "${REPO_ROOT}/UpdateE2E/Build"; do [ -d "${root}" ] && roots+=("${root}"); done
+        product="$(find "${roots[@]}" -type d -path "*/Products/Release/${APP_NAME}.app" -prune 2>/dev/null | head -1 || true)"
         [ -n "${product}" ] || die "no ${APP_NAME}.app product for version ${n}"
         mkdir -p "${out}/v${n}"
         ditto "${product}" "${out}/v${n}/${APP_NAME}.app"
