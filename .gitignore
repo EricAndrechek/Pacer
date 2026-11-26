@@ -40,6 +40,8 @@ xcuserdata/
 
 # Generated Xcode project (regenerated from project.yml)
 Pacer.xcodeproj/
+# The update end-to-end test app's generated project (UpdateE2E/project.yml).
+UpdateE2E/PacerUpdateE2E.xcodeproj/
 
 # macOS
 .DS_Store

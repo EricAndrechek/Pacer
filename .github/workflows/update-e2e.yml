@@ -1,0 +1,61 @@
+name: Update e2e
+
+# Pacer's update path end to end (#470). A test app that is Pacer's own update
+# code (App/Update, compiled verbatim into UpdateE2E/) against the Sparkle Pacer
+# ships is built three times (A < B < C), signed ad hoc, its archives signed
+# with an EdDSA key made in the job, and served from a local appcast. Then, with
+# nobody clicking anything: A defers B, C replaces it, the install moment
+# installs C once; and a 404 on C's archive leaves A on A, retrying, until the
+# archive is back. bin/update-e2e.sh has the checks.
+#
+# A disposable runner because the app replaces itself: never on a Mac someone
+# uses (docs/releasing.md, "Testing the update path end to end"). The release
+# EdDSA key and the signing secrets are never read here.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'App/Update/**'
+      - 'PacerCore/Sources/PacerCore/Update/**'
+      - 'UpdateE2E/**'
+      - 'bin/update-e2e.sh'
+      - 'bin/sparkle-eddsa.swift'
+      - '.github/workflows/update-e2e.yml'
+
+concurrency:
+  group: update-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  update-e2e:
+    name: Update path end to end
+    # The image releases build on: the same Xcode and SDK as the Sparkle
+    # client a released Pacer runs.
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          sw_vers
+
+      # XcodeGen and the SPM cache only: the test app links neither DuckDB nor
+      # the forecast networks.
+      - uses: ./.github/actions/prepare-build
+        with:
+          generate-project: "false"
+          duckdb: "false"
+          forecast-weights: "false"
+
+      - name: Build A, B and C
+        run: bin/update-e2e.sh build "$RUNNER_TEMP/update-e2e"
+
+      - name: Run the scenarios
+        run: bin/update-e2e.sh run "$RUNNER_TEMP/update-e2e"

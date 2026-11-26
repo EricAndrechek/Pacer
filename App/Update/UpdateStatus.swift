@@ -9,9 +9,10 @@ import PacerCore
 /// - **the check's progress** (`phase`), from Sparkle's delegate callbacks
 ///   (`PacerUpdaterDelegate`, which Sparkle calls on the main thread), through
 ///   `UpdateState.applying(_:)`;
-/// - **a ready update**, which is `UpdateInstallScheduler`'s hold of Sparkle's
-///   install block (`readyVersion`). Read, not copied: "ready" and "the block
-///   that installs it" cannot disagree.
+/// - **a pending or ready update**, which is `UpdateInstallScheduler`'s
+///   schedule: an update a check found and left on the server (#470), or its
+///   hold of Sparkle's install block (`readyVersion`). Read, not copied:
+///   "ready" and "the block that installs it" cannot disagree.
 ///
 /// Both are observable, so a view whose body reads `state` follows either.
 @MainActor @Observable
@@ -41,7 +42,8 @@ final class UpdateStatus {
         if let forced { return forced }
         let scheduler = UpdateInstallScheduler.shared
         return UpdateState.resolve(phase: phase, heldVersion: scheduler.readyVersion,
-                                   installing: scheduler.isInstalling)
+                                   installing: scheduler.isInstalling,
+                                   availableVersion: scheduler.offeredVersion)
     }
 
     func note(_ event: UpdateState.Event) {
@@ -50,12 +52,13 @@ final class UpdateStatus {
         phase = next
     }
 
-    /// Install the held update now and relaunch into it. An explicit click, so
-    /// `UpdateInstallPolicy` does not apply: its never-interrupt rules (an open
-    /// menu, text being edited) guard against a relaunch nobody asked for, and
-    /// this one was asked for (`UpdateInstallScheduler.installNow`). Bypassing
-    /// the editing guard is deliberate. Decided at the click: with no hold in
-    /// hand, or an install already started, it does nothing.
+    /// Install the update now and relaunch into it: the held one, or a pending
+    /// one once it is downloaded. An explicit click, so `UpdateInstallPolicy`
+    /// does not apply: its never-interrupt rules (an open menu, text being
+    /// edited) guard against a relaunch nobody asked for, and this one was
+    /// asked for (`UpdateInstallScheduler.installNow`). Bypassing the editing
+    /// guard is deliberate. Decided at the click: with nothing offered, or an
+    /// install already started, it does nothing.
     func installNow() {
         UpdateInstallScheduler.shared.installNow()
     }

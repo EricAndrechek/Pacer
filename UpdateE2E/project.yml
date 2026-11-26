@@ -1,0 +1,66 @@
+# The update path end to end (#470): a minimal app that runs Pacer's own
+# update code (App/Update, compiled verbatim) against the Sparkle Pacer ships,
+# so a CI runner can watch a Mac defer, arm, download and install. Built and run
+# only by bin/update-e2e.sh, on a disposable Mac (.github/workflows/update-e2e.yml):
+# it updates itself, which is never done on a Mac someone uses (docs/releasing.md).
+#
+# Why not Pacer itself, three times: its build is the DuckDB engine, the
+# forecast networks, the widget extension and Sentry, none of which the update
+# path touches, and an ad-hoc signed Pacer cannot hold its TeamID-prefixed App
+# Group, so on an unattended runner its store and the widget would be the test.
+# What the test is about is the same here: `PacerUpdater` (Sparkle's delegate),
+# `UpdateInstallScheduler` and `UpdateStatus`, the same PacerCore, and Sparkle
+# 2.10.1 embedded and signed the way release builds do it. Five app-target
+# symbols those files name are stood in for by Sources/Shims.swift.
+name: PacerUpdateE2E
+options:
+  bundleIdPrefix: com.ericandrechek
+  deploymentTarget:
+    macOS: "15.0"
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    MACOSX_DEPLOYMENT_TARGET: "15.0"
+    # Built unsigned, signed ad hoc afterwards inside-out by bin/update-e2e.sh,
+    # as bin/dev-install.sh and release.yml sign Pacer. No hardened runtime:
+    # with an ad-hoc signature (no Team ID) library validation would refuse
+    # Sparkle.framework, and the runtime flags change nothing in the update path.
+    CODE_SIGN_IDENTITY: ""
+    CODE_SIGNING_REQUIRED: NO
+    CODE_SIGNING_ALLOWED: NO
+    ENABLE_HARDENED_RUNTIME: NO
+    ENABLE_DEBUG_DYLIB: NO
+    ENABLE_PREVIEWS: NO
+
+packages:
+  PacerCore:
+    path: ../PacerCore
+  Sparkle:
+    # The version Pacer ships (project.yml); a Sparkle bump is a reviewed change.
+    url: https://github.com/sparkle-project/Sparkle
+    exactVersion: 2.10.1
+
+targets:
+  PacerUpdateE2E:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources
+      - path: ../App/Update
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.ericandrechek.pacer.update-e2e
+        PRODUCT_NAME: PacerUpdateE2E
+        INFOPLIST_FILE: Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        # bin/update-e2e.sh passes all four per build (A, B, C).
+        MARKETING_VERSION: "0.0.1"
+        CURRENT_PROJECT_VERSION: "1"
+        E2E_FEED_URL: "http://127.0.0.1:8471/appcast.xml"
+        E2E_PUBLIC_KEY: ""
+    dependencies:
+      - package: PacerCore
+        product: PacerCore
+      - package: Sparkle
+        product: Sparkle
