@@ -148,9 +148,9 @@ struct PriceListTests {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
         let cache = dir.appendingPathComponent("price-history.cache.json")
-        let suite = "pricelist.\(UUID().uuidString)"
-        let store = UserDefaults(suiteName: suite)!
-        defer { store.removePersistentDomain(forName: suite) }
+        let testDefaults = TestDefaults(prefix: "pricelist")
+        let store = testDefaults.defaults
+        defer { testDefaults.cleanup() }
         func serve(_ data: Data) async -> Bool {
             PriceListStub.serve(data)
             return await CuratedPriceHistory.refresh(urlSession: PriceListStub.session(), cacheURL: cache, store: store)
@@ -364,9 +364,9 @@ struct PriceListTests {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
         let cache = dir.appendingPathComponent("price-history.cache.json")
-        let suite = "pricelist.fix.\(UUID().uuidString)"
-        let store = UserDefaults(suiteName: suite)!
-        defer { store.removePersistentDomain(forName: suite) }
+        let testDefaults = TestDefaults(prefix: "pricelist.fix")
+        let store = testDefaults.defaults
+        defer { testDefaults.cleanup() }
         func serve(_ data: Data) async -> CuratedPriceHistory.RefreshResult {
             PriceListStub.serve(data)
             return await CuratedPriceHistory.refreshResult(urlSession: PriceListStub.session(), cacheURL: cache,
@@ -583,9 +583,9 @@ struct PriceListTests {
     }
 
     @Test func theModelsOutsideTheListArePersistedAndReportChanges() {
-        let suite = "pricelist.outside.\(UUID().uuidString)"
-        let store = UserDefaults(suiteName: suite)!
-        defer { store.removePersistentDomain(forName: suite) }
+        let testDefaults = TestDefaults(prefix: "pricelist.outside")
+        let store = testDefaults.defaults
+        defer { testDefaults.cleanup() }
         #expect(PriceSources.modelsOutsideList(store: store) == nil)
         #expect(PriceSources.recordModelsOutsideList([], store: store))
         #expect(PriceSources.modelsOutsideList(store: store) == [])
