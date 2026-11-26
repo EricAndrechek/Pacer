@@ -3,10 +3,10 @@ import Testing
 @testable import PacerCore
 
 @Suite(.serialized) struct FormatDriftTests {
+    private let defaultsBag = TestDefaultsBag()
     private func store() -> UserDefaults {
-        let suite = "pacer.formatdrift.\(UUID().uuidString)"
         FormatDrift.resetLaunchState()
-        return UserDefaults(suiteName: suite)!
+        return defaultsBag.make(prefix: "formatdrift")
     }
 
     @Test func reportsOnlyTheFirstSighting() {

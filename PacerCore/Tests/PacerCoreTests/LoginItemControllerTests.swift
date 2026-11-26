@@ -41,7 +41,9 @@ struct LoginItemControllerTests {
     }
 
     @Test func theChoiceIsRememberedPerStore() throws {
-        let defaults = try #require(UserDefaults(suiteName: "pacer.tests.loginItem.\(UUID().uuidString)"))
+        let holder = TestDefaults(prefix: "loginItem")
+        defer { holder.cleanup() }
+        let defaults = holder.defaults
         #expect(LoginItemController.recordedChoice(in: defaults) == nil)
         LoginItemController.record(true, in: defaults)
         #expect(LoginItemController.recordedChoice(in: defaults) == true)

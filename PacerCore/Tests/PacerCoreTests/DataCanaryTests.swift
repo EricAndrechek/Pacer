@@ -586,9 +586,9 @@ struct DataCanaryRunTests {
     func budget() throws {
         let fixture = try makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.home) }
-        let suite = "pacer.tests.dataCanary.\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
+        let holder = TestDefaults(prefix: "dataCanary")
+        defer { holder.cleanup() }
+        let defaults = holder.defaults
         let ledger = DataCanaryLedger(defaults: defaults)
         let tight = DataCanary.Policy(maxBytesPerRun: 1)
 
@@ -610,9 +610,9 @@ struct DataCanaryRunTests {
     func unjudgeableRecorded() throws {
         let fixture = try makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.home) }
-        let suite = "pacer.tests.dataCanary.\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
+        let holder = TestDefaults(prefix: "dataCanary")
+        defer { holder.cleanup() }
+        let defaults = holder.defaults
         let ledger = DataCanaryLedger(defaults: defaults)
         // Too small to judge on tokens, and no requests in these transcripts.
         let strict = DataCanary.Policy(minimumOutputTokens: 10_000_000)
@@ -633,9 +633,9 @@ struct DataCanaryRunTests {
     func ledger() throws {
         let fixture = try makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.home) }
-        let suite = "pacer.tests.dataCanary.\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
+        let holder = TestDefaults(prefix: "dataCanary")
+        defer { holder.cleanup() }
+        let defaults = holder.defaults
         let ledger = DataCanaryLedger(defaults: defaults)
 
         let first = DataCanary.runAndPublish(container: fixture.container, sources: fixture.sources,

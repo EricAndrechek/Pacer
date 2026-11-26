@@ -62,9 +62,9 @@ struct FeedRequestHeadersTests {
 
     @Test("the price request carries the provider's headers and nothing else changes")
     func priceRequest() throws {
-        let suite = "feed-headers-\(UUID().uuidString)"
-        let store = try #require(UserDefaults(suiteName: suite))
-        defer { store.removePersistentDomain(forName: suite) }
+        let holder = TestDefaults(prefix: "feedheaders")
+        let store = holder.defaults
+        defer { holder.cleanup() }
         let provider = FeedRequestHeaderProvider()
         let usage = Flag()
         provider.setExtra { usage.on ? ["X-Pacer-Id": "abc"] : [:] }
@@ -87,9 +87,9 @@ struct FeedRequestHeadersTests {
 
     @Test("the previous fetch time becomes the next request's bucket")
     func sincePersisted() throws {
-        let suite = "feed-headers-\(UUID().uuidString)"
-        let store = try #require(UserDefaults(suiteName: suite))
-        defer { store.removePersistentDomain(forName: suite) }
+        let holder = TestDefaults(prefix: "feedheaders")
+        let store = holder.defaults
+        defer { holder.cleanup() }
         let provider = FeedRequestHeaderProvider()
         _ = CuratedPriceHistory.request(now: Self.now, store: store, headers: provider, record: true)
         let next = CuratedPriceHistory.request(now: Self.now.addingTimeInterval(30 * 3600), store: store,
@@ -124,9 +124,9 @@ struct FeedRequestHeadersTests {
 
     @Test("previous check is read before it is overwritten")
     func previous() throws {
-        let suite = "feed-prev-\(UUID().uuidString)"
-        let store = try #require(UserDefaults(suiteName: suite))
-        defer { store.removePersistentDomain(forName: suite) }
+        let holder = TestDefaults(prefix: "feedheaders")
+        let store = holder.defaults
+        defer { holder.cleanup() }
         let k = "k"
         #expect(FeedRequestHeaders.previousCheck(key: k, store: store, now: Self.now, record: true) == nil)
         let later = Self.now.addingTimeInterval(7 * 3600)

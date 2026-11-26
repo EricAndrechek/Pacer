@@ -3,61 +3,66 @@ import Testing
 @testable import PacerCore
 
 /// Tests `PacerPreferences.costMode(from:)` mapping. We pass an
-/// isolated `UserDefaults(suiteName:)` per test so concurrent test
+/// isolated suite (`TestDefaults`) per test so concurrent test
 /// execution can't race on the live App Group store.
-private func makeIsolatedDefaults() -> UserDefaults {
-    let suite = "pacer.tests.\(UUID().uuidString)"
-    let defaults = UserDefaults(suiteName: suite)!
-    // Brand-new suites can be polluted by lingering values from
-    // earlier processes; clean every key to be safe.
-    for (key, _) in defaults.dictionaryRepresentation() {
-        defaults.removeObject(forKey: key)
-    }
-    return defaults
-}
-
 @Test func costModeDefaultsToAutoWhenAbsent() {
-    let defaults = makeIsolatedDefaults()
+    let holder = TestDefaults()
+    defer { holder.cleanup() }
+    let defaults = holder.defaults
     #expect(PacerPreferences.costMode(from: defaults) == .auto)
 }
 
 @Test func costModeMapsCalculate() {
-    let defaults = makeIsolatedDefaults()
+    let holder = TestDefaults()
+    defer { holder.cleanup() }
+    let defaults = holder.defaults
     defaults.set("calculate", forKey: PacerPreferenceKeys.costMode)
     #expect(PacerPreferences.costMode(from: defaults) == .calculate)
 }
 
 @Test func costModeMapsDisplay() {
-    let defaults = makeIsolatedDefaults()
+    let holder = TestDefaults()
+    defer { holder.cleanup() }
+    let defaults = holder.defaults
     defaults.set("display", forKey: PacerPreferenceKeys.costMode)
     #expect(PacerPreferences.costMode(from: defaults) == .display)
 }
 
 @Test func costModeUnknownStringFallsBackToAuto() {
-    let defaults = makeIsolatedDefaults()
+    let holder = TestDefaults()
+    defer { holder.cleanup() }
+    let defaults = holder.defaults
     defaults.set("nonsense", forKey: PacerPreferenceKeys.costMode)
     #expect(PacerPreferences.costMode(from: defaults) == .auto)
 }
 
 @Test func oauthTokenOverrideAbsentReturnsNil() {
-    let defaults = makeIsolatedDefaults()
+    let holder = TestDefaults()
+    defer { holder.cleanup() }
+    let defaults = holder.defaults
     #expect(PacerPreferences.oauthTokenOverride(from: defaults) == nil)
 }
 
 @Test func oauthTokenOverrideEmptyStringReturnsNil() {
-    let defaults = makeIsolatedDefaults()
+    let holder = TestDefaults()
+    defer { holder.cleanup() }
+    let defaults = holder.defaults
     defaults.set("", forKey: PacerPreferenceKeys.oauthTokenOverride)
     #expect(PacerPreferences.oauthTokenOverride(from: defaults) == nil)
 }
 
 @Test func oauthTokenOverrideWhitespaceOnlyReturnsNil() {
-    let defaults = makeIsolatedDefaults()
+    let holder = TestDefaults()
+    defer { holder.cleanup() }
+    let defaults = holder.defaults
     defaults.set("   \n  ", forKey: PacerPreferenceKeys.oauthTokenOverride)
     #expect(PacerPreferences.oauthTokenOverride(from: defaults) == nil)
 }
 
 @Test func oauthTokenOverrideTrimsWhitespace() {
-    let defaults = makeIsolatedDefaults()
+    let holder = TestDefaults()
+    defer { holder.cleanup() }
+    let defaults = holder.defaults
     defaults.set("  sk-ant-oat01-abc\n", forKey: PacerPreferenceKeys.oauthTokenOverride)
     #expect(PacerPreferences.oauthTokenOverride(from: defaults) == "sk-ant-oat01-abc")
 }
