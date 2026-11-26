@@ -22,6 +22,8 @@ struct PerModelTodayCard: View {
     /// rendered is the scope switch; the card's layout does not change.
     @Query private var scopedAggregates: [AccountDailyAggregate]
     @State private var scope = UsageScope.shared
+    /// Models with no price yet: their rows' costs carry the mark.
+    @State private var pricePending = PricePending.shared
 
     /// What the card renders: every account, or one. Both queries are
     /// live, so switching is a re-read rather than a recompute.
@@ -72,7 +74,8 @@ struct PerModelTodayCard: View {
                 color: pacerModelColor(agg.model),
                 tokens: agg.tokens,
                 costParts: agg.cost,
-                cost: agg.totalCostUSD)
+                cost: agg.totalCostUSD,
+                pricePendingModels: pricePending.pending(in: [agg.model]))
         }
     }
 
@@ -105,5 +108,9 @@ struct PerModelTodayCard: View {
         // the card kept the previous account after a switch until a scan
         // ingested something, which on an idle machine may be never (#141).
         .onChange(of: scope.accountId) { _, _ in refreshRows() }
+        // A price arriving changes no row's numbers until the next scan, but
+        // the mark must go when it does (and come when a model turns up
+        // without one).
+        .onChange(of: pricePending.models) { _, _ in refreshRows() }
     }
 }

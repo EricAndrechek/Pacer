@@ -109,10 +109,10 @@ final class AppBackgroundService {
     /// budget, which can leave them tens of minutes stale.
     private let widgetRefreshCoordinator = WidgetRefreshCoordinator()
     /// Background task that periodically refreshes the LiteLLM pricing
-    /// snapshot. Independent of the scan loop because its cadence (24h)
-    /// is two orders of magnitude longer than scan cycles (5–60s) and
-    /// entangling them would make the scan path responsible for
-    /// network/CDN fallibility.
+    /// snapshot. Independent of the scan loop because its cadence (24h,
+    /// hourly while a new Claude model has no price) is far longer than
+    /// scan cycles (5–60s) and entangling them would make the scan path
+    /// responsible for network/CDN fallibility.
     private var pricingRefreshTask: Task<Void, Never>?
     /// Gentle backstop that trims unused SwiftData persistent history so
     /// the `ATRANSACTION`/`ACHANGE` log can't grow unbounded over years.
@@ -233,8 +233,11 @@ final class AppBackgroundService {
         guard coordinator != nil else { return }
         Log.write("AppBackground", "stopping")
         arenaGate?.cancel()
-        // The arena scorer's workers stop at their next check; the outcomes so
-        // far are saved, and the next launch resumes after them.
+        // The arena scorer's workers stop at their next check, raised out of
+        // background QoS so a busy Mac runs them; the outcomes back so far are
+        // saved, and the next launch resumes after them. Never more than
+        // `ArenaRuntime.stopBound`: the scan's own flush below matters more
+        // than a worker the Mac is not running (#446).
         await arena?.stop()
         if let coord = coordinator {
             await coord.stop()
@@ -356,88 +359,68 @@ final class AppBackgroundService {
 
     // MARK: - Pricing refresh
 
-    /// 24h cadence for the pricing JSON refresh. LiteLLM ships updates
-    /// frequently but each one only affects costs of *future* samples
-    /// — historical aggregates keep the cost that was current when they
-    /// were computed. Faster cadence isn't worth the bandwidth.
-    private static let pricingRefreshInterval: TimeInterval = 24 * 3600
-    /// How long to wait after a refresh attempt that didn't produce a
-    /// usable snapshot (network down, decode failure, empty result).
-    /// One hour matches typical CDN outage recovery windows.
-    private static let pricingRetryInterval: TimeInterval = 3600
-
+    /// Refresh the pricing catalogs and the curated price history: daily, or
+    /// hourly while a newly used Claude model has no price
+    /// (`PricingRefreshSchedule`, which holds the intervals and why). Each
+    /// turn is `PricingRefreshLoop.tick` and a sleep.
+    ///
+    /// The loop wakes at least hourly to look at the cache's age and the
+    /// unpriced models, so a model that turns up unpriced during a daily wait
+    /// moves it to the hourly cadence within the hour. A pass that installs
+    /// new prices asks the scan for a cycle, which syncs them into the ledger
+    /// and reprices the history they reach, rather than waiting for the next
+    /// transcript change.
     private func startPricingRefreshTask() {
         guard pricingRefreshTask == nil else { return }
         pricingRefreshTask = Task {
-            // Re-check the cache age before every attempt — a previous
-            // run of this task might have refreshed before launch and
-            // a fresh launch shouldn't immediately re-fetch.
+            // The cache age is re-read every turn, so a launch soon after a
+            // refresh does not fetch again.
             while !Task.isCancelled {
-                let age = PricingTable.cacheAge()
-                let stale: Bool
-                switch age {
-                case .none: stale = true
-                case .some(let a): stale = a >= Self.pricingRefreshInterval
-                }
-
-                var refreshed = false
-                if stale {
-                    let count = await PricingTable.shared.modelCount()
-                    let refreshStarted = Date()
-                    refreshed = await PricingTable.shared.refresh()
-                    // Daily at most (an hourly retry on failure).
-                    Telemetry.distribution(
-                        "pricing.refresh_ms", Date().timeIntervalSince(refreshStarted) * 1000,
-                        unit: .millisecond, attributes: ["outcome": .string(refreshed ? "ok" : "failed")])
-                    // The curated price history rides the same cadence; it
-                    // is best-effort and never blocks the catalog refresh.
-                    await CuratedPriceHistory.refresh()
-                    if refreshed {
-                        await SampleCostCache.reload()
-                        let after = await PricingTable.shared.modelCount()
-                        Log.write(
-                            "AppBackground",
-                            "pricing refresh ok: \(count) → \(after) model(s)"
-                        )
-                        // Notify any view bound to the pricing snapshot
-                        // (model breakdowns, per-model today) so it
-                        // re-renders with the new prices for samples
-                        // landing after this point. Existing aggregate
-                        // rows keep the cost that was current when they
-                        // were recomputed. Hop to main because most
-                        // observers register on `.main` and posting off-
-                        // main would deliver on the poster's queue.
-                        await MainActor.run {
-                            NotificationCenter.default.post(
-                                name: .pacerPricingDidRefresh,
-                                object: nil
-                            )
-                        }
-                    }
-                }
-
-                // Compute next-sleep based on whichever path we took:
-                // - successful refresh → full 24h until the next cache
-                //   age check would flag stale
-                // - skipped (cache still fresh) → sleep the remaining
-                //   time until 24h
-                // - failed refresh → retry after 1h
-                let delay: TimeInterval
-                if stale && !refreshed {
-                    delay = Self.pricingRetryInterval
-                } else {
-                    let nextAge = PricingTable.cacheAge() ?? 0
-                    delay = max(60, Self.pricingRefreshInterval - nextAge)
-                }
+                let tick = await PricingRefreshLoop.tick(.init(
+                    cacheAge: { PricingTable.cacheAge() },
+                    hourly: { UnpricedModels.wantsHourlyChecks() },
+                    refresh: { hourly in await self.refreshPricing(hourly: hourly) }))
                 do {
-                    try await Task.sleep(
-                        nanoseconds: UInt64(delay * 1_000_000_000)
-                    )
+                    try await Task.sleep(nanoseconds: UInt64(tick.delay * 1_000_000_000))
                 } catch {
                     return
                 }
             }
         }
+    }
+
+    /// One refresh pass, and what follows from it.
+    private func refreshPricing(hourly: Bool) async -> PricingRefreshPass.Outcome {
+        let count = await PricingTable.shared.modelCount()
+        let outcome = await PricingRefreshPass.run(refreshCatalog: {
+            let refreshStarted = Date()
+            let ok = await PricingTable.shared.refresh()
+            // Daily at most, or hourly while a new model is unpriced or
+            // after a failure.
+            Telemetry.distribution(
+                "pricing.refresh_ms", Date().timeIntervalSince(refreshStarted) * 1000,
+                unit: .millisecond, attributes: ["outcome": .string(ok ? "ok" : "failed")])
+            return ok
+        })
+        if outcome.catalogRefreshed {
+            let after = await PricingTable.shared.modelCount()
+            Log.write("AppBackground", "pricing refresh ok: \(count) → \(after) model(s)"
+                      + (hourly ? " (hourly: a new model has no price)" : ""))
+        } else if outcome.curatedRefreshed {
+            Log.write("AppBackground", "pricing: catalog refresh failed, curated history refreshed")
+        }
+        if outcome.reloaded {
+            // Views bound to the pricing snapshot re-render with the new
+            // prices. Hop to main because most observers register on `.main`
+            // and posting off-main would deliver on the poster's queue.
+            await MainActor.run {
+                NotificationCenter.default.post(name: .pacerPricingDidRefresh, object: nil)
+            }
+        }
+        if outcome.pricesChanged, let coordinator {
+            await coordinator.requestScan()
+        }
+        return outcome
     }
 
     // MARK: - History prune

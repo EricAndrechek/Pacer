@@ -27,6 +27,8 @@ struct ProjectDetailView: View {
     @Query private var globalAggregates: [ProjectDailyAggregate]
     @Query private var scopedAggregates: [AccountProjectDailyAggregate]
     @State private var scope = UsageScope.shared
+    /// Models with no price yet: their rows' costs carry the mark.
+    @State private var pricePending = PricePending.shared
 
     /// Every account, or one — a project's detail should show the same scope
     /// the Projects list you came from was showing.
@@ -239,8 +241,10 @@ struct ProjectDetailView: View {
         d.activeDays = d.dailySeries.count
         d.firstDay = d.dailySeries.first?.id
         d.lastDay = d.dailySeries.last?.id
+        let pending = pricePending.models
         d.modelRows = byModel.map { model, b in
-            DetailModalCards.modelRow(model: model, tokens: b.tokens, costParts: b.cost, cost: b.total)
+            DetailModalCards.modelRow(model: model, tokens: b.tokens, costParts: b.cost, cost: b.total,
+                                      pending: pending)
         }
         cachedDerived = d
         refreshActivity()
@@ -347,7 +351,7 @@ struct ProjectDetailView: View {
         let account = scope.accountId
         let mode = CostMode(rawValue: costModeRaw) ?? .auto
         Task {
-            let load = await Task.detached(priority: .userInitiated) {
+            let load = await RenderReadiness.task("project-detail", priority: .userInitiated) {
                 Self.loadDetail(container: container, projectPath: path,
                                 since: since, accountId: account, mode: mode)
             }.value
@@ -563,7 +567,7 @@ struct ProjectDetailView: View {
         // Keyed on the path and the scan tick: the two inputs that change the answer.
         .task(id: ExistenceKey(path: projectPath, tick: existenceTick)) {
             let path = projectPath
-            let found = await Task.detached(priority: .utility) {
+            let found = await RenderReadiness.task("project-detail", priority: .utility) {
                 FileManager.default.fileExists(atPath: path)
             }.value
             guard !Task.isCancelled else { return }
@@ -584,6 +588,8 @@ struct ProjectDetailView: View {
         // The scope picks which table `aggregates` reads (so the fingerprint
         // follows it) and filters the raw-sample load, which needs telling.
         .onChange(of: scope.accountId) { _, _ in refreshDetail() }
+        // A model gaining its price drops the Models rows' mark.
+        .onChange(of: pricePending.models) { _, _ in refreshDerived() }
         // Live updates within an existing day: the scan coordinator
         // posts `pacerScanCycleDidComplete` whenever a cycle actually
         // wrote new data. Filter to cycles that touched samples or
@@ -679,7 +685,7 @@ struct ProjectDetailView: View {
         let generation = knownPathsGeneration &+ 1
         knownPathsGeneration = generation
         Task {
-            let paths = await Task.detached(priority: .utility) {
+            let paths = await RenderReadiness.task("project-detail", priority: .utility) {
                 Self.loadKnownProjectPaths(container: container)
             }.value
             guard generation == knownPathsGeneration else { return }

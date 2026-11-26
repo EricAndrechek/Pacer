@@ -12,18 +12,30 @@
     "binding": "ASSETS",
     // Astro emits dist/404.html; unknown paths get it with a 404 status.
     "not_found_handling": "404-page",
-    // Everything is a static asset except /download, which the Worker answers
-    // (worker/index.ts). Listing only it keeps every other request off the
-    // Worker entirely. /appcast.xml and /price-history.json are static assets
-    // on purpose (public/): the update feed must never depend on Worker code.
-    "run_worker_first": ["/download", "/download/"],
+    // Everything is a static asset except what is listed here, which reaches
+    // the Worker first (worker/index.ts): /download and /api/feedback, which
+    // the Worker answers, and the update feed and price history, which it only
+    // counts (`feed_request`). Those two are still static assets (public/): the
+    // Worker returns the assets binding's own Response untouched and counts in
+    // ctx.waitUntil, and falls back to the asset if anything of its own throws
+    // (site/README.md, "The Worker"). Listing /appcast.xml puts update checks
+    // under the Workers Free plan's account-wide daily request limit: past it,
+    // these paths answer 429 until 00:00 UTC. 0.9.5+ then reads the feed from
+    // raw.githubusercontent.com; 0.9.4 has no fallback and waits. Accepted by
+    // the owner, 2026-11-25. Every path not listed never runs Worker code.
+    "run_worker_first": ["/download", "/download/", "/api/feedback", "/appcast.xml", "/price-history.json"],
   },
-  // PostHog for /download's one anonymous `website_download` event (worker/index.ts).
+  // PostHog for /download's one anonymous `website_download` event and the
+  // feed's `feed_request` counts (worker/lib.ts).
   // The same project as the app; its token is public by design (it is compiled
   // into the app, project.yml). Empty POSTHOG_TOKEN turns the event off.
+  // SENTRY_DSN: where /api/feedback forwards the app's feedback (worker/feedback.ts).
+  // The app's own DSN (project.yml, PACER_SENTRY_DSN), a public client key by
+  // design: it can only send, not read. Empty turns the endpoint off (503).
   "vars": {
     "POSTHOG_TOKEN": "phc_rCT9m6F6y7DwcDSJ5BgHpZECFyvpmsPoyUiLx5pa693A",
     "POSTHOG_HOST": "https://us.i.posthog.com",
+    "SENTRY_DSN": "https://4538a70956bdb802f903aa6ceba5ba32@o4506596663427072.ingest.us.sentry.io/4512290674049024",
   },
   // Custom domain: the site, and from 0.9.4 the app's update feed (SUFeedURL)
   // and price history. Cloudflare creates the DNS record itself on the first

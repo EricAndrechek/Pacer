@@ -41,7 +41,11 @@ public enum AnalyticsEventName: String, Sendable, CaseIterable {
     case detailOpened = "detail_opened"
     case controlChanged = "control_changed"
     case exportUsed = "export_used"
+    /// The Send Feedback window opened. Named for the window's old title,
+    /// "Report a Problem", and kept so its series (and the PostHog insight on
+    /// it) carries on.
     case reportProblemOpened = "report_problem_opened"
+    case feedbackSent = "feedback_sent"
     case updateInstalled = "update_installed"
     case settingChanged = "setting_changed"
     // Menu bar

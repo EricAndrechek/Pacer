@@ -303,6 +303,12 @@ public final class ScanCoordinator {
         /// ended, any rebuild in it included: what launch work that should not
         /// compete with the first cycle waits for (`ArenaStartGate`).
         public var onFirstCycleEnded: (@Sendable () -> Void)?
+        /// Told the models with usage and no price (`UnpricedModels.State`)
+        /// after the first cycle's save and after any cycle that changed
+        /// them: `UnpricedModels.publish` (the "price pending" mark, the
+        /// hourly price checks, the Sentry report) unless a test passes its
+        /// own.
+        public var onUnpricedModels: @Sendable (UnpricedModels.State) -> Void
 
         public init(
             costMode: CostMode = .auto,
@@ -313,7 +319,8 @@ public final class ScanCoordinator {
             bulkImporter: BulkTranscriptImporter? = nil,
             desktopSessions: DesktopSessionDirectory? = .shared,
             loginMarker: DefaultLoginMarkerPublisher = DefaultLoginMarkerPublisher(),
-            onFirstCycleEnded: (@Sendable () -> Void)? = nil
+            onFirstCycleEnded: (@Sendable () -> Void)? = nil,
+            onUnpricedModels: @escaping @Sendable (UnpricedModels.State) -> Void = { UnpricedModels.publish($0) }
         ) {
             self.costMode = costMode
             self.watcherMode = watcherMode
@@ -324,6 +331,7 @@ public final class ScanCoordinator {
             self.desktopSessions = desktopSessions
             self.loginMarker = loginMarker
             self.onFirstCycleEnded = onFirstCycleEnded
+            self.onUnpricedModels = onUnpricedModels
         }
     }
 
@@ -565,6 +573,13 @@ public final class ScanCoordinator {
     /// used to wipe the marks, and in which a failure used to lose them.
     /// Tests hold the cycle open here, or throw. `nil` in the app.
     var beforeRecomputeHook: (@ScanActor () async throws -> Void)?
+
+    /// Test seam: runs at the start of the startup stale-cursor prune. The
+    /// OAuth poller must already be reading by then (#463). `nil` in the app.
+    var beforeStartupPruneHook: (@ScanActor () async throws -> Void)?
+    /// Test seam: runs right after the prune, before the first cycle (whose
+    /// cost-recompute rebuild may clear every cursor anyway). `nil` in the app.
+    var afterStartupPruneHook: (@ScanActor () async throws -> Void)?
 
     /// Whether a scan cycle or an alias migration currently owns the
     /// persister's dirty sets, and who is queued behind it.
@@ -1070,24 +1085,6 @@ public final class ScanCoordinator {
         resolvedRoots = try resolveAllRoots()
         let stream = await watcher.triggers()
         if await abandonIfStopped() { return }
-        // One-shot stale-cursor prune: walk the JSONLFileCursor table
-        // and drop rows whose paths no longer exist on disk. On the
-        // live machine the table had drifted to 1072 cursors vs ~900
-        // real JSONL files — 170+ stale rows that the cache (kept
-        // hot per-cycle) was paying memory + iteration cost on. Disk
-        // failures (e.g. transient network home dir) won't drop
-        // active cursors because Claude Code's `~/.claude` is a local
-        // path; the next genuine FSEvent for a path we deleted will
-        // simply re-create the cursor at offset 0 (correct: we'd be
-        // seeing a new file).
-        do {
-            let pruned = try pruneStaleCursors()
-            if pruned > 0 {
-                log("startup: pruned \(pruned) stale JSONLFileCursor row(s)")
-            }
-        } catch {
-            log("startup: stale-cursor prune failed: \(error)")
-        }
         // The poller and the watcher start BEFORE the first cycle (#328).
         // Neither needs it: the poller owns its own context and cadence, and
         // the watcher only records which transcripts changed. Started after
@@ -1134,6 +1131,30 @@ public final class ScanCoordinator {
         // seen during the first cycle queues behind it (`followLoginChange`).
         startLoginWatcher()
 
+        // Last, after the poller and LoginWatch (#463): the prune is a full-table
+        // fetch plus a stat of every path, milliseconds on an idle Mac and ~37 s
+        // on a starved `.utility` actor, and with it ahead of them the first
+        // usage reading came 46 s after launch. Same rows pruned, same log line.
+        // One-shot stale-cursor prune: walk the JSONLFileCursor table
+        // and drop rows whose paths no longer exist on disk. On the
+        // live machine the table had drifted to 1072 cursors vs ~900
+        // real JSONL files — 170+ stale rows that the cache (kept
+        // hot per-cycle) was paying memory + iteration cost on. Disk
+        // failures (e.g. transient network home dir) won't drop
+        // active cursors because Claude Code's `~/.claude` is a local
+        // path; the next genuine FSEvent for a path we deleted will
+        // simply re-create the cursor at offset 0 (correct: we'd be
+        // seeing a new file).
+        do {
+            try await beforeStartupPruneHook?()
+            let pruned = try pruneStaleCursors()
+            if pruned > 0 {
+                log("startup: pruned \(pruned) stale JSONLFileCursor row(s)")
+            }
+            try await afterStartupPruneHook?()
+        } catch {
+            log("startup: stale-cursor prune failed: \(error)")
+        }
         do {
             let report = try await runScanCycle()
             log("startup: \(formatReport(report))")
@@ -1184,6 +1205,15 @@ public final class ScanCoordinator {
         // is what the store holds, not those (#395).
         persister?.writeDedupIndexIfNeeded(force: true)
         await stopRunningParts()
+    }
+
+    /// Run a cycle now, for a change no transcript shows: new prices, which
+    /// the next cycle syncs into the ledger and reprices history with. On a
+    /// quiet machine the next cycle is otherwise the backstop's. Buffered
+    /// like a login switch's (`JSONLWatcher.requestScan`); a no-op before
+    /// `runForever` has started the watcher.
+    public func requestScan() async {
+        await watcher.requestScan()
     }
 
     /// Set by `stop()`, and never cleared: a stopped coordinator stays
@@ -2199,6 +2229,10 @@ public final class ScanCoordinator {
         if configuration.costMode != .display {
             rebuildStep(.updatingPrices)
             try await reconcilePriceLedger(persister: activePersister)
+        } else {
+            // Display mode shows Claude Code's own cost and prices nothing,
+            // so no cost is waiting on a price.
+            unpricedToPublish = UnpricedModels.State.empty
         }
         try saveCursors(result.updatedCursors)
         phase.saveCursorsMs = tickMs()
@@ -2475,6 +2509,12 @@ public final class ScanCoordinator {
         }
         // After the save, so the login the marker names is in the store (#343).
         configuration.loginMarker.publish(recorder.trail().currentDefaultLogin)
+        // After the save too: a model that gained its price had its buckets
+        // rebuilt this cycle, and its mark must not go before they commit.
+        if let state = unpricedToPublish {
+            unpricedToPublish = nil
+            publishUnpriced(state)
+        }
         // Only now: the rebuilt rollups are committed, so the marks are spent.
         // A throw anywhere above leaves them for the next cycle.
         activePersister.clearDirtyPairs()
@@ -2824,8 +2864,11 @@ public final class ScanCoordinator {
     /// across cycles, and a model that leaves it takes its history with it.
     private func reconcilePriceLedger(persister: SamplePersister) async throws {
         var models = FetchDescriptor<DailyAggregate>()
-        models.propertiesToFetch = [\.model]
-        let used = Set(try context.fetch(models).map(\.model))
+        // Date and cost for `UnpricedModels.State` (first day, $0 or not),
+        // read only for unpriced models' rows.
+        models.propertiesToFetch = [\.model, \.date, \.totalCostUSD]
+        let rows = try context.fetch(models)
+        let used = Set(rows.map(\.model))
 
         let generation = SampleCostCache.catalogGeneration
         if ledgerSyncedAtCatalogGeneration != generation || !SampleCostCache.hasLedgerFromStore {
@@ -2850,12 +2893,15 @@ public final class ScanCoordinator {
             }
         }
 
-        guard !used.isEmpty else { return }
+        guard !used.isEmpty else {
+            unpricedToPublish = UnpricedModels.State.empty
+            return
+        }
         let ledger = SampleCostCache.current().ledger
         let unpriced = used.filter { !ledger.isPriced($0) }
-        let previously: Set<String> = (try fetchMeta(ClaudeCodeMetaKey.unpricedModels))
-            .flatMap { Data($0.utf8) }
-            .flatMap { try? JSONDecoder().decode(Set<String>.self, from: $0) } ?? []
+        let previously = UnpricedModels.decode(try fetchMeta(ClaudeCodeMetaKey.unpricedModels))
+        unpricedToPublish = UnpricedModels.State(
+            unpriced: unpriced, rows: rows.lazy.map { (model: $0.model, date: $0.date, cost: $0.totalCostUSD) })
 
         // Left the unpriced set => gained a price. Its buckets carry a
         // `none|…` token, so the ledger change above already queued exactly
@@ -2876,6 +2922,22 @@ public final class ScanCoordinator {
                 log("pricing: no price yet for \(unpriced.sorted().joined(separator: ", ")) — cost reads low until there is")
             }
         }
+    }
+
+    /// The state last handed to `configuration.onUnpricedModels`; nil until
+    /// the first cycle of this coordinator, which always hands it over (a
+    /// launch starts with nothing published).
+    private var publishedUnpriced: UnpricedModels.State?
+    /// What this cycle's reconcile found, handed on after the cycle's save.
+    private var unpricedToPublish: UnpricedModels.State?
+
+    /// Hand the state on when it differs from the last one handed on: a
+    /// comparison per cycle, and a call only when a model loses or gains its
+    /// price (or its cost).
+    private func publishUnpriced(_ state: UnpricedModels.State) {
+        guard publishedUnpriced != state else { return }
+        publishedUnpriced = state
+        configuration.onUnpricedModels(state)
     }
 
     /// Queue for a from-scratch rebuild every bucket a price change reaches

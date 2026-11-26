@@ -18,6 +18,8 @@ struct DayDetailView: View {
     @Query private var globalAggregates: [DailyAggregate]
     @Query private var scopedAggregates: [AccountDailyAggregate]
     @State private var scope = UsageScope.shared
+    /// Models with no price yet: their rows' costs carry the mark.
+    @State private var pricePending = PricePending.shared
 
     /// Every account, or one — drilling into a day should show the same
     /// scope the chart you clicked was showing.
@@ -144,6 +146,7 @@ struct DayDetailView: View {
     @MainActor
     private func refreshCache() {
         let rows = aggregates
+        let pending = pricePending.models
         // An hour counts when it had a turn: its samples, or its tokens for a
         // row written before the per-account rollup kept a sample count.
         var active: Set<Int> = []
@@ -174,7 +177,7 @@ struct DayDetailView: View {
             hourHelp: pacerActivityCellHelp(activity, currentYear: year),
             modelRows: rows.map {
                 DetailModalCards.modelRow(model: $0.model, tokens: $0.tokens, costParts: $0.cost,
-                                          cost: $0.totalCostUSD)
+                                          cost: $0.totalCostUSD, pending: pending)
             },
             projectRows: projectRows
         )
@@ -243,6 +246,8 @@ struct DayDetailView: View {
         // old account while the live Sessions list moved to the new one
         // (#141).
         .onChange(of: scope.accountId) { _, _ in refreshCache() }
+        // A model gaining its price drops the Models rows' mark.
+        .onChange(of: pricePending.models) { _, _ in refreshCache() }
     }
 
     /// The first card: the day's cost, three counts, and its hours as a

@@ -93,6 +93,68 @@ import Testing
         #expect(readings.value > 0, "no rate-limit reading landed while the first cycle ran")
     }
 
+    /// The startup prune is a full-table fetch that starved a loaded Mac for
+    /// ~37 s (#463). Held open at its start, a reading must already land: the
+    /// poller starts before it.
+    @ScanActor
+    @Test func theOAuthPollerReadsWhileTheStartupPruneWaits() async throws {
+        let r = try root(files: ["a.jsonl": [line("1", at: "2026-04-30T12:00:00.000Z")]])
+        defer { try? FileManager.default.removeItem(at: r) }
+        let container = try PacerStore.makeInMemoryContainer()
+        let coordinator = ScanCoordinator(
+            container: container,
+            configuration: .init(costMode: .display, watcherMode: .manual, probeStatsCache: false),
+            resolver: ClaudePathResolver(environment: ["CLAUDE_CONFIG_DIR": r.path]),
+            oauthClient: try stubClient())
+        let readings = Box(0), reached = Box(false)
+        coordinator.beforeStartupPruneHook = {
+            defer { reached.value = true }
+            _ = await eventually {
+                readings.value = (try? ModelContext(container)
+                    .fetchCount(FetchDescriptor<RateLimitSample>())) ?? 0
+                return readings.value > 0
+            }
+        }
+        let run = Task { try await coordinator.runForever() }
+        let reachedHook = await eventually { reached.value }
+        let stopped = try await stopAndAwait(coordinator, running: run)
+        #expect(stopped, "stop() or runForever didn't return")
+        #expect(reachedHook, "startup never reached the prune")
+        #expect(readings.value > 0, "no rate-limit reading landed while the prune waited")
+    }
+
+    /// Moving the prune behind the poller (#463) changes when it runs, not what
+    /// it removes: a cursor whose file is gone is dropped before the first
+    /// cycle.
+    @ScanActor
+    @Test func theStartupPruneStillDropsCursorsOfDeletedFiles() async throws {
+        let r = try root(files: ["a.jsonl": [line("1", at: "2026-04-30T12:00:00.000Z")]])
+        defer { try? FileManager.default.removeItem(at: r) }
+        let container = try PacerStore.makeInMemoryContainer()
+        let gone = r.appendingPathComponent("deleted.jsonl").path
+        do {
+            let seed = ModelContext(container)
+            seed.insert(JSONLFileCursor(path: gone, byteOffset: 10, lastSeenMtime: Date()))
+            try seed.save()
+        }
+        let coordinator = ScanCoordinator(
+            container: container,
+            configuration: .init(costMode: .display, watcherMode: .manual, probeStatsCache: false),
+            resolver: ClaudePathResolver(environment: ["CLAUDE_CONFIG_DIR": r.path]))
+        let atFirstCycle = Box<[String]>([]), reached = Box(false)
+        coordinator.afterStartupPruneHook = {
+            atFirstCycle.value = ((try? ModelContext(container).fetch(FetchDescriptor<JSONLFileCursor>())) ?? [])
+                .map(\.path)
+            reached.value = true
+        }
+        let run = Task { try await coordinator.runForever() }
+        let ran = await eventually { reached.value }
+        let stopped = try await stopAndAwait(coordinator, running: run)
+        #expect(stopped, "stop() or runForever didn't return")
+        #expect(ran)
+        #expect(!atFirstCycle.value.contains(gone), "the stale cursor survived the prune")
+    }
+
     /// What the grader waits for (`ArenaStartGate`): told once, after the first
     /// cycle's rollups, whatever else the loop does.
     @ScanActor

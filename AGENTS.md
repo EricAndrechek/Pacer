@@ -233,10 +233,16 @@ These are subtle, easy to miss, and break user-visible numbers:
   sanity-check probe.
 - **Do not move the update feed, or edit it anywhere but `main`.** The
   feed and the price history are `site/public/appcast.xml` and
-  `site/public/price-history.json` on `main`, static files of the site at
+  `site/public/price-history.json` on `main`, served by the site at
   `https://pacer.andrechek.com/` (Pacer 0.9.4 and later read them:
   `SUFeedURL`, `CuratedPriceHistory.remoteURL`, pinned by
-  `FeedLocationTests`). Releases write them (`bin/publish-feeds.sh`);
+  `FeedLocationTests`). Both files' requests run the site's Worker, which
+  counts them and returns the file as the assets layer answers it, untouched
+  (`site/README.md`, "The Worker"). That puts update checks under the Workers
+  Free plan's account-wide daily request limit: past it, they get 429 until
+  00:00 UTC; 0.9.5 and later then read `main` on raw.githubusercontent.com,
+  0.9.4 has no fallback (accepted by the owner, 2026-11-25).
+  Releases write them (`bin/publish-feeds.sh`);
   `gh-pages` is only a byte-for-byte mirror for 0.9.3 and earlier. A Pacer
   pointed at a feed that stops getting releases is stranded for good, so a
   new `SUFeedURL` needs a migration plan of its own
@@ -262,7 +268,10 @@ promise). Read this before adding any signal.
   class). Usage levels go in bands (`TelemetryBands`).
 - **Everything leaving goes through `TelemetryScrubber`.** The send hooks in
   `TelemetryController`, `AnalyticsPayload` and the CLI's feedback path apply
-  it; do not add a send path that skips it.
+  it; do not add a send path that skips it. The one exception is the Send
+  Feedback window's message and email: the person's own words, sent on their
+  click to the site's endpoint, so only credentials come out
+  (`FeedbackRedactor`; owner's decision, 2026-11-25).
 - **Only the user's own app sends.** `LaunchMode.isNormalLaunch` gates it:
   screenshot, render, probe and self-test runs, tests, and `PACER_TELEMETRY=off`
   never start Sentry. A new diagnostic mode goes in `LaunchMode`, nowhere else.

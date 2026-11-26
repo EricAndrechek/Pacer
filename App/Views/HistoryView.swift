@@ -335,7 +335,7 @@ private struct LifetimeSummaryContent: View {
         Task {
             // Its own context, off the main actor: reading a lifetime of
             // project-day rows faults every one of them.
-            let projects = await Task.detached(priority: .utility) {
+            let projects = await RenderReadiness.task("history.projects", priority: .utility) {
                 RangeActivityCounts.projects(ModelContext(container), since: since, accountId: account)
             }.value
             counts.projects = projects

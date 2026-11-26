@@ -19,6 +19,14 @@ import PacerCore
 /// (`LiveMeterBoard.buildOnce`), so every page shows the estimates the app
 /// would, not bare readings. The `menu` page is the menu bar's dropdown.
 ///
+/// Two pages do not depend on the scope and are drawn once per run, in each
+/// state they have: `sidebar` (the window's sidebar, its footer up to date,
+/// downloading and ready to install; `PACER_RENDER_UPDATE_STATE`, e.g.
+/// `ready:0.9.5` or `downloading:0.9.5,failed`, names the states instead;
+/// the first and last also in light, the last also at the sidebar's narrowest)
+/// and `feedback` (the Send Feedback window: each kind, a failed send with the
+/// GitHub fallback, filled in with attachments, sent, and two in light).
+///
 /// Run it alongside the live app:
 ///
 ///     PACER_SCREENSHOT_MODE=1 PACER_RENDER_LIVE=auto \
@@ -26,6 +34,11 @@ import PacerCore
 ///
 /// `auto` means all-accounts plus every account. Or name scopes explicitly:
 /// `PACER_RENDER_LIVE=all,<accountId>`.
+///
+/// `PACER_RENDER_UNPRICED=<model>[,<model>…]` (make: `UNPRICED=`) draws those
+/// raw model ids as having no price yet, beside the ones the store says have
+/// none, so the "price pending" mark can be looked at on real rows: e.g.
+/// `make render-live SCOPES=all PAGES=dashboard,models UNPRICED=claude-opus-4-7`.
 ///
 /// Safety, in order of how badly each would go wrong:
 ///
@@ -64,6 +77,12 @@ enum LiveRenderMode {
         /// The menu bar's dropdown: the SwiftUI content of the status menu
         /// (`MenuStatusContent`), without the native items below it.
         case menu
+        /// The window's sidebar with its footer, once per update state
+        /// (`variants`).
+        case sidebar
+        /// The Send Feedback window, once per kind and once after a failed
+        /// send (`variants`).
+        case feedback
 
         /// Wide enough that the balanced grids take their many-column layout —
         /// a narrow render exercises a fallback the user is not looking at.
@@ -79,6 +98,46 @@ enum LiveRenderMode {
                 return 760
             case .modelInfo: return 1040
             case .menu: return MenuStatusContent.popoverWidth
+            // The sidebar's ideal width (`DashboardSidebar`).
+            case .sidebar: return 230
+            case .feedback: return 480
+            }
+        }
+
+        /// The states a scope-independent page is drawn in, each as its own
+        /// PNG (`live-<page>-<suffix>.png`); nil for every other page, which
+        /// is drawn once per scope.
+        @MainActor var variants: [(suffix: String, scheme: ColorScheme, view: AnyView)]? {
+            switch self {
+            case .sidebar:
+                let states = LiveRenderMode.updateStates
+                // Every state in dark, then the two ends of the footer in
+                // light, and the ready state at the narrowest the sidebar
+                // drags to, where the version takes a shorter form.
+                return states.map { state in
+                    (state.token, .dark, AnyView(SidebarRender(state: state)))
+                } + [states.first, states.last].compactMap { $0 }.map { state in
+                    ("\(state.token)-light", .light, AnyView(SidebarRender(state: state)))
+                } + [states.last].compactMap { $0 }.map { state in
+                    ("\(state.token)-narrow", .dark, AnyView(SidebarRender(state: state, width: 166)))
+                }
+            case .feedback:
+                func window(_ view: FeedbackView) -> AnyView {
+                    // Its title bar is empty and transparent: the same gap.
+                    AnyView(view.padding(.top, 28).background(Color(nsColor: .windowBackgroundColor)))
+                }
+                let failed = FeedbackView.Phase.failed(FeedbackCopy.failure(.failed(status: 502)) ?? "")
+                var all: [(String, ColorScheme, AnyView)] = FeedbackKind.allCases.map { kind in
+                    (kind.rawValue, .dark, window(FeedbackView(kind: kind, onClose: {})))
+                }
+                all.append(("failed", .dark, window(FeedbackView(kind: .problem, phase: failed, onClose: {}))))
+                all.append(("filled", .dark, window(FeedbackView(kind: .problem, sample: true, onClose: {}))))
+                all.append(("sent", .dark, window(FeedbackView(phase: .sent, onClose: {}))))
+                all.append(("idea-light", .light, window(FeedbackView(kind: .idea, onClose: {}))))
+                all.append(("filled-light", .light, window(FeedbackView(kind: .problem, sample: true, onClose: {}))))
+                return all
+            default:
+                return nil
             }
         }
 
@@ -128,6 +187,9 @@ enum LiveRenderMode {
                         RoundedRectangle(cornerRadius: 10, style: .continuous)
                             .strokeBorder(Color.primary.opacity(0.1), lineWidth: 1)
                     )
+            case .sidebar, .feedback:
+                // Drawn through `variants`, never here.
+                EmptyView()
             case .modelInfo:
                 VStack(alignment: .leading, spacing: 0) {
                     Text("5-hour").font(.headline).padding(.horizontal, 16).padding(.top, 16)
@@ -139,6 +201,28 @@ enum LiveRenderMode {
                 }
             }
         }
+    }
+
+    /// The update states the `sidebar` page is drawn in: up to date,
+    /// downloading and ready by default (checking and a failed check look like
+    /// up to date there), or what `PACER_RENDER_UPDATE_STATE` names.
+    static var updateStates: [UpdateState] {
+        let raw = ProcessInfo.processInfo.environment["PACER_RENDER_UPDATE_STATE"] ?? ""
+        let named = raw.split(separator: ",").compactMap { UpdateState(override: String($0)) }
+        if !named.isEmpty { return named }
+        let next = sampleNextVersion(after: UpdateStatus.currentVersion)
+        return [.upToDate, .downloading(version: next), .readyToInstall(version: next)]
+    }
+
+    /// A version for the default renders to offer: the next patch of this
+    /// build's, or of the last release when this is a dev build.
+    private static func sampleNextVersion(after label: AppVersionLabel) -> String {
+        guard case .release(let version) = label.kind else { return "0.9.5" }
+        var parts = version.split(separator: ".").compactMap { Int($0) }
+        guard parts.count >= 2 else { return "0.9.5" }
+        if parts.count == 2 { parts.append(0) }
+        parts[parts.count - 1] += 1
+        return parts.map(String.init).joined(separator: ".")
     }
 
     static var pages: [Page] {
@@ -166,11 +250,25 @@ enum LiveRenderMode {
             configurations: ModelConfiguration(url: try PacerStore.storeURL(), allowsSave: false))
     }
 
+    /// Models to draw as unpriced on top of the store's, from
+    /// `PACER_RENDER_UNPRICED`.
+    static var forcedUnpriced: Set<String> {
+        let raw = ProcessInfo.processInfo.environment["PACER_RENDER_UNPRICED"] ?? ""
+        return Set(raw.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty })
+    }
+
     static func run(container: ModelContainer) async {
         let context = ModelContext(container)
         let host = EngineHost(container: container)
         let targets = scopes(in: context)
         log("rendering \(targets.count) scope(s) → \(ScreenshotMode.outputDirectory.path)")
+
+        // No scan runs here to publish the unpriced set, so take the one the
+        // app's last reconcile stored, plus any forced for a look at the mark.
+        let unpriced = UnpricedModels.stored(in: context).union(forcedUnpriced)
+        PricePending.shared.update(unpriced)
+        if !unpriced.isEmpty { log("price pending: \(unpriced.sorted().joined(separator: ", "))") }
 
         // Warm every engine the store has, not just the requested scopes. In
         // parallel mode the pace card asks *each account's* engine even when
@@ -194,7 +292,7 @@ enum LiveRenderMode {
         log("live meter: \(live.values.reduce(0) { $0 + $1.values.filter(\.isEstimate).count }) estimate(s) "
             + "across \(live.count) account(s)")
 
-        for target in targets {
+        for (index, target) in targets.enumerated() {
             UsageScope.shared.selectEphemeral(target.accountId)
             // Warm this scope's engine before drawing, or every engine-powered
             // caption renders its "warming up" state and the render says
@@ -205,6 +303,18 @@ enum LiveRenderMode {
             // user can see, including the parts nobody has thought to suspect.
             // `PACER_RENDER_PAGES` narrows it when iterating on one.
             for page in pages {
+                if let variants = page.variants {
+                    // The same in every scope: drawn with the first only.
+                    guard index == 0 else { continue }
+                    for variant in variants {
+                        await OffscreenRenderer.render(
+                            name: "live-\(page.rawValue)-\(variant.suffix)",
+                            width: page.width, scheme: variant.scheme,
+                            container: container, engines: host
+                        ) { variant.view }
+                    }
+                    continue
+                }
                 await OffscreenRenderer.render(
                     name: "live-\(page.rawValue)-\(target.label)",
                     width: page.width, scheme: .dark,
@@ -213,11 +323,31 @@ enum LiveRenderMode {
             }
         }
         UsageScope.shared.selectEphemeral(UsageScope.storedAccountId)
+        UpdateStatus.shared.forced = nil
         log("done")
     }
 
     private static func log(_ message: String) {
         // lint:allow stderr-write diagnostic mode only (never the user's app): its output is the terminal that started the run
         FileHandle.standardError.write(Data("[Pacer live-render] \(message)\n".utf8))
+    }
+}
+
+/// The sidebar as the window draws it, with its footer forced into one update
+/// state. At the window's minimum height, on the window background: the split
+/// view's sidebar material is not drawn off-screen.
+private struct SidebarRender: View {
+    let state: UpdateState
+    /// Narrower than the page, to draw the sidebar dragged in.
+    var width: CGFloat?
+    @State private var selection: ContentView.Destination = .dashboard
+
+    var body: some View {
+        DashboardSidebar(selection: $selection)
+            .frame(width: width, height: 620)
+            .background(Color(nsColor: .windowBackgroundColor))
+            // Set as the view appears, so each variant draws its own state
+            // (the renderer draws them one after another).
+            .onAppear { UpdateStatus.shared.forced = state }
     }
 }

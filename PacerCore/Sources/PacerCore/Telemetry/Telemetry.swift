@@ -72,7 +72,17 @@ public enum Telemetry {
         /// a name) with enumerable attributes, such as an error's domain and
         /// code. Sentry: an error event under the crash-reports toggle and the
         /// daily error cap; strings and bools become tags, numbers extra data.
-        func problem(_ message: String, attributes: Attributes)
+        ///
+        /// `fingerprint`, when given, decides which issue the event joins
+        /// instead of Sentry's own grouping (which, for a message event, is
+        /// the message): our own enumerable parts, such as
+        /// `["unpriced-model", <model id>]`, so one cause on every Mac is one
+        /// issue and two causes sharing a message are two.
+        ///
+        /// Returns whether the event was taken for sending: the toggle on and
+        /// the day's error budget with room. A caller that sends something
+        /// once ("once per Mac") marks it sent only on true.
+        func problem(_ message: String, attributes: Attributes, fingerprint: [String]?) -> Bool
     }
 
     struct NoSink: Sink {
@@ -81,7 +91,7 @@ public enum Telemetry {
         func gauge(_ key: String, _ value: Double, unit: Unit, attributes: Attributes) {}
         func span(_ span: Span) {}
         func breadcrumb(_ category: String, _ message: String) {}
-        func problem(_ message: String, attributes: Attributes) {}
+        func problem(_ message: String, attributes: Attributes, fingerprint: [String]?) -> Bool { false }
     }
 
     private static let installed = Mutex<any Sink>(NoSink())
@@ -106,7 +116,39 @@ public enum Telemetry {
     public static func breadcrumb(_ category: String, _ message: String) {
         sink.breadcrumb(category, message)
     }
-    public static func problem(_ message: String, attributes: Attributes = [:]) {
-        sink.problem(message, attributes: attributes)
+    /// False when nothing will be sent: no sink (tests, the widget, the CLI,
+    /// diagnostic launches), crash reports off, or the error budget spent.
+    @discardableResult
+    public static func problem(_ message: String, attributes: Attributes = [:],
+                               fingerprint: [String]? = nil) -> Bool {
+        sink.problem(message, attributes: attributes, fingerprint: fingerprint)
+    }
+
+    /// A problem as the Sentry event's fields, apart from the SDK so the
+    /// mapping is tested: the message, strings and bools as tags (searchable,
+    /// few values), numbers as extra data (a duration does not spawn a tag
+    /// value per event), and the fingerprint, every string scrubbed.
+    public struct ProblemFields: Equatable, Sendable {
+        public let message: String
+        public let tags: [String: String]
+        public let extra: [String: Value]
+        public let fingerprint: [String]?
+
+        public init(_ message: String, attributes: Attributes, fingerprint: [String]?) {
+            self.message = TelemetryScrubber.scrub(message)
+            var tags: [String: String] = [:]
+            var extra: [String: Value] = [:]
+            for (key, value) in attributes {
+                switch value {
+                case .string(let s): tags[key] = TelemetryScrubber.scrub(s)
+                case .bool(let b): tags[key] = b ? "true" : "false"
+                case .int: extra[key] = value
+                case .double(let d): if d.isFinite { extra[key] = value }
+                }
+            }
+            self.tags = tags
+            self.extra = extra
+            self.fingerprint = fingerprint.flatMap { $0.isEmpty ? nil : $0.map { TelemetryScrubber.scrub($0) } }
+        }
     }
 }

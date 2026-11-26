@@ -138,6 +138,9 @@ public struct PacerShareListData<Extra: PacerUsageExtra> {
         public let tokens: TokenBreakdown
         public let costParts: CostComponents
         public let cost: Double
+        /// The folded rows' models with no price yet, so the tail's cost
+        /// carries the mark its rows would have.
+        public var pricePendingModels: [String] = []
     }
 
     /// - `maxSlices`: rows with a wedge, and a line, of their own; the rest
@@ -161,13 +164,15 @@ public struct PacerShareListData<Extra: PacerUsageExtra> {
             var tokens = TokenBreakdown.zero
             var parts = CostComponents.zero
             var cost: Double = 0
+            var pending: Set<String> = []
             for row in tail {
                 tokens += row.tokens
                 parts += row.costParts
                 cost += row.cost
+                pending.formUnion(row.pricePendingModels)
             }
             other = Other(label: "\(tail.count) others", count: tail.count, tokens: tokens,
-                          costParts: parts, cost: cost)
+                          costParts: parts, cost: cost, pricePendingModels: pending.sorted())
         } else {
             other = nil
         }
@@ -420,7 +425,8 @@ public struct PacerShareList<Extra: PacerUsageExtra>: View {
     @ViewBuilder
     private func line(_ row: PacerUsageRow<Extra>, columns: [PacerShareListColumn], labelWidth: CGFloat) -> some View {
         let content = lineContent(color: row.color ?? .gray, label: row.label, help: row.subtitle ?? row.label,
-                                  breakdown: row.breakdown, columns: columns, labelWidth: labelWidth) { column in
+                                  breakdown: row.breakdown, pricePending: row.pricePendingModels,
+                                  columns: columns, labelWidth: labelWidth) { column in
             data.cell(column, row: row)
         }
         if let onOpen {
@@ -434,6 +440,7 @@ public struct PacerShareList<Extra: PacerUsageExtra>: View {
                            labelWidth: CGFloat) -> some View {
         lineContent(color: .secondary, label: other.label, help: other.label,
                     breakdown: CostBreakdown(cost: other.costParts, tokens: other.tokens),
+                    pricePending: other.pricePendingModels,
                     columns: columns, labelWidth: labelWidth) { column in
             data.otherCell(column, other)
         }
@@ -441,6 +448,7 @@ public struct PacerShareList<Extra: PacerUsageExtra>: View {
     }
 
     private func lineContent(color: Color, label: String, help: String, breakdown: CostBreakdown,
+                             pricePending: [String],
                              columns: [PacerShareListColumn], labelWidth: CGFloat,
                              cell: @escaping (PacerShareListColumn) -> PacerUsageCellText) -> some View {
         let sorted = data.sort.column
@@ -458,15 +466,22 @@ public struct PacerShareList<Extra: PacerUsageExtra>: View {
                 } else {
                     let text = cell(column)
                     let emphasised = column.id == sorted
-                    Text(text.text)
-                        .font(emphasised
-                              ? .system(size: 12, weight: .semibold, design: .rounded)
-                              : .system(size: 12))
-                        .foregroundStyle(emphasised ? Color.primary : Color.secondary)
-                        .monospacedDigit()
-                        .lineLimit(1)
-                        .frame(maxWidth: .infinity, alignment: .trailing)
-                        .help(text.help)
+                    HStack(spacing: 3) {
+                        // Before the number, as in the usage table, so the
+                        // numbers' trailing edges stay aligned.
+                        if column.kind == .usage(.cost) { PacerPricePendingMark(models: pricePending) }
+                        Text(text.text)
+                            .font(emphasised
+                                  ? .system(size: 12, weight: .semibold, design: .rounded)
+                                  : .system(size: 12))
+                            .foregroundStyle(emphasised ? Color.primary : Color.secondary)
+                            .monospacedDigit()
+                            .lineLimit(1)
+                    }
+                    // The whole cell, as before the mark: every list's
+                    // tooltip area. The mark's own tooltip sits inside it.
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                    .help(text.help)
                 }
             }
         }
