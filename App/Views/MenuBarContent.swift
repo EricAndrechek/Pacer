@@ -494,7 +494,10 @@ struct MenuBarLabel: View {
         // keys stay put, so neither load restarts. Same view, same identity:
         // the status item keeps what it showed until the process ends.
         let pass = frozen.resolve(isTerminating: TerminationGate.shared.isTerminating) {
-            Pass(usageKey: usageKey, limitsKey: limitsKey, rendered: rendered, readingTimes: readingTimes)
+            // `self.`: the locals below share these names, and Swift 6.2 (Xcode 26)
+            // resolves them to those locals here, a circular reference.
+            Pass(usageKey: self.usageKey, limitsKey: self.limitsKey,
+                 rendered: self.rendered, readingTimes: self.readingTimes)
         }
         let usageKey = pass.usageKey
         let limitsKey = pass.limitsKey
