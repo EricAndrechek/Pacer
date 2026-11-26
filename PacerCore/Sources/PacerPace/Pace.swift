@@ -2033,7 +2033,7 @@ final class PaceRun {
             entry["lastVerdict"] = verdict ?? String(decoding: data, as: UTF8.self)
         }
         let inbox = "\(env["HOME"] ?? NSHomeDirectory())/.claude/pace/feedback.jsonl"
-        guard let json = try? JSONSerialization.data(withJSONObject: entry, options: [.sortedKeys, .withoutEscapingSlashes]),
+        guard let json = SafeJSON.data(entry, options: [.sortedKeys, .withoutEscapingSlashes]),
               Self.append(Data(json + [UInt8(ascii: "\n")]), to: inbox) else {
             try die("could not write \(inbox)")
         }

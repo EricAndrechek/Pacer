@@ -54,9 +54,9 @@ public enum SentryEnvelope {
     }
 
     private static func envelope(eventId: String, type: String, payload: [String: Any]) -> Data? {
-        guard let body = try? JSONSerialization.data(withJSONObject: payload),
-              let header = try? JSONSerialization.data(withJSONObject: ["event_id": eventId]),
-              let item = try? JSONSerialization.data(withJSONObject: ["type": type, "length": body.count])
+        guard let body = SafeJSON.data(payload),
+              let header = SafeJSON.data(["event_id": eventId]),
+              let item = SafeJSON.data(["type": type, "length": body.count])
         else { return nil }
         var out = Data()
         for part in [header, item, body] { out.append(part); out.append(0x0A) }

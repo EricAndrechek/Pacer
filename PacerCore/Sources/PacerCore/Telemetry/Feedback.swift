@@ -366,7 +366,10 @@ public struct FeedbackSubmission: Sendable, Equatable {
         if let devDescribe { body["devDescribe"] = devDescribe }
         if let locale { body["locale"] = locale }
         if let installId { body["installId"] = installId }
-        return try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
+        guard let data = SafeJSON.data(body, options: [.sortedKeys]) else {
+            throw CocoaError(.propertyListWriteInvalid)
+        }
+        return data
     }
 
     /// `userAgent` must start `Pacer/`: the endpoint serves nothing else.
