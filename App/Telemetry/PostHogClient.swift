@@ -123,8 +123,7 @@ final class PostHogClient: Sendable {
         }
         guard let batch else { completion?(); return }
         let items = batch.compactMap { try? JSONSerialization.jsonObject(with: $0) }
-        guard let body = try? JSONSerialization.data(
-            withJSONObject: ["api_key": config.token, "batch": items]) else {
+        guard let body = SafeJSON.data(["api_key": config.token, "batch": items]) else {
             state.withLock { $0.inFlight = false }
             completion?()
             return

@@ -25,7 +25,7 @@ import Testing
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()
-        let needle = "JSONSerialization.data(" + "withJSONObject:"
+        let needle = try NSRegularExpression(pattern: #"JSONSerialization\.data\(\s*withJSONObject"#)
         var offenders: [String] = []
         for sub in ["PacerCore/Sources", "App"] {
             let dir = root.appendingPathComponent(sub)
@@ -33,7 +33,7 @@ import Testing
             while let url = walker.nextObject() as? URL {
                 guard url.pathExtension == "swift", url.lastPathComponent != "SafeJSON.swift",
                       let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
-                if text.contains(needle) { offenders.append(url.lastPathComponent) }
+                if needle.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) != nil { offenders.append(url.lastPathComponent) }
             }
         }
         #expect(offenders.isEmpty, "use SafeJSON.data: \(offenders)")

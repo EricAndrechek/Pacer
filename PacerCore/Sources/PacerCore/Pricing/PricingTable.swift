@@ -124,9 +124,7 @@ public actor PricingTable {
             // embedded path uses.
             let destination = cacheURL ?? Self.cacheFileURL()
             if let destination,
-               let mergedData = try? JSONSerialization.data(
-                withJSONObject: mergedJSON, options: [.sortedKeys]
-               ) {
+               let mergedData = SafeJSON.data(mergedJSON, options: [.sortedKeys]) {
                 do {
                     try FileManager.default.createDirectory(
                         at: destination.deletingLastPathComponent(),
