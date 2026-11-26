@@ -93,9 +93,9 @@ struct RuntimeCostOrderTests {
     }
 
     @Test func averagesMoveSlowlyAndSurviveARelaunch() throws {
-        let suite = "pacer.test.arena-costs.\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
+        let holder = TestDefaults(prefix: "arena-costs")
+        defer { holder.cleanup() }
+        let defaults = holder.defaults
         let costs = ArenaModelCosts(defaults: defaults)
         #expect(costs.measured("m", weekly: false) == nil)
         costs.record("m", weekly: false, cpuMs: 200)

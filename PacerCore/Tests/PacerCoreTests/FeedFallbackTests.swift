@@ -49,14 +49,14 @@ struct FeedFallbackTests {
         FeedStubProtocol.lock.withLock {
             FeedStubProtocol.replies = [Self.site: site, Self.raw: raw]; FeedStubProtocol.seen = []
         }
-        let suite = "feedfallback.\(UUID().uuidString)"
-        let store = UserDefaults(suiteName: suite)!
-        store.removePersistentDomain(forName: suite)
+        let holder = TestDefaults(prefix: "feedfallback")
+        let store = holder.defaults
+        holder.cleanup()
         let cache = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID()).json")
         let ok = await CuratedPriceHistory.refresh(urlSession: FeedStubProtocol.session(), cacheURL: cache, store: store)
         let seen = FeedStubProtocol.lock.withLock { FeedStubProtocol.seen }
         let reported = store.object(forKey: FeedFallback.problemKey(.priceHistory)) is Date
-        store.removePersistentDomain(forName: suite)
+        holder.cleanup()
         try? FileManager.default.removeItem(at: cache)
         return (ok, seen.compactMap { $0.url?.host }, seen, reported)
     }
@@ -167,9 +167,9 @@ struct FeedFallbackTests {
     // MARK: reporting
 
     @Test func problemIsRateLimitedPerFeedPerDay() {
-        let suite = "feedfallback.\(UUID().uuidString)"
-        let store = UserDefaults(suiteName: suite)!
-        defer { store.removePersistentDomain(forName: suite) }
+        let holder = TestDefaults(prefix: "feedfallback")
+        let store = holder.defaults
+        defer { holder.cleanup() }
         let f = FeedFallback.Failure(domain: NSURLErrorDomain, code: -1001)
         let t0 = Date(timeIntervalSince1970: 1_800_000_000)
         var counts: [String: Int] = [:]
@@ -183,9 +183,9 @@ struct FeedFallbackTests {
     }
 
     @Test func offlineIsCountedNeverAProblem() {
-        let suite = "feedfallback.\(UUID().uuidString)"
-        let store = UserDefaults(suiteName: suite)!
-        defer { store.removePersistentDomain(forName: suite) }
+        let holder = TestDefaults(prefix: "feedfallback")
+        let store = holder.defaults
+        defer { holder.cleanup() }
         var counts: [String: Int] = [:]
         for code in [NSURLErrorNotConnectedToInternet, NSURLErrorDataNotAllowed] {
             let f = FeedFallback.Failure(domain: NSURLErrorDomain, code: code)
@@ -233,9 +233,9 @@ struct UpdateRetryPolicyTests {
                       "error.underlying_code": .int(-1001)])
         #expect(FeedFallback.downloadProblemAttributes(domain: "weird/path", code: 1, underlyingDomain: nil, underlyingCode: nil)
             == ["feed": .string("update_archive"), "error.domain": .string("other"), "error.code": .int(1)])
-        let suite = "feedfallback.\(UUID().uuidString)"
-        let store = UserDefaults(suiteName: suite)!
-        defer { store.removePersistentDomain(forName: suite) }
+        let holder = TestDefaults(prefix: "feedfallback")
+        let store = holder.defaults
+        defer { holder.cleanup() }
         let t = Date(timeIntervalSince1970: 1_800_000_000)
         #expect(FeedFallback.reportDownloadFailure(domain: "x", code: 1, underlyingDomain: nil, underlyingCode: nil, now: t, store: store))
         #expect(!FeedFallback.reportDownloadFailure(domain: "x", code: 1, underlyingDomain: nil, underlyingCode: nil, now: t + 3600, store: store))

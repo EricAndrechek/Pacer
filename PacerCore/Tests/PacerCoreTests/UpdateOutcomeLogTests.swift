@@ -4,12 +4,10 @@ import Testing
 
 @Suite("Update outcome log")
 struct UpdateOutcomeLogTests {
+    private let defaultsBag = TestDefaultsBag()
 
     private func suite() -> UserDefaults {
-        let name = "pacer.test.update.\(UUID().uuidString)"
-        let d = UserDefaults(suiteName: name)!
-        d.removePersistentDomain(forName: name)
-        return d
+        defaultsBag.make(prefix: "update")
     }
 
     @Test("error results carry a safe domain tail and the code")
