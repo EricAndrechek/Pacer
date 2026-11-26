@@ -2940,6 +2940,8 @@ public final class ScanCoordinator {
     /// from, in this process. nil until the first sync, which therefore runs
     /// on the first cycle after launch.
     private var ledgerSyncedAtCatalogGeneration: UInt64?
+    /// Whether that sync took the price list as stale (`forLedger`).
+    private var ledgerSyncedWithStaleList: Bool?
     /// Price changes whose buckets this cycle is rebuilding, logged with
     /// their new cost once the daily rollup has been recomputed.
     private var pendingReprice: [RepriceScope.Line] = []
@@ -2967,19 +2969,33 @@ public final class ScanCoordinator {
         let used = Set(rows.map(\.model))
 
         let generation = SampleCostCache.catalogGeneration
-        if ledgerSyncedAtCatalogGeneration != generation || !SampleCostCache.hasLedgerFromStore {
+        // The price list turning stale (or fresh again) changes what the
+        // ledger takes from it (`CuratedPriceHistory.forLedger`) with no new
+        // download, so it is an input of its own.
+        let now = Date()
+        let listStale = SampleCostCache.curated().listIsStale(at: now)
+        if ledgerSyncedAtCatalogGeneration != generation || ledgerSyncedWithStaleList != listStale
+            || !SampleCostCache.hasLedgerFromStore {
             do {
+                if listStale != ledgerSyncedWithStaleList, ledgerSyncedWithStaleList != nil {
+                    log(listStale
+                        ? "pricing: the price list has not been confirmed for over \(Int(PriceSources.listStaleAfter / 86_400)) days — "
+                          + "the catalogs this Mac fetches price what comes after it"
+                        : "pricing: the price list is confirmed again")
+                }
                 let result = try PriceLedgerStore.sync(
                     context: context,
                     catalog: SampleCostCache.current().pricingByModel,
-                    curated: SampleCostCache.curated(),
-                    usedModels: used)
+                    curated: SampleCostCache.curated().forLedger(at: now),
+                    usedModels: used,
+                    now: now)
                 await SampleCostCache.installLedger(result.ledger)
                 ledgerSyncedAtCatalogGeneration = generation
+                ledgerSyncedWithStaleList = listStale
                 if result.changed {
                     log("pricing: ledger \(result.ledger.records.count) record(s) — "
                         + "\(result.opened.count) opened, \(result.closed.count) closed, "
-                        + "\(result.curatedChanged) curated change(s)")
+                        + "\(result.curatedChanged) curated, \(result.listChanged) price-list change(s)")
                     try rebuildRepricedBuckets(
                         result.ledger.changes(since: result.previous), persister: persister)
                 }
@@ -2988,6 +3004,8 @@ public final class ScanCoordinator {
                 log("pricing: ledger sync failed (\(error)) — keeping the current ledger")
             }
         }
+
+        noteModelsOutsidePriceList(used: used, generation: generation)
 
         guard !used.isEmpty else {
             unpricedToPublish = UnpricedModels.State.empty
@@ -3034,6 +3052,29 @@ public final class ScanCoordinator {
         guard publishedUnpriced != state else { return }
         publishedUnpriced = state
         configuration.onUnpricedModels(state)
+    }
+
+    /// The inputs `noteModelsOutsidePriceList` last worked from.
+    private var priceListCoverageInputs: (generation: UInt64, used: Set<String>)?
+
+    /// Record which used models the curated history and the price list
+    /// together do not price (#469), for the refresh loop: while any is, it
+    /// keeps fetching the catalogs directly (`PriceSources`), so a model the
+    /// list does not carry (another backend, a launch the job has not seen)
+    /// still gets a price. Worked out only when the models or the prices
+    /// moved; a handful of `isPriced` lookups when they do.
+    private func noteModelsOutsidePriceList(used: Set<String>, generation: UInt64) {
+        if let last = priceListCoverageInputs, last.generation == generation, last.used == used { return }
+        priceListCoverageInputs = (generation, used)
+        let list = SampleCostCache.curated()
+        let covering = PriceLedger(records: list.records + list.catalog)
+        let outside = used.filter { !covering.isPriced($0) }
+        if PriceSources.recordModelsOutsideList(outside) {
+            log(outside.isEmpty
+                ? "pricing: the price list covers every model in use"
+                : "pricing: the price list does not cover \(outside.sorted().joined(separator: ", ")) — "
+                  + "the catalogs stay a direct source for them")
+        }
     }
 
     /// Queue for a from-scratch rebuild every bucket a price change reaches

@@ -20,9 +20,14 @@ import SwiftData
 ///   reviewed history the catalogs can't hold (Sonnet 5's introductory
 ///   window, Sonnet 5.5's cache-read rate from launch). Never overwritten by
 ///   a catalog refresh.
+/// - the **price list** (#469): catalog prices the `price-catalog-sync` job
+///   merged and dated on our side, published in the same file's `catalog`
+///   section. Mirrored like curated rows (the file is their truth), but they
+///   rank as catalog prices; ids start `list|`.
 /// - a catalog (`litellm`, `models.dev`, `catwalk`) or the built-in
-///   `fallback` table: one open record per rate vector, opened at first
-///   sighting and closed when a refresh reports different rates.
+///   `fallback` table, fetched by this Mac: one open record per rate vector,
+///   opened at first sighting and closed when a refresh reports different
+///   rates. Since #469 only a fallback for what the price list lacks.
 ///
 /// A few hundred rows. The recompute and view paths never fetch these: they
 /// read the Sendable `PriceLedger` that `SampleCostCache` holds, so pricing a
@@ -236,6 +241,22 @@ public struct PriceRecordValue: Sendable, Hashable, Codable {
 
     public var curated: Bool { source == .curated }
 
+    /// Where a record came from, as the first field of its id.
+    public enum Origin: String, Sendable {
+        /// The curated file's reviewed records.
+        case curated
+        /// A catalog price this Mac fetched and dated itself.
+        case catalog
+        /// A catalog price from the published price list, dated by the
+        /// `price-catalog-sync` job (#469): the same date on every Mac.
+        case list
+    }
+
+    /// A catalog price from the published price list (`Origin.list`). It
+    /// ranks below curated records like any catalog price, and above the
+    /// ones this Mac dated itself (`PriceLedger.precedence`).
+    public var fromPriceList: Bool { id.hasPrefix(Origin.list.rawValue + "|") }
+
     /// `curated|claude-sonnet-5|anthropic|global|standard|0|1782864000`, or
     /// `catalog|…` for a catalog record. The key is recoverable from the id
     /// (`PriceLedger.key(ofToken:)`), which is what lets a rollup's
@@ -243,7 +264,17 @@ public struct PriceRecordValue: Sendable, Hashable, Codable {
     public static func makeId(
         curated: Bool, key: CanonicalModelID, speed: PriceSpeed, tier: Int64, from: Date
     ) -> String {
-        [curated ? "curated" : "catalog", key.model, key.provider.rawValue,
+        makeId(origin: curated ? .curated : .catalog, key: key, speed: speed, tier: tier, from: from)
+    }
+
+    /// `list|…` for a price-list record: a prefix of its own, so a list
+    /// record and the one this Mac opened for the same price on the same
+    /// date never share an id (`PriceLedgerStore` mirrors the first and
+    /// leaves the second alone).
+    public static func makeId(
+        origin: Origin, key: CanonicalModelID, speed: PriceSpeed, tier: Int64, from: Date
+    ) -> String {
+        [origin.rawValue, key.model, key.provider.rawValue,
          key.region.rawValue, speed.rawValue, String(tier),
          String(Int64(from.timeIntervalSince1970.rounded()))].joined(separator: "|")
     }

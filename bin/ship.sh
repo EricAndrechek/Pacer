@@ -126,6 +126,9 @@ wait_for() {
 }
 advertises() { grep -q ">${2}<" "$1" 2>/dev/null; }   # advertises <feed file> <version>
 same_file() { cmp -s "$1" "$2"; }
+# Two price histories with the same curated part, whatever their price lists
+# (`catalog`, written between releases by bin/price-catalog-sync.py, #469).
+same_curated_prices() { python3 -I bin/price-catalog-sync.py same-curated "$1" "$2"; }
 
 # check_item <feed file> <version> <DMG asset size> <`gh release view --json assets` JSON>:
 # the feed parses, the item for <version> is there, its full <enclosure> is
@@ -351,6 +354,20 @@ PY
   expect pass "the published price history" check_prices site/public/price-history.json PacerCore/Sources/PacerCore/Resources/price-history.json
   expect fail "a price history older than the release's" check_prices "$T/old-prices.json" PacerCore/Sources/PacerCore/Resources/price-history.json
   expect fail "a price history the app would not decode" check_prices "$T/broken-prices.json" PacerCore/Sources/PacerCore/Resources/price-history.json
+  # The mirror's price history: its curated part is what counts (#469).
+  python3 -I - site/public/price-history.json "$T" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+json.dump(dict(d, catalog={"changedAt": "2026-11-25", "checkedAt": "2026-11-25", "records": []}),
+          open(sys.argv[2] + "/listed-prices.json", "w"))
+json.dump(dict(d, records=d["records"][1:]), open(sys.argv[2] + "/edited-prices.json", "w"))
+PY
+  expect pass "a mirror whose only difference is the site's newer price list" \
+    same_curated_prices "$T/listed-prices.json" site/public/price-history.json
+  expect fail "a mirror with different curated prices" same_curated_prices "$T/edited-prices.json" site/public/price-history.json
+  # The review-shift warning: silent when nothing moves.
+  expect pass "a release whose curated review dates override no list price" \
+    python3 -I bin/price-catalog-sync.py review-shift --release site/public/price-history.json --site site/public/price-history.json
 
   # The Workers Builds check that gates tagging: the newest run decides.
   local W='"name":"Workers Builds: pacer"'
@@ -470,6 +487,20 @@ cmd_feeds() {
     fi
   done
   site_build_ok || rc=1
+  # A warning, never a block: a release whose curated review date moves past a
+  # price-list record that differs from the curated price makes the curated
+  # price win over it again, history included (#469).
+  if [ -s "${tmp}/main-price-history.json" ]; then
+    local shift sc=0
+    shift="$(python3 -I bin/price-catalog-sync.py review-shift \
+      --release PacerCore/Sources/PacerCore/Resources/price-history.json --site "${tmp}/main-price-history.json")" || sc=$?
+    case $sc in
+      0) ok "no curated review date moves past a different price-list record" ;;
+      3) while IFS= read -r line; do warn "curated review: ${line}"; done <<<"$shift"
+         warn "pin reviewedAt on those curated rows to keep the list's prices, or release as is to have the curated ones win" ;;
+      *) warn "could not compare the release's curated review dates with the site's price list" ;;
+    esac
+  fi
   if [ "$(legacy_mirror)" = on ]; then
     if bin/publish-feeds.sh status >/dev/null 2>&1; then ok "the gh-pages mirror holds the same bytes as main (bin/publish-feeds.sh status)"
     else bad "the gh-pages mirror and main's site copies differ: \`bin/publish-feeds.sh mirror\` (after checking which is right)"; rc=1; fi
@@ -719,8 +750,13 @@ cmd_verify() {
     if fetch_to "$SITE_PRICES_URL" "$tmp/site-prices.json" && fetch_to "$MIRROR_PRICES_URL" "$tmp/mirror-prices.json" \
        && same_file "$tmp/site-prices.json" "$tmp/mirror-prices.json"; then
       ok "price-history.json: the mirror's is the site's, byte for byte"
+    elif same_curated_prices "$tmp/site-prices.json" "$tmp/mirror-prices.json"; then
+      # The price-catalog-sync job may have moved the site's price list on
+      # since the release published both (#469); the mirror's readers do not
+      # read it.
+      ok "price-history.json: the mirror has the site's curated prices (the site's price list has moved on since)"
     else
-      bad "price-history.json: the site's and the mirror's are not byte-identical (or one could not be read)"; rc=1
+      bad "price-history.json: the site's and the mirror's curated prices differ (or one could not be read)"; rc=1
     fi
   else
     info "the legacy mirror is off (PACER_LEGACY_PAGES_MIRROR): gh-pages is frozen, not checked"

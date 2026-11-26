@@ -337,8 +337,15 @@ Plus a separate `--cost-source` setting for the statusline's own
 display: `auto | claudeCode | pacer | both`. Distinct concept, distinct
 setting, distinct UI.
 
-**Pricing source**: LiteLLM
-`model_prices_and_context_window.json`. Two-tier strategy:
+**Pricing source** (since #469): Pacer's own price list, the `catalog`
+section of `https://pacer.andrechek.com/price-history.json`, which a scheduled
+workflow (`bin/price-catalog-sync.py`) merges from LiteLLM, models.dev and
+Catwalk and dates once for every Mac. The app fetches LiteLLM and the others
+itself only when the list is missing, stale, or lacks a model in use
+(`PriceSources`); `docs/releasing.md`, "The price list". The direct path, which
+was the only one before:
+
+LiteLLM `model_prices_and_context_window.json`. Two-tier strategy:
 
 1. **Build-time snapshot** embedded in `PacerCore` as a Swift package
    resource. Default for fast paths. Ships fully offline-capable.

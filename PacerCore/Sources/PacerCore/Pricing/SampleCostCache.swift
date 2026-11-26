@@ -103,7 +103,7 @@ public enum SampleCostCache {
         catalogGenerationStorage &+= 1
         let ledger = hasStoreLedger
             ? snapshotStorage.ledger
-            : PriceLedger.provisional(catalog: snap.pricingByModel, curated: curated.records)
+            : PriceLedger.provisional(catalog: snap.pricingByModel, curated: curated.records + curated.catalog)
         let previous = snapshotStorage.ledger
         snapshotStorage = snap.with(ledger: ledger)
         if !ledger.samePrices(as: previous) { generationStorage &+= 1 }

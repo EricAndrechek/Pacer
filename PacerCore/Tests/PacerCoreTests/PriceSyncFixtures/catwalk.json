@@ -1,0 +1,12 @@
+{
+  "name": "Anthropic",
+  "id": "anthropic",
+  "models": [
+    {"id": "claude-opus-5-5", "name": "Claude Opus 5.5", "pricing": {"input": 4, "output": 20, "cache_create": 5, "cache_hit": 0.2}, "context_window": 1000000, "default_max_tokens": 128000},
+    {"id": "claude-fable-9", "name": "Claude Fable 9", "cost_per_1m_in": 10, "cost_per_1m_out": 50, "cost_per_1m_in_cached": 12.5, "cost_per_1m_out_cached": 0.3, "context_window": 1000000},
+    {"id": "claude-mythos-9", "name": "Claude Mythos 9", "pricing": {"input": 25, "output": 125}},
+    {"id": "claude-haiku-4-5-20251001", "pricing": {"input": 1, "output": 5, "cache_create": 1.25, "cache_hit": 0.1}},
+    {"id": "", "pricing": {"input": 1}},
+    {"name": "no id", "pricing": {"input": 1}}
+  ]
+}

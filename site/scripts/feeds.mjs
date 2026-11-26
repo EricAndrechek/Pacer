@@ -162,15 +162,61 @@ export function priceHistoryProblems(text) {
     problems.push('records is not a non-empty array');
     return problems;
   }
-  file.records.forEach((row, i) => {
-    const where = `records[${i}]`;
-    if (!row || typeof row !== 'object') return problems.push(`${where} is not an object`);
-    if (typeof row.model !== 'string' || !row.model) problems.push(`${where}.model is missing`);
-    if (typeof row.effectiveFrom !== 'string' || !row.effectiveFrom) problems.push(`${where}.effectiveFrom is missing`);
-    const rates = row.perMTok;
-    for (const key of ['input', 'output', 'cacheRead', 'cacheWrite5m', 'cacheWrite1h']) {
-      if (typeof rates?.[key] !== 'number' || !Number.isFinite(rates[key])) problems.push(`${where}.perMTok.${key} is not a number`);
+  file.records.forEach((row, i) => rowProblems(row, `records[${i}]`, problems));
+  // The price list (#469): catalog prices bin/price-catalog-sync.py merged and
+  // dated, which the app reads from 0.9.6 on (0.9.5 and earlier ignore the
+  // key). CuratedPriceHistory.decode rejects the whole file, list and curated
+  // records alike, over a bad row here, so it gates the deploy the same way.
+  if (file.catalog !== undefined) {
+    const cat = file.catalog;
+    if (!cat || typeof cat !== 'object' || Array.isArray(cat)) {
+      problems.push('catalog is not an object');
+      return problems;
     }
-  });
+    for (const key of ['changedAt', 'checkedAt']) {
+      if (typeof cat[key] !== 'string' || !/^\d{4}-\d{2}-\d{2}/.test(cat[key])) problems.push(`catalog.${key} is not a date`);
+    }
+    if (!Array.isArray(cat.records)) {
+      problems.push('catalog.records is not an array');
+      return problems;
+    }
+    const seen = new Set();
+    cat.records.forEach((row, i) => {
+      const where = `catalog.records[${i}]`;
+      rowProblems(row, where, problems);
+      if (!row || typeof row !== 'object') return;
+      for (const key of ['fastMultiplier', 'regionalMultiplier']) {
+        if (row[key] != null && (typeof row[key] !== 'number' || !Number.isFinite(row[key]) || row[key] < 0)) {
+          problems.push(`${where}.${key} is not a number`);
+        }
+      }
+      const id = [row.model, row.provider, row.region, row.speed, row.tierAbovePromptTokens, row.effectiveFrom].join('|');
+      if (seen.has(id)) problems.push(`${where} repeats an earlier record`);
+      seen.add(id);
+    });
+  }
   return problems;
+}
+
+/**
+ * One price row: the fields CuratedPriceHistory.decode reads, with the checks
+ * it makes (rates finite and not negative, an end after the start).
+ * @param {any} row
+ * @param {string} where
+ * @param {string[]} problems
+ */
+function rowProblems(row, where, problems) {
+  if (!row || typeof row !== 'object') return problems.push(`${where} is not an object`);
+  if (typeof row.model !== 'string' || !row.model) problems.push(`${where}.model is missing`);
+  if (typeof row.effectiveFrom !== 'string' || !row.effectiveFrom) problems.push(`${where}.effectiveFrom is missing`);
+  const rates = row.perMTok;
+  for (const key of ['input', 'output', 'cacheRead', 'cacheWrite5m', 'cacheWrite1h']) {
+    if (typeof rates?.[key] !== 'number' || !Number.isFinite(rates[key]) || rates[key] < 0) {
+      problems.push(`${where}.perMTok.${key} is not a number`);
+    }
+  }
+  const from = Date.parse(row.effectiveFrom), to = row.effectiveTo == null ? null : Date.parse(row.effectiveTo);
+  if (Number.isNaN(from)) problems.push(`${where}.effectiveFrom is not a date`);
+  if (to !== null && (Number.isNaN(to) || to <= from)) problems.push(`${where}.effectiveTo is not after effectiveFrom`);
+  return problems.length;
 }

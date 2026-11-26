@@ -1,8 +1,16 @@
 import Foundation
 
-/// When the app re-fetches the pricing catalogs and the curated price
-/// history (`AppBackgroundService`'s refresh loop, through
-/// `PricingRefreshLoop.tick`), as plain logic.
+/// When the app re-fetches its prices (`AppBackgroundService`'s refresh
+/// loop, through `PricingRefreshLoop.tick`), as plain logic.
+///
+/// Since #469 the clock this schedules is the **price list's**
+/// (`PriceSources.listCheckAge`): the curated history and the catalog prices
+/// merged on our side, a few dozen KB. The catalogs themselves are fetched in
+/// the same pass only when the list falls short (`PriceSources.directReason`),
+/// and at most daily whatever the cadence here (`PriceSources.catalogsDue`), so
+/// the hourly cadence below re-asks for the small list, never for LiteLLM's
+/// several MB. A new model reaches the list within six hours of a catalog
+/// listing it (`price-catalog-sync.yml`), or sooner as a curated row.
 ///
 /// Daily, normally: a catalog update only changes what future samples cost
 /// at catalog rates, and the ledger records it either way. **Hourly while a
@@ -65,18 +73,25 @@ public enum PricingRefreshSchedule {
 public enum PricingRefreshLoop {
 
     public struct Inputs {
-        /// The catalog cache's age (`PricingTable.cacheAge`).
+        /// The age of the source this loop keeps fresh: the price list's last
+        /// good check (`PriceSources.listCheckAge`).
         public var cacheAge: () -> TimeInterval?
         /// `UnpricedModels.wantsHourlyChecks`.
         public var hourly: () -> Bool
-        /// One refresh pass (`PricingRefreshPass.run` and what the app does
-        /// with its outcome).
+        /// Whether a pass is due for another reason: the catalogs are wanted
+        /// directly and their own daily clock is up (`PriceSources.catalogsDue`),
+        /// or their last attempt failed and its hour is up.
+        public var alsoDue: () -> Bool
+        /// One refresh pass (`PriceSources.pass` and what the app does with
+        /// its outcome).
         public var refresh: (_ hourly: Bool) async -> PricingRefreshPass.Outcome
 
         public init(cacheAge: @escaping () -> TimeInterval?, hourly: @escaping () -> Bool,
+                    alsoDue: @escaping () -> Bool = { false },
                     refresh: @escaping (_ hourly: Bool) async -> PricingRefreshPass.Outcome) {
             self.cacheAge = cacheAge
             self.hourly = hourly
+            self.alsoDue = alsoDue
             self.refresh = refresh
         }
     }
@@ -90,17 +105,20 @@ public enum PricingRefreshLoop {
     @MainActor
     public static func tick(_ inputs: Inputs) async -> Tick {
         let hourly = inputs.hourly()
-        let due = PricingRefreshSchedule.isDue(cacheAge: inputs.cacheAge(), hourly: hourly)
+        let due = PricingRefreshSchedule.isDue(cacheAge: inputs.cacheAge(), hourly: hourly) || inputs.alsoDue()
         let outcome = due ? await inputs.refresh(hourly) : nil
         let delay = PricingRefreshSchedule.delay(
-            attempted: due, succeeded: outcome?.catalogRefreshed ?? false,
+            attempted: due, succeeded: outcome.map { $0.catalogRefreshed || $0.listChecked } ?? false,
             cacheAge: inputs.cacheAge(), hourly: inputs.hourly())
         return Tick(outcome: outcome, delay: delay)
     }
 }
 
-/// One refresh pass: the catalogs, then the curated history, then the cost
-/// cache reload if either produced a new copy.
+/// One refresh pass: the price list (curated history plus the catalog prices
+/// merged on our side), then the catalogs directly when the pass's own rule
+/// wants them (`PriceSources.pass`), then the cost cache reload if either
+/// produced a new copy. The list comes first, so a fresh copy can make the
+/// direct fetch unnecessary.
 ///
 /// The reload used to follow only a catalog refresh, so a curated-only
 /// update (a price added to the published history while the catalogs were
@@ -110,6 +128,7 @@ public enum PricingRefreshPass {
 
     public struct Outcome: Equatable, Sendable {
         public let catalogRefreshed: Bool
+        /// The price list was fetched and cached anew.
         public let curatedRefreshed: Bool
         /// `SampleCostCache.reload()` ran.
         public let reloaded: Bool
@@ -117,12 +136,25 @@ public enum PricingRefreshPass {
         /// (`SampleCostCache.catalogGeneration` moved): the ledger has
         /// something to sync.
         public let pricesChanged: Bool
+        /// The list's check got a usable answer, new or not, or was not due:
+        /// the loop's clock is good (`CuratedPriceHistory.RefreshResult`).
+        public let listChecked: Bool
+        /// Why the catalogs were wanted directly, or nil when the list was
+        /// enough (`PriceSources.directReason`).
+        public let direct: PriceSources.DirectReason?
+        /// How long the direct fetch took, when it ran (`pricing.refresh_ms`).
+        public let catalogSeconds: TimeInterval?
 
-        public init(catalogRefreshed: Bool, curatedRefreshed: Bool, reloaded: Bool, pricesChanged: Bool) {
+        public init(catalogRefreshed: Bool, curatedRefreshed: Bool, reloaded: Bool, pricesChanged: Bool,
+                    listChecked: Bool = false, direct: PriceSources.DirectReason? = nil,
+                    catalogSeconds: TimeInterval? = nil) {
             self.catalogRefreshed = catalogRefreshed
             self.curatedRefreshed = curatedRefreshed
             self.reloaded = reloaded
             self.pricesChanged = pricesChanged
+            self.listChecked = listChecked
+            self.direct = direct
+            self.catalogSeconds = catalogSeconds
         }
 
         public static let nothing = Outcome(catalogRefreshed: false, curatedRefreshed: false,
@@ -131,24 +163,31 @@ public enum PricingRefreshPass {
 
     /// The app's steps; tests pass their own.
     public static func fetchCatalogs() async -> Bool { await PricingTable.shared.refresh() }
-    public static func fetchCurated() async -> Bool { await CuratedPriceHistory.refresh() }
+    public static func fetchCurated() async -> CuratedPriceHistory.RefreshResult {
+        await CuratedPriceHistory.refreshResult()
+    }
     @MainActor public static func reloadCostCache() async { await SampleCostCache.reload() }
     public static func catalogGeneration() -> UInt64 { SampleCostCache.catalogGeneration }
 
+    /// The list first, then the catalogs (which decide for themselves whether
+    /// they are wanted, after the list), then the reload.
     @MainActor
     public static func run(
         refreshCatalog: () async -> Bool = fetchCatalogs,
-        refreshCurated: () async -> Bool = fetchCurated,
+        refreshCurated: () async -> CuratedPriceHistory.RefreshResult = fetchCurated,
         reload: () async -> Void = reloadCostCache,
         generation: () -> UInt64 = catalogGeneration
     ) async -> Outcome {
+        let list = await refreshCurated()
+        let curated = list == .updated
         let catalog = await refreshCatalog()
-        // Best-effort, and never blocks the catalog's result.
-        let curated = await refreshCurated()
-        guard catalog || curated else { return .nothing }
+        guard catalog || curated else {
+            return Outcome(catalogRefreshed: false, curatedRefreshed: false, reloaded: false, pricesChanged: false,
+                           listChecked: list != .failed)
+        }
         let before = generation()
         await reload()
         return Outcome(catalogRefreshed: catalog, curatedRefreshed: curated, reloaded: true,
-                       pricesChanged: generation() != before)
+                       pricesChanged: generation() != before, listChecked: list != .failed)
     }
 }

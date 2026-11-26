@@ -46,11 +46,15 @@ public final class Z003PriceCatalogSnapshot {
         public var catalog: [PriceRecordValue]
         public var curatedAsOf: Date
         public var curated: [PriceRecordValue]
+        /// The price list's dated records (#469); nil when the file had none,
+        /// which keeps the fingerprint of a list-less sync what it was before.
+        public var list: [PriceRecordValue]?
 
         public init(catalog: [PriceRecordValue], curated: CuratedPriceHistory) {
             self.catalog = catalog.sorted { $0.id < $1.id }
             self.curatedAsOf = curated.asOf
             self.curated = curated.records.sorted { $0.id < $1.id }
+            self.list = curated.catalog.isEmpty ? nil : curated.catalog.sorted { $0.id < $1.id }
         }
 
         /// Canonical bytes: the same content encodes the same in every

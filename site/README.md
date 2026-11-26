@@ -17,7 +17,7 @@ read from `https://pacer.andrechek.com/` (`SUFeedURL`,
 | `src/lib/releases.ts` | Reads `../docs/release-notes/` at build time for the changelog |
 | `src/lib/faq.ts` | FAQ text, used by the page and its `FAQPage` JSON-LD |
 | `../docs/screenshots/` | The README screenshots, imported directly (`@screenshots/...`), so the site never falls behind the app |
-| `public/appcast.xml`, `public/price-history.json` | The update feed and the price history. Written by releases; hand edits only as `docs/releasing.md` says |
+| `public/appcast.xml`, `public/price-history.json` | The update feed and the price history. Written by releases, and the price history's `catalog` section (the price list) every six hours by `.github/workflows/price-catalog-sync.yml`; hand edits only as `docs/releasing.md` says |
 | `worker/index.ts`, `worker/lib.ts`, `worker/feedback.ts` | The Worker: `/download/`, `/api/feedback`, and counting update-feed and price-history requests |
 | `scripts/` | `lastmod.mjs` (sitemap dates from git), `llms-full.mjs` (`/llms-full.txt` from the built pages), `csp-hashes.mjs`, `indexnow.mjs`, `feeds.mjs` + `check-feeds.mjs` (the feed's deploy gate) |
 | `public/_headers` | Security headers and the CSP (inline-script hashes filled in by `pnpm build`) |
