@@ -159,6 +159,34 @@ public struct PaceAccountGroupsLayout: Layout {
         }
     }
 
+    /// No guide of its own, for any alignment, at once, without asking a
+    /// single child (#475).
+    ///
+    /// The protocol's default merges every subview's guides. To do that it
+    /// places the subviews, and then asks each one where *its* guide is,
+    /// which asks that column's own stacks, frames and `ViewThatFits`, all
+    /// the way down. The card's `VStack(alignment: .leading)` asks for
+    /// `.leading` on every pass. That one question was 850 of 1,721 samples
+    /// of a main thread stuck laying out the dashboard on a starved Mac,
+    /// against 55 for this layout's own sizing.
+    ///
+    /// The answer is the same as the merge's. No view in a pace column sets
+    /// an explicit horizontal guide (no `alignmentGuide` anywhere in the app),
+    /// so the merge found none and the stack fell back to the guide's default
+    /// (leading edge 0, centre half the width), which is what nil gives it. A
+    /// vertical guide, which only a parent `HStack` would ask for, defaults
+    /// the same way; a text baseline would default to the bottom edge, and no
+    /// parent aligns the card by one. `PaceCardLayoutTests` checks the frames
+    /// match the default merge's and that the question no longer reaches a
+    /// column.
+    public func explicitAlignment(of guide: HorizontalAlignment, in bounds: CGRect,
+                                  proposal: ProposedViewSize, subviews: Subviews,
+                                  cache: inout Cache) -> CGFloat? { nil }
+
+    public func explicitAlignment(of guide: VerticalAlignment, in bounds: CGRect,
+                                  proposal: ProposedViewSize, subviews: Subviews,
+                                  cache: inout Cache) -> CGFloat? { nil }
+
     enum Part: Equatable {
         case header(Int)
         case columns(Range<Int>)

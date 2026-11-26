@@ -29,6 +29,12 @@ import Foundation
 // refreshes on these signals (AGENTS.md, "Every cached value needs an explicit
 // trigger"), so nothing per view decides anything, and a view that was missed
 // here simply keeps its old, always-current behaviour.
+//
+// One more state holds, for good: quit (#475, `TerminationGate`). From
+// `beginTermination()` nothing is delivered again, asleep or awake, and no
+// clock loop waiting in `untilAwake()` resumes unless its task is cancelled.
+// The window stays up, drawn as it was; nobody looks at a dashboard
+// that is about to go, and its refreshes would only slow the quit.
 
 /// A dashboard refresh signal the gate can hold while every display sleeps.
 public enum ViewRefreshSignal: String, Sendable, CaseIterable {
@@ -113,17 +119,29 @@ public struct ViewRefreshCoalescer: Sendable, Equatable {
     public private(set) var held: [ViewRefreshSignal] = []
     public private(set) var heldScan: ScanCycleSummary?
     public private(set) var asleepSince: Date?
+    /// Quit has begun: nothing is delivered again (#475).
+    public private(set) var isTerminating = false
 
     public init() {}
 
-    public var isHolding: Bool { displays == .asleep }
+    public var isHolding: Bool { displays == .asleep || isTerminating }
+
+    /// Quit has begun. Whatever was held is dropped, since nothing will be
+    /// delivered again, and every later `offer` is refused.
+    public mutating func beginTermination() {
+        isTerminating = true
+        held = []
+        heldScan = nil
+    }
 
     /// Offer one firing of `signal`. True: deliver it now (any display awake,
-    /// or nobody knows). False: it is held for the wake.
+    /// or nobody knows). False: it is held for the wake, or, once quit has
+    /// begun, dropped.
     ///
     /// `summary` is a scan cycle's; nil there means "unknown", which holds as
     /// `ScanCycleSummary.everything`.
     public mutating func offer(_ signal: ViewRefreshSignal, summary: ScanCycleSummary? = nil) -> Bool {
+        guard !isTerminating else { return false }
         guard isHolding else { return true }
         if !held.contains(signal) { held.append(signal) }
         if signal == .scanCycle {
@@ -134,10 +152,12 @@ public struct ViewRefreshCoalescer: Sendable, Equatable {
     }
 
     /// Move to `new`. Leaving `asleep` returns what to deliver (possibly
-    /// nothing) and clears it; any other move returns nil.
+    /// nothing) and clears it; any other move returns nil, and so does every
+    /// move once quit has begun.
     public mutating func setDisplays(_ new: Displays, now: Date) -> Flush? {
         let old = displays
         displays = new
+        guard !isTerminating else { return nil }
         if new == .asleep {
             if old != .asleep { asleepSince = now }
             return nil
@@ -223,8 +243,12 @@ public final class ViewRefreshGate {
 
     // MARK: - Reading
 
-    /// True while every display is asleep and dashboard refreshes are held.
+    /// True while every display is asleep and dashboard refreshes are held,
+    /// and from the moment quit begins.
     public var isHolding: Bool { coalescer.isHolding }
+
+    /// True once quit has begun (`beginTermination`).
+    public var isTerminating: Bool { coalescer.isTerminating }
 
     /// The dashboard's view of the scan notification. Use in place of
     /// `NotificationCenter.default.publisher(for: .pacerScanCycleDidComplete)`
@@ -248,6 +272,8 @@ public final class ViewRefreshGate {
     /// and run once on wake with the merged summary (scan cycles) or nil.
     public func offer(_ signal: ViewRefreshSignal, summary: ScanCycleSummary? = nil,
                       deliver: @escaping @MainActor (ScanCycleSummary?) -> Void) {
+        // Quit has begun: never delivered, so nothing to keep.
+        guard !coalescer.isTerminating else { return }
         // A display that woke without telling us (a new one, Sidecar, a wake
         // the main thread missed while stuck): look before holding anything.
         if coalescer.isHolding, !allDisplaysAsleep() { setDisplays(.awake) }
@@ -258,14 +284,29 @@ public final class ViewRefreshGate {
         }
     }
 
+    /// Quit has begun (`TerminationGate`, #475): from now on no dashboard
+    /// refresh is delivered, asleep or awake, and the clock loops waiting in
+    /// `untilAwake()` stay there. What was held for a wake is dropped. The
+    /// window is left as it is, drawn from what it last showed.
+    public func beginTermination() {
+        guard !coalescer.isTerminating else { return }
+        let wasHolding = coalescer.isHolding
+        coalescer.beginTermination()
+        deliveries.removeAll()
+        recheck?.cancel()
+        recheck = nil
+        log("quit began — dashboard refreshes stop" + (wasHolding ? " (they were held: displays asleep)" : ""))
+    }
+
     /// Returns at once while any display is awake; while every display
     /// sleeps, suspends until one wakes. For a dashboard view's clock loop,
     /// after its sleep and before its work: the tick is held, and on wake the
     /// loop runs exactly once, at the real time, rather than catching up.
-    /// Cancelling the caller's task resumes it.
+    /// Cancelling the caller's task resumes it. Once quit has begun it
+    /// suspends until then, whatever the displays do.
     public func untilAwake() async {
         guard coalescer.isHolding else { return }
-        if !allDisplaysAsleep() { setDisplays(.awake); return }
+        if !coalescer.isTerminating, !allDisplaysAsleep() { setDisplays(.awake); return }
         _ = coalescer.offer(.minuteTick)
         nextWaiter &+= 1
         let id = nextWaiter
@@ -330,7 +371,7 @@ public final class ViewRefreshGate {
     private func setDisplays(_ new: ViewRefreshCoalescer.Displays) {
         let wasHolding = coalescer.isHolding
         guard let flush = coalescer.setDisplays(new, now: now()) else {
-            if new == .asleep, !wasHolding {
+            if new == .asleep, !wasHolding, !coalescer.isTerminating {
                 log("displays asleep — holding view refreshes")
             }
             return
