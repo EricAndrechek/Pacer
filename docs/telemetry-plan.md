@@ -71,7 +71,7 @@ A model Claude Code uses before any pricing source lists it costs $0 until one d
   - Only versioned Claude ids: `claude-`, lowercase words, then a version number (`claude-sonnet-5-6`, `claude-3-5-sonnet`). A model from another backend, or an alias without a version (`claude-sonnet-acme-prod`), can be a private deployment's name and is never a tag or a fingerprint.
   - Only the user's own app (`LaunchMode.isNormalLaunch`). A model is marked reported (`pacer.telemetry.unpricedModelsReported` in the app's defaults, at most 100) only when the sink took its event; one refused (crash reports off, budget spent) is tried at a later publish or launch. At most 3 reports per launch; the rest go on later launches.
   - Also counted, as before, in `data.unpriced_model` (Sentry metric) and `format.unknown_model` (`model` attribute, first sighting).
-- **The hourly checks:** while a reportable Claude model has no price and its first day of usage (the daily rollup's earliest day for it) is under 7 days ago, the pricing refresh (catalogs and curated history) runs hourly instead of daily (`PricingRefreshSchedule`, `UnpricedModels.wantsHourlyChecks`). Another backend's model, an alias, or a model unpriced for over a week leaves it daily, so it never re-downloads the catalogs hourly for good. `pricing.refresh_ms` therefore arrives up to 24 times a day for a week after a Claude model launches unpriced; a failed fetch, or a cache it could not write, still waits an hour. Nothing new is sent for it.
+- **The hourly checks:** while a reportable Claude model has no price and its first day of usage (the daily rollup's earliest day for it) is under 7 days ago, the pricing refresh runs hourly instead of daily (`PricingRefreshSchedule`, `UnpricedModels.wantsHourlyChecks`). From 0.9.6 that hourly refresh is the price list only (`PriceSources.pass`, #469): the catalogs are fetched directly at most daily, and only when the list falls short, so `pricing.refresh_ms` (the direct fetch) arrives at most once a day plus hourly retries of a failed one; the extra hourly requests are price-history fetches, counted by the site like any other (`since_last_check` `lt1h`). In 0.9.5 the hourly refresh fetched the catalogs too, so `pricing.refresh_ms` arrived up to 24 times a day for a week after a Claude model launched unpriced. Another backend's model, an alias, or a model unpriced for over a week leaves it daily. Nothing new is sent for it.
 
 ## Crash relaunch (since 0.9.1, #412)
 `PacerRelauncher` brings Pacer back after it exits without quitting (AGENTS.md, "Relaunch after a crash"). Three health counters (not usage: Sentry metrics, and `counter.*` in PostHog's `daily_checkin`), no ids, no paths:
@@ -378,7 +378,9 @@ How many Macs run Pacer, and on which versions, counted from every Mac,
 telemetry toggles or not: every Pacer from 0.9.4 on fetches the update feed
 (`/appcast.xml`, Sparkle: at launch and every 6 hours) and the price history
 (`/price-history.json`, about once a day on the catalog's 24-hour refresh,
-retried hourly after a failure) from pacer.andrechek.com. Both paths run the
+retried hourly after a failure; from 0.9.6 on, on the price list's own daily
+clock, since it is the app's primary price source, #469) from
+pacer.andrechek.com. Both paths run the
 site's Worker (`run_worker_first`), which returns the static file exactly as
 the assets layer answers it, untouched, and then, in `ctx.waitUntil`, posts
 one event to the app's PostHog project. Nothing about the count can change or
@@ -786,7 +788,8 @@ person, account, project or path. Account ids are org ids, so never sent; plan t
    local API routes hit, CLI subcommands, installed widgets (kind + size). The least-used shows
    up as zero counts against the full list, which the check-in carries.
 8. **Slow operations**: scan cycles > 1 s with phase breakdown (already planned), OAuth poll
-   latency and outcome (ok / 401 / 429 / network), pricing refresh time, local API snapshot build
+   latency and outcome (ok / 401 / 429 / network), pricing refresh time (`pricing.refresh_ms`, the
+   direct catalog fetch; from 0.9.6 only when the app falls back to it, #469), local API snapshot build
    time, widget timeline time, CLI command time, main-thread stalls (the watchdog's threshold is
    100 ms in code; send ≥ 250 ms), launch-to-ready time, memory footprint at launch, hourly and
    after a rebuild.

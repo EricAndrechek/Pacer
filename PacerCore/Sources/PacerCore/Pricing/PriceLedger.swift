@@ -21,6 +21,11 @@ import Foundation
 ///    curated file was reviewed, with different numbers, is news the reviewer
 ///    didn't have, and wins from its start. Otherwise an open curated record
 ///    would freeze its model's price forever. Ties go to the later start.
+///    Among catalog records, the price list's (#469, dated once on our side)
+///    beat the ones this Mac dated from its own fetches wherever both cover
+///    the moment: every Mac then prices it alike, and a Mac's own record only
+///    fills what the list does not cover (time before the list existed, a
+///    model it does not carry).
 /// 4. **Outside every window** (a sample older than the first record, or in a
 ///    gap), the nearest record prices it and the result is flagged
 ///    `outsideWindow`: a flagged estimate rather than a silent one.
@@ -313,14 +318,17 @@ public struct PriceLedger: Sendable {
     }
 
     /// Curated over catalog, with the review-date exception (see the type
-    /// doc), then the later start, then the id.
+    /// doc), then the later start, then the id. The price list's catalog
+    /// records stand in for this Mac's own whenever any is among `records`.
     static func precedence(_ records: [PriceRecordValue]) -> PriceRecordValue {
         func latest(_ rs: [PriceRecordValue]) -> PriceRecordValue? {
             rs.max {
                 $0.effectiveFrom != $1.effectiveFrom ? $0.effectiveFrom < $1.effectiveFrom : $0.id < $1.id
             }
         }
-        let catalog = records.filter { !$0.curated }
+        let anyCatalog = records.filter { !$0.curated }
+        let listed = anyCatalog.filter(\.fromPriceList)
+        let catalog = listed.isEmpty ? anyCatalog : listed
         guard let curated = latest(records.filter(\.curated)) else { return latest(catalog)! }
         if curated.effectiveTo == nil, let reviewed = curated.reviewedAt,
            let news = latest(catalog.filter { $0.effectiveFrom > reviewed && !$0.samePrice(as: curated) }) {
@@ -551,8 +559,9 @@ extension PriceLedger {
     }
 
     /// The stand-in ledger `SampleCostCache` uses before the store's has been
-    /// read: curated history plus the catalog's current rates, open from the
-    /// beginning of time. Only views can see it, briefly at launch — the scan
+    /// read: curated history (and the price list's dated records, passed in
+    /// with it) plus the catalog's current rates, open from the beginning of
+    /// time. Only views can see it, briefly at launch — the scan
     /// installs the store's ledger before any rollup is recomputed — and
     /// tests that never run a scan price against it.
     public static func provisional(

@@ -108,11 +108,12 @@ final class AppBackgroundService {
     /// on their own internal timeline policy, gated by WidgetKit's
     /// budget, which can leave them tens of minutes stale.
     private let widgetRefreshCoordinator = WidgetRefreshCoordinator()
-    /// Background task that periodically refreshes the LiteLLM pricing
-    /// snapshot. Independent of the scan loop because its cadence (24h,
-    /// hourly while a new Claude model has no price) is far longer than
-    /// scan cycles (5–60s) and entangling them would make the scan path
-    /// responsible for network/CDN fallibility.
+    /// Background task that periodically refreshes the price list (and,
+    /// only when it falls short, the catalogs directly: `PriceSources`).
+    /// Independent of the scan loop because its cadence (24h, hourly while a
+    /// new Claude model has no price) is far longer than scan cycles (5–60s)
+    /// and entangling them would make the scan path responsible for
+    /// network/CDN fallibility.
     private var pricingRefreshTask: Task<Void, Never>?
     /// Gentle backstop that trims unused SwiftData persistent history so
     /// the `ATRANSACTION`/`ACHANGE` log can't grow unbounded over years.
@@ -359,10 +360,12 @@ final class AppBackgroundService {
 
     // MARK: - Pricing refresh
 
-    /// Refresh the pricing catalogs and the curated price history: daily, or
-    /// hourly while a newly used Claude model has no price
-    /// (`PricingRefreshSchedule`, which holds the intervals and why). Each
-    /// turn is `PricingRefreshLoop.tick` and a sleep.
+    /// Refresh the price list (the curated history plus the catalog prices
+    /// `bin/price-catalog-sync.py` merged on our side, #469): daily, or hourly
+    /// while a newly used Claude model has no price (`PricingRefreshSchedule`,
+    /// which holds the intervals and why). The catalogs themselves are fetched
+    /// in the same pass only when the list falls short, at most daily
+    /// (`PriceSources`). Each turn is `PricingRefreshLoop.tick` and a sleep.
     ///
     /// The loop wakes at least hourly to look at the cache's age and the
     /// unpriced models, so a model that turns up unpriced during a daily wait
@@ -377,8 +380,9 @@ final class AppBackgroundService {
             // refresh does not fetch again.
             while !Task.isCancelled {
                 let tick = await PricingRefreshLoop.tick(.init(
-                    cacheAge: { PricingTable.cacheAge() },
+                    cacheAge: { PriceSources.listCheckAge() },
                     hourly: { UnpricedModels.wantsHourlyChecks() },
+                    alsoDue: { PriceSources.catalogsDue() },
                     refresh: { hourly in await self.refreshPricing(hourly: hourly) }))
                 do {
                     try await Task.sleep(nanoseconds: UInt64(tick.delay * 1_000_000_000))
@@ -392,22 +396,23 @@ final class AppBackgroundService {
     /// One refresh pass, and what follows from it.
     private func refreshPricing(hourly: Bool) async -> PricingRefreshPass.Outcome {
         let count = await PricingTable.shared.modelCount()
-        let outcome = await PricingRefreshPass.run(refreshCatalog: {
-            let refreshStarted = Date()
-            let ok = await PricingTable.shared.refresh()
-            // Daily at most, or hourly while a new model is unpriced or
-            // after a failure.
+        let outcome = await PriceSources.pass(hourly: hourly)
+        if let seconds = outcome.catalogSeconds {
+            // The direct catalog fetch, only when the list fell short: daily
+            // at most, or hourly after a failure.
             Telemetry.distribution(
-                "pricing.refresh_ms", Date().timeIntervalSince(refreshStarted) * 1000,
-                unit: .millisecond, attributes: ["outcome": .string(ok ? "ok" : "failed")])
-            return ok
-        })
+                "pricing.refresh_ms", seconds * 1000, unit: .millisecond,
+                attributes: ["outcome": .string(outcome.catalogRefreshed ? "ok" : "failed")])
+        }
+        let why = (hourly ? " (hourly: a new model has no price)" : "")
+            + (outcome.direct.map { " [catalogs wanted: \($0.rawValue)]" } ?? "")
         if outcome.catalogRefreshed {
             let after = await PricingTable.shared.modelCount()
-            Log.write("AppBackground", "pricing refresh ok: \(count) → \(after) model(s)"
-                      + (hourly ? " (hourly: a new model has no price)" : ""))
+            Log.write("AppBackground", "pricing refresh ok: catalogs \(count) → \(after) model(s), price list "
+                      + (outcome.curatedRefreshed ? "updated" : "unchanged") + why)
         } else if outcome.curatedRefreshed {
-            Log.write("AppBackground", "pricing: catalog refresh failed, curated history refreshed")
+            Log.write("AppBackground", "pricing refresh ok: price list updated"
+                      + (outcome.catalogSeconds != nil ? ", catalog fetch failed" : "") + why)
         }
         if outcome.reloaded {
             // Views bound to the pricing snapshot re-render with the new

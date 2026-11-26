@@ -242,8 +242,14 @@ These are subtle, easy to miss, and break user-visible numbers:
   Free plan's account-wide daily request limit: past it, they get 429 until
   00:00 UTC; 0.9.5 and later then read `main` on raw.githubusercontent.com,
   0.9.4 has no fallback (accepted by the owner, 2026-11-25).
-  Releases write them (`bin/publish-feeds.sh`);
-  `gh-pages` is only a byte-for-byte mirror for 0.9.3 and earlier. A Pacer
+  Releases write them (`bin/publish-feeds.sh`), and the price history's
+  `catalog` section (the price list, #469) is written every six hours by
+  `.github/workflows/price-catalog-sync.yml`: never hand-edit or `git revert`
+  those records (a wrong one is re-priced by a curated record, then the list is
+  bumped: `docs/releasing.md`, "The price list"), and keep
+  `bin/price-catalog-sync.py` merging exactly as `PricingTable` does
+  (`PricingCatalogParityTests`). `gh-pages` is only a mirror for 0.9.3 and
+  earlier. A Pacer
   pointed at a feed that stops getting releases is stranded for good, so a
   new `SUFeedURL` needs a migration plan of its own
   (`docs/releasing.md`, "The update feed").

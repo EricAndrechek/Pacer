@@ -43,6 +43,12 @@ enum CatwalkCatalog {
     /// below input). Mapping those the wrong way round would inflate cache
     /// reads by ~50x while looking entirely plausible.
     ///
+    /// Catwalk has since moved the prices into a `pricing` object (`input`,
+    /// `output`, `cache_create` for the write rate, `cache_hit` for the read
+    /// rate). Until #469 noticed, this read only the flat keys and so took
+    /// nothing from Catwalk at all; both shapes are read now, the flat key
+    /// first. `bin/price-catalog-sync.py` reads them the same way.
+    ///
     /// Like models.dev, the 1-hour cache-write tier isn't published, so
     /// synthesized entries leave it nil and `CostCalculator` bills 1h writes
     /// at the 5m rate — a small undercount that self-heals once a primary
@@ -59,19 +65,20 @@ enum CatwalkCatalog {
         result.reserveCapacity(models.count)
         for model in models {
             guard let id = model["id"] as? String, !id.isEmpty else { continue }
-            func perToken(_ key: String) -> Double? {
-                guard let mtok = (model[key] as? NSNumber)?.doubleValue, mtok > 0 else {
+            let pricing = model["pricing"] as? [String: Any] ?? [:]
+            func perToken(_ flat: String, _ nested: String) -> Double? {
+                guard let mtok = ((model[flat] ?? pricing[nested]) as? NSNumber)?.doubleValue, mtok > 0 else {
                     return nil
                 }
                 return mtok / 1_000_000
             }
             var entry: [String: Any] = [:]
-            if let v = perToken("cost_per_1m_in") { entry["input_cost_per_token"] = v }
-            if let v = perToken("cost_per_1m_out") { entry["output_cost_per_token"] = v }
-            if let v = perToken("cost_per_1m_in_cached") {
+            if let v = perToken("cost_per_1m_in", "input") { entry["input_cost_per_token"] = v }
+            if let v = perToken("cost_per_1m_out", "output") { entry["output_cost_per_token"] = v }
+            if let v = perToken("cost_per_1m_in_cached", "cache_create") {
                 entry["cache_creation_input_token_cost"] = v
             }
-            if let v = perToken("cost_per_1m_out_cached") {
+            if let v = perToken("cost_per_1m_out_cached", "cache_hit") {
                 entry["cache_read_input_token_cost"] = v
             }
             guard !entry.isEmpty else { continue }

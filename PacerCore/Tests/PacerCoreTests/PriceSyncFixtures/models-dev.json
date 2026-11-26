@@ -1,0 +1,15 @@
+{
+  "anthropic": {
+    "id": "anthropic",
+    "models": {
+      "claude-opus-5-5": {"id": "claude-opus-5-5", "cost": {"input": 4, "output": 20, "cache_read": 0.2, "cache_write": 5}, "limit": {"context": 1000000, "output": 128000}},
+      "claude-opus-4-7": {"id": "claude-opus-4-7", "cost": {"input": 5, "output": 30, "cache_read": 0.5, "cache_write": 6.25}},
+      "claude-sonnet-4-5-20250929": {"id": "claude-sonnet-4-5-20250929", "cost": {"input": 3, "output": 15, "cache_read": 0.3, "cache_write": 3.75}},
+      "claude-fable-9": {"id": "claude-fable-9", "cost": {"input": 10, "output": 50, "cache_read": 0.25, "cache_write": 12.5}, "limit": {"context": 1000000.0, "output": 128000}},
+      "claude-3-5-haiku-latest": {"id": "claude-3-5-haiku-latest", "cost": {"input": 0.8, "output": 4, "cache_read": 0.08, "cache_write": 1}},
+      "claude-zero": {"id": "claude-zero", "cost": {"input": 0, "output": 0}},
+      "claude-nocost": {"id": "claude-nocost"}
+    }
+  },
+  "openai": {"id": "openai", "models": {"gpt-4o": {"cost": {"input": 2.5, "output": 10}}}}
+}
