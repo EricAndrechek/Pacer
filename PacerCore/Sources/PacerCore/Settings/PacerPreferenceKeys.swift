@@ -135,6 +135,13 @@ public enum PacerPreferenceKeys {
     /// missing value means on. Until 2026-11 this key also covered Sentry's
     /// performance data; see `TelemetryConsent` for the migration.
     public static let telemetryUsageData = "pacer.telemetry.usageData"
+    /// When Pacer last asked the site for the curated price history, as a
+    /// `Date`; it becomes the `X-Pacer-Since-Last-Check` bucket of the next
+    /// request (`FeedRequestHeaders`).
+    /// When the appcast was last requested (Sparkle's own date is already
+    /// "now" when the delegate runs).
+    public static let appcastLastCheck = "pacer.appcast.lastCheck"
+    public static let priceHistoryLastFetch = "pacer.priceHistory.lastFetch"
     /// Set once the two-toggle migration has run (`TelemetryConsent.migrate`).
     public static let telemetryMigrated = "pacer.telemetry.migratedTwoToggles"
     /// Set by the migration when the old usage toggle was off: Sentry then
@@ -232,14 +239,14 @@ public enum PacerPreferences {
         if isTestProcess {
             // Per-process, so a parallel run cannot clobber another's writes.
             //
-            // An absolute path (no `.plist`) keeps the plist in the temp
-            // directory. A named suite wrote ~/Library/Preferences/<name>.plist,
-            // which cfprefsd re-creates after any delete and which piled up
-            // (#336, #464). Test-only: the production branch below is untouched.
-            let dir = FileManager.default.temporaryDirectory
-                .appendingPathComponent("pacer-test-defaults-\(ProcessInfo.processInfo.processIdentifier)", isDirectory: true)
-            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            let suite = dir.appendingPathComponent("testprocess").path
+            // A named domain, not an absolute path. #336 briefly used a path
+            // under the temp directory to keep the plist out of
+            // ~/Library/Preferences; on CI's loaded runners a read right after
+            // a write then came back stale (a removed key still read, a write
+            // not yet visible, one reconcile taking 50 s), and the scope-mirror
+            // tests failed on main. The leftover plists are swept by
+            // `make test` instead (Makefile), which is where they piled up.
+            let suite = "pacer.testprocess.\(ProcessInfo.processInfo.processIdentifier)"
             return UserDefaults(suiteName: suite) ?? .standard
         }
         return UserDefaults(suiteName: PacerStore.appGroupIdentifier) ?? .standard
