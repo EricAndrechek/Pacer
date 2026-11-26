@@ -585,6 +585,10 @@ public final class ScanCoordinator {
     /// persister's dirty sets, and who is queued behind it.
     private var markPassInFlight = false
     private var markPassWaiters: [CheckedContinuation<Void, Never>] = []
+    /// Passes waiting for the dirty sets or holding them, and `stop()`
+    /// waiting for there to be none (#475).
+    private var passesEntered = 0
+    private var passEndWaiters: [CheckedContinuation<Void, Never>] = []
 
     /// Run `body` with the persister's dirty sets to itself.
     ///
@@ -599,15 +603,41 @@ public final class ScanCoordinator {
     private func withMarksToItself<T>(
         _ body: @ScanActor () async throws -> T
     ) async rethrows -> T {
+        passesEntered += 1
         while markPassInFlight {
             await withCheckedContinuation { markPassWaiters.append($0) }
         }
         markPassInFlight = true
         defer {
             markPassInFlight = false
+            passesEntered -= 1
             if !markPassWaiters.isEmpty { markPassWaiters.removeFirst().resume() }
+            if passesEntered == 0, !passEndWaiters.isEmpty {
+                let waiters = passEndWaiters
+                passEndWaiters = []
+                for waiter in waiters { waiter.resume() }
+            }
         }
         return try await body()
+    }
+
+    /// Returns once no pass (scan cycle, login pass, alias migration) is
+    /// running or waiting to. Every pass that starts after `stop()` returns
+    /// at its first line, so once this returns after a stop, none will save.
+    private func untilNoPass() async {
+        while passesEntered > 0 {
+            await withCheckedContinuation { passEndWaiters.append($0) }
+        }
+    }
+
+    /// A pass's first line: once `stop()` has begun, it does nothing (#475).
+    private func throwIfStopped() throws {
+        if stopRequested { throw ScanStopped() }
+    }
+
+    /// The error a pass that starts after `stop()` throws instead of running.
+    public struct ScanStopped: Error, CustomStringConvertible {
+        public var description: String { "stopped: Pacer is quitting" }
     }
 
     /// Last time we ran the auto-aliaser pass. Under heavy Claude
@@ -726,7 +756,10 @@ public final class ScanCoordinator {
     public func runAliasMigrationOnly() async throws -> AliasMigrationReport {
         // Includes the fingerprint check: a cycle in flight may itself migrate
         // this alias, and then there is nothing left to do here.
-        try await withMarksToItself { try await runAliasMigrationUnserialized() }
+        try await withMarksToItself {
+            try throwIfStopped()
+            return try await runAliasMigrationUnserialized()
+        }
     }
 
     private func runAliasMigrationUnserialized() async throws -> AliasMigrationReport {
@@ -1145,6 +1178,9 @@ public final class ScanCoordinator {
         // path; the next genuine FSEvent for a path we deleted will
         // simply re-create the cursor at offset 0 (correct: we'd be
         // seeing a new file).
+        // The prune saves, and the startup cycle after it is a pass: neither
+        // may start once `stop()` has (#475).
+        if await abandonIfStopped() { return }
         do {
             try await beforeStartupPruneHook?()
             let pruned = try pruneStaleCursors()
@@ -1188,24 +1224,79 @@ public final class ScanCoordinator {
         }
     }
 
-    public func stop() async {
+    /// Stop, and wait for the pass in flight to finish: for at most
+    /// `stopDrainBound`. Returns whether it did, and with it the promise that
+    /// nothing from this coordinator saves after this returns (#475).
+    ///
+    /// **Why it waits.** It used to return with a scan cycle still running.
+    /// That cycle saved when it finished, after the quit had replied, and
+    /// by then a new Pacer could already have the store open. Now
+    /// every pass checks the stop first thing and does nothing if it was
+    /// asked for, and this waits for the one already running.
+    ///
+    /// **Why it lets that pass finish, rather than stopping it part-way.** A
+    /// cycle commits in pieces: the scan saves its turns in batches, and the
+    /// rollups and cursors commit after. Cursors never commit ahead of their
+    /// turns, so a cycle cut short loses nothing: the next launch rereads
+    /// from the old cursors and the dedup index (rebuilt when it disagrees
+    /// with the store) turns away what is already stored. But a turn saved
+    /// whose rollups did not commit is not marked again on the reread, and
+    /// its day, hour, project and session rows stay short until something
+    /// else marks them. Running to the end is what avoids that. Past the
+    /// bound the pass is left running. Then the quit's exit guard ends the
+    /// process under it (`QuitExitGuard`), which is that same crash case.
+    ///
+    /// **Not covered, on purpose.** A few writes run outside the passes:
+    /// the fire-and-forget poller tasks a cycle starts
+    /// (`oauthPoller.refreshSignedInCredential`, `.setActiveAccount`), and
+    /// `followLoginChange(.switcher)`, which ingests the switcher's cache
+    /// without a pass. They can still save after this returns. Each is
+    /// a small transaction of its own, which SQLite's WAL keeps atomic
+    /// beside another process's writes, and each repeats harmlessly at the
+    /// next launch. Bringing them under the wait is out of scope for #475.
+    @discardableResult
+    public func stop() async -> Bool {
         // First, before anything suspends: `runForever` reads it after each
-        // startup step, so whatever this call can't reach yet is not started.
+        // startup step, and every pass reads it first thing, so whatever this
+        // call can't reach yet is not started.
         stopRequested = true
         signedInCredential.setOnAccountChange(nil)
         loginWatcher?.stop()
         loginWatcher = nil
         fastRejectFollowUp?.cancel()
         fastRejectFollowUp = nil
+        await stopRunningParts()
+        let waitStarted = ContinuousClock.now
+        var drained = true
+        if passesEntered > 0 {
+            drained = await BoundedWait.atMost(stopDrainBoundForTesting ?? Self.stopDrainBound) { [self] in
+                await self.untilNoPass()
+            }
+        }
+        let waited = Int((ContinuousClock.now - waitStarted) / .milliseconds(1))
+        if !drained {
+            log("stop: a scan pass is still running after \(waited) ms; not waiting for it")
+        } else if waited >= 100 {
+            log("stop: waited \(waited) ms for the scan pass in flight to finish")
+        }
         // Flush the dedup index unconditionally on the way out: writes are
         // throttled during normal operation, so without this a clean quit
         // could still leave several minutes of rows to re-walk next launch.
-        // A quit often lands while a cycle is suspended part-way, its turns
-        // inserted and not yet saved, and they never will be; what is written
-        // is what the store holds, not those (#395).
+        // After the wait, so it covers the last cycle's turns; what is
+        // written is what the store holds, never turns inserted and not yet
+        // saved (#395).
         persister?.writeDedupIndexIfNeeded(force: true)
-        await stopRunningParts()
+        return drained
     }
+
+    /// The longest `stop()` waits for the pass in flight (#475). A cycle's
+    /// commit takes well under a second on an idle Mac and seconds on a
+    /// loaded one. Its worst phase on record was minutes (a 241 s session
+    /// rebuild in a launch's first cycle at load ~225), and a quit must end
+    /// in bounded time (#446). The install script allows 60 s for the whole quit.
+    public static let stopDrainBound: Duration = .seconds(20)
+    /// Test seam: a shorter bound, so a test can see the wait give up.
+    var stopDrainBoundForTesting: Duration?
 
     /// Run a cycle now, for a change no transcript shows: new prices, which
     /// the next cycle syncs into the ledger and reprices history with. On a
@@ -1345,6 +1436,8 @@ public final class ScanCoordinator {
         loginPassQueued = true
         await withMarksToItself {
             loginPassQueued = false
+            // Quitting (#475): a login pass saves, and none may after `stop()`.
+            guard !stopRequested else { return }
             let keychainMoved = loginPassKeychainMoved
             let seen = loginPassSeenAt ?? seenAt
             loginPassKeychainMoved = false
@@ -1652,7 +1745,10 @@ public final class ScanCoordinator {
     // MARK: - Internal
 
     private func runScanCycle() async throws -> ScanReport {
-        let report = try await withMarksToItself { try await runScanCycleUnserialized() }
+        let report = try await withMarksToItself {
+            try throwIfStopped()
+            return try await runScanCycleUnserialized()
+        }
         // After the cycle's locals are gone, so what is reported is what the
         // rebuild left behind: the floor the app then sits on for hours (#337).
         if lastCycleRebuilt {

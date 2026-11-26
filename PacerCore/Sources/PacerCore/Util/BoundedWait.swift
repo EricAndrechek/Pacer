@@ -6,7 +6,7 @@ import Foundation
 /// waits on is doing (#446): a quit waits on the arena scorer, and on a
 /// saturated Mac the scorer's background-QoS threads can go minutes without
 /// a core.
-enum BoundedWait {
+public enum BoundedWait {
     /// Runs `work` in a task of its own, at the caller's priority, and waits
     /// for it for at most `bound` of wall time. Returns whether it finished.
     ///
@@ -15,7 +15,7 @@ enum BoundedWait {
     /// under it). The bound's own wait is a task at the caller's priority on
     /// the shared pool, so it is never one of the threads the work is waiting
     /// on.
-    static func atMost(_ bound: Duration, _ work: @escaping @Sendable () async -> Void) async -> Bool {
+    public static func atMost(_ bound: Duration, _ work: @escaping @Sendable () async -> Void) async -> Bool {
         let first = FirstAnswer()
         return await withCheckedContinuation { (c: CheckedContinuation<Bool, Never>) in
             first.arm(c)
