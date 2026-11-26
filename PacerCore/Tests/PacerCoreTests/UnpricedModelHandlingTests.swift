@@ -10,12 +10,9 @@ import Testing
 /// reload a curated-only update now gets, and the "price pending" mark.
 @Suite struct UnpricedModelHandlingTests {
 
-    private static func freshStore() -> UserDefaults {
-        let name = "pacer.test.unpriced.\(UUID().uuidString)"
-        let store = UserDefaults(suiteName: name)!
-        store.removePersistentDomain(forName: name)
-        return store
-    }
+    private let defaultsBag = TestDefaultsBag()
+
+    private func freshStore() -> UserDefaults { defaultsBag.make(prefix: "unpriced") }
 
     /// The sink's answer, settable, and what it was handed.
     private final class Sender: @unchecked Sendable {
@@ -50,7 +47,7 @@ import Testing
     @MainActor
     @Test("a model's problem goes once per Mac, fingerprinted on the model")
     func problemOncePerModelPerMac() {
-        let store = Self.freshStore()
+        let store = freshStore()
         let sender = Sender()
         let hub = Self.hub(store, sender)
         hub.publish(Self.state(["claude-sonnet-5-6"]))
@@ -73,7 +70,7 @@ import Testing
     @MainActor
     @Test("a report the sink refused is not marked, and goes at a later publish")
     func refusedIsNotMarked() {
-        let store = Self.freshStore()
+        let store = freshStore()
         let sender = Sender()
         sender.accepts.withLock { $0 = false }
         let hub = Self.hub(store, sender)
@@ -87,7 +84,7 @@ import Testing
     @MainActor
     @Test("at most three reports a launch; the rest go on the next")
     func perLaunchCap() {
-        let store = Self.freshStore()
+        let store = freshStore()
         let sender = Sender()
         let models: Set<String> = ["claude-a-1", "claude-b-1", "claude-c-1", "claude-d-1", "claude-e-1"]
         let hub = Self.hub(store, sender)
@@ -102,7 +99,7 @@ import Testing
     @MainActor
     @Test("a diagnostic launch or a test sends nothing and marks nothing")
     func disabledSendsNothing() {
-        let store = Self.freshStore()
+        let store = freshStore()
         let sender = Sender()
         Self.hub(store, sender, enabled: false).publish(Self.state(["claude-sonnet-5-6"]))
         #expect(sender.sent.isEmpty)
@@ -189,7 +186,7 @@ import Testing
     @MainActor
     @Test("hourly only while a new, versioned Claude model is unpriced")
     func hourlyOnlyForNewClaudeModels() {
-        let store = Self.freshStore()
+        let store = freshStore()
         let sender = Sender()
         let hub = Self.hub(store, sender, enabled: false)
         let now = Date()
@@ -335,7 +332,7 @@ import Testing
     @Test("publishing reaches the views' copy, costless models only")
     func publishReachesTheBoard() async {
         let board = PricePending()
-        let hub = Self.hub(Self.freshStore(), Sender(), board: board, enabled: false)
+        let hub = Self.hub(freshStore(), Sender(), board: board, enabled: false)
         hub.publish(UnpricedModels.State(unpriced: ["claude-sonnet-5-6", "claude-costed-1"],
                                          costless: ["claude-sonnet-5-6"], firstDay: [:]))
         #expect(await eventually(timeout: .seconds(60)) { board.models == ["claude-sonnet-5-6"] })
