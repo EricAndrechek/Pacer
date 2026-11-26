@@ -9,11 +9,7 @@ import Testing
 struct CrashRelaunchTests {
 
     func withDefaults(_ body: (UserDefaults) throws -> Void) rethrows {
-        // `pacer.testprocess.*` so `make test` sweeps the plist cfprefsd writes back.
-        let name = "pacer.testprocess.crashRelaunch.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: name)!
-        defer { defaults.removePersistentDomain(forName: name) }
-        try body(defaults)
+        try withTestDefaults(prefix: "crashRelaunch", body)
     }
 
     func counts(_ defaults: UserDefaults) -> [String: Int] {

@@ -4,9 +4,10 @@ import Testing
 
 @Suite("Telemetry toggles: two-toggle migration")
 struct TelemetryConsentTests {
+    private let defaultsBag = TestDefaultsBag()
 
     private func store() throws -> UserDefaults {
-        try #require(UserDefaults(suiteName: "consent-\(UUID().uuidString)"))
+        defaultsBag.make(prefix: "consent")
     }
 
     /// nil = key absent (never touched), else the stored old value.

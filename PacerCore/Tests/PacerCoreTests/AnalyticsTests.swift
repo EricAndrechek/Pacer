@@ -264,7 +264,9 @@ struct AnalyticsMappingTests {
 
     @Test("settings: bools and fixed sets send a value; numbers and unknowns do not")
     func settingsDiff() throws {
-        let s = try #require(UserDefaults(suiteName: "an-\(UUID().uuidString)"))
+        let holder = TestDefaults(prefix: "analytics")
+        defer { holder.cleanup() }
+        let s = holder.defaults
         let before = AnalyticsSettings.snapshot(s)
         s.set(true, forKey: PacerPreferenceKeys.notificationsEnabled)
         s.set("calculate", forKey: PacerPreferenceKeys.costMode)

@@ -147,7 +147,9 @@ struct LiveMeterAlertsTests {
         #expect(RateLimitAlertRules.toPost(windowKey: "w", previous: 70, current: 80, thresholds: [75],
                                            resetsAt: Self.reset.addingTimeInterval(0.6),
                                            notified: { $0 == legacy }).isEmpty)
-        #expect(RateLimitAlertSource.current(from: UserDefaults(suiteName: "pacer.test.alertsource.\(UUID())")!)
+        let holder = TestDefaults(prefix: "alertsource")
+        defer { holder.cleanup() }
+        #expect(RateLimitAlertSource.current(from: holder.defaults)
                 == .readings)
     }
 }

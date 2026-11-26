@@ -5,6 +5,7 @@ import Testing
 
 @Suite("Telemetry send caps", .serialized)
 struct TelemetryBudgetTests {
+    private let defaultsBag = TestDefaultsBag()
 
     private final class Clock: @unchecked Sendable {
         private let t: Mutex<Date>
@@ -16,7 +17,7 @@ struct TelemetryBudgetTests {
     private func make(_ limits: TelemetryBudget.Limits = .release, store: UserDefaults? = nil,
                       clock: Clock = Clock(Date(timeIntervalSince1970: Double(20_500 * 86_400 + 3_600))))
         throws -> (TelemetryBudget, UserDefaults, Clock) {
-        let defaults = try store ?? #require(UserDefaults(suiteName: "budget-\(UUID().uuidString)"))
+        let defaults = store ?? defaultsBag.make(prefix: "budget")
         return (TelemetryBudget(store: defaults, limits: limits, now: { clock.now }), defaults, clock)
     }
 
