@@ -23,6 +23,10 @@ final class AppBackgroundService {
     private let container: ModelContainer
     private var coordinator: ScanCoordinator?
     private var coordinatorTask: Task<Void, Error>?
+    /// `runForever` has started and not yet returned. `stop()` ends the
+    /// watcher and poller but does not wait for a cycle already running, which
+    /// saves when it finishes; the quit's last log line says which (#475).
+    private(set) var isScanLoopRunning = false
     /// NotificationCenter observer for `.pacerRequestImmediateScan`.
     /// UI surfaces (e.g. the bulk-merge sheet) post this when they
     /// commit changes the user expects to see reflected immediately;
@@ -201,14 +205,19 @@ final class AppBackgroundService {
         // and the coordinator is cleared so a future start() can
         // retry. At `loopPriority`, not the main thread's inherited one:
         // an upgrade's first cycle is minutes of CPU (#326).
+        isScanLoopRunning = true
         coordinatorTask = Task(priority: ScanCoordinator.loopPriority) { [weak self] in
             do {
                 try await scanCoordinator.runForever()
                 Log.write("AppBackground", "scan loop exited")
+                await MainActor.run { self?.isScanLoopRunning = false }
             } catch {
                 Log.write("AppBackground", "scan loop failed: \(error)")
                 gate.mark(.firstScan)
-                await MainActor.run { self?.coordinator = nil }
+                await MainActor.run {
+                    self?.isScanLoopRunning = false
+                    self?.coordinator = nil
+                }
                 throw error
             }
         }

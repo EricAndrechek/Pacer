@@ -96,6 +96,18 @@ public struct PaceColumnGrid: Layout {
         }
     }
 
+    /// No guide of its own, without asking a child: the protocol's default
+    /// would place every column and ask each one's subtree for its guide on
+    /// every pass. Same answer, since no column sets one. The full reasoning
+    /// is on `PaceAccountGroupsLayout.explicitAlignment` (#475).
+    public func explicitAlignment(of guide: HorizontalAlignment, in bounds: CGRect,
+                                  proposal: ProposedViewSize, subviews: Subviews,
+                                  cache: inout Cache) -> CGFloat? { nil }
+
+    public func explicitAlignment(of guide: VerticalAlignment, in bounds: CGRect,
+                                  proposal: ProposedViewSize, subviews: Subviews,
+                                  cache: inout Cache) -> CGFloat? { nil }
+
     /// Rows of subview indices, left-aligned, and the width each item gets.
     /// The column count is `PaceColumnLayout.columnCount` — the same balancing
     /// rule the card documented (4→2+2, 5→3+2), now fed a real width.

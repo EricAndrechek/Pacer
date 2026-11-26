@@ -472,17 +472,37 @@ struct MenuBarLabel: View {
         }
     }
 
+    /// Everything `body` reads to draw one pass, read once.
+    private struct Pass {
+        var usageKey: MenuBarLabelFeed.UsageKey?
+        var limitsKey: MenuBarLabelFeed.LimitsKey
+        var rendered: Render
+        var readingTimes: [Date]
+    }
+
+    /// The last pass, drawn again unchanged once quit begins (#475).
+    @State private var frozen = TerminationFreeze<Pass>()
+
     var body: some View {
         // Read here, so a change to any part re-runs `body` and restarts the
         // task keyed on it. Captured once, so the read is for exactly the key
         // the task was started with.
-        let usageKey = self.usageKey
-        let limitsKey = self.limitsKey
+        //
+        // Once quit begins the last pass is drawn again and nothing else is
+        // read (`TerminationFreeze`), so a scan cycle, poll or live-meter
+        // publish during the shutdown no longer redraws the label, and the
+        // keys stay put, so neither load restarts. Same view, same identity:
+        // the status item keeps what it showed until the process ends.
+        let pass = frozen.resolve(isTerminating: TerminationGate.shared.isTerminating) {
+            Pass(usageKey: usageKey, limitsKey: limitsKey, rendered: rendered, readingTimes: readingTimes)
+        }
+        let usageKey = pass.usageKey
+        let limitsKey = pass.limitsKey
         // `.equatable()` gates AppKit's re-rasterization: the outer view
         // re-evaluates when a key or a read value moves (cheap: no fetch is
         // made here), but the hosted status item only redraws when `rendered`
         // actually differs.
-        return MenuBarLabelContent(rendered: rendered).equatable()
+        return MenuBarLabelContent(rendered: pass.rendered).equatable()
             // No fetch on the main thread: each load reads on a fresh context
             // in a detached task and assigns its values in one turn.
             .task(id: limitsKey) {
@@ -494,14 +514,14 @@ struct MenuBarLabel: View {
             }
             // `initial: true` so the button gets a tooltip on first draw, not
             // only after the first value change.
-            .onChange(of: rendered.tooltip, initial: true) { _, _ in
+            .onChange(of: pass.rendered.tooltip, initial: true) { _, _ in
                 onTooltipChange?(tooltip(aged: true))
             }
             // A new reading of the same value leaves the ageless text as it
             // was, and its "read … ago" would otherwise wait for the minute
             // push to say "now". Kept out of `Render`, so it re-rasterizes
             // nothing.
-            .onChange(of: readingTimes) { _, _ in
+            .onChange(of: pass.readingTimes) { _, _ in
                 onTooltipChange?(tooltip(aged: true))
             }
             // The tooltip's ages, its "resets in 2 hr" and its
@@ -516,7 +536,8 @@ struct MenuBarLabel: View {
                 while !Task.isCancelled {
                     let next = PacerReadAge.nextChange(after: Date())
                     try? await Task.sleep(for: .seconds(max(0.05, next.timeIntervalSinceNow)))
-                    if Task.isCancelled { break }
+                    // Quitting: the label is frozen, and so is its hover hint.
+                    if Task.isCancelled || TerminationGate.shared.isTerminating { break }
                     onTooltipChange?(tooltip(aged: true, now: max(next, Date())))
                 }
             }

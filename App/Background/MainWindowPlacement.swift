@@ -451,6 +451,12 @@ enum MainWindowPlacement {
     /// creates it — reopening our own bundle makes SwiftUI rebuild the scene's
     /// window — minus `NSApp.activate()`, so nobody's focus moves.
     static func reopenInBackground() {
+        // Not while quitting (#475): opening our own bundle then can start a
+        // second Pacer beside this one instead of reopening this one's window.
+        guard !TerminationGate.shared.isTerminating else {
+            Log.write("Placement", "not reopening the dashboard: quitting")
+            return
+        }
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = false
         configuration.createsNewApplicationInstance = false

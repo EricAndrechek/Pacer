@@ -1,9 +1,9 @@
 #!/bin/bash
 # Quit the running Pacer.app GUI (if any) so the install script can
 # safely replace the bundle. Tries AppleScript quit first (so SwiftUI
-# termination handlers run cleanly), falls back to SIGKILL after a
-# bounded wait. Also terminates the WidgetKit extension and the crash
-# relauncher (see below).
+# termination handlers run cleanly), waits up to 60 s for the process to
+# exit, and only then falls back to SIGKILL. Also terminates the WidgetKit
+# extension and the crash relauncher (see below).
 #
 # Stdout: "1" if the app was running and has been stopped; "0" if it
 # was not running. The install script captures this to decide whether
@@ -76,23 +76,41 @@ echo "    Quitting Pacer.app" >&2
 
 # AppleScript `with timeout` keeps osascript from hanging forever if
 # the app's main thread is stuck — without it, a wedged Pacer would
-# block the whole install. 5s is enough for any healthy quit cycle.
+# block the whole install. The timeout only bounds waiting for the
+# event's reply: the quit request itself stays queued in Pacer, which
+# handles it once its main thread gets to it.
 osascript \
     -e 'with timeout of 5 seconds' \
     -e 'tell application "Pacer" to quit' \
     -e 'end timeout' >/dev/null 2>&1 || true
 
-# Even on a successful quit, the process can take a moment to drop off
-# the process table. Two seconds is a generous allowance.
-for _ in 1 2; do
-    sleep 1
+# Then wait for the process itself to exit, for up to 60 s, before forcing
+# it. A quit does real work: it stops the scan loop and the poller, lets
+# their last saves land, and flushes telemetry and the log. That work is
+# bounded (#446), but on a loaded Mac it takes well over the 2 s this used
+# to allow. Twice on 2026-11-25 the SIGKILL landed part-way through a
+# shutdown (the scan loop had exited at +7.3 s, the archive sync had just
+# run). Pacer also ends itself 5 s after it answers the quit
+# (`QuitExitGuard`, #475), so a healthy quit is gone well inside this.
+QUIT_WAIT_POLLS=120   # × 0.5 s = 60 s
+for (( poll = 1; poll <= QUIT_WAIT_POLLS; poll++ )); do
     if ! pgrep -U "${ME}" -f "${APP_PATH_REGEX}" >/dev/null 2>&1; then
         echo 1
         exit 0
     fi
+    # Say so once, when this is no longer a moment: the install is waiting
+    # on the quit, not stuck.
+    if (( poll == 10 )); then
+        echo "    Waiting for Pacer to finish quitting (up to 60 s)" >&2
+    fi
+    sleep 0.5
 done
+if ! pgrep -U "${ME}" -f "${APP_PATH_REGEX}" >/dev/null 2>&1; then
+    echo 1
+    exit 0
+fi
 
-echo "    GUI did not exit after AppleScript quit; sending SIGKILL" >&2
+echo "    GUI did not exit within 60 s of the AppleScript quit; sending SIGKILL" >&2
 pkill -KILL -U "${ME}" -f "${APP_PATH_REGEX}" 2>/dev/null || true
 sleep 1
 echo 1

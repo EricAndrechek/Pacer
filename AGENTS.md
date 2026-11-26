@@ -817,9 +817,12 @@ or not "Open at Login" is on, with no prompt.
 
 - **`kill -9` brings Pacer back; a plain `kill` does not.** SIGKILL looks like
   any other crash. `bin/dev-quit-app.sh` (so `make install`, `make uninstall`,
-  `make record`) stops the relauncher first, because its fallback is a
-  SIGKILL; anything else that must force-kill Pacer runs
-  `pkill -x PacerRelauncher` first.
+  `make record`) stops the relauncher first, because its fallback, once a
+  quit has had 60 s to finish, is a SIGKILL; anything else that must
+  force-kill Pacer runs `pkill -x PacerRelauncher` first.
+- **A quit ends the process 5 s after Pacer answers it** (`QuitExitGuard`,
+  #475), if AppKit has not by then; from the quit on, no view refreshes
+  (`TerminationGate`).
 - Not armed under a debugger (Xcode's Stop is a SIGKILL) or when started from
   a terminal. `defaults write com.ericandrechek.pacer crashRelaunch.disabled
   -bool YES` turns it off from the next launch.

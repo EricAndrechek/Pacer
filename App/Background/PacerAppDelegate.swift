@@ -691,6 +691,11 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // clean (stuck shutdown killed by `make install` or logout) is still
         // a quit, never a crash to relaunch from (#412).
         CrashRelauncher.standDown()
+        // View work stops here (#475): the dashboard's refresh signals are
+        // held for good and the menu-bar label draws its last pass again, so
+        // nothing redraws for the rest of the quit. The window stays open,
+        // drawn as it was, so the next launch restores it.
+        TerminationGate.shared.begin()
         let began = ContinuousClock.now
         Task { @MainActor in
             // A quit during a migration waits for it: SQLite would roll an
@@ -711,9 +716,18 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // How long the quit's own work took: what a quit on a loaded Mac
             // is checked by (#446).
             Log.write("Lifecycle", "shut down in \(Int((ContinuousClock.now - began) / .milliseconds(1))) ms")
+            // The instant the quit is handed back to AppKit, and whether a
+            // scan cycle is still finishing (`stop()` does not wait for one):
+            // what a process outliving its quit is measured from (#475).
+            let scan = backgroundService?.isScanLoopRunning == true ? "still running" : "exited"
+            Log.write("Lifecycle", "replying to terminate · scan loop \(scan)")
             // Log lines are written on a background queue (`Log`); make sure
             // the last ones (this shutdown's) are on disk before the process ends.
             await Task.detached { Log.flush() }.value
+            // AppKit ends the process after the reply, on this run loop. A
+            // starved one can take far longer than the shutdown did, with a
+            // new Pacer already launched beside it; the guard bounds that.
+            QuitExitGuard.arm()
             NSApp.reply(toApplicationShouldTerminate: true)
         }
         return .terminateLater
@@ -1493,6 +1507,13 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // SwiftUI Window scene to materialize its singleton window
         // again. There's no other AppDelegate-accessible API for this
         // — `openWindow(id:)` only works from inside a SwiftUI view.
+        //
+        // Not while quitting (#475): opening our own bundle then can start a
+        // second Pacer beside this one instead of reopening this one's window.
+        guard !TerminationGate.shared.isTerminating else {
+            Log.write("Placement", "not reopening the dashboard: quitting")
+            return false
+        }
         NSWorkspace.shared.open(Bundle.main.bundleURL)
         return false
     }

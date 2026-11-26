@@ -342,4 +342,122 @@ struct PaceCardLayoutTests {
         #expect(births.allSatisfy { $0 != nil })
         #expect(Set(births.compactMap { $0 }).count > 1)
     }
+
+    // MARK: - The card's alignment question stays out of the columns (#475)
+
+    /// Every horizontal-guide question that reaches a column.
+    final class AlignmentQueries { var count = 0 }
+
+    /// A column's root, laid out exactly as its content, that counts the
+    /// guide questions it is asked: what the protocol's default merge asks
+    /// of every column on every pass (in the app, down through each column's
+    /// stacks, frames and `ViewThatFits`).
+    struct CountingColumn: Layout {
+        let queries: AlignmentQueries
+        func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+            subviews.first?.sizeThatFits(proposal) ?? .zero
+        }
+        func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+            subviews.first?.place(at: bounds.origin, anchor: .topLeading, proposal: ProposedViewSize(bounds.size))
+        }
+        func explicitAlignment(of guide: HorizontalAlignment, in bounds: CGRect, proposal: ProposedViewSize,
+                               subviews: Subviews, cache: inout ()) -> CGFloat? {
+            queries.count += 1
+            return nil
+        }
+    }
+
+    /// `PaceAccountGroupsLayout` as it was before #475: the same sizes and
+    /// places, and the protocol's default guides, which merge the subviews'.
+    struct MergingGroups: Layout {
+        let base = PaceAccountGroupsLayout()
+        func makeCache(subviews: Subviews) -> PaceAccountGroupsLayout.Cache { base.makeCache(subviews: subviews) }
+        func updateCache(_ cache: inout PaceAccountGroupsLayout.Cache, subviews: Subviews) {
+            base.updateCache(&cache, subviews: subviews)
+        }
+        func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews,
+                          cache: inout PaceAccountGroupsLayout.Cache) -> CGSize {
+            base.sizeThatFits(proposal: proposal, subviews: subviews, cache: &cache)
+        }
+        func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews,
+                           cache: inout PaceAccountGroupsLayout.Cache) {
+            base.placeSubviews(in: bounds, proposal: proposal, subviews: subviews, cache: &cache)
+        }
+    }
+
+    /// `PaceColumnGrid` as it was before #475, the same way.
+    struct MergingGrid: Layout {
+        let base = PaceColumnGrid()
+        func makeCache(subviews: Subviews) -> PaceColumnGrid.Cache { base.makeCache(subviews: subviews) }
+        func updateCache(_ cache: inout PaceColumnGrid.Cache, subviews: Subviews) {
+            base.updateCache(&cache, subviews: subviews)
+        }
+        func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout PaceColumnGrid.Cache) -> CGSize {
+            base.sizeThatFits(proposal: proposal, subviews: subviews, cache: &cache)
+        }
+        func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews,
+                           cache: inout PaceColumnGrid.Cache) {
+            base.placeSubviews(in: bounds, proposal: proposal, subviews: subviews, cache: &cache)
+        }
+    }
+
+    /// The card as `PacerCard` holds it: a title over the columns, in a
+    /// `VStack(alignment: .leading)`, which asks the layout for its leading
+    /// guide on every pass. The layout goes through `AnyLayout`, as the
+    /// card's does.
+    struct LeadingCard: View {
+        let layout: AnyLayout
+        let accounts: [Account]
+        let log: FrameLog
+        let queries: AlignmentQueries
+        var body: some View {
+            let grouped = accounts.count > 1
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Rate-limit pace").font(.headline)
+                layout {
+                    ForEach(accounts) { account in
+                        if grouped {
+                            PaceCardLayoutTests.header(account.id, log).paceAccountHeader()
+                        }
+                        ForEach(account.columns) { col in
+                            CountingColumn(queries: queries) { PaceCardLayoutTests.cell(col, log) }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    static let alignmentCases: [(name: String, accounts: [Account], new: AnyLayout, merging: AnyLayout)] = [
+        ("grouped, three accounts", [account("a", [120, 150]), account("b", [110, 100, 95]),
+                                     account("c", [130, 125, 80, 140])],
+         AnyLayout(PaceAccountGroupsLayout()), AnyLayout(MergingGroups())),
+        ("grid of 5", [account("a", [120, 150, 90, 130, 100])],
+         AnyLayout(PaceColumnGrid()), AnyLayout(MergingGrid())),
+    ]
+
+    @Test("the leading guide is answered without asking a column, at the same frames",
+          arguments: [1000, 560] as [CGFloat])
+    func alignmentStaysOutOfTheColumns(width: CGFloat) {
+        for (name, accounts, newLayout, mergingLayout) in Self.alignmentCases {
+            let merged = FrameLog(), new = FrameLog()
+            let mergedQueries = AlignmentQueries(), newQueries = AlignmentQueries()
+            let mergedSize = Self.layOut(LeadingCard(layout: mergingLayout, accounts: accounts,
+                                                     log: merged, queries: mergedQueries), width: width)
+            let newSize = Self.layOut(LeadingCard(layout: newLayout, accounts: accounts,
+                                                  log: new, queries: newQueries), width: width)
+            let columns = accounts.flatMap(\.columns).count
+            // Without this the next line could pass by never asking at all.
+            #expect(mergedQueries.count >= columns,
+                    "\(name) @ \(width): the default merge asked \(mergedQueries.count) for \(columns) columns")
+            #expect(newQueries.count == 0, "\(name) @ \(width): \(newQueries.count) question(s) reached a column")
+            // And the answer is the same: the same card, every child where it was.
+            #expect(newSize == mergedSize, "\(name) @ \(width): card \(newSize) vs \(mergedSize)")
+            #expect(Set(new.frames.keys) == Set(merged.frames.keys), "\(name) @ \(width)")
+            for (id, was) in merged.frames {
+                guard let now = new.frames[id] else { continue }
+                #expect(Self.same(now, was), "\(name) @ \(width): \(id) at \(now), was \(was)")
+            }
+        }
+    }
 }
