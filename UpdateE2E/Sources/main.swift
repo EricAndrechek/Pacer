@@ -93,8 +93,10 @@ final class E2EDelegate: NSObject, NSApplicationDelegate {
 }
 
 MainActor.assumeIsolated {
-    // Seconds instead of minutes, set before anything touches the scheduler.
-    UpdateInstallScheduler.tuning = .init(tick: 1, armSpacing: 10, retryAfter: 60, adjustSignals: { signals in
+    // Seconds instead of minutes, set before anything touches the scheduler:
+    // a tick a second, and every spacing between arms divided by 360 (30 min →
+    // 5 s, 2 h → 20 s, 6 h → 60 s), so the backoff itself is exercised.
+    UpdateInstallScheduler.tuning = .init(tick: 1, timeScale: 1.0 / 360, retryAfter: 60, adjustSignals: { signals in
         if E2E.exists("install-now") {
             signals.sinceUsed = 86_400
             signals.userIdle = 86_400

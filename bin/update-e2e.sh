@@ -23,8 +23,9 @@
 #      requested); C is added and replaces B as the pending update, still with no
 #      download; at the install moment A downloads C, only C, and relaunches into
 #      it, once.
-#   2. download failure: C's archive answers 404. A stays on A, retries at its
-#      spacing, never falls back to B; once the archive is back, it installs C.
+#   2. download failure: C's archive answers 404. A stays on A, retries with
+#      the backoff (30 min, then 2 h, scaled down 360 times), never falls back
+#      to B; once the archive is back, it installs C.
 #
 # Everything is read from the app's own log (Pacer's [Update] lines and the test
 # app's STATUS lines), the feed server's request log, and the installed
@@ -277,6 +278,18 @@ requests() {
 eq() { [ "$1" = "$2" ]; }
 ge() { [ "$1" -ge "$2" ]; }
 log_count() { grep -Ec -- "$1" "${LOG}" 2>/dev/null || true; }
+
+arm_gaps_back_off() {
+    # The first three "arming for" lines' gaps: about 5 s, then about 20 s.
+    grep -E '\[Update\] arming for ' "${LOG}" | python3 -I -c '
+import sys
+from datetime import datetime
+t = [datetime.strptime(l.split(" ", 1)[0], "%Y-%m-%dT%H:%M:%S.%fZ") for l in sys.stdin]
+gaps = [(b - a).total_seconds() for a, b in zip(t, t[1:])][:2]
+print("     arm gaps:", ", ".join("%.1f s" % g for g in gaps))
+sys.exit(0 if len(gaps) == 2 and 4.5 <= gaps[0] < 15 and gaps[1] >= 19.5 else 1)
+'
+}
 installed_build() { /usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "${APP}/Contents/Info.plist" 2>/dev/null || echo none; }
 
 dump() {
@@ -347,7 +360,8 @@ scenario_download_404() {
     wait_for 60 "A (build 1) launched" 'launched build=1 ' || return
     wait_for 120 "A found C and deferred it" 'STATUS phase=available offered=0\.0\.3 ' || return
     touch "${HANDLES}/install-now"
-    # armSpacing is 10 s in the test app: two attempts inside half a minute.
+    # The test app divides every spacing by 360: after one failed download the
+    # next arm waits 5 s (30 min), after two 20 s (2 h).
     wait_for 120 "two arm attempts ended in a failed download" \
         'STATUS .*update\.arm\.download_failed=2' || return
     check "A is still A" eq "$(installed_build)" 1
@@ -361,6 +375,7 @@ scenario_download_404() {
     wait_for 240 "with the archive back, the next attempt installs C" 'launched build=3 ' || return
     rm -f "${HANDLES}/install-now"
     sleep 20
+    check "the retries back off: 30 min, then 2 h (scaled: 5 s, then 20 s)" arm_gaps_back_off
     check "C's archive downloaded exactly once" eq "$(requests "${out}" "${APP_NAME}-3.zip" 200)" 1
     check "two launches in all" eq "$(log_count 'launched build=')" 2
     check "the installed bundle is C" eq "$(installed_build)" 3

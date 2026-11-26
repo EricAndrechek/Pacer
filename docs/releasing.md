@@ -162,8 +162,14 @@ update when automatic downloads are off, and any update pending for 72 h, which
 is downloaded the way it was before (the hold, then install-on-quit) so a bug in
 arming cannot strand a Mac; `update.defer_fallback` counts those. An update that
 is only available is not installed when Pacer quits: nothing is downloaded yet.
-An arm that fails (feed unreachable, download failed) leaves the update pending
-and is tried again after 30 minutes. Every Sparkle behaviour this relies on is
+An arm that fails leaves the update pending. One that could not reach the site
+is retried a quarter of an hour later by the feed fallback's re-check, which
+downloads from the fallback feed (a plain check there would only defer the
+update again); one that failed past the feed (the download, its signature or
+extraction, or an authorization Sparkle asked for) is retried after 30 minutes,
+then 2 hours, then every 6 hours, since each may have cost a full download. The
+app menu keeps "Check for Updates…" under the update item, and a click on the
+update with automatic downloads turned off runs Sparkle's own dialog. Every Sparkle behaviour this relies on is
 pinned with its 2.10.1 file and line in `UpdateDeferral`; a Sparkle bump re-reads
 them, and the end-to-end test below runs it.
 
@@ -640,8 +646,9 @@ log and the installed bundle:
    install moment (the test app's `install-now` file makes the Mac read as idle,
    so `UpdateInstallPolicy` itself says install) A downloads C, only C, and
    relaunches into it, once.
-2. C's archive answers 404: A stays on A, retries at its spacing (10 s in the
-   test app, 30 min in Pacer), never falls back to B, and installs C once the
+2. C's archive answers 404: A stays on A, retries with the backoff (30 min,
+   then 2 h in Pacer; the test app divides every spacing by 360, so 5 s, then
+   20 s, which the job checks), never falls back to B, and installs C once the
    archive is back.
 
 `run` refuses anywhere but a GitHub-hosted runner (or a VM that sets

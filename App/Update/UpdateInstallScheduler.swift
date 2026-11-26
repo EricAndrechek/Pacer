@@ -46,7 +46,8 @@ final class UpdateInstallScheduler {
     /// install moment in seconds instead of ten idle minutes.
     struct Tuning {
         var tick: TimeInterval = 60
-        var armSpacing: TimeInterval = UpdateSchedule.armSpacing
+        /// Multiplies every spacing between arm attempts (`UpdateSchedule.retrySpacing`).
+        var timeScale: Double = 1
         var retryAfter: TimeInterval = 15 * 60
         var adjustSignals: (@MainActor (inout UpdateInstallPolicy.Signals) -> Void)?
     }
@@ -63,12 +64,14 @@ final class UpdateInstallScheduler {
     var readyVersion: String? { schedule.heldVersion }
     /// What the update action offers: pending or held.
     var offeredVersion: String? { schedule.offeredVersion }
-    /// The block has been called and Pacer has not relaunched yet, or an arm
-    /// someone clicked for is downloading: the update buttons grey out, and a
-    /// second click does nothing. Back to clickable when the hold ends, an arm
-    /// fails, or `retryAfter` passes with Pacer still here (the block can be
-    /// called again then).
-    var isInstalling: Bool { schedule.isInstalling }
+    /// The block has been called and Pacer has not relaunched yet: the update
+    /// buttons grey out, and a second click does nothing. Back to clickable
+    /// when the hold ends, or when `retryAfter` passes with Pacer still here
+    /// (the block can be called again then).
+    var isInstallStarted: Bool { schedule.isInstallStarted }
+    /// Someone clicked for an update that is not downloaded yet: it shows as
+    /// downloading, then as restarting. Clickable again if the arm fails.
+    var isRequested: Bool { schedule.isRequested }
 
     @ObservationIgnored private var install: (() -> Void)?
     @ObservationIgnored private weak var updater: SPUUpdater?
@@ -99,7 +102,7 @@ final class UpdateInstallScheduler {
         if owner {
             let saved = UpdateScheduleStore.load(store)
             schedule = UpdateSchedule(restoring: saved.pending, lastAttempt: saved.lastAttempt,
-                                      currentBuild: currentBuild)
+                                      failures: saved.failures, currentBuild: currentBuild)
             if UpdateScheduleStore.takeArmedInstall(currentBuild: currentBuild, store) {
                 TelemetryCounters.add(UpdateSchedule.ArmOutcome.installed.counterKey)
             }
@@ -136,6 +139,7 @@ final class UpdateInstallScheduler {
     /// `shouldProceedWithUpdate`: defer the download, or let it go ahead.
     func decide(_ found: UpdateDeferral.Found, version: String, build: String) -> UpdateDeferral.Decision {
         let now = Date()
+        schedule.clamp(now: now)
         let pendingFor = schedule.pending.map { max(0, now.timeIntervalSince($0.since)) }
         let decision = UpdateDeferral.decide(found, normalLaunch: owner, arming: schedule.isArming,
                                              pendingFor: pendingFor)
@@ -154,8 +158,15 @@ final class UpdateInstallScheduler {
             // and let the hold and install-on-quit take it, as before #470.
             Log.write("Update", "\(version) pending for 72 h; downloading it now")
             TelemetryCounters.add("update.defer_fallback")
-        case .proceed(.needsAttention), .proceed(.notAutomatic):
-            // Sparkle's own handling from here: nothing of ours is pending.
+        case .proceed(.needsAttention):
+            // Sparkle's own handling from here: nothing of ours is pending. A
+            // click stands, so a critical update downloaded instead installs
+            // as soon as it is handed over.
+            if schedule.pending != nil, !schedule.isHeldOrInstalling {
+                schedule.handOver()
+                persist()
+            }
+        case .proceed(.notAutomatic):
             if schedule.pending != nil, !schedule.isHeldOrInstalling {
                 schedule.clear()
                 persist()
@@ -166,6 +177,34 @@ final class UpdateInstallScheduler {
         return decision
     }
 
+    /// `willDownloadUpdate`: an arm that fails from here on cost a download.
+    func noteDownloadStarted() { schedule.noteDownloadStarted() }
+
+    /// `userDidMakeChoice`: Sparkle showed its own dialog. During an arm that
+    /// means the install needs authorization (`ArmOutcome.needsAuthorization`).
+    func noteShownToUser() { schedule.noteShownToUser() }
+
+    /// The feed fallback's re-check is due (`FeedFallback.failoverRecheckDelay`
+    /// after a check could not read the site). True when it was an arm that
+    /// could not, and this check, its retry on the fallback, is now under way;
+    /// false leaves the caller to run a plain check.
+    func armForFailover() -> Bool {
+        guard owner, let updater else { return false }
+        switch schedule.failoverVerdict(sessionInProgress: updater.sessionInProgress,
+                                        automaticChecks: updater.automaticallyChecksForUpdates,
+                                        automaticDownloads: updater.automaticallyDownloadsUpdates) {
+        case .arm(let reason):
+            Log.write("Update", "the site was unreachable; the arm retries on the fallback feed")
+            arm(reason)
+            return schedule.isArming
+        case .optedOut:
+            dropOptedOut()
+            return false
+        case .busy, .none, .wait, .spacing:
+            return false
+        }
+    }
+
     /// `willInstallUpdateOnQuit`: take the install over. False leaves Sparkle's
     /// own install-on-quit alone, for a diagnostic run of the bundle.
     func hold(version: String, updater: SPUUpdater, install: @escaping () -> Void) -> Bool {
@@ -174,6 +213,7 @@ final class UpdateInstallScheduler {
         self.updater = updater
         firedAt = nil
         lastWait = nil
+        schedule.clamp(now: Date())
         let action = schedule.held(version: version)
         let armed: Bool
         if case .held(_, _, let reason) = schedule.phase { armed = reason != nil } else { armed = false }
@@ -243,12 +283,15 @@ final class UpdateInstallScheduler {
         guard owner, let updater else { return }
         if !schedule.isHeldOrInstalling, schedule.pending != nil,
            !(updater.automaticallyChecksForUpdates && updater.automaticallyDownloadsUpdates) {
+            // Automatic updates were turned off since: the click still gets the
+            // update, through Sparkle's own dialog, which asks before it downloads.
             dropOptedOut()
+            if !updater.sessionInProgress { updater.checkForUpdates() }
             return
         }
         switch schedule.clicked(sessionInProgress: updater.sessionInProgress) {
         case .installHeld:
-            guard install != nil, !schedule.isInstalling else { return }
+            guard install != nil, !schedule.isInstallStarted else { return }
             // The same check the timer makes: a session that closed without
             // telling the delegate leaves a block that installs nothing.
             guard updater.sessionInProgress else { release(); return }
@@ -286,8 +329,9 @@ final class UpdateInstallScheduler {
         switch schedule.phase {
         case .idle:
             stopTimer()
-        case .available(let pending):
-            evaluateArming(since: pending.since)
+        case .available:
+            schedule.clamp(now: Date())
+            if let since = schedule.pending?.since { evaluateArming(since: since) }
         case .arming:
             // Sparkle tells the delegate when the cycle ends; if a session
             // ever closed without that, the arm is over all the same.
@@ -305,7 +349,7 @@ final class UpdateInstallScheduler {
             now: now, policy: policy, sessionInProgress: updater.sessionInProgress,
             automaticChecks: updater.automaticallyChecksForUpdates,
             automaticDownloads: updater.automaticallyDownloadsUpdates,
-            spacing: tuning.armSpacing)
+            scale: tuning.timeScale)
         switch verdict {
         case .arm(let reason):
             arm(reason)
@@ -357,13 +401,15 @@ final class UpdateInstallScheduler {
         // the block is dead and "Update to … — Restart" would do nothing.
         guard updater?.sessionInProgress == true else { release(); return }
         let now = Date()
+        // A clock set back since the hold must not hold it until it catches up.
+        if readyAt > now { self.readyAt = now }
         if let firedAt {
             if now.timeIntervalSince(firedAt) < tuning.retryAfter { return }
             // Still here after the wait: the block may be called again.
             self.firedAt = nil
             schedule.installDidNotHappen()
         }
-        switch UpdateInstallPolicy.decide(signals(now: now, readyAt: readyAt)) {
+        switch UpdateInstallPolicy.decide(signals(now: now, readyAt: min(readyAt, now))) {
         case .wait(let reason):
             if reason != lastWait {
                 lastWait = reason

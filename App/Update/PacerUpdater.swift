@@ -162,6 +162,19 @@ private class PacerUpdaterDelegate: NSObject, SPUUpdaterDelegate {
     func updater(_ updater: SPUUpdater, willDownloadUpdate item: SUAppcastItem, with request: NSMutableURLRequest) {
         FeedRequestHeaders.strip(request)
         note(.downloadStarted(version: item.displayVersionString))
+        MainActor.assumeIsolated { UpdateInstallScheduler.shared.noteDownloadStarted() }
+    }
+
+    /// Someone answered one of Sparkle's own update dialogs. During an arm,
+    /// Sparkle shows one only when the silent install needs authorization: it
+    /// gets 4008 from the installer launcher (`SPUInstallerDriver.m:472-473`),
+    /// keeps the download resumable and shows it at once
+    /// (`SPUAutomaticUpdateDriver.m:150`, `SPUUIBasedUpdateDriver.m:257-258`).
+    /// The scheduler backs its next arm off, or the dialog would come back
+    /// with every one.
+    func updater(_ updater: SPUUpdater, userDidMake choice: SPUUserUpdateChoice, forUpdate updateItem: SUAppcastItem,
+                 state: SPUUserUpdateState) {
+        MainActor.assumeIsolated { UpdateInstallScheduler.shared.noteShownToUser() }
     }
 
     func updater(_ updater: SPUUpdater, shouldDownloadReleaseNotesForUpdate updateItem: SUAppcastItem) -> Bool {
@@ -243,6 +256,18 @@ private class PacerUpdaterDelegate: NSObject, SPUUpdaterDelegate {
         }
     }
 
+    /// The re-check that reads the fallback feed after the site failed. When
+    /// the failed check was an arm, this one is that arm's retry (#470): a
+    /// plain check would find the update, defer it and spend the fallback, so
+    /// nothing would arm while the site stays down.
+    private func failoverRecheck(_ updater: SPUUpdater, after delay: TimeInterval) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak updater] in
+            guard let updater, updater.automaticallyChecksForUpdates else { return }
+            let armed = MainActor.assumeIsolated { UpdateInstallScheduler.shared.armForFailover() }
+            if !armed { updater.checkForUpdatesInBackground() }
+        }
+    }
+
     /// Set by `didFinishLoadingAppcast`, cleared before every check: what
     /// separates "the feed was unreachable" from "the archive download failed",
     /// which are both `SUDownloadError`.
@@ -315,7 +340,7 @@ private class PacerUpdaterDelegate: NSObject, SPUUpdaterDelegate {
             FeedFallback.report(feed: .appcast, failure: primary, fallbackOK: fallbackOK)
         }
         // The primary just failed: read the fallback soon, not in ~6 h.
-        if !wasFallback, feedChooser.usesFallback { recheck(updater, after: FeedFallback.failoverRecheckDelay) }
+        if !wasFallback, feedChooser.usesFallback { failoverRecheck(updater, after: FeedFallback.failoverRecheckDelay) }
         // A check that got through (an answer, even "up to date" or "later") ends the backoff.
         if ns == nil || deferred || (ns?.domain == "SUSparkleErrorDomain" && ns?.code == 1001) { downloadFailures = 0 }
         let failed = ns.map { !UpdateState.isQuietEnd(domain: $0.domain, code: $0.code) } ?? false
@@ -418,32 +443,52 @@ private final class DevBuildUpdaterDelegate: PacerUpdaterDelegate {
 /// and disables the menu item accordingly. Sparkle's recommended
 /// SwiftUI integration shape.
 ///
-/// While a downloaded update waits for a quiet moment (`UpdateInstallScheduler`)
-/// Sparkle's session stays open and no check can run, so the item installs
-/// that update instead, as "Update to 0.9.5 — Restart", the status menu's words
-/// (`UpdateCopy`). The same while an update is only available (#470): the
-/// click downloads the newest release and installs it.
+/// While an update is offered (pending since #470, or downloaded and waiting
+/// for a quiet moment, `UpdateInstallScheduler`), "Update to 0.9.5 — Restart",
+/// the status menu's words (`UpdateCopy`), installs it. The app menu (`.menu`)
+/// shows that item above "Check for Updates…" and keeps the check, which runs
+/// Sparkle's own dialog whenever no session is open (a held update keeps one
+/// open, so it is greyed out then). The About window's single link (`.single`)
+/// turns into the install while there is one to offer.
 struct CheckForUpdatesView: View {
-    @ObservedObject private var checker: UpdaterChecker
+    enum Style { case single, menu }
 
-    init(updater: SPUUpdater) {
+    @ObservedObject private var checker: UpdaterChecker
+    private let style: Style
+
+    init(updater: SPUUpdater, style: Style = .single) {
         self.checker = UpdaterChecker(updater: updater)
+        self.style = style
     }
 
     var body: some View {
-        // Read here, in this body, so the title follows the hold.
+        // Read here, in this body, so the titles follow the schedule.
         let state = UpdateStatus.shared.state
-        let ready = state.readyVersion
-        Button(ready.map(UpdateCopy.menuInstall) ?? UpdateCopy.checkForUpdates) {
-            // Decided at the click, not from the render: the hold can end
-            // between the two.
-            if UpdateInstallScheduler.shared.offeredVersion != nil {
-                UpdateStatus.shared.installNow()
-            } else {
-                checker.updater.checkForUpdates()
+        let offered = state.readyVersion
+        switch style {
+        case .menu:
+            if let offered {
+                Button(UpdateCopy.menuInstall(offered)) { install() }
+                    .disabled(state.isInstalling)
             }
+            Button(UpdateCopy.checkForUpdates) { checker.updater.checkForUpdates() }
+                .disabled(!checker.canCheckForUpdates)
+        case .single:
+            Button(offered.map(UpdateCopy.menuInstall) ?? UpdateCopy.checkForUpdates) {
+                // Decided at the click, not from the render: the hold can end
+                // between the two.
+                if UpdateInstallScheduler.shared.offeredVersion != nil {
+                    install()
+                } else {
+                    checker.updater.checkForUpdates()
+                }
+            }
+            .disabled(state.isInstalling || (offered == nil && !checker.canCheckForUpdates))
         }
-        .disabled(state.isInstalling || (ready == nil && !checker.canCheckForUpdates))
+    }
+
+    private func install() {
+        UpdateStatus.shared.installNow()
     }
 }
 

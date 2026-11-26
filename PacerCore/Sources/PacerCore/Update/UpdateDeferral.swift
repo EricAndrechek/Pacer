@@ -133,8 +133,9 @@ public enum UpdateDeferral {
 ///   launches: it is both the deferral's 72 h clock and the policy's "since
 ///   ready", so a pending update ages the same way a held one did.
 /// - **arming**: `UpdateInstallPolicy` said install (or someone clicked), Sparkle
-///   is idle, and the last attempt is `armSpacing` old: Pacer has started a
-///   background check that downloads.
+///   is idle, and the last attempt is `retrySpacing` old: Pacer has started a
+///   background check that downloads. An arm that could not reach the feed is
+///   retried by the feed fallback's own re-check (`failoverVerdict`).
 /// - **held**: Sparkle handed over its install block (`willInstallUpdateOnQuit`).
 /// - **installing**: the block was called; Pacer relaunches.
 public struct UpdateSchedule: Sendable, Equatable {
@@ -144,7 +145,7 @@ public struct UpdateSchedule: Sendable, Equatable {
         public var version: String
         /// Its `CFBundleVersion`, which tells a newer item from the same one.
         public var build: String
-        /// When an update was first deferred.
+        /// When an update was first deferred. Never later than now (`clamp`).
         public var since: Date
         /// This Pacer's `CFBundleVersion` then. A launch on any other build has
         /// installed something since, and starts clean.
@@ -166,8 +167,9 @@ public struct UpdateSchedule: Sendable, Equatable {
         case idle
         case available(Pending)
         case arming(Pending, ArmReason)
-        /// Sparkle's install block in hand. `pending` and `armed` are nil for a
-        /// hold no arming led to: the 72 h fallback, a critical update.
+        /// Sparkle's install block in hand. `pending` is nil for a hold with
+        /// nothing pending before it (a critical update); `armed` is nil for a
+        /// hold no arm and no click led to (the 72 h fallback, a critical update).
         case held(version: String, pending: Pending?, armed: ArmReason?)
         case installing(version: String, pending: Pending?, armed: ArmReason?)
     }
@@ -181,8 +183,13 @@ public struct UpdateSchedule: Sendable, Equatable {
         /// The check found nothing newer than this build: the update was pulled.
         case nothingNewer = "nothing_newer"
         case feedFailed = "feed_failed"
-        /// The feed was read but the download (or its extraction) failed.
+        /// The feed was read but the download (or its extraction, signature
+        /// check or installer) failed.
         case downloadFailed = "download_failed"
+        /// Sparkle needs someone to authorize the install (a copy of Pacer the
+        /// user cannot write), so it showed its own dialog instead
+        /// (`SPUInstallerDriver.m:472-473`, `SPUAutomaticUpdateDriver.m:150`).
+        case needsAuthorization = "needs_authorization"
         /// Sparkle was busy with another session when Pacer wanted to arm.
         case busy
 
@@ -197,6 +204,9 @@ public struct UpdateSchedule: Sendable, Equatable {
         case feedFailed
         /// The appcast was read, and the cycle failed after it.
         case downloadFailed
+        /// The installer needs authorization: Sparkle's 4008 (authorize later)
+        /// or 4007 (the authorization was cancelled).
+        case needsAuthorization
         /// Anything else: no error and no hold.
         case other
 
@@ -208,17 +218,18 @@ public struct UpdateSchedule: Sendable, Equatable {
             guard let domain, let code else { return .other }
             if UpdateDeferral.isDeferral(domain: domain, code: code) { return nil }
             if UpdateState.isNoUpdate(domain: domain, code: code) { return .noUpdate }
+            if domain == UpdateOutcomeLog.sparkleErrorDomain, code == 4007 || code == 4008 { return .needsAuthorization }
             return feedLoaded ? .downloadFailed : .feedFailed
         }
     }
 
     public enum ArmVerdict: Sendable, Equatable {
-        /// Nothing available to arm.
+        /// Nothing to arm.
         case none
         case arm(ArmReason)
         /// The policy says not now.
         case wait(UpdateInstallPolicy.WaitReason)
-        /// The last attempt was less than `armSpacing` ago.
+        /// The last attempt was less than `retrySpacing` ago.
         case spacing
         /// Sparkle's session is in progress.
         case busy
@@ -250,28 +261,54 @@ public struct UpdateSchedule: Sendable, Equatable {
         case nothing
     }
 
-    /// Between arm attempts the policy makes: a failed download or an
-    /// unreachable feed is retried half an hour later, not every minute.
+    /// Between arm attempts the policy makes: an unreachable feed is retried
+    /// half an hour later, not every minute.
     public static let armSpacing: TimeInterval = 30 * 60
+    /// The longest wait between attempts, after three failed ones in a row.
+    public static let longRetry: TimeInterval = 6 * 3600
+
+    /// Wait after `failures` arms in a row that failed past the feed (their
+    /// download, extraction or signature, or an authorization Sparkle asked
+    /// for). Each may have cost a full download and shown a dialog, so they
+    /// back off as a failed download does (`UpdateRetryPolicy`): 30 min, 2 h,
+    /// then 6 h. No failures: `armSpacing`.
+    public static func retrySpacing(afterFailures failures: Int) -> TimeInterval {
+        guard failures > 0 else { return armSpacing }
+        return UpdateRetryPolicy.downloadRetryDelay(afterFailures: failures) ?? longRetry
+    }
 
     public private(set) var phase: Phase
     public private(set) var lastAttempt: Date?
-    /// Someone clicked while Sparkle was busy.
-    public private(set) var clickWaiting = false
+    /// Arms in a row that failed past the feed (`retrySpacing`). Back to 0 on
+    /// a hold, a newer release, or the update going away.
+    public private(set) var failures: Int
+    /// Someone clicked, and whatever Sparkle hands over next installs at once:
+    /// the armed download, a critical update the arm found instead, or the
+    /// 72 h fallback's download that a busy Sparkle was already running.
+    public private(set) var clicked = false
+    /// The last arm could not reach the feed. The feed fallback's re-check is
+    /// its retry, with this reason (`failoverVerdict`).
+    public private(set) var feedFailedArm: ArmReason?
+    /// This arm started a download / Sparkle showed this arm to the user.
+    private var armDownloaded = false
+    private var armShown = false
     /// `busy` was counted for the current wish to arm.
     private var busyCounted = false
 
-    public init(phase: Phase = .idle, lastAttempt: Date? = nil) {
+    public init(phase: Phase = .idle, lastAttempt: Date? = nil, failures: Int = 0) {
         self.phase = phase
         self.lastAttempt = lastAttempt
+        self.failures = failures
     }
 
     /// At launch, from what was persisted. A pending update deferred on another
     /// build of Pacer is gone: this launch is past it, and the next check finds
     /// whatever is newer.
-    public init(restoring pending: Pending?, lastAttempt: Date?, currentBuild: String) {
+    public init(restoring pending: Pending?, lastAttempt: Date?, failures: Int = 0, currentBuild: String,
+                now: Date = Date()) {
         if let pending, pending.fromBuild == currentBuild {
-            self.init(phase: .available(pending), lastAttempt: lastAttempt)
+            self.init(phase: .available(pending), lastAttempt: lastAttempt, failures: failures)
+            clamp(now: now)
         } else {
             self.init(phase: .idle, lastAttempt: pending == nil ? lastAttempt : nil)
         }
@@ -305,14 +342,24 @@ public struct UpdateSchedule: Sendable, Equatable {
         }
     }
 
-    /// The update action shows as under way: an install started, or an arm
-    /// someone clicked for (it installs as soon as it is downloaded).
-    public var isInstalling: Bool {
+    /// The block has been called.
+    public var isInstallStarted: Bool {
+        if case .installing = phase { return true }
+        return false
+    }
+
+    /// Someone clicked for a pending update that is not handed over yet: it
+    /// installs as soon as it is.
+    public var isRequested: Bool {
         switch phase {
-        case .installing, .arming(_, .requested): return true
-        default: return false
+        case .arming(_, .requested): return true
+        case .available, .arming: return clicked
+        case .idle, .held, .installing: return false
         }
     }
+
+    /// The update action shows as under way: an install started, or one asked for.
+    public var isInstalling: Bool { isInstallStarted || isRequested }
 
     public var isArming: Bool {
         if case .arming = phase { return true }
@@ -322,6 +369,26 @@ public struct UpdateSchedule: Sendable, Equatable {
     /// Anything but idle is watched on the scheduler's timer.
     public var needsTimer: Bool { phase != .idle }
 
+    // MARK: - The clock
+
+    /// A first sighting later than now (the clock was set back since) is now:
+    /// a `since` in the future would hold the 72 h fallback and the policy's
+    /// `maxWait` and `ceiling` until the clock caught up with it.
+    public mutating func clamp(now: Date) {
+        func clamped(_ p: Pending) -> Pending {
+            var p = p
+            if p.since > now { p.since = now }
+            return p
+        }
+        switch phase {
+        case .idle: break
+        case .available(let p): phase = .available(clamped(p))
+        case .arming(let p, let r): phase = .arming(clamped(p), r)
+        case .held(let v, let p, let a): phase = .held(version: v, pending: p.map(clamped), armed: a)
+        case .installing(let v, let p, let a): phase = .installing(version: v, pending: p.map(clamped), armed: a)
+        }
+    }
+
     // MARK: - From Sparkle
 
     /// A background check found `version` and the deferral said wait. True
@@ -329,9 +396,13 @@ public struct UpdateSchedule: Sendable, Equatable {
     /// is when the scheduler logs it and records `available`.
     @discardableResult
     public mutating func deferred(version: String, build: String, now: Date, currentBuild: String) -> Bool {
+        clamp(now: now)
         switch phase {
         case .idle:
             phase = .available(Pending(version: version, build: build, since: now, fromBuild: currentBuild))
+            failures = 0
+            clicked = false
+            feedFailedArm = nil
             busyCounted = false
             return true
         case .available(var p):
@@ -340,6 +411,8 @@ public struct UpdateSchedule: Sendable, Equatable {
             p.version = version
             p.build = build
             phase = .available(p)
+            // A new release is a new archive: its first attempt is not backed off.
+            failures = 0
             return true
         case .arming, .held, .installing:
             // An arming check is let through, and none runs during a hold.
@@ -347,39 +420,81 @@ public struct UpdateSchedule: Sendable, Equatable {
         }
     }
 
-    /// The check found something the deferral leaves to Sparkle (critical,
-    /// information-only, a major upgrade), or the user turned automatic
-    /// downloads off: nothing pending any more. A hold keeps its own course.
+    /// Nothing pending any more: automatic updates were turned off, or the
+    /// update went away. A hold keeps its own course.
     public mutating func clear() {
         switch phase {
         case .available, .arming:
             phase = .idle
-            clickWaiting = false
-            busyCounted = false
+            reset()
         case .idle, .held, .installing:
             break
         }
     }
 
-    /// The check Pacer started to arm did not start (Sparkle refused it).
+    /// The check found something the deferral leaves to Sparkle (critical,
+    /// information-only, a major upgrade): nothing of ours is pending. A click
+    /// stands, so a critical update Sparkle downloads instead installs at once.
+    public mutating func handOver() {
+        switch phase {
+        case .available, .arming:
+            let asked = isRequested
+            phase = .idle
+            reset()
+            clicked = asked
+        case .idle, .held, .installing:
+            break
+        }
+    }
+
+    private mutating func reset() {
+        failures = 0
+        clicked = false
+        feedFailedArm = nil
+        armDownloaded = false
+        armShown = false
+        busyCounted = false
+    }
+
+    /// The check Pacer started to arm did not start (Sparkle refused it). A
+    /// click stays asked for.
     public mutating func armDidNotStart() {
         if case .arming(let p, _) = phase { phase = .available(p) }
     }
 
+    /// The arm's check started downloading.
+    public mutating func noteDownloadStarted() {
+        if isArming { armDownloaded = true }
+    }
+
+    /// Sparkle showed the arm's update to the user (its own dialog, which
+    /// for an armed update means it needs authorization to install).
+    public mutating func noteShownToUser() {
+        if isArming { armShown = true }
+    }
+
     /// Sparkle handed over its install block for `version`.
     public mutating func held(version: String) -> HoldAction {
+        let asked = isRequested || (phase == .idle && clicked)
+        defer {
+            clicked = false
+            failures = 0
+            feedFailedArm = nil
+            armDownloaded = false
+            armShown = false
+        }
         switch phase {
         case .arming(let p, let reason):
-            phase = .held(version: version, pending: p, armed: reason)
-            return reason == .requested ? .installNow : .policy(since: p.since)
+            phase = .held(version: version, pending: p, armed: asked ? .requested : reason)
+            return asked ? .installNow : .policy(since: p.since)
         case .available(let p):
             // The fallback: downloaded without arming, after `fallbackAfter`.
-            phase = .held(version: version, pending: p, armed: nil)
-            return .policy(since: p.since)
+            phase = .held(version: version, pending: p, armed: asked ? .requested : nil)
+            return asked ? .installNow : .policy(since: p.since)
         case .idle, .held, .installing:
             // A critical update, or nothing was pending: as before #470.
-            phase = .held(version: version, pending: nil, armed: nil)
-            return .policy(since: nil)
+            phase = .held(version: version, pending: nil, armed: asked ? .requested : nil)
+            return asked ? .installNow : .policy(since: nil)
         }
     }
 
@@ -399,7 +514,7 @@ public struct UpdateSchedule: Sendable, Equatable {
         switch phase {
         case .held(_, let p, _), .installing(_, let p, _):
             phase = p.map(Phase.available) ?? .idle
-            clickWaiting = false
+            clicked = false
             busyCounted = false
         case .idle, .available, .arming:
             break
@@ -408,29 +523,44 @@ public struct UpdateSchedule: Sendable, Equatable {
 
     /// A cycle ended. While arming, that is the arm's outcome; a cycle that
     /// got to a hold has already moved on. "No update" also drops a pending
-    /// update that was only available: it has been pulled from the feed.
+    /// update that was only available: it has been pulled from the feed. A
+    /// click is spent either way: the action is clickable again.
     public mutating func cycleEnded(_ end: CycleEnd) -> ArmOutcome? {
         switch phase {
-        case .arming(let p, _):
+        case .arming(let p, let reason):
+            let downloaded = armDownloaded, shown = armShown
+            armDownloaded = false
+            armShown = false
             busyCounted = false
-            switch end {
-            case .noUpdate:
+            clicked = false
+            if end == .noUpdate {
                 phase = .idle
+                reset()
                 return .nothingNewer
-            case .feedFailed:
-                phase = .available(p)
-                return .feedFailed
-            case .downloadFailed:
-                phase = .available(p)
-                return .downloadFailed
-            case .other:
-                phase = .available(p)
-                return nil
             }
+            phase = .available(p)
+            if end == .needsAuthorization || shown {
+                failures += 1
+                return .needsAuthorization
+            }
+            if end == .downloadFailed || downloaded {
+                failures += 1
+                return .downloadFailed
+            }
+            if end == .feedFailed {
+                feedFailedArm = reason
+                return .feedFailed
+            }
+            return nil
         case .available:
             if end == .noUpdate { clear() }
             return nil
-        case .idle, .held, .installing:
+        case .idle:
+            // A click handed over with the update (`handOver`) is spent once
+            // that cycle is over.
+            clicked = false
+            return nil
+        case .held, .installing:
             return nil
         }
     }
@@ -438,23 +568,37 @@ public struct UpdateSchedule: Sendable, Equatable {
     // MARK: - Arming
 
     /// Whether to arm now. `policy` is `UpdateInstallPolicy.decide` of the
-    /// Mac's signals, counting from `pending.since`.
+    /// Mac's signals, counting from `pending.since`. `scale` shortens every
+    /// spacing (the end-to-end test app only).
     public func armVerdict(now: Date, policy: UpdateInstallPolicy.Decision, sessionInProgress: Bool,
-                           automaticChecks: Bool, automaticDownloads: Bool,
-                           spacing: TimeInterval = armSpacing) -> ArmVerdict {
+                           automaticChecks: Bool, automaticDownloads: Bool, scale: Double = 1) -> ArmVerdict {
         guard case .available = phase else { return .none }
         // Sparkle does not enforce "check automatically" on a direct
         // `checkForUpdatesInBackground()`, so Pacer does. And with automatic
         // downloads off that call would run Sparkle's dialog-first driver.
         guard automaticChecks, automaticDownloads else { return .optedOut }
-        if clickWaiting { return sessionInProgress ? .busy : .arm(.requested) }
+        if clicked { return sessionInProgress ? .busy : .arm(.requested) }
         if case .wait(let reason) = policy { return .wait(reason) }
         if let lastAttempt {
             let elapsed = now.timeIntervalSince(lastAttempt)
             // A clock set back must not stall arming until it catches up.
-            if elapsed >= 0, elapsed < spacing { return .spacing }
+            if elapsed >= 0, elapsed < Self.retrySpacing(afterFailures: failures) * scale { return .spacing }
         }
         return sessionInProgress ? .busy : .arm(.policy)
+    }
+
+    /// The feed fallback's re-check, a quarter of an hour after a check could
+    /// not read the site (`FeedFallback`): when that check was an arm, this
+    /// one is its retry and downloads, on the fallback. Otherwise it is a plain
+    /// check (`.none`), whose deferral would only spend the fallback. Neither
+    /// the policy nor the spacing applies: the arm was decided already, and its
+    /// hold still waits on the policy (`held`).
+    public func failoverVerdict(sessionInProgress: Bool, automaticChecks: Bool,
+                                automaticDownloads: Bool) -> ArmVerdict {
+        guard case .available = phase, let reason = feedFailedArm else { return .none }
+        guard automaticChecks, automaticDownloads else { return .optedOut }
+        if sessionInProgress { return .busy }
+        return .arm(clicked ? .requested : reason)
     }
 
     /// Pacer is starting the armed check.
@@ -462,7 +606,10 @@ public struct UpdateSchedule: Sendable, Equatable {
         guard case .available(let p) = phase else { return }
         phase = .arming(p, reason)
         lastAttempt = now
-        clickWaiting = false
+        clicked = reason == .requested
+        feedFailedArm = nil
+        armDownloaded = false
+        armShown = false
         busyCounted = false
     }
 
@@ -483,12 +630,13 @@ public struct UpdateSchedule: Sendable, Equatable {
         case .held:
             return .installHeld
         case .arming(let p, .policy):
-            // Already downloading: install the moment it is handed over.
+            // Already on its way: install the moment it is handed over.
             phase = .arming(p, .requested)
+            clicked = true
             return .nothing
         case .available:
             if sessionInProgress {
-                clickWaiting = true
+                clicked = true
                 return .waiting
             }
             return .arm
@@ -497,17 +645,19 @@ public struct UpdateSchedule: Sendable, Equatable {
 }
 
 /// Where `UpdateSchedule` keeps what outlives a launch: the pending update,
-/// the last arm attempt, and the build an armed install left from.
+/// the last arm attempt and the failures since, and the build an armed install
+/// left from.
 public enum UpdateScheduleStore {
     public static let pendingKey = "pacer.update.pending"
     public static let lastAttemptKey = "pacer.update.lastArmAttempt"
+    public static let failuresKey = "pacer.update.armFailures"
     /// Set when an armed hold's block is called; the next launch counts
     /// `update.arm.installed` if it runs another build.
     public static let armedInstallFromKey = "pacer.update.armedInstallFrom"
 
-    public static func load(_ store: UserDefaults) -> (pending: UpdateSchedule.Pending?, lastAttempt: Date?) {
+    public static func load(_ store: UserDefaults) -> (pending: UpdateSchedule.Pending?, lastAttempt: Date?, failures: Int) {
         let pending = store.data(forKey: pendingKey).flatMap { try? JSONDecoder().decode(UpdateSchedule.Pending.self, from: $0) }
-        return (pending, store.object(forKey: lastAttemptKey) as? Date)
+        return (pending, store.object(forKey: lastAttemptKey) as? Date, max(0, store.integer(forKey: failuresKey)))
     }
 
     public static func save(_ schedule: UpdateSchedule, _ store: UserDefaults) {
@@ -520,6 +670,11 @@ public enum UpdateScheduleStore {
             store.set(lastAttempt, forKey: lastAttemptKey)
         } else {
             store.removeObject(forKey: lastAttemptKey)
+        }
+        if schedule.failures > 0 {
+            store.set(schedule.failures, forKey: failuresKey)
+        } else {
+            store.removeObject(forKey: failuresKey)
         }
     }
 

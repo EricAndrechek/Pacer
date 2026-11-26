@@ -226,17 +226,20 @@ public enum UpdateState: Sendable, Equatable {
     }
 
     /// The state to show: a held update wins over whatever the last check
-    /// said, since nothing else can run while it is held; then a pending one,
-    /// whose own checks (an arm downloading it) show as its action.
-    /// `installing` covers an arm someone clicked for, which installs as soon
-    /// as it is downloaded (`UpdateSchedule.isInstalling`).
+    /// said, since nothing else can run while it is held (`installing`: its
+    /// block has been called). Then a pending one: an arm's download shows as a
+    /// download whoever started it; one someone clicked for (`requested`)
+    /// shows as downloading from the moment its check starts and as
+    /// restarting once the download is done; otherwise it is available.
     public static func resolve(phase: UpdateState, heldVersion: String?, installing: Bool = false,
-                               availableVersion: String? = nil) -> UpdateState {
+                               availableVersion: String? = nil, requested: Bool = false) -> UpdateState {
         if let heldVersion {
             return installing ? .installing(version: heldVersion) : .readyToInstall(version: heldVersion)
         }
         if let availableVersion {
-            return installing ? .installing(version: availableVersion) : .available(version: availableVersion)
+            if case .downloading = phase { return phase }
+            guard requested else { return .available(version: availableVersion) }
+            return phase == .checking ? .downloading(version: availableVersion) : .installing(version: availableVersion)
         }
         switch phase {
         case .readyToInstall, .installing, .available: return .upToDate

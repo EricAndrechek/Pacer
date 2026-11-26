@@ -115,9 +115,11 @@ signals (not usage: Sentry metrics, and `counter.*` in PostHog's
   `held` (downloaded and handed over), `installed` (counted at the first launch
   of the new build, since the install relaunches Pacer before a check-in),
   `nothing_newer` (the check found no update: the release was pulled),
-  `feed_failed`, `download_failed` (the feed was read and the download or its
-  extraction failed), `busy` (Sparkle was in another session when Pacer wanted
-  to arm; once per wish, not per minute).
+  `feed_failed`, `download_failed` (the feed was read and the download, its
+  extraction or its signature failed), `needs_authorization` (the install needs
+  an administrator, so Sparkle showed its own dialog instead), `busy` (Sparkle
+  was in another session when Pacer wanted to arm; once per wish, not per
+  minute). Arms that fail past the feed back off: 30 min, 2 h, then 6 h.
 - `update.defer_fallback`: an update pending for 72 h was downloaded the way it was
   before #470 (the hold, then install-on-quit), because arming had not managed it.
   Near zero on a healthy fleet; a rise is a bug in arming.

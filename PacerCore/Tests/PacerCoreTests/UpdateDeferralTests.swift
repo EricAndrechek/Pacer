@@ -317,7 +317,8 @@ struct UpdateScheduleTests {
     func counterKeys() {
         #expect(S.ArmOutcome.allCases.map(\.counterKey) == [
             "update.arm.held", "update.arm.installed", "update.arm.nothing_newer",
-            "update.arm.feed_failed", "update.arm.download_failed", "update.arm.busy",
+            "update.arm.feed_failed", "update.arm.download_failed", "update.arm.needs_authorization",
+            "update.arm.busy",
         ])
     }
 
@@ -328,11 +329,12 @@ struct UpdateScheduleTests {
         _ = s.cycleEnded(.feedFailed)
         let r19 = s.clicked(sessionInProgress: true)
         #expect(r19 == .waiting)
-        #expect(s.clickWaiting)
+        #expect(s.clicked)
+        #expect(s.isRequested)
         #expect(verdict(s, at: t0.addingTimeInterval(1), policy: .wait(.inUse), busy: true) == .busy)
         #expect(verdict(s, at: t0.addingTimeInterval(2), policy: .wait(.inUse), busy: false) == .arm(.requested))
         s.armed(.requested, now: t0.addingTimeInterval(2))
-        #expect(!s.clickWaiting)
+        #expect(s.isArming && s.isRequested)
 
         // A click during the policy's arm makes it install as soon as it is handed over.
         var policyArm = available()
@@ -394,12 +396,12 @@ struct UpdateScheduleTests {
     @Test("at launch: pending on this build is restored; deferred on another build, it is gone")
     func restore() {
         let pending = S.Pending(version: "0.9.6", build: "1806", since: t0, fromBuild: "1800")
-        #expect(S(restoring: pending, lastAttempt: t0, currentBuild: "1800").phase == .available(pending))
-        #expect(S(restoring: pending, lastAttempt: t0, currentBuild: "1800").lastAttempt == t0)
-        let updated = S(restoring: pending, lastAttempt: t0, currentBuild: "1806")
+        #expect(S(restoring: pending, lastAttempt: t0, currentBuild: "1800", now: t0).phase == .available(pending))
+        #expect(S(restoring: pending, lastAttempt: t0, currentBuild: "1800", now: t0).lastAttempt == t0)
+        let updated = S(restoring: pending, lastAttempt: t0, currentBuild: "1806", now: t0)
         #expect(updated.phase == .idle)
         #expect(updated.lastAttempt == nil)
-        #expect(S(restoring: nil, lastAttempt: nil, currentBuild: "1800").phase == .idle)
+        #expect(S(restoring: nil, lastAttempt: nil, currentBuild: "1800", now: t0).phase == .idle)
     }
 
     @Test("what outlives a launch round-trips, and an armed install is counted once on the new build")
@@ -445,6 +447,213 @@ struct UpdateScheduleTests {
                                        pending: .init(version: "C", build: "3", since: t0, fromBuild: "1"),
                                        armed: .policy))
         // Relaunched on C: nothing pending.
-        #expect(S(restoring: s.pending, lastAttempt: s.lastAttempt, currentBuild: "3").phase == .idle)
+        #expect(S(restoring: s.pending, lastAttempt: s.lastAttempt, currentBuild: "3", now: t0).phase == .idle)
+    }
+    // MARK: - Review fixes
+
+    @Test("an arm that could not reach the site is retried by the fallback's re-check, past the policy and the spacing")
+    func failoverArms() {
+        var s = available()
+        let notAnArm = s.failoverVerdict(sessionInProgress: false, automaticChecks: true, automaticDownloads: true)
+        // A plain check that failed: the re-check is a plain check too.
+        #expect(notAnArm == .none)
+        s.armed(.policy, now: t0)
+        let r1 = s.cycleEnded(.feedFailed)
+        #expect(r1 == .feedFailed)
+        #expect(s.feedFailedArm == .policy)
+        #expect(s.failures == 0)
+        let at = t0.addingTimeInterval(15 * 60)
+        // The policy's own clock still says wait, and the spacing too…
+        #expect(verdict(s, at: at, policy: .wait(.inUse)) == .wait(.inUse))
+        #expect(verdict(s, at: at) == .spacing)
+        // …but the failover re-check is the arm.
+        #expect(s.failoverVerdict(sessionInProgress: false, automaticChecks: true, automaticDownloads: true)
+                == .arm(.policy))
+        #expect(s.failoverVerdict(sessionInProgress: true, automaticChecks: true, automaticDownloads: true) == .busy)
+        #expect(s.failoverVerdict(sessionInProgress: false, automaticChecks: false, automaticDownloads: true)
+                == .optedOut)
+        s.armed(.policy, now: at)
+        #expect(s.feedFailedArm == nil)
+        // Its hold still waits on the policy, from the first sighting.
+        let r2 = s.held(version: "0.9.6")
+        #expect(r2 == .policy(since: t0))
+
+        // A clicked arm that could not reach the site retries as clicked.
+        var clicked = available()
+        clicked.armed(.requested, now: t0)
+        _ = clicked.cycleEnded(.feedFailed)
+        #expect(clicked.failoverVerdict(sessionInProgress: false, automaticChecks: true, automaticDownloads: true)
+                == .arm(.requested))
+
+        // Not after an arm that got past the feed.
+        var downloaded = available()
+        downloaded.armed(.policy, now: t0)
+        _ = downloaded.cycleEnded(.downloadFailed)
+        #expect(downloaded.failoverVerdict(sessionInProgress: false, automaticChecks: true, automaticDownloads: true)
+                == .none)
+    }
+
+    @Test("failed arms back off like failed downloads: 30 min, 2 h, then 6 h")
+    func backoff() {
+        #expect(S.retrySpacing(afterFailures: 0) == 30 * 60)
+        #expect(S.retrySpacing(afterFailures: 1) == 30 * 60)
+        #expect(S.retrySpacing(afterFailures: 2) == 2 * 3600)
+        #expect(S.retrySpacing(afterFailures: 3) == 6 * 3600)
+        #expect(S.retrySpacing(afterFailures: 9) == 6 * 3600)
+
+        var s = available()
+        var at = t0
+        for (n, wait) in [(1, 30 * 60.0), (2, 2 * 3600.0), (3, 6 * 3600.0), (4, 6 * 3600.0)] {
+            s.armed(.policy, now: at)
+            s.noteDownloadStarted()
+            let r = s.cycleEnded(.other)
+            // A download that started and got no hold failed, whatever the error said.
+            #expect(r == .downloadFailed)
+            #expect(s.failures == n)
+            #expect(verdict(s, at: at.addingTimeInterval(wait - 1)) == .spacing)
+            #expect(verdict(s, at: at.addingTimeInterval(wait)) == .arm(.policy))
+            at = at.addingTimeInterval(wait)
+        }
+        // An unreachable feed costs no download: it neither adds nor resets.
+        s.armed(.policy, now: at)
+        _ = s.cycleEnded(.feedFailed)
+        #expect(s.failures == 4)
+
+        // A newer release starts again.
+        var newer = s
+        newer.deferred(version: "0.9.7", build: "1807", now: at, currentBuild: "1800")
+        #expect(newer.failures == 0)
+        // So does a hold.
+        var held = s
+        held.armed(.policy, now: at.addingTimeInterval(7 * 3600))
+        _ = held.held(version: "0.9.6")
+        #expect(held.failures == 0)
+        // And the update going away.
+        var gone = s
+        gone.armed(.policy, now: at.addingTimeInterval(7 * 3600))
+        _ = gone.cycleEnded(.noUpdate)
+        #expect(gone.failures == 0)
+
+        // The count outlives a launch on the same build, not on another.
+        let bag = TestDefaultsBag()
+        let d = bag.make(prefix: "backoff")
+        UpdateScheduleStore.save(s, d)
+        let loaded = UpdateScheduleStore.load(d)
+        #expect(loaded.failures == 4)
+        #expect(S(restoring: loaded.pending, lastAttempt: loaded.lastAttempt, failures: loaded.failures,
+                  currentBuild: "1800", now: at).failures == 4)
+        #expect(S(restoring: loaded.pending, lastAttempt: loaded.lastAttempt, failures: loaded.failures,
+                  currentBuild: "1806", now: at).failures == 0)
+        UpdateScheduleStore.save(S(), d)
+        #expect(UpdateScheduleStore.load(d).failures == 0)
+    }
+
+    @Test("Sparkle asking for authorization backs off too, so its dialog does not come back every half hour")
+    func authorization() {
+        typealias E = S.CycleEnd
+        #expect(E.classify(errorDomain: "SUSparkleErrorDomain", code: 4008, feedLoaded: true) == .needsAuthorization)
+        #expect(E.classify(errorDomain: "SUSparkleErrorDomain", code: 4007, feedLoaded: false) == .needsAuthorization)
+        #expect(E.classify(errorDomain: "elsewhere", code: 4008, feedLoaded: true) == .downloadFailed)
+
+        var s = available()
+        s.armed(.policy, now: t0)
+        s.noteDownloadStarted()
+        // 4008 keeps the download and Sparkle shows its dialog at once; the
+        // cycle that ends is the dialog's, often with no error at all.
+        s.noteShownToUser()
+        let r1 = s.cycleEnded(.other)
+        #expect(r1 == .needsAuthorization)
+        #expect(s.failures == 1)
+        #expect(verdict(s, at: t0.addingTimeInterval(30 * 60 - 1)) == .spacing)
+        s.armed(.policy, now: t0.addingTimeInterval(30 * 60))
+        let r2 = s.cycleEnded(.needsAuthorization)
+        #expect(r2 == .needsAuthorization)
+        #expect(verdict(s, at: t0.addingTimeInterval(30 * 60 + 2 * 3600 - 1)) == .spacing)
+        // Outside an arm, a dialog is not ours to count.
+        var idle = available()
+        idle.noteShownToUser()
+        #expect(idle.cycleEnded(.other) == nil)
+    }
+
+    @Test("a first sighting in the future (the clock was set back) is now")
+    func clockSetBack() {
+        var s = available(at: t0)
+        let earlier = t0.addingTimeInterval(-5 * 86400)
+        s.clamp(now: earlier)
+        #expect(s.pending?.since == earlier)
+        // So the 72 h fallback and the policy count from a real moment again.
+        let later = earlier.addingTimeInterval(UpdateDeferral.fallbackAfter)
+        let pendingFor = later.timeIntervalSince(s.pending!.since)
+        #expect(UpdateDeferral.decide(.init(background: true, automaticDownloads: true), normalLaunch: true,
+                                      arming: false, pendingFor: pendingFor) == .proceed(.fallback))
+        // The next deferral clamps as well, and a past since is left alone.
+        var again = available(at: t0)
+        again.deferred(version: "0.9.6", build: "1806", now: earlier, currentBuild: "1800")
+        #expect(again.pending?.since == earlier)
+        again.clamp(now: t0)
+        #expect(again.pending?.since == earlier)
+        // A restore too.
+        let future = S.Pending(version: "0.9.6", build: "1806", since: t0, fromBuild: "1800")
+        #expect(S(restoring: future, lastAttempt: nil, currentBuild: "1800", now: earlier).pending?.since == earlier)
+        // And a hold's.
+        var held = available(at: t0)
+        _ = held.held(version: "0.9.6")
+        held.clamp(now: earlier)
+        #expect(held.pending?.since == earlier)
+    }
+
+    @Test("a click is never lost: a critical update the arm found instead, or a fallback already downloading")
+    func clicksKept() {
+        // The clicked arm finds a critical update: Sparkle downloads it, and it installs as clicked.
+        var critical = available()
+        critical.armed(.requested, now: t0)
+        critical.handOver()
+        #expect(critical.phase == .idle)
+        #expect(critical.clicked)
+        let r1 = critical.held(version: "0.9.9")
+        #expect(r1 == .installNow)
+        #expect(!critical.clicked)
+
+        // A click during the policy's arm, handed over, the same.
+        var policy = available()
+        policy.armed(.policy, now: t0)
+        _ = policy.clicked(sessionInProgress: true)
+        policy.handOver()
+        let r2 = policy.held(version: "0.9.9")
+        #expect(r2 == .installNow)
+
+        // Handed over without a click: as before.
+        var unasked = available()
+        unasked.armed(.policy, now: t0)
+        unasked.handOver()
+        #expect(!unasked.clicked)
+        let r3 = unasked.held(version: "0.9.9")
+        #expect(r3 == .policy(since: nil))
+
+        // An information-only update Sparkle shows instead: the click ends with its cycle.
+        var info = available()
+        info.armed(.requested, now: t0)
+        info.handOver()
+        _ = info.cycleEnded(.other)
+        #expect(!info.clicked)
+        let r4 = info.held(version: "1.0.0")
+        #expect(r4 == .policy(since: nil))
+
+        // Clicked while Sparkle was busy with a check that turned out to be
+        // the 72 h fallback's download: its hold installs as clicked.
+        var fallback = available()
+        let r5 = fallback.clicked(sessionInProgress: true)
+        #expect(r5 == .waiting)
+        let r6 = fallback.held(version: "0.9.6")
+        #expect(r6 == .installNow)
+        #expect(fallback.phase == .held(version: "0.9.6", pending: fallback.pending, armed: .requested))
+
+        // A clicked arm that fails is clickable again.
+        var failed = available()
+        failed.armed(.requested, now: t0)
+        #expect(failed.isRequested)
+        _ = failed.cycleEnded(.downloadFailed)
+        #expect(!failed.isRequested && !failed.clicked)
     }
 }
+

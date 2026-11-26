@@ -42,8 +42,9 @@ final class UpdateStatus {
         if let forced { return forced }
         let scheduler = UpdateInstallScheduler.shared
         return UpdateState.resolve(phase: phase, heldVersion: scheduler.readyVersion,
-                                   installing: scheduler.isInstalling,
-                                   availableVersion: scheduler.offeredVersion)
+                                   installing: scheduler.isInstallStarted,
+                                   availableVersion: scheduler.offeredVersion,
+                                   requested: scheduler.isRequested)
     }
 
     func note(_ event: UpdateState.Event) {
