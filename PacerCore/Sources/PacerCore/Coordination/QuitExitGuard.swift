@@ -29,9 +29,8 @@ import Foundation
 /// exit, and a crash report. `_exit` ends the process at once. The store
 /// needs nothing from it: SQLite's WAL keeps every committed transaction,
 /// and a transaction still open is rolled back on the next open, as after
-/// any kill. (One can be: `AppBackgroundService.stop` does not wait for a scan
-/// cycle already running to finish, and the reply's log line says whether
-/// the scan loop had exited.)
+/// any kill. (One can be open only when the scan's last pass outran
+/// `ScanCoordinator.stopDrainBound`; the reply's log line says so.)
 public enum QuitExitGuard {
 
     /// How long AppKit gets after the reply. A quit that is not starved ends

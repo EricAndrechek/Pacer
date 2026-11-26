@@ -716,11 +716,12 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // How long the quit's own work took: what a quit on a loaded Mac
             // is checked by (#446).
             Log.write("Lifecycle", "shut down in \(Int((ContinuousClock.now - began) / .milliseconds(1))) ms")
-            // The instant the quit is handed back to AppKit, and whether a
-            // scan cycle is still finishing (`stop()` does not wait for one):
-            // what a process outliving its quit is measured from (#475).
-            let scan = backgroundService?.isScanLoopRunning == true ? "still running" : "exited"
-            Log.write("Lifecycle", "replying to terminate · scan loop \(scan)")
+            // The instant the quit is handed back to AppKit: what a process
+            // outliving its quit is measured from. And whether the scan's last
+            // pass finished inside `stop()`'s bound; if not, it may still save
+            // until the exit guard ends the process (#475).
+            let scan = backgroundService?.scanStopDrained == false ? "still running" : "finished"
+            Log.write("Lifecycle", "replying to terminate · scan pass \(scan)")
             // Log lines are written on a background queue (`Log`); make sure
             // the last ones (this shutdown's) are on disk before the process ends.
             await Task.detached { Log.flush() }.value
