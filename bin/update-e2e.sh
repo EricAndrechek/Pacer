@@ -194,8 +194,22 @@ start_server() {
     die "the feed server did not come up"
 }
 stop_server() {
-    [ -n "${server_pid}" ] && kill "${server_pid}" 2>/dev/null || true
+    if [ -n "${server_pid}" ]; then
+        kill "${server_pid}" 2>/dev/null || true
+        wait "${server_pid}" 2>/dev/null || true
+    fi
     server_pid=""
+}
+
+evidence() {
+    # What the scenario rests on, printed passing or not: Pacer's [Update]
+    # lines, the test app's launches and STATUS changes, and every archive
+    # request the server answered.
+    local out="$1"
+    echo "  -- app log ([Update], launches, STATUS)"
+    grep -E '\[(Update|E2E)\]' "${LOG}" 2>/dev/null | sed 's/^/     /' || true
+    echo "  -- archive requests"
+    grep -E 'GET /[^ ]+\.zip' "${out}/server.log" 2>/dev/null | sed 's/^/     /' || true
 }
 
 app_pids() { pgrep -x "${APP_NAME}" || true; }
@@ -317,6 +331,7 @@ scenario_newest_once() {
     # the armed install that brought it here.
     wait_for 30 "C starts with nothing pending and counts update.arm.installed" \
         'STATUS phase=idle .*update\.arm\.installed=1' || true
+    evidence "${out}"
     stop_app
     stop_server
 }
@@ -349,6 +364,7 @@ scenario_download_404() {
     check "C's archive downloaded exactly once" eq "$(requests "${out}" "${APP_NAME}-3.zip" 200)" 1
     check "two launches in all" eq "$(log_count 'launched build=')" 2
     check "the installed bundle is C" eq "$(installed_build)" 3
+    evidence "${out}"
     stop_app
     stop_server
 }
