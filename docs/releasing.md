@@ -26,7 +26,9 @@ feed is where the release will write it and live: the app's `SUFeedURL` is
 Workers Builds check on `main`'s site commit succeeded (a failed site build
 leaves the old deployment serving, and would also swallow the release's feed
 commit), and, while the [legacy mirror](#the-legacy-github-pages-mirror) is
-on, gh-pages holds the same bytes. `SHIP_SKIP_SITE_BUILD_CHECK=1` skips only
+on, gh-pages holds the same bytes (for `price-history.json`, the same curated
+prices: [the price list](#the-price-list) moves on between releases).
+`SHIP_SKIP_SITE_BUILD_CHECK=1` skips only
 the Workers Builds check, loudly, for the case where Cloudflare reports no
 check runs at all.
 
@@ -35,7 +37,8 @@ checks the whole chain end to end: the GitHub Release has the DMG asset; the
 site's appcast (`https://pacer.andrechek.com/appcast.xml`, what 0.9.4 and later
 read) advertises the version, waiting up to 15 minutes for Workers Builds to
 deploy it; while the mirror is on, the GitHub Pages copy (what 0.9.3 and
-earlier read) is byte-identical to it, and so is `price-history.json`; the
+earlier read) is byte-identical to it, and `price-history.json` has the same
+curated prices (byte-identical unless the price list moved on meanwhile); the
 price history served decodes and is no older than the release's; the item's
 `<enclosure>` length matches the published asset, and — if `uv` is available —
 the DMG's EdDSA signature validates against the app's embedded
@@ -122,7 +125,7 @@ and the release that writes it also checks it is being served.
 | Source | `site/public/appcast.xml`, `site/public/price-history.json` on `main` | `appcast.xml`, `price-history.json` at the root of `gh-pages` |
 | Served at | `https://pacer.andrechek.com/appcast.xml` (static files of the Cloudflare site; their requests run the Worker, which counts them and returns the file untouched; past the Workers Free plan's daily request limit they answer 429 until 00:00 UTC, when 0.9.5+ reads `main` on raw.githubusercontent.com and 0.9.4 waits; `site/README.md`, "The Worker") | `https://ericandrechek.github.io/Pacer/appcast.xml` (GitHub Pages) |
 | Read by | Pacer 0.9.4 and later (`SUFeedURL`, `CuratedPriceHistory.remoteURL`) | Pacer 0.9.3 and earlier |
-| Written by | the release workflow, and reviewed hand edits | a copy of the site copy, never edited on its own |
+| Written by | the release workflow, reviewed hand edits, and (the price history's `catalog` section only) the [price-catalog-sync workflow](#the-price-list) | a copy of the site copy, never edited on its own |
 
 ### The fallback source
 
@@ -153,7 +156,9 @@ The `Publish the update feed` step runs `bin/publish-feeds.sh release`
    `site/public/appcast.xml` ([`bin/appcast-add-item.py`](../bin/appcast-add-item.py),
    which checks the whole feed still parses with the item intact), and the
    tag's `price-history.json` replaces the one beside it (the site's is kept
-   only when it is strictly newer by `asOf`, or the tag's would not decode);
+   only when it is strictly newer by `asOf`, or the tag's would not decode),
+   keeping the site's [price list](#the-price-list): the tag's curated records
+   with the site's `catalog` section (`bin/price-catalog-sync.py graft`);
 2. the site's own deploy check (`site/scripts/check-feeds.mjs`) runs on the
    result, so a copy Workers Builds would refuse never reaches `main`;
 3. the commit `site: publish appcast and price history for X.Y.Z` is pushed to
@@ -192,6 +197,80 @@ reports it as the feed not advertising the release. It also blocks every later
 deploy, the next release's feed included, until it is fixed; `bin/ship.sh
 preflight` fails while the site does not serve `main`'s copy, so a release is
 never tagged into that state.
+
+### The price list
+
+Since #469 the catalog prices are merged once, on our side, instead of on
+every Mac. `.github/workflows/price-catalog-sync.yml` runs
+[`bin/price-catalog-sync.py`](../bin/price-catalog-sync.py) every six hours: it
+fetches LiteLLM, models.dev and Catwalk, merges them exactly as the app does
+(`PricingCatalogParityTests` runs the script against the app's own merge), and
+folds the result into `site/public/price-history.json` as dated records in a
+`catalog` section beside the curated `records`. A record is opened only when a
+price changes, dated by the run that saw it, so every Mac prices the change
+from the same instant; the record it replaces is closed at that instant. A
+model that leaves every catalog keeps its last record open. The curated
+records and `asOf` are never touched (the app reads `asOf` as every curated
+row's review date), and which record prices a request stays the app's rule
+(`PriceLedger.precedence`: curated beats catalog, except a catalog change
+after the curated review; the list beats prices a Mac dated itself).
+
+- **What it commits.** When the file changed, one commit to `main` as
+  `github-actions[bot]`, titled `Prices: catalog price list: <models> (N
+  opened, M closed)`, with every change in the body; at least weekly a
+  heartbeat (`catalog.checkedAt`) so a quiet week and a stopped job look
+  different. Workers Builds deploys it; app CI ignores `site/**`. Every change
+  is a reviewable commit.
+- **When it refuses.** A catalog that cannot be read or yields far fewer
+  models than usual, a run that would close more than a quarter of the open
+  prices, a rate that moves tenfold, or a model listed for the first time with
+  no input or output cost: the run fails and writes nothing. It then opens,
+  or comments on, one `area:pricing` issue titled "Price catalog sync is
+  failing" (once per distinct reason; the next good run closes it), and GitHub
+  emails whoever last changed the workflow's `schedule`. A refusal can be a
+  real change (a family-wide price cut closes many records at once): check the
+  catalogs, then accept it with `gh workflow run price-catalog-sync.yml -f
+  dry_run=false -f accept_mass_change=true`.
+- **Correcting a wrong list price.** Never `git revert` a bot commit. A Mac
+  takes a new copy only when its `catalog.checkedAt` is at least as new as the
+  one it cached, and a revert brings back an older one: Macs that took the bad
+  copy keep it. Also, the next run would open the bad price again if the
+  catalogs still say it. Instead:
+  1. Fix the cause: the job's input handling, if the catalogs are right and
+     the merge read them wrong (the next run then closes the bad record and
+     opens the right one), or wait for the catalog to be fixed upstream.
+  2. Re-price the bad window with a curated record in
+     `PacerCore/Sources/PacerCore/Resources/price-history.json` (and the site
+     copy, to reach Macs before the next release): a closed record for the
+     window, or an open one whose `reviewedAt` is after the bad record's
+     start. Either beats the list record there (`PriceLedger.precedence`).
+  3. Bump the list so every Mac takes the copy:
+     `gh workflow run price-catalog-sync.yml -f dry_run=false -f heartbeat=true`
+     (a run that changed something has a fresh `checkedAt` already).
+     `PriceListTests` covers a Mac that cached the bad copy taking the fix.
+- **By hand.** `gh workflow run price-catalog-sync.yml` is a dry run (its
+  summary lists what would open and close); `-f dry_run=false` on `main`
+  commits. Off `main`, and on a pull request that touches the job, it is always
+  a dry run. Locally: `uv run bin/price-catalog-sync.py sync --dry-run`, and
+  `uv run bin/price-catalog-sync-test.py`.
+- **If it stops.** Macs keep the list they have. Once it has gone ten days
+  without a `checkedAt` (`PriceSources.listStaleAfter`), the app fetches the
+  catalogs itself again, daily, and its list records stop at that last check
+  (`CuratedPriceHistory.forLedger`): moments up to it keep the list's prices,
+  and what follows is priced by the catalogs this Mac fetched, dated by this
+  Mac, as before #469. When the job is back, the list covers the gap again and
+  every Mac prices it alike. A model in use that the list does not price is
+  fetched directly at any time. GitHub disables schedules in a public
+  repository after 60 days without activity; the heartbeat commit counts as
+  activity.
+- **Releases** carry the list over (step 1 above), and the legacy mirror gets
+  the merged file. Between releases the mirror keeps the last release's list;
+  its readers (0.9.3 and earlier) ignore the section, so `bin/publish-feeds.sh
+  status` and `bin/ship.sh verify` compare its price history by the curated
+  part. `bin/ship.sh preflight` warns (it never blocks) when the release moves
+  a curated record's review date past a list record with a different price:
+  the curated price would then win over that record, history included. Pin
+  `reviewedAt` on the row to keep the list's price.
 
 ### When the site's feed did not update
 

@@ -6,7 +6,10 @@ import SwiftData
 ///
 /// - **Curated rows** mirror the curated file exactly: added, updated and
 ///   removed with it. A catalog refresh never touches them.
-/// - **Catalog rows** record changes. For every rate vector the merged
+/// - **Price-list rows** (#469, ids `list|…`) mirror the file's `catalog`
+///   section the same way: the job that writes it already dated every
+///   change, so the file is their truth too.
+/// - **Catalog rows** this Mac fetched itself record changes. For every rate vector the merged
 ///   catalog states, compare it with that vector's open record: different →
 ///   close the open record at `now` and open a new one; the same → write
 ///   nothing. A vector's first record starts at its curated start date when
@@ -27,10 +30,12 @@ public enum PriceLedgerStore {
         public let opened: [PriceRecordValue]
         public let closed: [PriceRecordValue]
         public let curatedChanged: Int
+        /// Price-list rows added, updated or removed.
+        public let listChanged: Int
         /// A new `PriceCatalogSnapshot` was written. Not part of `changed`,
         /// which is about prices: a snapshot reprices nothing.
         public let snapshotTaken: Bool
-        public var changed: Bool { !opened.isEmpty || !closed.isEmpty || curatedChanged > 0 }
+        public var changed: Bool { !opened.isEmpty || !closed.isEmpty || curatedChanged > 0 || listChanged > 0 }
     }
 
     /// Read the ledger as stored.
@@ -66,23 +71,31 @@ public enum PriceLedgerStore {
         var byId: [String: PriceRecord] = [:]
         for row in rows { byId[row.recordId] = row }
 
-        // Curated: the file is the truth for curated rows.
-        var curatedChanged = 0
-        let wanted = Dictionary(uniqueKeysWithValues: curated.records.map { ($0.id, $0) })
+        // Curated and price-list rows: the file is the truth for both. Their
+        // ids cannot collide (`curated|…` against `list|…`), and the decoder
+        // has already refused a file with a duplicate within either.
+        var curatedChanged = 0, listChanged = 0
+        let listPrefix = PriceRecordValue.Origin.list.rawValue + "|"
+        func mirrored(_ row: PriceRecord) -> Bool { row.curated || row.recordId.hasPrefix(listPrefix) }
+        let wanted = Dictionary((curated.records + curated.catalog).map { ($0.id, $0) },
+                                uniquingKeysWith: { first, _ in first })
         for (id, value) in wanted {
             if let row = byId[id] {
-                if row.value != value { row.update(from: value, seenAt: now); curatedChanged += 1 }
+                if row.value != value {
+                    row.update(from: value, seenAt: now)
+                    if value.curated { curatedChanged += 1 } else { listChanged += 1 }
+                }
             } else {
                 let row = PriceRecord(value, recordedAt: now)
                 context.insert(row)
                 byId[id] = row
-                curatedChanged += 1
+                if value.curated { curatedChanged += 1 } else { listChanged += 1 }
             }
         }
-        for row in rows where row.curated && wanted[row.recordId] == nil {
+        for row in rows where mirrored(row) && wanted[row.recordId] == nil {
             context.delete(row)
             byId[row.recordId] = nil
-            curatedChanged += 1
+            if row.curated { curatedChanged += 1 } else { listChanged += 1 }
         }
         var curatedStart: [Slot: Date] = [:]
         for r in curated.records {
@@ -90,9 +103,10 @@ public enum PriceLedgerStore {
             curatedStart[slot] = min(curatedStart[slot] ?? r.effectiveFrom, r.effectiveFrom)
         }
 
-        // Catalog: record changes, one slot at a time.
+        // Catalog: record changes, one slot at a time. Only this Mac's own
+        // records: the price list's are mirrored above, never closed here.
         var catalogBySlot: [Slot: [PriceRecord]] = [:]
-        for row in byId.values where !row.curated {
+        for row in byId.values where !mirrored(row) {
             catalogBySlot[Slot(row.value), default: []].append(row)
         }
         let used = Set(usedModels.map(CanonicalModelID.parse))
@@ -145,7 +159,7 @@ public enum PriceLedgerStore {
         let result = SyncResult(
             previous: previous,
             ledger: PriceLedger(records: byId.values.map(\.value)),
-            opened: opened, closed: closed, curatedChanged: curatedChanged,
+            opened: opened, closed: closed, curatedChanged: curatedChanged, listChanged: listChanged,
             snapshotTaken: snapshotTaken)
         if result.changed || snapshotTaken { try context.save() }
         return result

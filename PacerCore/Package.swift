@@ -48,7 +48,11 @@ let package = Package(
             // `arena port-fixtures`): synthetic inputs and the Python
             // reference's outputs, which the Swift ports must reproduce.
             // `HangFixtures`: real main-thread stacks of "App Hanging" events
-            // (`HangFingerprintTests`).
+            // (`HangFingerprintTests`). `PriceSyncFixtures`: catalog payloads
+            // that both `bin/price-catalog-sync.py` and the app merge
+            // (`PricingCatalogParityTests`, which read them by path; the
+            // script's own tests read them too).
+            exclude: ["PriceSyncFixtures"],
             resources: [.copy("ArenaFixtures"), .copy("HangFixtures")]
         ),
         .testTarget(

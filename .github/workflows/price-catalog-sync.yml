@@ -1,0 +1,194 @@
+name: Price catalog sync
+
+# Merges the price catalogs once, on our side, into the price list every Pacer
+# reads (#469). bin/price-catalog-sync.py fetches LiteLLM, models.dev and
+# Catwalk, merges them exactly as the app does (PricingCatalogParityTests holds
+# it to that), and folds the result into site/public/price-history.json as
+# dated catalog records: a new record only when a price changes, dated by the
+# run that saw it, so every Mac gets the same date. When the file changed, this
+# commits it to main as github-actions[bot]. Workers Builds deploys it (its
+# watch paths include site/*) after the site's feed check; app CI ignores
+# site/**; the raw.githubusercontent.com fallback serves the same file.
+#
+# A catalog that returns garbage, a run that would close a quarter of the open
+# prices at once, a rate that moves tenfold, or a model listed for the first
+# time at no input or output cost fails the run and writes nothing. Any failed
+# run that would have committed opens (or adds to) one `area:pricing` issue,
+# "Price catalog sync is failing", and a later good run closes it; GitHub also
+# emails the person who last changed this file's `schedule`. A refused change
+# that is real (a family-wide price cut, say) is accepted by hand once checked:
+#   gh workflow run price-catalog-sync.yml -f dry_run=false -f accept_mass_change=true
+# A hand correction of the list reaches Macs that cached the bad copy only with
+# a newer `catalog.checkedAt`: -f heartbeat=true writes one (docs/releasing.md,
+# "The price list": never git-revert the list).
+#
+# A stopped job shows on every Mac as a stale `catalog.checkedAt` (the job
+# re-confirms it at least weekly). After ten days without one
+# (PriceSources.listStaleAfter) the app fetches the catalogs itself again, and
+# the list stops pricing anything after its last check
+# (CuratedPriceHistory.forLedger), so those fetches price what follows. GitHub
+# disables a public repository's schedules after 60 days without activity; the
+# weekly heartbeat commit is activity.
+
+on:
+  schedule:
+    - cron: "41 */6 * * *"   # every 6 hours, at :41
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Report what would change without committing (always a dry run off main)
+        type: boolean
+        default: true
+      accept_mass_change:
+        description: Accept a run the garbage guards refused, once checked by hand
+        type: boolean
+        default: false
+      heartbeat:
+        description: Write a fresh catalog.checkedAt even if nothing changed (after a hand correction)
+        type: boolean
+        default: false
+  pull_request:
+    paths:
+      - bin/price-catalog-sync.py
+      - bin/price-catalog-sync-test.py
+      - PacerCore/Tests/PacerCoreTests/PriceSyncFixtures/**
+      - .github/workflows/price-catalog-sync.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: price-catalog-sync-${{ github.event_name == 'pull_request' && github.ref || 'main' }}
+  cancel-in-progress: false
+
+
+jobs:
+  # A pull request that touches the job: its tests, then a dry run against the
+  # live catalogs, with read-only access.
+  check:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Test the job
+        run: python3 -I bin/price-catalog-sync-test.py
+      - name: Dry run against the live catalogs
+        run: python3 -I bin/price-catalog-sync.py sync --dry-run --summary "$GITHUB_STEP_SUMMARY"
+
+  sync:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      issues: write
+    env:
+      # Only a scheduled run, or a manual one on main that asks to, commits.
+      DRY_RUN: ${{ (github.ref != 'refs/heads/main' || (github.event_name == 'workflow_dispatch' && inputs.dry_run)) && '1' || '' }}
+      ACCEPT_MASS_CHANGE: ${{ (github.event_name == 'workflow_dispatch' && inputs.accept_mass_change) && '1' || '' }}
+      HEARTBEAT: ${{ (github.event_name == 'workflow_dispatch' && inputs.heartbeat) && '1' || '' }}
+      ISSUE_TITLE: Price catalog sync is failing
+    steps:
+      # No setup action or cache: the job is stdlib-only Python and the
+      # runner's python3 runs it (locally it is a `uv run` script).
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+          persist-credentials: ${{ env.DRY_RUN == '' }}
+
+      - name: Test the job
+        run: python3 -I bin/price-catalog-sync-test.py
+
+      - name: Merge the catalogs into the price list
+        env:
+          GIT_AUTHOR_NAME: github-actions[bot]
+          GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+          GIT_COMMITTER_NAME: github-actions[bot]
+          GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+        run: |
+          set -euo pipefail
+          file=site/public/price-history.json
+          args=(sync --file "$file" --summary "$GITHUB_STEP_SUMMARY" --message "$RUNNER_TEMP/message.txt")
+          if [ -n "$ACCEPT_MASS_CHANGE" ]; then args+=(--accept-mass-change); fi
+          if [ -n "$HEARTBEAT" ]; then args+=(--heartbeat); fi
+          # The job's own words, for the issue if this run fails.
+          exec 2> >(tee "$RUNNER_TEMP/error.txt" >&2)
+          if [ -n "$DRY_RUN" ]; then
+            python3 -I bin/price-catalog-sync.py "${args[@]}" --dry-run
+            exit 0
+          fi
+          # Main can move under the run (a release publishes this same file):
+          # each attempt starts from main as it is, so nothing it holds is lost.
+          for attempt in 1 2 3; do
+            git fetch -q --depth=1 origin +refs/heads/main:refs/remotes/origin/main
+            git reset -q --hard origin/main
+            rm -f "$RUNNER_TEMP/message.txt"
+            python3 -I bin/price-catalog-sync.py "${args[@]}"
+            if git diff --quiet -- "$file"; then
+              echo "Nothing to commit."
+              exit 0
+            fi
+            git add -- "$file"
+            git commit -q -F "$RUNNER_TEMP/message.txt"
+            if git push -q origin HEAD:main; then
+              echo "Pushed $(git rev-parse --short HEAD) to main."
+              exit 0
+            fi
+            echo "::warning::push refused (attempt $attempt): main moved; starting again from it"
+            sleep $((attempt * 10))
+          done
+          echo "::error::could not push the price list to main after 3 attempts"
+          exit 1
+
+      # One issue for as long as the job keeps failing: opened on the first
+      # failure, commented on when the reason changes, closed by the next good
+      # run. Never for a dry run.
+      - name: Open or update the failure issue
+        if: failure() && env.DRY_RUN == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          reason="$(grep -v '^$' "$RUNNER_TEMP/error.txt" 2>/dev/null | tail -40 || true)"
+          [ -n "$reason" ] || reason="(no message from the job: see the run's log)"
+          fp="$(printf '%s' "$reason" | sha1sum | cut -c1-12)"
+          {
+            echo "The scheduled run of \`price-catalog-sync.yml\` failed and wrote nothing: $RUN_URL"
+            echo
+            echo '```'
+            printf '%s\n' "$reason"
+            echo '```'
+            echo
+            echo "Macs keep the list they have. If the change is real (check the catalogs), accept it:"
+            echo "\`gh workflow run price-catalog-sync.yml -f dry_run=false -f accept_mass_change=true\`."
+            echo "Otherwise fix the job's input handling; see docs/releasing.md, \"The price list\"."
+            echo
+            echo "<!-- price-catalog-sync:fingerprint=$fp -->"
+          } > "$RUNNER_TEMP/issue.md"
+          num="$(gh issue list --state open --label area:pricing --limit 50 --json number,title \
+            --jq "map(select(.title == \"$ISSUE_TITLE\")) | .[0].number // empty")"
+          if [ -z "$num" ]; then
+            gh issue create --title "$ISSUE_TITLE" --label area:pricing --body-file "$RUNNER_TEMP/issue.md"
+          elif gh issue view "$num" --json body,comments --jq '[.body] + [.comments[].body] | join("\n")' \
+               | grep -q "fingerprint=$fp"; then
+            echo "Issue #$num already says this."
+          else
+            gh issue comment "$num" --body-file "$RUNNER_TEMP/issue.md"
+          fi
+
+      - name: Close the failure issue
+        if: success() && env.DRY_RUN == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          num="$(gh issue list --state open --label area:pricing --limit 50 --json number,title \
+            --jq "map(select(.title == \"$ISSUE_TITLE\")) | .[0].number // empty")"
+          [ -z "$num" ] || gh issue close "$num" --comment "The job ran cleanly again: $RUN_URL"

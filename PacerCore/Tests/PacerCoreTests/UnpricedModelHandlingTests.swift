@@ -295,18 +295,18 @@ import Testing
     func curatedOnlyRefreshReloads() async {
         let calls = Calls()
         let outcome = await PricingRefreshPass.run(
-            refreshCatalog: { false }, refreshCurated: { true }, reload: { calls.reloads += 1 },
+            refreshCatalog: { false }, refreshCurated: { .updated }, reload: { calls.reloads += 1 },
             generation: { calls.generation })
         #expect(calls.reloads == 1)
         #expect(outcome.reloaded && outcome.curatedRefreshed && !outcome.catalogRefreshed)
 
         let catalog = await PricingRefreshPass.run(
-            refreshCatalog: { true }, refreshCurated: { false }, reload: { calls.reloads += 1 },
+            refreshCatalog: { true }, refreshCurated: { .failed }, reload: { calls.reloads += 1 },
             generation: { calls.generation })
         #expect(calls.reloads == 2 && catalog.reloaded)
 
         let neither = await PricingRefreshPass.run(
-            refreshCatalog: { false }, refreshCurated: { false }, reload: { calls.reloads += 1 },
+            refreshCatalog: { false }, refreshCurated: { .failed }, reload: { calls.reloads += 1 },
             generation: { calls.generation })
         #expect(calls.reloads == 2)
         #expect(neither == .nothing)
@@ -317,11 +317,11 @@ import Testing
     func pricesChangedFollowsTheGeneration() async {
         let calls = Calls()
         let changed = await PricingRefreshPass.run(
-            refreshCatalog: { false }, refreshCurated: { true },
+            refreshCatalog: { false }, refreshCurated: { .updated },
             reload: { calls.generation += 1 }, generation: { calls.generation })
         #expect(changed.pricesChanged)
         let same = await PricingRefreshPass.run(
-            refreshCatalog: { true }, refreshCurated: { true },
+            refreshCatalog: { true }, refreshCurated: { .updated },
             reload: {}, generation: { calls.generation })
         #expect(!same.pricesChanged)
     }

@@ -117,4 +117,33 @@ describe('priceHistoryProblems', () => {
       expect(priceHistoryProblems(text)).not.toEqual([]);
     });
   }
+
+  // The price list bin/price-catalog-sync.py writes (#469).
+  const listed = {
+    model: 'claude-sonnet-4-5', provider: 'bedrock', region: 'us', effectiveFrom: '2026-11-25T18:00:00Z',
+    effectiveTo: null, perMTok: { input: 3.3, output: 16.5, cacheWrite5m: 4.125, cacheWrite1h: 6.6, cacheRead: 0.33 },
+    derived: ['cacheWrite1h'], regionalMultiplier: 1.1, source: 'litellm',
+  };
+  const catalog = (over: Record<string, unknown> = {}) =>
+    file({ catalog: { changedAt: '2026-11-25T18:00:00Z', checkedAt: '2026-11-25T18:00:00Z', records: [listed], ...over } });
+
+  it('passes a price list', () => {
+    expect(priceHistoryProblems(catalog())).toEqual([]);
+    expect(priceHistoryProblems(catalog({ records: [] }))).toEqual([]);
+  });
+
+  const brokenList: Record<string, string> = {
+    'a catalog that is not an object': file({ catalog: [] }),
+    'a catalog without checkedAt': catalog({ checkedAt: undefined }),
+    'a catalog without records': catalog({ records: undefined }),
+    'a listed record with a negative rate': catalog({ records: [{ ...listed, perMTok: { ...listed.perMTok, input: -1 } }] }),
+    'a listed record that ends before it starts': catalog({ records: [{ ...listed, effectiveTo: '2026-01-01' }] }),
+    'a listed record twice': catalog({ records: [listed, listed] }),
+    'a listed record with a bad multiplier': catalog({ records: [{ ...listed, regionalMultiplier: 'x' }] }),
+  };
+  for (const [what, text] of Object.entries(brokenList)) {
+    it(`refuses ${what}`, () => {
+      expect(priceHistoryProblems(text)).not.toEqual([]);
+    });
+  }
 });

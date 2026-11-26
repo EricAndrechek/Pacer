@@ -55,7 +55,9 @@
 #                  PacerCore/Sources/PacerCore/Resources/price-history.json,
 #                  i.e. the tag's in a release run). The site's copy is kept
 #                  instead only when it is strictly newer (asOf) or FILE is
-#                  not a price history the app would decode.
+#                  not a price history the app would decode. Either way the
+#                  site's price list (its `catalog` section, written by
+#                  bin/price-catalog-sync.py) is kept.
 #   --message MSG  (mirror) the commit message
 #   --base-ref REF (release, with --no-push only) start from REF's site copy
 #                  instead of main's: a dry run of a branch that adds the site
@@ -236,7 +238,15 @@ generate() {
   fi
   which="$(choose_prices "$PRICES" "$w/${SITE_DIR}/price-history.json")"
   case "$which" in
-    release) cp "$PRICES" "$w/${SITE_DIR}/price-history.json" || die "could not copy the price history" ;;
+    # The release's curated records, carrying over the site's price list (the
+    # `catalog` section bin/price-catalog-sync.py keeps on main, #469): a
+    # bundled copy has none, and copying it over the site's would drop every
+    # catalog price the job has dated. With no list on the site this is the
+    # release's file byte for byte.
+    release) python3 -I "${SCRIPT_DIR}/price-catalog-sync.py" graft --release "$PRICES" \
+               --site "$w/${SITE_DIR}/price-history.json" --out "$w/${SITE_DIR}/price-history.json.next" \
+             && mv "$w/${SITE_DIR}/price-history.json.next" "$w/${SITE_DIR}/price-history.json" \
+             || die "could not write the price history" ;;
     site) warn "price history: kept the site's copy (see above)" ;;
     *) die "no usable price history to publish" ;;
   esac
@@ -457,13 +467,22 @@ cmd_status() {
   parse_opts "$@"
   g fetch -q "$REMOTE" "+refs/heads/main:refs/remotes/${REMOTE}/main" "+refs/heads/gh-pages:refs/remotes/${REMOTE}/gh-pages"
   local f rc=0
+  local t; t="$(mktemp -d "${TMPDIR:-/tmp}/pacer-feeds-status.XXXXXX")"
   for f in "${FILES[@]}"; do
-    if cmp -s <(g show "${REMOTE}/main:${SITE_DIR}/$f") <(g show "${REMOTE}/gh-pages:$f"); then
+    g show "${REMOTE}/main:${SITE_DIR}/$f" > "$t/main" 2>/dev/null || : > "$t/main"
+    g show "${REMOTE}/gh-pages:$f" > "$t/mirror" 2>/dev/null || : > "$t/mirror"
+    if cmp -s "$t/main" "$t/mirror"; then
       say "${f}: main's site copy and the gh-pages mirror are byte-identical"
+    elif [ "$f" = price-history.json ] && python3 -I "${SCRIPT_DIR}/price-catalog-sync.py" same-curated "$t/main" "$t/mirror"; then
+      # bin/price-catalog-sync.py moves main's price list (the `catalog`
+      # section, #469) on between releases; 0.9.3 and earlier, the mirror's
+      # only readers, do not read it, and the next release copies it over.
+      say "${f}: the same curated prices on main and the gh-pages mirror (main's price list is newer; the mirror's readers do not read it)"
     else
       say "${f}: main's site copy and the gh-pages mirror DIFFER"; rc=1
     fi
   done
+  rm -rf "$t"
   return "$rc"
 }
 
@@ -495,7 +514,7 @@ cmd_self_test() {
     rm -rf "$seed"
   }
   git init -q --initial-branch=main "$seed"
-  g archive HEAD -- bin/appcast-add-item.py "${SITE_DIR}" site/scripts \
+  g archive HEAD -- bin/appcast-add-item.py bin/price-catalog-sync.py "${SITE_DIR}" site/scripts \
     PacerCore/Sources/PacerCore/Resources/price-history.json | tar -x -C "$seed"
   seed_push main
   git init -q --initial-branch=main "$seed"
@@ -550,8 +569,21 @@ cmd_self_test() {
   git --git-dir="$remote" cat-file -e main:RACE.txt 2>/dev/null && ok "release: the racing commit on main was kept" || bad "release: the racing commit was lost"
   [ "$(count main "${SITE_DIR}/appcast.xml")" = 1 ] && ok "release: main's site appcast has the item once" || bad "release: main's site appcast has the item $(count main "${SITE_DIR}/appcast.xml") times"
   identical && ok "release: site copy and mirror are byte-identical" || bad "release: site copy and mirror differ"
-  feed_on main "${SITE_DIR}/price-history.json" | cmp -s - "$REPO/PacerCore/Sources/PacerCore/Resources/price-history.json" \
-    && ok "release: the release's price history is the one published" || bad "release: wrong price history published"
+  # The release's curated records, with whatever price list the site copy
+  # held (#469; none means the release's file byte for byte).
+  feed_on main "${SITE_DIR}/price-history.json" > "$T/published.json"
+  g show "HEAD:${SITE_DIR}/price-history.json" > "$T/site-before.json"
+  if python3 -I - "$T/published.json" "$REPO/PacerCore/Sources/PacerCore/Resources/price-history.json" \
+       "$T/site-before.json" <<'PY'
+import json, sys
+pub, rel, site = (json.load(open(p)) for p in sys.argv[1:4])
+assert pub["records"] == rel["records"] and pub["asOf"] == rel["asOf"], "curated part"
+assert pub.get("catalog") == site.get("catalog"), "price list"
+if "catalog" not in site:
+    assert open(sys.argv[1], "rb").read() == open(sys.argv[2], "rb").read(), "bytes"
+PY
+  then ok "release: the release's price history is the one published, with the site's price list"
+  else bad "release: wrong price history published"; fi
   git --git-dir="$remote" log -1 --format=%s main | grep -q '^site: publish appcast and price history for 99.0.0$' \
     && ok "release: main's commit names the version" || bad "release: main's commit message: $(git --git-dir="$remote" log -1 --format=%s main)"
   local main_before; main_before="$(git --git-dir="$remote" rev-parse main)"
@@ -637,6 +669,30 @@ PY
     && ok "prices: a broken release copy is never published" || bad "prices: broken release copy chosen"
   [ "$(choose_prices "$REPO/PacerCore/Sources/PacerCore/Resources/price-history.json" "$P/old.json" 2>/dev/null)" = release ] \
     && ok "prices: the release copy replaces an older site copy" || bad "prices: release copy not chosen"
+
+  # 8b. A release keeps the site's price list (#469), and with none there it
+  # publishes the release's bytes unchanged.
+  local rel="$REPO/PacerCore/Sources/PacerCore/Resources/price-history.json"
+  python3 -I - "$rel" "$P" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+row = {"model": "claude-x", "provider": "bedrock", "region": "us", "effectiveFrom": "2026-11-25T18:00:00Z",
+       "effectiveTo": None, "source": "litellm",
+       "perMTok": {"input": 1, "output": 5, "cacheWrite5m": 1.25, "cacheWrite1h": 2, "cacheRead": 0.1}}
+site = dict(d, catalog={"changedAt": "2026-11-25T18:00:00Z", "checkedAt": "2026-11-25T18:00:00Z", "records": [row]})
+json.dump(site, open(sys.argv[2] + "/listed.json", "w"), indent=2)
+json.dump(dict(d, records=d["records"][:-1]), open(sys.argv[2] + "/plain-site.json", "w"), indent=2)
+PY
+  if python3 -I "$REPO/bin/price-catalog-sync.py" graft --release "$rel" --site "$P/listed.json" --out "$P/grafted.json" \
+     && python3 -I - "$P/grafted.json" "$rel" "$P/listed.json" <<'PY'
+import json, sys
+g, r, s = (json.load(open(p)) for p in sys.argv[1:4])
+assert g["records"] == r["records"] and g["asOf"] == r["asOf"] and g["catalog"] == s["catalog"]
+PY
+  then ok "prices: a release keeps the site's price list"; else bad "prices: the site's price list was not kept"; fi
+  python3 -I "$REPO/bin/price-catalog-sync.py" graft --release "$rel" --site "$P/plain-site.json" --out "$P/plain.json" \
+    && cmp -s "$P/plain.json" "$rel" \
+    && ok "prices: with no price list on the site, the release's bytes are published" || bad "prices: the release copy was rewritten"
 
   # 9. The switch reads like PACER_SPARKLE_DELTAS.
   local v want got
