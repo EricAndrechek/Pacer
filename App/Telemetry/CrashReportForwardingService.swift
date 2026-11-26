@@ -155,7 +155,7 @@ final class CrashReportForwardingService {
             user["id"] = id
         }
         event["user"] = user
-        return (try? JSONSerialization.data(withJSONObject: event)) ?? eventJSON
+        return (SafeJSON.data(event)) ?? eventJSON
     }
 
     nonisolated private static func advance(_ current: Date, to date: Date, store: UserDefaults) -> Date {

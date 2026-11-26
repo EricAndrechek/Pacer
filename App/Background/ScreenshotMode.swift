@@ -1462,7 +1462,7 @@ enum ScreenshotMode {
             log("\(name): crop \(crop) \(frame) → \(r) of \(bounds)")
             request["crop"] = [r.minX, r.minY, r.width, r.height]
         }
-        if let data = try? JSONSerialization.data(withJSONObject: request) {
+        if let data = SafeJSON.data(request) {
             // Atomic: the capture helper polls this directory every 100 ms, and
             // a plain write let it read a request half-written — "The data
             // couldn't be read because it isn't in the correct format" — and
@@ -1615,7 +1615,7 @@ enum ScreenshotMode {
         let request: [String: Any] = ["kind": "menubar",
                                       "rect": [left, barTop, right - left, height],
                                       "png": png.path]
-        if let data = try? JSONSerialization.data(withJSONObject: request) {
+        if let data = SafeJSON.data(request) {
             try? data.write(to: dir.appendingPathComponent("\(name).request"), options: .atomic)
         }
         // Opening the menu runs a tracking loop that does not return until it
@@ -1698,7 +1698,7 @@ enum ScreenshotMode {
         var body = payload
         body["kind"] = kind
         body["done"] = dir.appendingPathComponent("\(name).done").path
-        guard let data = try? JSONSerialization.data(withJSONObject: body) else { return false }
+        guard let data = SafeJSON.data(body) else { return false }
         try? data.write(to: dir.appendingPathComponent("\(name).request"), options: .atomic)
         let deadline = Deadline(seconds: timeout)
         while !deadline.passed {

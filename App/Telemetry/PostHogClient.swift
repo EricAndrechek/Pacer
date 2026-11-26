@@ -66,7 +66,7 @@ final class PostHogClient: Sendable {
 
     func enqueue(_ event: AnalyticsEvent) {
         let item = AnalyticsPayload.item(event, context: config.context)
-        guard let data = try? JSONSerialization.data(withJSONObject: item) else { return }
+        guard let data = SafeJSON.data(item) else { return }
         let (dropped, flushNow) = state.withLock { s -> (Int, Bool) in
             load(&s)
             s.queue.append(data)
@@ -171,7 +171,7 @@ final class PostHogClient: Sendable {
         s.loaded = true
         guard let url = config.queueURL, let data = try? Data(contentsOf: url),
               let list = try? JSONSerialization.jsonObject(with: data) as? [Any] else { return }
-        let saved = list.compactMap { try? JSONSerialization.data(withJSONObject: $0) }
+        let saved = list.compactMap { SafeJSON.data($0) }
         s.queue = Array((saved + s.queue).suffix(Self.maxQueued))
     }
 
@@ -187,7 +187,7 @@ final class PostHogClient: Sendable {
         guard let url = config.queueURL else { return }
         let snapshot = state.withLock { $0.queue }
         let items = snapshot.compactMap { try? JSONSerialization.jsonObject(with: $0) }
-        guard let data = try? JSONSerialization.data(withJSONObject: items) else { return }
+        guard let data = SafeJSON.data(items) else { return }
         try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
                                                  withIntermediateDirectories: true)
         try? data.write(to: url, options: .atomic)

@@ -117,7 +117,7 @@ public enum CrashReportForwarder {
         // shape the scrubber removes as a token, and Sentry rejects the whole
         // envelope without it (HTTP 400, found on a real forward 2026-11-02).
         scrubbed["event_id"] = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
-        guard let data = try? JSONSerialization.data(withJSONObject: scrubbed) else { return nil }
+        guard let data = SafeJSON.data(scrubbed) else { return nil }
         return Report(incidentId: incident, processName: name, appVersion: version,
                       buildVersion: build, captureTime: capture, eventJSON: data)
     }

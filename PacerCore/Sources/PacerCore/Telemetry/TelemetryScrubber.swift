@@ -28,7 +28,11 @@ import Foundation
 /// rule would redact; the link is ours and holds only the random install id.
 public enum TelemetryScrubber {
 
-    public static func scrub(_ text: String, home: String = NSHomeDirectory()) -> String {
+    /// Read once: `NSHomeDirectory()` hit a hang in a memory-pressured Mac on the
+    /// main thread (Sentry PACER-2Q) when evaluated per call.
+    public static let homeDirectory = NSHomeDirectory()
+
+    public static func scrub(_ text: String, home: String = TelemetryScrubber.homeDirectory) -> String {
         guard !text.isEmpty else { return text }
         // Set the person links aside under placeholders no rule matches, and
         // put them back after.
@@ -55,7 +59,7 @@ public enum TelemetryScrubber {
 
     /// Scrub every string value of a dictionary, recursively. Keys are kept:
     /// they are ours (attribute names), never user data.
-    public static func scrub(_ values: [String: Any], home: String = NSHomeDirectory()) -> [String: Any] {
+    public static func scrub(_ values: [String: Any], home: String = TelemetryScrubber.homeDirectory) -> [String: Any] {
         values.mapValues { scrubValue($0, home: home) }
     }
 
