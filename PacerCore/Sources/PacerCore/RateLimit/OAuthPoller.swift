@@ -222,7 +222,9 @@ public actor OAuthPoller: TokenPoolTesting {
         var state: OAuthPollScheduler.LaneState
         var consecutiveFailures: Int
         /// Polls in a row that got HTTP 403; every other outcome resets it (#434).
-        /// Manual tests (the Settings "Test" button) are not counted.
+        /// Manual tests (the Settings "Test" button) are not counted. A park
+        /// keeps it, so the first poll after the 6 h that is refused again
+        /// parks again rather than starting a new streak of three (#482).
         var consecutive403 = 0
         /// Parked after repeated 403s: `state.cooldownUntil` is the retry time.
         /// Cleared by the next poll's outcome, so the pill never outlives it.
@@ -1349,8 +1351,16 @@ public actor OAuthPoller: TokenPoolTesting {
     /// lane was dropped; Claude Code refreshed it within seconds, but the next
     /// discovery was 18:34Z, so the account every pacing decision reads went
     /// 9-10 minutes stale (#212).
+    ///
+    /// A lane parked after repeated 403s does not count (#482). It keeps its
+    /// `.primary` or `.unknown` slot, so it used to hold this look off for its
+    /// whole 6 h, and a token refused from its first poll stays `.unknown` for
+    /// good; meanwhile the replacement Claude Code wrote went unread until the
+    /// scheduled discovery.
     private func emptyPoolDiscoveryDue(_ now: Date) -> Bool {
-        guard !lanes.contains(where: { $0.state.account == .primary || $0.state.account == .unknown })
+        guard !lanes.contains(where: {
+            !$0.refused403 && ($0.state.account == .primary || $0.state.account == .unknown)
+        })
         else { return false }
         return lastEmptyPoolDiscoveryAt.map {
             now.timeIntervalSince($0) >= configuration.emptyPoolRediscoverInterval
@@ -1555,6 +1565,44 @@ public actor OAuthPoller: TokenPoolTesting {
         if head == "<" { return .edge }
         if !body.isEmpty, head != "{" { return .edge }
         return .unknown
+    }
+
+    /// Why a lane refused `forbidden403ParkAfter` times in a row was left to
+    /// ordinary cooling. The raw value is the `oauth.lane_park_declined.<reason>`
+    /// counter's last word (#482).
+    enum ParkDecline: String, CaseIterable {
+        /// The body is an edge page (WAF, proxy, region block), not Anthropic's.
+        case edge
+        /// The body is not `permission_error` and the lane has never had a
+        /// good reading, so there is no account whose other lanes could vouch.
+        case noAccount = "no_account"
+        /// No lane that could vouch took a good reading during the streak.
+        case noSibling = "no_sibling"
+    }
+
+    /// Park, or why not (nil parks). Pure, so the rule is tested on its own.
+    ///
+    /// A park needs another lane that is healthy and took a good reading since
+    /// the streak began, as evidence that the network and the endpoint work and
+    /// only this token is refused. Which lanes count depends on the body:
+    ///
+    /// - `permission_error` is Anthropic's API answering, so the request got
+    ///   there. Any healthy lane, of any account, then shows the path is fine
+    ///   (#482). Requiring the same account left two cases that never parked:
+    ///   a token refused from its first poll (an account is learned only from
+    ///   a good reading) and an account whose only token is refused, the field
+    ///   case behind #482, polled about 24 times a day for ever.
+    /// - Any other non-edge body is unproven, so it keeps #434's rule: a lane
+    ///   of the same account must vouch.
+    nonisolated static func parkDecline(kind: ForbiddenKind, hasAccount: Bool,
+                                        sameAccountHealthy: Bool, anyHealthy: Bool) -> ParkDecline? {
+        switch kind {
+        case .edge: return .edge
+        case .permission: return anyHealthy ? nil : .noSibling
+        case .unknown:
+            guard hasAccount else { return .noAccount }
+            return sameAccountHealthy ? nil : .noSibling
+        }
     }
 
     private var lastAllForbiddenLogAt: Date?
@@ -1820,32 +1868,52 @@ public actor OAuthPoller: TokenPoolTesting {
     /// the lane stays in the pool (so the persisted pool, a manual token's row
     /// and the signed-in credential are untouched) and only its cooldown moves.
     /// Returns false, leaving ordinary cooling, when the refusals do not look
-    /// like this token's own: every other lane is failing too (VPN, proxy,
-    /// region, WAF) or the body is an edge page rather than Anthropic's JSON.
+    /// like this token's own (`parkDecline`): no healthy lane beside it (VPN,
+    /// proxy, region, WAF, every lane failing together) or an edge page rather
+    /// than Anthropic's JSON.
+    ///
+    /// A park can take an account's last usable lane, the active account's
+    /// included (#482). The once-a-minute empty-pool discovery skips parked
+    /// lanes, so the token Claude Code writes next is picked up within the
+    /// minute rather than at the scheduled rediscovery.
     private func park403(_ idx: Int, body: String, now: Date) -> Bool {
         let kind = Self.forbiddenKind(body: body)
-        // Only a lane of the SAME account can say this token, not the network,
-        // is the problem, and only one that took a good reading after this
-        // streak began. That also means a park never takes an account's last
-        // usable lane: a parked lane keeps its `.primary` slot, and a
-        // replacement would wait out the rediscovery interval (#434).
+        // A vouching lane took a good reading after this streak began.
         let key = lanes[idx].accountKey
         let since = lanes[idx].streak403Start ?? .distantPast
-        let othersHealthy = key != nil && lanes.enumerated().contains { i, l in
-            i != idx && l.accountKey == key && !l.refused403
+        let healthy = lanes.indices.filter { i in
+            let l = lanes[i]
+            return i != idx && !l.refused403
                 && l.consecutive403 == 0 && l.consecutiveFailures == 0
                 && (l.lastSuccessAt.map { $0 >= since } ?? false)
         }
-        guard kind != .edge, othersHealthy else {
+        let decline = Self.parkDecline(
+            kind: kind, hasAccount: key != nil,
+            sameAccountHealthy: key != nil && healthy.contains { lanes[$0].accountKey == key },
+            anyHealthy: !healthy.isEmpty)
+        if let decline {
+            // Counted on every declined attempt (a local tally, drained by the
+            // daily check-in), so the field says which rule keeps a refused
+            // token from parking.
+            TelemetryCounters.add("oauth.lane_park_declined.\(decline.rawValue)")
             if lastAllForbiddenLogAt.map({ now.timeIntervalSince($0) >= 3_600 }) ?? true {
                 lastAllForbiddenLogAt = now
+                let why: String
+                switch decline {
+                case .edge: why = "an edge-looking response — looks like the network, not the token"
+                case .noAccount: why = "no account yet to vouch within — the body is not Anthropic's permission_error"
+                case .noSibling:
+                    why = kind == .permission
+                        ? "no healthy lane of any account beside it — looks like the network, not the token"
+                        : "no healthy lane of the account beside it — looks like the network, not the token"
+                }
                 Log.write("OAuthPoller", "http 403 ×\(lanes[idx].consecutive403) on \(kind.rawValue) body with "
-                    + (kind == .edge ? "an edge-looking response" : "no healthy lane of the account beside it")
-                    + " — not parking (looks like the network, not the token); lanes=\(lanes.count)")
+                    + "\(why); not parking (\(decline.rawValue)); lanes=\(lanes.count)")
             }
             return false
         }
-        lanes[idx].consecutive403 = 0
+        // `consecutive403` is kept: a 403 on the first poll after the 6 h is the
+        // same refusal and parks again at once (#482).
         lanes[idx].refused403 = true
         lanes[idx].state.cooldownUntil = now.addingTimeInterval(Self.forbidden403Backoff)
         TelemetryCounters.add("oauth.lane_parked_403")
@@ -2034,6 +2102,28 @@ public actor OAuthPoller: TokenPoolTesting {
         lane.state.cooldownUntil = meta.cooldownUntil
         lane.resolvedOrg = meta.organizationId
         lane.consecutiveFailures = meta.consecutiveFailures
+        // The park itself is restored above (its cooldown); restore that it was
+        // one, which the lane meta has no field for (#482). A park is the only
+        // cooldown longer than `laneCooldownMax` past its poll (`cooldownLane`
+        // caps every other one there), so the span says so. Without this the
+        // first 403 after a relaunch began a new streak of three, the lane did
+        // not read as refused, and it held off the empty-pool discovery.
+        if Self.persistedMetaIsPark(lastPolledAt: meta.lastPolledAt, cooldownUntil: meta.cooldownUntil,
+                                    cooldownMax: configuration.laneCooldownMax) {
+            lane.refused403 = true
+            lane.consecutive403 = Self.forbidden403ParkAfter
+            lane.streak403Start = meta.lastPolledAt
+        }
+    }
+
+    /// Whether a persisted cooldown is a 403 park rather than ordinary
+    /// cooling. One second of slack for the store's date round trip. A manual
+    /// Test in a park's last hour moves `lastPolledAt` up to the end, and that
+    /// lane restores as ordinary cooling: it then needs three 403s again.
+    nonisolated static func persistedMetaIsPark(lastPolledAt: Date?, cooldownUntil: Date?,
+                                                cooldownMax: TimeInterval) -> Bool {
+        guard let lastPolledAt, let cooldownUntil else { return false }
+        return cooldownUntil.timeIntervalSince(lastPolledAt) > cooldownMax + 1
     }
 
     private func laneMetaSnapshot(for lane: Lane) -> LaneMetaSnapshot {

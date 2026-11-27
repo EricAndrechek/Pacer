@@ -271,11 +271,21 @@ import Testing
         let pool: EphemeralTokenPoolStore
         let script: ForbiddenScript
         let keychain: ForbiddenKeychainBox
+        let client: OAuthClient
+        let container: ModelContainer
+        let configuration: OAuthPoller.Configuration
+
+        /// A new poller over the same store, pool, sources and clock: what the
+        /// next launch starts from.
+        func relaunch() -> OAuthPoller {
+            OAuthPoller(client: client, container: container, configuration: configuration,
+                        clock: clock, poolStore: pool)
+        }
     }
 
     private static func twoLanes(_ script: ForbiddenScript, second: Bool = true) throws -> TwoLanes {
         let box = ForbiddenKeychainBox(token: "tokA")
-        let kc = KeychainOAuth(rawReader: { .success(Self.keychainBlob(token: box.token)) })
+        let kc = KeychainOAuth(rawReader: { .success(Self.keychainBlob(token: box.read())) })
         let held = second ? EphemeralCredentialStore(OAuthCredential(
             accessToken: "tokB", expiresAt: Date().addingTimeInterval(86_400 * 30),
             subscriptionType: nil)) : EphemeralCredentialStore()
@@ -285,12 +295,19 @@ import Testing
         let client = OAuthClient(keychain: kc, transport: transport, desktopEnabled: { false }, heldStore: held)
         let clock = TestClock()
         let pool = EphemeralTokenPoolStore()
+        let container = try makeContainer()
+        let configuration = OAuthPoller.Configuration(laneCooldownBase: 0, laneCooldownMax: 0)
         let poller = OAuthPoller(
-            client: client, container: try makeContainer(),
-            configuration: .init(laneCooldownBase: 0, laneCooldownMax: 0),
+            client: client, container: container,
+            configuration: configuration,
             clock: clock, poolStore: pool)
-        return TwoLanes(poller: poller, clock: clock, pool: pool, script: script, keychain: box)
+        return TwoLanes(poller: poller, clock: clock, pool: pool, script: script, keychain: box,
+                        client: client, container: container, configuration: configuration)
     }
+
+    /// The 403 body the field reported (#482): Anthropic's own refusal of a
+    /// token without usage access.
+    private static let scopeRefusal = #"{"type":"error","error":{"type":"permission_error","message":"OAuth token does not meet scope requirement user:profile"}}"#
 
     private static func poolTokens(_ pool: EphemeralTokenPoolStore) -> Set<String> {
         Set(pool.loadAll().map(\.credential.accessToken))
@@ -368,7 +385,7 @@ import Testing
         #expect(await t.poller.snapshot().laneCount == 2)
     }
 
-    @Test("another account's healthy lane does not license parking this account's only lane (#434)")
+    @Test("another account's healthy lane does not license parking this account's only lane when the body is not permission_error (#434, #482)")
     func otherAccountsLaneDoesNotVouch() async throws {
         let t = try Self.twoLanes(ForbiddenScript(
             ["tokA": [.okOrg("orgA"), .status(403)], "tokB": [.okOrg("orgB")]]))
@@ -421,6 +438,106 @@ import Testing
     func serverErrorsStillOnlyCool() async throws {
         let t = try Self.twoLanes(ForbiddenScript(["tokA": [.ok, .status(503)], "tokB": [.ok]]))
         for _ in 0..<10 { #expect(await t.poller.runOnce() != .forbiddenParked) }
+    }
+
+    // MARK: - Tokens refused from their first poll (#482)
+
+    @Test("a token refused from its first poll is parked beside a healthy lane, though it never got an account (#482)")
+    func refusedFromFirstPollParks() async throws {
+        let t = try Self.twoLanes(ForbiddenScript(
+            ["tokA": [.status(403, body: Self.scopeRefusal)], "tokB": [.ok]]))
+        var outcomes: [OAuthPoller.PollOutcome] = []
+        for _ in 0..<7 { outcomes.append(await t.poller.runOnce()) }
+        #expect(outcomes.contains(.forbiddenParked))
+        #expect(await t.poller.snapshot().laneCount == 2, "parked, not removed")
+        let seen = t.script.count(for: "tokA")
+        #expect(seen == OAuthPoller.forbidden403ParkAfter)
+        for _ in 0..<4 { _ = await t.poller.runOnce() }
+        #expect(t.script.count(for: "tokA") == seen, "parked: automatic polls no longer reach it")
+    }
+
+    @Test("a token refused from its first poll with a body that is not permission_error still needs its own account (#482)")
+    func refusedFromFirstPollWithUnknownBodyIsNotParked() async throws {
+        let t = try Self.twoLanes(ForbiddenScript(["tokA": [.status(403)], "tokB": [.ok]]))
+        for _ in 0..<10 { #expect(await t.poller.runOnce() != .forbiddenParked) }
+    }
+
+    @Test("an account's only token, refused with permission_error, parks beside another account's healthy lane (#482)")
+    func singleTokenAccountParksBesideAnotherAccount() async throws {
+        // tokB is another account's: `runOnce` polls it once, and that reading
+        // is at the same instant as tokA's streak (the clock stands still), so
+        // it speaks for the network as the sweep's readings do in the app.
+        let t = try Self.twoLanes(ForbiddenScript(
+            ["tokA": [.okOrg("orgA"), .status(403, body: Self.scopeRefusal)], "tokB": [.okOrg("orgB")]]))
+        var outcomes: [OAuthPoller.PollOutcome] = []
+        for _ in 0..<10 { outcomes.append(await t.poller.runOnce()) }
+        #expect(outcomes.contains(.forbiddenParked))
+        #expect(await t.poller.snapshot().laneCount == 2)
+        #expect(t.script.count(for: "tokA") == 1 + OAuthPoller.forbidden403ParkAfter)
+    }
+
+    @Test("with only a parked lane left, the once-a-minute look for a new token still runs (#482)")
+    func parkedLaneDoesNotHoldOffEmptyPoolDiscovery() async throws {
+        let t = try Self.twoLanes(ForbiddenScript(["tokA": [.ok, .status(403)], "tokB": [.ok]]))
+        for _ in 0..<7 { _ = await t.poller.runOnce() }
+        #expect(t.script.count(for: "tokA") == 1 + OAuthPoller.forbidden403ParkAfter, "tokA is parked")
+        // The healthy lane goes (401): the parked one is all that is left.
+        t.script.set("tokB", [.status(401)])
+        #expect(await t.poller.runOnce() == .unauthorized)
+        #expect(await t.poller.snapshot().laneCount == 1)
+
+        let before = t.keychain.reads
+        // 150 s of loop passes, 10 s apart: looks at +60 and +120.
+        for _ in 0..<15 {
+            t.clock.advance(by: 10)
+            _ = await t.poller.runOnce()
+        }
+        let discoveries = t.keychain.reads - before
+        #expect((2...3).contains(discoveries), "got \(discoveries) discoveries over 150 s")
+    }
+
+    @Test("a 403 right after the 6 h is the same refusal: the lane is parked again at once (#482)")
+    func reparksAtOnceAfterBackoff() async throws {
+        let t = try Self.twoLanes(ForbiddenScript(["tokA": [.ok, .status(403)], "tokB": [.ok]]))
+        for _ in 0..<7 { _ = await t.poller.runOnce() }
+        let seen = t.script.count(for: "tokA")
+        t.clock.advance(by: OAuthPoller.forbidden403Backoff + 60)
+        var outcomes: [OAuthPoller.PollOutcome] = []
+        for _ in 0..<6 { outcomes.append(await t.poller.runOnce()) }
+        #expect(outcomes.contains(.forbiddenParked))
+        #expect(t.script.count(for: "tokA") == seen + 1, "one poll, then parked again")
+    }
+
+    @Test("a lane parked before a restart is parked again by its first 403 after it (#482)")
+    func parkSurvivesRestart() async throws {
+        let t = try Self.twoLanes(ForbiddenScript(["tokA": [.ok, .status(403)], "tokB": [.ok]]))
+        for _ in 0..<7 { _ = await t.poller.runOnce() }
+        let relaunched = t.relaunch()
+        t.clock.advance(by: OAuthPoller.forbidden403Backoff + 60)
+        // The other lane has a reading this launch, as the loop gives it in the app.
+        if case .success = await relaunched.testLane(id: OAuthPoller.laneId("tokB")) {} else {
+            Issue.record("tokB should poll fine")
+        }
+        let seen = t.script.count(for: "tokA")
+        #expect(await relaunched.runOnce() == .forbiddenParked)
+        for _ in 0..<3 { _ = await relaunched.runOnce() }
+        #expect(t.script.count(for: "tokA") == seen + 1)
+    }
+
+    @Test("why a park is declined: edge page, no account to vouch within, or nothing healthy (#482)")
+    func parkDeclineReasons() {
+        typealias P = OAuthPoller
+        // An edge page is never parked, whatever stands beside it.
+        #expect(P.parkDecline(kind: .edge, hasAccount: true, sameAccountHealthy: true, anyHealthy: true) == .edge)
+        // Anthropic's permission_error: any healthy lane, of any account, vouches.
+        #expect(P.parkDecline(kind: .permission, hasAccount: false, sameAccountHealthy: false, anyHealthy: true) == nil)
+        #expect(P.parkDecline(kind: .permission, hasAccount: true, sameAccountHealthy: false, anyHealthy: true) == nil)
+        #expect(P.parkDecline(kind: .permission, hasAccount: false, sameAccountHealthy: false, anyHealthy: false) == .noSibling)
+        // Anything else still needs a healthy lane of its own account.
+        #expect(P.parkDecline(kind: .unknown, hasAccount: false, sameAccountHealthy: false, anyHealthy: true) == .noAccount)
+        #expect(P.parkDecline(kind: .unknown, hasAccount: true, sameAccountHealthy: false, anyHealthy: true) == .noSibling)
+        #expect(P.parkDecline(kind: .unknown, hasAccount: true, sameAccountHealthy: true, anyHealthy: true) == nil)
+        #expect(P.ParkDecline.allCases.map(\.rawValue).sorted() == ["edge", "no_account", "no_sibling"])
     }
 
     /// Two distinct orgs are BOTH tracked — neither dropped — and both write
@@ -1187,11 +1304,15 @@ private final class LockedBox: @unchecked Sendable {
 private final class ForbiddenKeychainBox: @unchecked Sendable {
     private let lock = NSLock()
     private var _token: String
+    private var _reads = 0
     init(token: String) { _token = token }
     var token: String {
         get { lock.lock(); defer { lock.unlock() }; return _token }
         set { lock.lock(); _token = newValue; lock.unlock() }
     }
+    /// The token, counted as one read of the keychain item.
+    func read() -> String { lock.lock(); defer { lock.unlock() }; _reads += 1; return _token }
+    var reads: Int { lock.lock(); defer { lock.unlock() }; return _reads }
 }
 
 /// Per-token scripted responses for the 403 tests; the last step repeats.
