@@ -33,13 +33,18 @@ public enum FeedFallback {
         /// `http` (a non-200 answer) and `decode` (an answer that did not
         /// parse) are ours; the rest are the two system domains a feed fetch can
         /// fail in. Anything else is `other`, so a stray domain name can't leave.
-        static let domains: Set<String> = [NSURLErrorDomain, "http", "decode", "SUSparkleErrorDomain"]
+        static let domains: Set<String> = [NSURLErrorDomain, FeedFallback.cfNetworkDomain, "http", "decode", "SUSparkleErrorDomain"]
         static func allowedDomain(_ d: String) -> String { domains.contains(d) ? d : "other" }
     }
 
     // MARK: Appcast failures
 
     private static let sparkleDomain = "SUSparkleErrorDomain"
+    /// The loading errors come in either system domain with the same codes:
+    /// Sparkle's innermost error is often CFNetwork's, not Foundation's (a 0.9.5
+    /// Mac waking offline reported -1009 as an unknown domain, Sentry PACER-2S).
+    static let cfNetworkDomain = kCFErrorDomainCFNetwork as String
+    static func isURLLoading(_ domain: String) -> Bool { domain == NSURLErrorDomain || domain == cfNetworkDomain }
     private static let sparkleAppcastParseError = 1000   // SUAppcastParseError
     private static let sparkleDownloadError = 2001       // SUDownloadError
 
@@ -56,21 +61,21 @@ public enum FeedFallback {
     /// The failure keeps the innermost error's domain and code.
     public static func appcastFailure(_ error: NSError, feedLoaded: Bool) -> Failure? {
         guard !feedLoaded else { return nil }
-        let isFeedError = error.domain == NSURLErrorDomain
+        let isFeedError = isURLLoading(error.domain)
             || (error.domain == sparkleDomain
                 && (error.code == sparkleDownloadError || error.code == sparkleAppcastParseError))
         guard isFeedError else { return nil }
         var innermost = error
         while let next = innermost.userInfo[NSUnderlyingErrorKey] as? NSError, next !== innermost { innermost = next }
-        if innermost.domain == NSURLErrorDomain, innermost.code == NSURLErrorCancelled { return nil }
-        let status = innermost.domain == NSURLErrorDomain && innermost.code == NSURLErrorBadServerResponse
+        if isURLLoading(innermost.domain), innermost.code == NSURLErrorCancelled { return nil }
+        let status = isURLLoading(innermost.domain) && innermost.code == NSURLErrorBadServerResponse
             ? (innermost.userInfo["statusCode"] as? Int) : nil
         return Failure(domain: innermost.domain, code: innermost.code, httpStatus: status)
     }
 
     /// Offline is the Mac's state, not the feed's: counted, never an issue.
     public static func isOffline(_ failure: Failure) -> Bool {
-        failure.domain == NSURLErrorDomain
+        isURLLoading(failure.domain)
             && (failure.code == NSURLErrorNotConnectedToInternet || failure.code == NSURLErrorDataNotAllowed)
     }
 

@@ -144,6 +144,22 @@ struct FeedFallbackTests {
         #expect(FeedFallback.appcastFailure(e, feedLoaded: false) == .init(domain: NSURLErrorDomain, code: code))
     }
 
+    /// Sentry PACER-2S: a Mac waking offline reported -1009 whose innermost
+    /// error was CFNetwork's domain, not Foundation's. Offline in either domain
+    /// is the Mac's state: counted, never a problem; the domain is allow-listed.
+    @Test(arguments: [NSURLErrorDomain, kCFErrorDomainCFNetwork as String])
+    func offlineInEitherLoadingDomainIsOffline(domain: String) {
+        for code in [NSURLErrorNotConnectedToInternet, NSURLErrorDataNotAllowed] {
+            let failure = FeedFallback.appcastFailure(Self.nested2001(NSError(domain: domain, code: code)), feedLoaded: false)
+            #expect(failure == .init(domain: domain, code: code))
+            #expect(failure.map(FeedFallback.isOffline) == true)
+        }
+        #expect(FeedFallback.isOffline(.init(domain: domain, code: NSURLErrorTimedOut)) == false)
+        #expect(FeedFallback.appcastFailure(Self.nested2001(NSError(domain: domain, code: NSURLErrorCancelled)),
+                                            feedLoaded: false) == nil)
+        #expect(FeedFallback.Failure.allowedDomain(domain) == domain)
+    }
+
     @Test func anHttp503ComesThroughWithItsStatus() {
         let inner = NSError(domain: NSURLErrorDomain, code: NSURLErrorBadServerResponse, userInfo: ["statusCode": 503])
         #expect(FeedFallback.appcastFailure(Self.nested2001(inner), feedLoaded: false)?.httpStatus == 503)
