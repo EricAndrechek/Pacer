@@ -1,7 +1,8 @@
 // How Pacer compares: one data file for the /compare/ hub, the per-tool pages,
 // llms.txt and the Markdown twins built from them, so none of them can say
-// something another doesn't. README.md's "How Pacer compares" table is kept
-// in line with it by hand.
+// something another doesn't. README.md's "How Pacer compares" table is
+// generated from it (readmeTable) and test/compare.test.ts fails when the
+// README's copy differs.
 //
 // Every other tool's cell is read from that tool's own current page or repo
 // (checked on CHECKED, the source on each cell; test/compare.test.ts fails on
@@ -186,7 +187,7 @@ export const TOOLS: Tool[] = [
       perModel: n(CCUSAGE_REPO),
       pace: n(CCUSAGE_REPO),
       projection: unstated(CCUSAGE_REPO),
-      heatmap: n(CCUSAGE_REPO),
+      heatmap: unstated(CCUSAGE_REPO),
       breakdown: y(CCUSAGE_REPO),
       beyond: y(CCUSAGE_REPO, 'about 20 agents'),
       widgets: na(CCUSAGE_REPO, 'a command-line tool'),
@@ -233,11 +234,11 @@ export const TOOLS: Tool[] = [
       pace: part(MONITOR, 'reset-aware pace and burn rate'),
       projection: part(MONITOR, 'session forecasts and cost projections'),
       heatmap: unstated(MONITOR),
-      breakdown: part(MONITOR, 'per-model tables'),
+      breakdown: y(MONITOR, 'opt-in local history by project, model and day'),
       beyond: unstated(MONITOR),
-      widgets: n(MONITOR),
+      widgets: unstated(MONITOR, 'points to companion apps'),
       notifications: part(MONITOR, 'exit codes and the terminal title'),
-      csv: y(MONITOR),
+      csv: y(MONITOR, 'and JSON, from its history too'),
       roi: unstated(MONITOR),
       plugins: unstated(MONITOR),
       price: t('Free', MONITOR),
@@ -252,11 +253,11 @@ export const TOOLS: Tool[] = [
       data: "It reads Claude Code's local logs. For limits it uses the rate-limit readings in Claude Code's statusline data while they are fresh, and otherwise shows a local estimate, labelled as one.",
       betterPick: [
         'You live in a terminal, or work on Linux or Windows.',
-        'You want a live burn-rate view in a terminal pane, with JSON, text or CSV output.',
+        'You want a live burn-rate view in a terminal pane, with JSON, text or CSV output, and an opt-in local history that outlives Claude Code’s 30-day cleanup.',
       ],
       pacerDiffers: [
         "Pacer runs in the menu bar and widgets on your Mac, so it is there without a terminal open, and it asks Anthropic for your limits every few minutes on its own.",
-        'It keeps your whole history: cost by project, model and day, a six-month heatmap, and every window paced to its reset, per-model caps included.',
+        'It collects in the background from the menu bar and keeps every request it reads, so a fix to how it counts corrects your past too: cost by project (in your own collections), model, day and account, priced at the rate in effect at the time, a six-month heatmap, and every window paced to its reset, per-model caps included.',
         'It can alert you at a threshold, and its skill pauses agent runs before a limit.',
       ],
     },
@@ -284,7 +285,7 @@ export const TOOLS: Tool[] = [
       notifications: y(CLAUDEBAR, 'also webhooks and Slack'),
       csv: unstated(CLAUDEBAR),
       roi: unstated(CLAUDEBAR),
-      plugins: n(CLAUDEBAR, 'extensions add quota sources'),
+      plugins: unstated(CLAUDEBAR, 'its extensions add quota sources'),
       price: t('Free', CLAUDEBAR),
       license: t('Apache 2.0', CLAUDEBAR),
       platforms: t('macOS 15 or newer', CLAUDEBAR),
@@ -396,7 +397,7 @@ export const TOOLS: Tool[] = [
       projection: part(CLAUDE_GOD, 'a monthly forecast'),
       heatmap: y(CLAUDE_GOD),
       breakdown: y(CLAUDE_GOD),
-      beyond: n(CLAUDE_GOD),
+      beyond: unstated(CLAUDE_GOD),
       widgets: y(CLAUDE_GOD),
       notifications: y(CLAUDE_GOD),
       csv: y(CLAUDE_GOD),

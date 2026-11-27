@@ -178,9 +178,9 @@ the honest lay of the land.
 | Per-model limit windows | ✓ | ? | ✓ | – | – | ? |
 | Usage paced against an even burn | ✓ | ◐ | ◐ | – | – | – |
 | End-of-day spend projection | ✓ | ◐ | ◐ | ◐ | ? | – |
-| Activity heatmap | ✓ | ? | ✓ | ? | – | ◐ |
+| Activity heatmap | ✓ | ? | ✓ | ? | ? | ◐ |
 | Per-project and per-model breakdown | ✓ | ✓ | ✓ | ✓ | ✓ | ◐ |
-| Other agents (Codex, opencode, …) | – | ✓ | – | – | ✓ | n/a |
+| Other agents (Codex, opencode, …) | – | ✓ | ? | – | ✓ | n/a |
 | Desktop widgets | ✓ | ? | ✓ | ? | n/a | n/a |
 | Threshold alerts | ✓ | ✓ | ✓ | ✓ | ? | – |
 | CSV export | ✓ | ✓ | ✓ | ? | ? | – |
