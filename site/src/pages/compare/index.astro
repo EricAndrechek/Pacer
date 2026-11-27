@@ -103,7 +103,10 @@ const markClass = (c: Cell) => (c.mark ? `mark ${c.mark}` : 'mark');
 </Base>
 
 <style>
+  /* Wide tables scroll inside the page, never the page itself; positioned so
+     the visually hidden text in their cells is clipped with them. */
   .scroll {
+    position: relative;
     overflow-x: auto;
     margin-inline: calc(-1 * var(--gutter));
     padding-inline: var(--gutter);

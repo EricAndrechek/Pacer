@@ -179,7 +179,10 @@ const dataset = {
 </Base>
 
 <style>
+  /* Wide tables scroll inside the page, never the page itself; positioned so
+     the visually hidden text in their cells is clipped with them. */
   .scroll {
+    position: relative;
     overflow-x: auto;
     margin-inline: calc(-1 * var(--gutter));
     padding-inline: var(--gutter);
@@ -218,7 +221,7 @@ const dataset = {
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
   }
-  td:last-child {
+  .prices td:last-child {
     white-space: nowrap;
     color: var(--ink-2);
     padding-left: 1.2em;
@@ -252,12 +255,19 @@ const dataset = {
     display: block;
     color: var(--ink-2);
   }
+  .facts {
+    table-layout: fixed;
+  }
   .facts th[scope='row'] {
     white-space: nowrap;
-    width: 1%;
-    padding-right: 1.5em;
+    width: 6.5em;
+    padding-right: 1em;
   }
   .facts td {
+    overflow-wrap: anywhere;
+  }
+  .facts code {
+    white-space: normal;
     overflow-wrap: anywhere;
   }
   pre {
