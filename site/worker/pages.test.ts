@@ -133,7 +133,7 @@ describe('pages through the Markdown router', () => {
     expect((await get('/cli/', { Accept: 'text/markdown' }, 'HEAD')).response.headers.get('content-type')).toBe('text/markdown; charset=utf-8');
   });
 
-  it('answers a conditional Markdown request with the full twin, never the HTML (md-router 0.5.0 takes a 304 for no twin)', async () => {
+  it('answers a conditional Markdown request with the full twin, never the HTML (md-router 0.5.1 fetches the twin without the validators)', async () => {
     for (const headers of [
       { Accept: 'text/markdown', 'If-None-Match': MD_ETAG },
       { 'User-Agent': 'Mozilla/5.0 (compatible; GPTBot/1.2; +https://openai.com/gptbot)', 'If-None-Match': MD_ETAG, 'If-Modified-Since': 'Wed, 26 Nov 2026 00:00:00 GMT' },

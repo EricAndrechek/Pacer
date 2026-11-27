@@ -32,7 +32,7 @@
 //   it.
 // - /.well-known/search is Search for Agents over the pages (worker/search.ts).
 
-import { LLM_BOT_UA, createMdRouter } from './md-router.mjs';
+import { createMdRouter } from './md-router.mjs';
 import { API_POINTER_PAGES, PATHS, isPageRoute, linkHeader } from '../scripts/discovery.mjs';
 import { feedback } from './feedback';
 import { download, environmentOf, feedFileOf, serveFeed } from './lib';
@@ -41,43 +41,25 @@ import { handleSearch } from './search';
 const pages = createMdRouter<Env>({ vary: true });
 
 /**
- * Whether the router will answer with the page's Markdown twin: its own test
- * (md-router src/worker.ts, `wantsMarkdown`), an `Accept` naming
- * text/markdown or a known LLM crawler's User-Agent.
- */
-const wantsMarkdown = (request: Request) =>
-  (request.headers.get('Accept') ?? '').includes('text/markdown') || LLM_BOT_UA.test(request.headers.get('User-Agent') ?? '');
-
-/**
- * A page through the Markdown router, with three things the router (0.5.0)
- * doesn't do itself:
+ * A page through the Markdown router, with two things the router doesn't do
+ * itself:
  *
- * - A request it will answer with Markdown goes to it without
- *   `If-None-Match` / `If-Modified-Since`. Workaround for an md-router bug:
- *   it takes the twin's 304 for "no twin" (`!mdResponse.ok`, src/worker.ts:253)
- *   and falls back to the HTML page, conditional headers and all, so an agent
- *   revalidating `/faq/` as Markdown got `text/html`. Without them it always
- *   gets the full twin. Remove this once md-router treats a 304 as the twin.
  * - HEAD is negotiated like GET (the router passes anything but GET straight
  *   to the assets), so the two answer with the same headers.
  * - A Markdown answer is `private`: routing also depends on the User-Agent,
  *   which `Vary: Accept` doesn't say, so no shared cache may keep it for a
  *   browser asking the same URL.
  *
+ * A revalidating Markdown client is the router's job since 0.5.1: it fetches
+ * the twin without the client's `If-None-Match` / `If-Modified-Since`, so a
+ * twin's 304 is never taken for a missing twin (this Worker used to strip
+ * them itself).
+ *
  * Then the discovery pointers are added where the page carries them.
  */
 async function page(request: Request, env: Env, ctx: ExecutionContext, pathname: string): Promise<Response> {
   const head = request.method === 'HEAD';
-  const markdown = wantsMarkdown(request);
-  let asked = request;
-  if (head || markdown) {
-    const headers = new Headers(request.headers);
-    if (markdown) {
-      headers.delete('If-None-Match');
-      headers.delete('If-Modified-Since');
-    }
-    asked = new Request(request.url, { method: head ? 'GET' : request.method, headers });
-  }
+  const asked = head ? new Request(request.url, { method: 'GET', headers: request.headers }) : request;
   const response = await pages.fetch!(asked as Parameters<NonNullable<typeof pages.fetch>>[0], env, ctx);
   const type = response.headers.get('content-type') ?? '';
   const path = pathname.replace(/^\/+/, '');
