@@ -1,0 +1,162 @@
+---
+import Base from '../../layouts/Base.astro';
+import { CHECKED, HUB, MARK_TEXT, ROWS, toolPages, type Cell } from '../../lib/compare';
+
+// The hub: every tool in one table (src/lib/compare.ts, which the per-tool
+// pages, llms.txt and the README's table follow too).
+const pages = toolPages();
+const link = (t: (typeof HUB)[number]) => (t.slug === 'pacer' ? '/' : t.page ? `/compare/${t.slug}/` : t.url);
+const others = HUB.filter((t) => t.slug !== 'pacer');
+const markClass = (c: Cell) => (c.mark ? `mark ${c.mark}` : 'mark');
+---
+
+<Base
+  title="How Pacer compares: Claude Code usage trackers | Pacer"
+  description="Pacer next to CodexBar, ccusage, Claude Code Usage Monitor, ClaudeBar, Claude Code's /usage, Token Pacer, Claude God and ccseva: how each reads your Claude limits, what it shows, what it costs."
+>
+  <header class="wrap page-head">
+    <h1>How Pacer compares</h1>
+    <p class="lede">
+      Claude Code's own <code>/usage</code>, the ccusage command line and several menu-bar apps all keep an eye on Claude
+      Code usage. They're good tools; here's the honest lay of the land.
+    </p>
+  </header>
+
+  <section class="wrap" aria-labelledby="table-title">
+    <h2 id="table-title" class="sr-only">Every tool, side by side</h2>
+    <div class="scroll" tabindex="0" role="region" aria-labelledby="table-title">
+      <table class="hub">
+        <thead>
+          <tr>
+            <th scope="col"><span class="sr-only">Feature</span></th>
+            {
+              HUB.map((tool) => (
+                <th scope="col">
+                  <a href={link(tool)}>{tool.short}</a>
+                </th>
+              ))
+            }
+          </tr>
+        </thead>
+        <tbody>
+          {
+            ROWS.map((row) => (
+              <tr>
+                <th scope="row">{row.label}</th>
+                {HUB.map((tool) => {
+                  const c = tool.cells[row.key];
+                  return (
+                    <td class={tool.slug === 'pacer' ? 'pacer' : undefined}>
+                      {c.mark ? <span class={markClass(c)}>{MARK_TEXT[c.mark]}</span> : null}
+                      {c.mark && c.text && <span class="sr-only">{c.mark === 'yes' || c.mark === 'no' ? ' ' : ': '}</span>}
+                      {c.text && <span class={c.mark ? 'note' : undefined}>{c.text}</span>}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))
+          }
+        </tbody>
+      </table>
+    </div>
+    <p class="legend small muted">
+      ✓ does it. – doesn't. Partly: does some of it, as noted. Not stated: its own pages don't say. n/a: doesn't apply.
+      Each tool's column is read from its own site or repository, checked {CHECKED}; these tools move fast, so corrections
+      are welcome as <a href="https://github.com/EricAndrechek/Pacer/issues">an issue</a>.
+    </p>
+  </section>
+
+  <div class="wrap prose">
+    <section aria-labelledby="each">
+      <h2 id="each">One at a time</h2>
+      <ul class="tools">
+        {
+          pages.map((tool) => (
+            <li>
+              <a href={`/compare/${tool.slug}/`}>{tool.page.title}</a>: {tool.page.description.split('. ')[0]}.
+            </li>
+          ))
+        }
+      </ul>
+    </section>
+
+    <section aria-labelledby="sources">
+      <h2 id="sources">Sources</h2>
+      <p class="small muted">Checked {CHECKED}.</p>
+      <ul class="small">
+        {
+          others.map((tool) => (
+            <li>
+              <strong>{tool.name}:</strong>{' '}
+              {tool.sources.map((s, i) => (
+                <>
+                  {i > 0 && ', '}
+                  <a href={s.url}>{s.label}</a>
+                </>
+              ))}
+            </li>
+          ))
+        }
+      </ul>
+    </section>
+  </div>
+</Base>
+
+<style>
+  .scroll {
+    overflow-x: auto;
+    margin-inline: calc(-1 * var(--gutter));
+    padding-inline: var(--gutter);
+  }
+  .hub {
+    min-width: 1100px;
+    font-size: 0.9rem;
+  }
+  .hub th[scope='row'] {
+    position: sticky;
+    left: 0;
+    background: var(--paper);
+    min-width: 13em;
+    font-weight: 650;
+    z-index: 1;
+  }
+  .hub thead th {
+    white-space: nowrap;
+    vertical-align: bottom;
+  }
+  .hub thead th a {
+    color: var(--ink);
+  }
+  .hub td {
+    min-width: 7.5em;
+  }
+  .hub td.pacer {
+    background: color-mix(in srgb, var(--pace) 7%, transparent);
+    padding-left: 0.6em;
+  }
+  .mark {
+    font-weight: 700;
+  }
+  .mark.yes {
+    color: var(--band-green-text);
+  }
+  .mark.no,
+  .mark.na,
+  .mark.unstated {
+    color: var(--ink-3);
+    font-weight: 500;
+  }
+  .note {
+    display: block;
+    color: var(--ink-2);
+    font-size: 0.92em;
+    line-height: 1.35;
+  }
+  .legend {
+    margin-top: 1rem;
+    max-width: var(--measure);
+  }
+  .tools li + li {
+    margin-top: 0.6em;
+  }
+</style>

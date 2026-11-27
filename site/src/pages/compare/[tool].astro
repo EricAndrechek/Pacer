@@ -1,0 +1,213 @@
+---
+import Base from '../../layouts/Base.astro';
+import Download from '../../components/Download.astro';
+import { CCUSAGE_DIFFERENCES, CHECKED, PACER, ROWS, cellText, toolPages, type Tool, type ToolPage } from '../../lib/compare';
+
+// One page per tool with a `page` in src/lib/compare.ts: what it is, how it
+// reads its numbers, the two side by side, when it is the better pick, and
+// where Pacer differs. ccusage's page adds the counting differences.
+export function getStaticPaths() {
+  return toolPages().map((tool) => ({ params: { tool: tool.slug }, props: { tool } }));
+}
+
+interface Props {
+  tool: Tool & { page: ToolPage };
+}
+const { tool } = Astro.props;
+const { page } = tool;
+const others = toolPages().filter((t) => t.slug !== tool.slug);
+const isCcusage = tool.slug === 'ccusage';
+
+const breadcrumbs = {
+  '@type': 'BreadcrumbList',
+  itemListElement: [
+    { '@type': 'ListItem', position: 1, name: 'How Pacer compares', item: new URL('/compare/', Astro.site).toString() },
+    { '@type': 'ListItem', position: 2, name: page.title, item: new URL(`/compare/${tool.slug}/`, Astro.site).toString() },
+  ],
+};
+---
+
+<Base title={`${page.title} | Pacer`} description={page.description} jsonLd={[breadcrumbs]}>
+  <header class="wrap page-head">
+    <p class="crumb small" data-llms="skip"><a href="/compare/">How Pacer compares</a></p>
+    <h1>{page.title}</h1>
+    <p class="lede">{page.what}</p>
+  </header>
+
+  <div class="wrap prose">
+    <section aria-labelledby="data">
+      <h2 id="data">How {tool.name} gets its numbers</h2>
+      <p>{page.data}</p>
+      <p>
+        Pacer reads the transcripts Claude Code writes on your Mac for tokens and cost, and asks Anthropic for your limits
+        with your Claude Code login every few minutes (<a href="/how-pacer-counts/">how Pacer counts</a>).
+      </p>
+    </section>
+
+    <section aria-labelledby="side">
+      <h2 id="side">Side by side</h2>
+      <table class="pair">
+        <thead>
+          <tr>
+            <th scope="col"><span class="sr-only">Feature</span></th>
+            <th scope="col">Pacer</th>
+            <th scope="col">{tool.name}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {
+            ROWS.map((row) => (
+              <tr>
+                <th scope="row">{row.label}</th>
+                <td>{cellText(PACER.cells[row.key])}</td>
+                <td>{cellText(tool.cells[row.key])}</td>
+              </tr>
+            ))
+          }
+        </tbody>
+      </table>
+      <p class="small muted">
+        ✓ does it. – doesn't. Partly: some of it, as noted. Not stated: {tool.name}'s own pages don't say. n/a: doesn't
+        apply.
+      </p>
+    </section>
+
+    <section aria-labelledby="better">
+      <h2 id="better">When {tool.name} is the better pick</h2>
+      <ul>{page.betterPick.map((p) => <li>{p}</li>)}</ul>
+    </section>
+
+    <section aria-labelledby="differs">
+      <h2 id="differs">Where Pacer differs</h2>
+      <ul>{page.pacerDiffers.map((p) => <li>{p}</li>)}</ul>
+    </section>
+
+    {
+      isCcusage && (
+        <section aria-labelledby="counting">
+          <h2 id="counting">Where the numbers differ, on purpose</h2>
+          <p>
+            Pacer started as a port of ccusage, and its numbers are checked against the raw transcripts rather than against
+            ccusage. Where the two disagree, it is usually one of these. ccusage's side is as Pacer's{' '}
+            <a href="https://github.com/EricAndrechek/Pacer/blob/main/docs/research/ccusage-reference.md">notes on its source</a>{' '}
+            recorded it at version 18; ccusage has changed a lot since, so check its own docs for what it does today.
+          </p>
+          <table class="diff">
+            <thead>
+              <tr>
+                <th scope="col" />
+                <th scope="col">ccusage</th>
+                <th scope="col">Pacer</th>
+                <th scope="col">Why</th>
+              </tr>
+            </thead>
+            <tbody>
+              {CCUSAGE_DIFFERENCES.map((d) => (
+                <tr>
+                  <th scope="row">{d.what}</th>
+                  <td data-label="ccusage">{d.ccusage}</td>
+                  <td data-label="Pacer">{d.pacer}</td>
+                  <td data-label="Why">{d.why}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
+      )
+    }
+
+    <section aria-labelledby="checked">
+      <h2 id="checked">Sources</h2>
+      <p>
+        Checked {CHECKED}, from {tool.name}'s own pages:
+        {
+          tool.sources.map((s, i) => (
+            <>
+              {i > 0 && ', '}
+              <a href={s.url}>{s.label}</a>
+            </>
+          ))
+        }. Something out of date? <a href="https://github.com/EricAndrechek/Pacer/issues">Open an issue</a>.
+      </p>
+      <p>
+        More: <a href="/compare/">every tool in one table</a>,
+        {
+          others.map((t, i) => (
+            <>
+              {i > 0 && ', '}
+              <a href={`/compare/${t.slug}/`}>{t.page.title}</a>
+            </>
+          ))
+        }.
+      </p>
+    </section>
+
+    <section aria-labelledby="get">
+      <h2 id="get">Get Pacer</h2>
+      <Download placement={`compare-${tool.slug}`} />
+    </section>
+  </div>
+</Base>
+
+<style>
+  .crumb {
+    margin-bottom: 0.4rem;
+  }
+  .pair th[scope='row'] {
+    font-weight: 650;
+    width: 34%;
+  }
+  .pair td {
+    width: 33%;
+    color: var(--ink-2);
+  }
+  .pair td:nth-child(2) {
+    color: var(--ink);
+  }
+  .diff th[scope='row'] {
+    white-space: nowrap;
+    padding-right: 1rem;
+  }
+  .diff td:last-child {
+    color: var(--ink-2);
+  }
+  /* Narrow screens: each row becomes a block, its cells labelled. */
+  @media (max-width: 760px) {
+    .pair th[scope='row'],
+    .pair td {
+      width: auto;
+    }
+    .diff thead {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip: rect(0 0 0 0);
+    }
+    .diff,
+    .diff tbody,
+    .diff tr,
+    .diff th,
+    .diff td {
+      display: block;
+      width: 100%;
+    }
+    .diff tr {
+      padding: 1rem 0;
+      border-bottom: 1px solid var(--line);
+    }
+    .diff th[scope='row'] {
+      border: 0;
+      padding: 0 0 0.35rem;
+    }
+    .diff td {
+      border: 0;
+      padding: 0.15rem 0;
+    }
+    .diff td::before {
+      content: attr(data-label) ': ';
+      font-weight: 700;
+      color: var(--ink);
+    }
+  }
+</style>

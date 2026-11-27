@@ -19,7 +19,14 @@ const EXTRA_SOURCES = {
   '/features/': ['../docs/screenshots'],
   '/faq/': ['src/lib/faq.ts'],
   '/changelog/': ['src/lib/releases.ts', '../docs/release-notes'],
+  '/how-pacer-counts/': ['src/lib/compare.ts'],
+  // Redeployed by every catalog sync commit that moves a price.
+  '/claude-prices/': ['src/lib/prices.ts', 'public/price-history.json'],
+  '/compare/': ['src/lib/compare.ts'],
 };
+
+/** The per-tool comparison pages share one template and one data file. */
+const COMPARE_TOOL_SOURCES = ['src/pages/compare/[tool].astro', 'src/lib/compare.ts'];
 
 /** Repo-relative (to site/) source files for a site path such as `/faq/`. */
 export function sourcesFor(pathname) {
@@ -27,7 +34,7 @@ export function sourcesFor(pathname) {
   const candidates = path
     ? [`src/pages/${path}.astro`, `src/pages/${path}/index.astro`]
     : ['src/pages/index.astro'];
-  const extra = EXTRA_SOURCES[`/${path}${path ? '/' : ''}`] ?? [];
+  const extra = EXTRA_SOURCES[`/${path}${path ? '/' : ''}`] ?? (/^compare\/[^/]+$/.test(path) ? COMPARE_TOOL_SOURCES : []);
   return [...candidates, ...extra, ...SHARED].filter((f) => existsSync(`${root}/${f}`));
 }
 

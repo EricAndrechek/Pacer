@@ -162,60 +162,73 @@ exactly as it always has.
 ## How Pacer compares
 
 You've got options for keeping an eye on Claude Code usage — Claude Code's own
-`/usage`, the popular [`ccusage`](https://github.com/ryoppippi/ccusage) CLI, and
-several menu-bar apps — the closest being [Token Pacer](https://tokenpacer.app),
-a paid, closed-source namesake, plus [Claude God](https://claudegod.app) and
-[ccseva](https://github.com/Iamshankhadeep/ccseva). They're good tools; here's
+`/usage`, the popular [`ccusage`](https://github.com/ccusage/ccusage) CLI, and
+several menu-bar apps: [Token Pacer](https://tokenpacer.app), a namesake with a
+paid Pro tier, [Claude God](https://claudegod.app) and
+[ccseva](https://github.com/Iamshankhadeep/ccseva), plus multi-provider trackers
+like [CodexBar](https://github.com/steipete/CodexBar) and
+[ClaudeBar](https://github.com/tddworks/ClaudeBar). They're good tools; here's
 the honest lay of the land.
 
-| | **Pacer** | **[Token Pacer](https://tokenpacer.app)** | **[Claude God](https://claudegod.app)** | **[ccseva](https://github.com/Iamshankhadeep/ccseva)** | **[ccusage](https://github.com/ryoppippi/ccusage)** | **CC `/usage`** |
+| | **Pacer** | **[Token Pacer](https://tokenpacer.app)** | **[Claude God](https://claudegod.app)** | **[ccseva](https://github.com/Iamshankhadeep/ccseva)** | **[ccusage](https://github.com/ccusage/ccusage)** | **CC `/usage`** |
 |---|:---:|:---:|:---:|:---:|:---:|:---:|
-| Form factor | Menu-bar app | Menu-bar app | Menu-bar app | Menu-bar app | CLI | In-terminal |
-| Native macOS (not Electron) | ✓ | ✓ | ✓ | – (Electron) | – | – |
-| Always-on, glanceable | ✓ | ✓ | ✓ | ✓ | – | – |
-| Live limit % from Anthropic's API | ✓ | ✦ | ✓ | ✦ | ✦ | ✓ |
-| Per-model (scoped) limit windows | ✓ | – | – | – | – | – |
-| Pace vs. ideal-burn line | ✓ | – | – | – | – | – |
-| End-of-day spend projection | ✓ | ✓ | ✓ | ✓ | – | – |
-| Activity heatmap (6 months) | ✓ | – | – | – | – | – |
-| Per-project & per-model breakdown | ✓ | ✓ | ✓ | ✓ | ✓ | – |
-| Beyond Claude Code (Codex, opencode, …) | – | ✓ | – | – | – | – |
-| Home-screen / Notification Center widgets | ✓ | – | ✓ | – | – | – |
-| Threshold / budget notifications | ✓ | ✓ | ✓ | ✓ | – | – |
-| CSV export | ✓ | ✓ | ✓ | – | ✓ | – |
-| ROI: cost vs. git commits | – | – | ✓ | – | – | – |
-| Claude Code plugin marketplace | – | – | ✓ | – | – | – |
-| Price | Free | $29 one-time | Free | Free | Free | Included |
-| Free & open source | ✓ | – | ✓ | ✓ | ✓ | – |
+| Form factor | Menu-bar app | Menu-bar app | Menu-bar app | Menu-bar app | Command line | In the terminal |
+| Native app (not Electron) | ✓ | ? | ✓ | ✓ | n/a | n/a |
+| Limit % read from Anthropic, not estimated | ✓ | ◐ | ✓ | ✓ | – | ✓ |
+| Per-model limit windows | ✓ | ? | ✓ | – | – | ? |
+| Usage paced against an even burn | ✓ | ◐ | ◐ | – | – | – |
+| End-of-day spend projection | ✓ | ◐ | ◐ | ◐ | ? | – |
+| Activity heatmap | ✓ | ? | ✓ | ? | – | ◐ |
+| Per-project and per-model breakdown | ✓ | ✓ | ✓ | ✓ | ✓ | ◐ |
+| Other agents (Codex, opencode, …) | – | ✓ | – | – | ✓ | n/a |
+| Desktop widgets | ✓ | ? | ✓ | ? | n/a | n/a |
+| Threshold alerts | ✓ | ✓ | ✓ | ✓ | ? | – |
+| CSV export | ✓ | ✓ | ✓ | ? | ? | – |
+| Cost against git commits | – | ? | ✓ | ? | ? | – |
+| Claude Code plugin manager | – | ? | ✓ | ? | ? | n/a |
+| Price | Free | Free mode; Pro $29 one-time (launch price) | Free | Free | Free | Included with Claude Code |
+| Open source | MIT | ? | MIT | MIT | MIT | Part of Claude Code |
+| Runs on | macOS 15 or newer | macOS 13 or newer | macOS 13 or newer | macOS 14 or newer | Any terminal with npx, bunx or Nix | Wherever Claude Code runs |
 
-<sub>✦ estimates the windows from your local JSONL logs rather than reading
-Anthropic's usage API. Token Pacer is a paid, closed-source app, so its column is
-read from its public site rather than its source — and some of its features (CSV
-export, custom model pricing) are Pro-tier. Best-effort as of June 2026 — these
-tools all move fast, so corrections are welcome via an issue or PR.</sub>
+<sub>✓ does it · – doesn't · ◐ partly · ? its own pages don't say · n/a doesn't
+apply. Each column is read from that tool's own site or repository, as of
+November 2026; the notes behind each cell, and CodexBar, ClaudeBar and Claude
+Code Usage Monitor alongside these, are on
+[pacer.andrechek.com/compare](https://pacer.andrechek.com/compare/). These tools
+all move fast, so corrections are welcome via an issue or PR.</sub>
 
 **The gist:**
 
 - **vs. `/usage`** — Claude Code's built-in view is a *snapshot you ask for* in
   one terminal; Pacer is the always-on, zoomed-out companion that remembers every
   session. The speedometer in one car vs. the dashboard that logs every trip.
+  `/usage` does attribute your plan usage to skills, subagents, plugins and MCP
+  servers, which Pacer doesn't.
 - **vs. `ccusage`** — a great CLI for scriptable numbers (Pacer's tests even
-  cross-check their scanner against it); Pacer is the GUI you glance at instead of
-  a command you re-run, and it reads your *actual* limit % from Anthropic rather
-  than estimating from logs.
-- **vs. Claude God / ccseva** — the closest rivals, and genuinely nice. Pacer
-  leans into *pacing* (your windows against an ideal-burn line, "will I run out
-  before the reset?"), native + quiet-by-default, and signed/notarized
-  self-update; Claude God goes further on ROI/git correlation and a plugin
-  marketplace, and ccseva on its glassy UI. Pick the one that thinks about your
-  usage the way you do — they coexist happily.
-- **vs. Token Pacer** — the close namesake, and the nearest thing to a direct
-  rival: also a native, local-first macOS menu-bar tracker, and it reaches
-  *wider* — covering Codex and opencode alongside Claude Code, with "next action"
-  nudges. The trade-offs: it's **$29 and closed-source**, where Pacer is free and
-  open; Pacer reads your *real* limit % from Anthropic and adds the ideal-burn
-  pacing line, the 6-month heatmap, and widgets. Multi-agent and willing to pay?
-  Fair pick. Claude Code-first and value open source? Pacer.
+  cross-check their scanner against it), and it now reads Codex and about twenty
+  other agents too; Pacer is the GUI you glance at instead of a command you
+  re-run, and it reads your *actual* limit % from Anthropic rather than
+  estimating from logs.
+- **vs. Claude God / ccseva** — the closest rivals, and genuinely nice. Claude
+  God now covers much of the same ground (per-model quotas, a heatmap, widgets)
+  and goes further on cost-per-commit ROI and a Claude Code plugin manager;
+  ccseva keeps to a small, free native app with the 5-hour and weekly gauges and
+  a predicted cutoff. Pacer leans into *pacing* (every window against an
+  even-burn line, "will I run out before the reset?"), native + quiet-by-default,
+  signed/notarized self-update, and a skill that pauses your agents before a
+  limit. Pick the one that thinks about your usage the way you do — they coexist
+  happily.
+- **vs. Token Pacer** — the close namesake: also a macOS menu-bar
+  tracker, and it reaches *wider*, covering Codex and opencode alongside Claude
+  Code, with "next action" nudges. Its Pro tier is $29 one-time at launch (there
+  is a Free mode) and its source isn't public, where Pacer is free and open.
+  Multi-agent and willing to pay? Fair pick. Claude Code-first and value open
+  source? Pacer.
+- **vs. CodexBar / ClaudeBar** — if you use Codex, Cursor, Gemini or Copilot
+  alongside Claude, these put every provider's quota in one menu (CodexBar runs
+  on Linux too). Pacer stays with Claude Code and goes deeper there: cost by
+  project, model and day, priced at the rate in effect at the time, and agent
+  pacing.
 
 ## Privacy
 
