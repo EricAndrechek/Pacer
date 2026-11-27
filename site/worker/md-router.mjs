@@ -4,4 +4,4 @@
 // (noUncheckedIndexedAccess, no .ts import extensions) and fail on; through
 // this file tsc reads only the declaration, while Wrangler, esbuild and
 // Vitest bundle the package itself.
-export { createMdRouter } from '@wave-rf/cloudflare-md-router';
+export { LLM_BOT_UA, createMdRouter } from '@wave-rf/cloudflare-md-router';

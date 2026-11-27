@@ -9,4 +9,6 @@ export interface MdRouterOptions {
   advertiseLlmsTxt?: boolean | string;
   canonicalOrigin?: string;
 }
+/** The LLM crawlers the router serves Markdown to (src/bots.ts). */
+export declare const LLM_BOT_UA: RegExp;
 export declare function createMdRouter<Env extends { ASSETS: Fetcher }>(options?: MdRouterOptions): ExportedHandler<Env>;

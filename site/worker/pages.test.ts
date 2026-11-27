@@ -13,10 +13,17 @@ const html = (title: string) => () =>
   new Response(`<!doctype html><title>${title}</title>`, {
     headers: { 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': "default-src 'self'" },
   });
-const md = (text: string) => () => new Response(text, { headers: { 'Content-Type': 'text/markdown; charset=utf-8' } });
+const MD_ETAG = '"md-1"';
+/** A twin, as the assets layer serves it: an ETag, and a 304 for a matching If-None-Match. */
+const md =
+  (text: string) =>
+  (asked?: Request): Response =>
+    asked?.headers.get('If-None-Match') === MD_ETAG
+      ? new Response(null, { status: 304, headers: { ETag: MD_ETAG } })
+      : new Response(text, { headers: { 'Content-Type': 'text/markdown; charset=utf-8', ETag: MD_ETAG, 'Cache-Control': 'public, max-age=3600' } });
 
 /** dist/ as the assets layer serves it: pages, their twins, the feed files, the 404 page. */
-const FILES: Record<string, () => Response> = {
+const FILES: Record<string, (asked?: Request) => Response> = {
   '/': html('Home'),
   '/index.md': md('# Pacer'),
   '/faq/': html('FAQ'),
@@ -39,7 +46,7 @@ const notFound = () => new Response('<!doctype html><title>Page not found</title
 async function get(path: string, headers: Record<string, string> = {}, method = 'GET') {
   const assets = vi.fn(async (input: RequestInfo | URL) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-    return (FILES[new URL(url).pathname] ?? notFound)();
+    return (FILES[new URL(url).pathname] ?? notFound)(input instanceof Request ? input : undefined);
   });
   const env = { ASSETS: { fetch: assets }, POSTHOG_TOKEN: '', POSTHOG_HOST: '', SENTRY_DSN: '' } as unknown as Env;
   const ctx = createExecutionContext();
@@ -115,9 +122,43 @@ describe('pages through the Markdown router', () => {
     }
   });
 
-  it('passes HEAD through to the asset', async () => {
-    const { response } = await get('/faq/', { Accept: 'text/markdown' }, 'HEAD');
-    expect(response.headers.get('content-type')).toMatch(/^text\/html/);
+  it('negotiates HEAD like GET: the same status and headers, no body', async () => {
+    for (const headers of [{ Accept: 'text/markdown' }, { Accept: 'text/html' }, {}] as Record<string, string>[]) {
+      const viaGet = (await get('/cli/', headers)).response;
+      const viaHead = (await get('/cli/', headers, 'HEAD')).response;
+      expect(viaHead.status).toBe(viaGet.status);
+      expect([...viaHead.headers]).toEqual([...viaGet.headers]);
+      expect(viaHead.body).toBeNull();
+    }
+    expect((await get('/cli/', { Accept: 'text/markdown' }, 'HEAD')).response.headers.get('content-type')).toBe('text/markdown; charset=utf-8');
+  });
+
+  it('answers a conditional Markdown request with the full twin, never the HTML (md-router 0.5.0 takes a 304 for no twin)', async () => {
+    for (const headers of [
+      { Accept: 'text/markdown', 'If-None-Match': MD_ETAG },
+      { 'User-Agent': 'Mozilla/5.0 (compatible; GPTBot/1.2; +https://openai.com/gptbot)', 'If-None-Match': MD_ETAG, 'If-Modified-Since': 'Wed, 26 Nov 2026 00:00:00 GMT' },
+    ] as Record<string, string>[]) {
+      const { response, assets } = await get('/faq/', headers);
+      expect(response.status).toBe(200);
+      expect(response.headers.get('content-type')).toBe('text/markdown; charset=utf-8');
+      expect(await response.text()).toBe('# Questions');
+      for (const [input] of assets.mock.calls) {
+        expect((input as Request).headers.get('If-None-Match')).toBeNull();
+        expect((input as Request).headers.get('If-Modified-Since')).toBeNull();
+      }
+    }
+    // A browser's conditional request for the HTML still reaches the assets layer as it came.
+    const html = await get('/faq/', { Accept: 'text/html', 'If-None-Match': '"html-1"' });
+    expect((html.assets.mock.calls[0]![0] as Request).headers.get('If-None-Match')).toBe('"html-1"');
+  });
+
+  it('marks Markdown answers private, since crawler routing is by User-Agent, which Vary does not name', async () => {
+    const twin = (await get('/faq/', { Accept: 'text/markdown' })).response;
+    expect(twin.headers.get('cache-control')).toBe('private, max-age=0, must-revalidate');
+    const bot = (await get('/faq/', { 'User-Agent': 'Mozilla/5.0 (compatible; ClaudeBot/1.0)' })).response;
+    expect(bot.headers.get('cache-control')).toBe('private, max-age=0, must-revalidate');
+    // The HTML keeps the asset's own caching.
+    expect((await get('/faq/', { Accept: 'text/html' })).response.headers.get('cache-control')).toBeNull();
   });
 });
 
