@@ -722,7 +722,7 @@ final class PacerHTTPServer: @unchecked Sendable {
             "schemaVersion": 1,
             "endpoints": ["/v1/snapshot", "/v1/accounts", "/v1/session", "/v1/sessions", "/v1/limits/history", "/v1/usage/daily", "/v1/usage/models", "/v1/predictions/history", "/v1/stream", "/metrics", "/healthz"],
         ]
-        return (try? JSONSerialization.data(withJSONObject: info, options: [.prettyPrinted, .sortedKeys]))
+        return (SafeJSON.data(info, options: [.prettyPrinted, .sortedKeys]))
             ?? Data("{}".utf8)
     }
 

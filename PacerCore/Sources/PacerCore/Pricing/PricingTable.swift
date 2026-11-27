@@ -124,9 +124,7 @@ public actor PricingTable {
             // embedded path uses.
             let destination = cacheURL ?? Self.cacheFileURL()
             if let destination,
-               let mergedData = try? JSONSerialization.data(
-                withJSONObject: mergedJSON, options: [.sortedKeys]
-               ) {
+               let mergedData = SafeJSON.data(mergedJSON, options: [.sortedKeys]) {
                 do {
                     try FileManager.default.createDirectory(
                         at: destination.deletingLastPathComponent(),
@@ -490,7 +488,7 @@ public actor PricingTable {
             // for a value that isn't an object or array, so one string or number
             // at the top level would crash every Mac on its next price refresh.
             guard value is [String: Any],
-                  let entryData = try? JSONSerialization.data(withJSONObject: value) else {
+                  let entryData = SafeJSON.data(value) else {
                 continue
             }
             guard let entry = try? decoder.decode(LiteLLMModelPricing.self, from: entryData) else {

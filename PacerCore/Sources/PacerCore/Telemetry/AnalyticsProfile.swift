@@ -111,7 +111,7 @@ public final class AnalyticsProfile: Sendable {
             case .list, .object: continue
             }
         }
-        return try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+        return SafeJSON.data(object, options: [.sortedKeys])
     }
 
     static func read(_ url: URL) -> Analytics.Properties? {

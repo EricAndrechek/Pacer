@@ -1885,5 +1885,69 @@ colour, which had quietly flattened every stacked view.</p>]]></description>
                 sparkle:edSignature="vUyNpClrgxLjMtncJel99CbYFT2Qrf8j6zf8pVF2UpqKZdkYl4he+Jv8501/7BQHilHj5WoMfR805mQ63lzZAQ==" />
         </sparkle:deltas>
     </item>
+            <item>
+        <title>Version 0.9.6</title>
+        <description><![CDATA[<p>Prices that arrive from one shared list, and a Pacer that stays responsive and quits cleanly on a busy Mac.</p>
+<h2>Prices from one list</h2>
+<p>Pacer now reads model prices from a single list on pacer.andrechek.com, merged from the public price catalogs every six hours. A new model is priced within hours, every Mac records the same price change on the same day, and the daily download is a few kilobytes instead of almost two megabytes. Pacer only contacts the catalogs itself if that list goes unconfirmed for ten days.</p>
+<h2>Steadier on a busy Mac</h2>
+<ul>
+<li>The pace card no longer spends seconds re-measuring itself, which could freeze Pacer on a Mac short of memory.</li>
+<li>Quitting stops all drawing first, nothing is written after the last save, and a quit that gets stuck now ends on its own.</li>
+<li>Pacer can no longer crash while writing a malformed number into a report.</li>
+</ul>
+<p><strong>Your data is untouched.</strong></p>]]></description>
+        <pubDate>Fri, 27 Nov 2026 13:00:26 +0000</pubDate>
+        <sparkle:version>1795783245</sparkle:version>
+        <sparkle:shortVersionString>0.9.6</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.6/Pacer-0.9.6.dmg"
+            length="160296458"
+            type="application/octet-stream"
+            sparkle:edSignature="IV0Ouvqg8OL2hXz7Sjc/ZOeNzFp4zl/yBW5g7mWOMCZ//9ZtpNGnDDt7ayEiZcvgZugQb0pr8pLPwu7UeLpvCg==" />
+        <sparkle:deltas>
+            <enclosure
+                url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.6/Pacer-0.9.6-from-0.9.5.delta"
+                sparkle:deltaFrom="1795695348"
+                length="4900190"
+                type="application/octet-stream"
+                sparkle:deltaFromSparkleExecutableSize="976432"
+                sparkle:deltaFromSparkleLocales="ar,ca,cs,da,de,el,es"
+                sparkle:edSignature="sv6lbGxfBvdJaqI/mFMxuppS2DinaALrNmiza6hD/j86QkeZzXLGPH8IT7uwEQl6MeSDEfdqeONqdOeBkW75CA==" />
+            <enclosure
+                url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.6/Pacer-0.9.6-from-0.9.4.delta"
+                sparkle:deltaFrom="1795607386"
+                length="6737178"
+                type="application/octet-stream"
+                sparkle:deltaFromSparkleExecutableSize="976432"
+                sparkle:deltaFromSparkleLocales="ar,ca,cs,da,de,el,es"
+                sparkle:edSignature="QXGTbCjY4GnA73dMDgxVrwv1lionFegh6GzyUZHm0JZRH/gOcOrEfZV5YzQzHMyCoM7GhzEpR4GkiOBcmbfdCQ==" />
+            <enclosure
+                url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.6/Pacer-0.9.6-from-0.9.3.delta"
+                sparkle:deltaFrom="1795528779"
+                length="7207078"
+                type="application/octet-stream"
+                sparkle:deltaFromSparkleExecutableSize="976432"
+                sparkle:deltaFromSparkleLocales="ar,ca,cs,da,de,el,es"
+                sparkle:edSignature="gNt6+VFoiQ4sCl67MvQXK1Y9i/7meAhsN2o5sSh3CjHhdsqA2OoyT/AwFH67rTlFqtl/Z3zESWUZN5pWdbO1BQ==" />
+            <enclosure
+                url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.6/Pacer-0.9.6-from-0.9.2.delta"
+                sparkle:deltaFrom="1794840834"
+                length="7811050"
+                type="application/octet-stream"
+                sparkle:deltaFromSparkleExecutableSize="976432"
+                sparkle:deltaFromSparkleLocales="ar,ca,cs,da,de,el,es"
+                sparkle:edSignature="bLHjYlMhkYS3LcwQu2E48t5sSZF8XHeLy5GEeHpSkkcBywkoS5B5hA5bzkWcY57zdFQrZdEY65T9XP2HzZmvDg==" />
+            <enclosure
+                url="https://github.com/EricAndrechek/Pacer/releases/download/v0.9.6/Pacer-0.9.6-from-0.9.1.delta"
+                sparkle:deltaFrom="1794605188"
+                length="8257794"
+                type="application/octet-stream"
+                sparkle:deltaFromSparkleExecutableSize="976432"
+                sparkle:deltaFromSparkleLocales="ar,ca,cs,da,de,el,es"
+                sparkle:edSignature="0elcmqJ/Knn1Ps9OyqUPXLd8n36jh9sggGzOL5OKOxTKtHZhfMHxJIZJC8A8c548/rcrxKsDoi5MZxMm+VfEDQ==" />
+        </sparkle:deltas>
+    </item>
         </channel>
 </rss>
