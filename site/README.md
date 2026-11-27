@@ -158,7 +158,7 @@ writes (`text/markdown` for the twins, `application/linkset+json` with RFC 9727'
 caching. They are static assets and never run the Worker.
 
 **The Markdown router.** Pages go through `@wave-rf/cloudflare-md-router`
-(0.5.0, pinned, as on room-planner) in `worker/index.ts`, with `vary: true`:
+(0.5.1, pinned) in `worker/index.ts`, with `vary: true`:
 `Accept: text/markdown` and known LLM crawlers (GPTBot, ClaudeBot,
 PerplexityBot and others) get the twin; everyone else, Googlebot and Bingbot
 included, gets the HTML with a `Link` to it; both carry `Vary: Accept`. A page
