@@ -51,6 +51,8 @@ const discoveryHeaders = (mdPaths, skillFiles) =>
     ...rule(PATHS.ard, 'application/ai-catalog+json'),
     ...rule(PATHS.agentSkills, 'application/json'),
     ...rule(PATHS.skillArchive, 'application/gzip'),
+    // The public copy of the price list: refreshed at most every six hours.
+    ...rule(PATHS.priceList, 'application/json; charset=utf-8'),
     ...skillFiles.flatMap((f) =>
       rule(`${PATHS.skillDir}${f.name}`, f.name.endsWith('.md') ? 'text/markdown; charset=utf-8' : 'text/plain; charset=utf-8'),
     ),
@@ -147,7 +149,9 @@ export function htmlToMarkdown(html, origin) {
     .trim();
 }
 
-const read = (dist, path) => readFileSync(join(dist, path, 'index.html'), 'utf8');
+/** A built page's HTML, or with `file` set, any file's bytes. */
+const read = (dist, path, file = 'index.html') =>
+  file === '' ? readFileSync(join(dist, path)) : readFileSync(join(dist, path, file), 'utf8');
 
 /**
  * Every discovery file made from the build, written into `dist`.
@@ -197,6 +201,11 @@ export function writeDiscovery(dist, origin, built, now = new Date()) {
   const catalog = aiCatalog(origin, { skillDescription: description, skillDigest: sha256(skillMd) });
   writeJson(dist, PATHS.aiCatalog, catalog);
   writeJson(dist, PATHS.ard, catalog);
+
+  // The price list's public copy: the bytes Astro copied from public/ (which
+  // check-feeds.mjs holds to public/ byte for byte), at a path that is a plain
+  // static asset. scripts/check-discovery.mjs checks the two after the build.
+  write(dist, PATHS.priceList, read(dist, PATHS.priceHistory.slice(1), ''));
 
   write(dist, PATHS.apiCatalog, `${JSON.stringify(apiCatalog(origin), null, 2)}\n`);
   write(dist, PATHS.security, securityTxt(origin, now));

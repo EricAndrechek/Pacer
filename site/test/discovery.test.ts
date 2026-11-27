@@ -21,6 +21,7 @@ import {
   SKILL_REQUIREMENT,
   isPageRoute,
   linkHeader,
+  runsWorkerFirst,
   markdownPath,
   pointerLinks,
 } from '../scripts/discovery.mjs';
@@ -59,6 +60,8 @@ beforeAll(() => {
     );
   }
   writeFileSync(join(dist, '_headers'), "/*\n  Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'\n");
+  // Astro copies public/ into dist/ before the integration runs.
+  writeFileSync(join(dist, 'price-history.json'), readFileSync('public/price-history.json'));
   writeDiscovery(dist, ORIGIN, ALL_PAGES, NOW);
 });
 afterAll(() => rmSync(dist, { recursive: true, force: true }));
@@ -199,14 +202,14 @@ describe('the catalogs', () => {
     expect(byId.skill.url).toBe(`${ORIGIN}${PATHS.skill}`);
     expect(byId.skill.digest).toBe(sha256(read(PATHS.skill)));
     expect(byId.skill.description).toBe(json(PATHS.agentSkills).skills[0].description);
-    expect(byId['price-history'].url).toBe(`${ORIGIN}${PATHS.priceHistory}`);
+    expect(byId['price-history'].url).toBe(`${ORIGIN}${PATHS.priceList}`);
   });
 
   it('lists the price history in the API catalog (RFC 9727), with its schema and documentation', () => {
     const { linkset } = json(PATHS.apiCatalog);
     const byAnchor = Object.fromEntries(linkset.map((l: { anchor: string }) => [l.anchor, l]));
-    expect(byAnchor[`${ORIGIN}${PATHS.apiCatalog}`].item).toEqual([{ href: `${ORIGIN}${PATHS.priceHistory}`, type: 'application/json' }]);
-    const api = byAnchor[`${ORIGIN}${PATHS.priceHistory}`];
+    expect(byAnchor[`${ORIGIN}${PATHS.apiCatalog}`].item).toEqual([{ href: `${ORIGIN}${PATHS.priceList}`, type: 'application/json' }]);
+    const api = byAnchor[`${ORIGIN}${PATHS.priceList}`];
     expect(api['service-desc']).toEqual([{ href: `${ORIGIN}${PATHS.priceSchema}`, type: 'application/schema+json' }]);
     expect(api['service-doc'].map((d: { href: string }) => d.href)).toEqual([`${ORIGIN}/claude-prices/`, `${ORIGIN}/claude-prices.md`]);
     for (const l of linkset) {
@@ -217,6 +220,21 @@ describe('the catalogs', () => {
     }
     // The update feed is the app's, not an API.
     expect(JSON.stringify(linkset)).not.toContain('appcast');
+  });
+
+  it('publishes the price list at its own static path: the app\'s bytes, never routed to the Worker, and the only copy advertised', () => {
+    expect(read(PATHS.priceList).equals(readFileSync('public/price-history.json'))).toBe(true);
+    expect(read(PATHS.priceList).equals(read(PATHS.priceHistory))).toBe(true);
+    const runFirst = /"run_worker_first":\s*\[([^\]]*)\]/.exec(readFileSync('wrangler.jsonc', 'utf8'))?.[1] ?? '';
+    const routes = [...runFirst.matchAll(/"([^"]+)"/g)].map((m) => m[1]!);
+    expect(runsWorkerFirst(routes, PATHS.priceList)).toBe(false);
+    expect(runsWorkerFirst(routes, PATHS.priceHistory)).toBe(true); // the app's, counted
+    expect(isPageRoute(PATHS.priceList)).toBe(false);
+    expect(text('_headers')).toContain(
+      `${PATHS.priceList}\n  Content-Type: application/json; charset=utf-8\n  Access-Control-Allow-Origin: *\n  Cache-Control: public, max-age=3600`,
+    );
+    // The app's path is not offered to anyone else.
+    for (const path of [PATHS.apiCatalog, PATHS.aiCatalog]) expect(text(path), path).not.toContain(PATHS.priceHistory);
   });
 
   it('writes security.txt (RFC 9116) with GitHub contacts, a future expiry and its canonical URL', () => {
@@ -272,7 +290,7 @@ describe('pointers', () => {
     expect(body).toMatch(/^# Pacer\n\n> /);
     expect(body).toContain('## Use Pacer from an agent');
     const links = new Set([...body.matchAll(/\]\((https?:\/\/[^)\s]+)\)/g)].map((m) => m[1]!));
-    for (const path of [PATHS.skill, PATHS.agentSkills, PATHS.priceHistory, PATHS.priceSchema, PATHS.prices, PATHS.apiCatalog, PATHS.aiCatalog, PATHS.llmsFull]) {
+    for (const path of [PATHS.skill, PATHS.agentSkills, PATHS.priceList, PATHS.priceSchema, PATHS.prices, PATHS.apiCatalog, PATHS.aiCatalog, PATHS.llmsFull]) {
       expect(links, path).toContain(`${ORIGIN}${path}`);
     }
     for (const page of ALL_PAGES) {
@@ -281,6 +299,7 @@ describe('pointers', () => {
     }
     for (const href of links) if (new URL(href).origin === ORIGIN) expect(served(new URL(href).pathname), href).toBe(true);
     expect(body).toContain(BREW_COMMAND);
+    expect(body).not.toContain(PATHS.priceHistory);
   });
 
   it('the site and the discovery files share one repository and Homebrew command', () => {

@@ -126,12 +126,19 @@ Ported from room-planner's (its `docs/DEPLOY.md`, "Discovery for agents").
 | `/robots.txt` | Every crawler allowed, AI crawlers included, with `Content-Signal: search=yes, ai-input=yes, ai-train=yes` (the owner's choice: assistants should know Pacer), the sitemap, an `Agentmap:` line naming the AI catalog, and the llms.txt pointer. `/download` stays disallowed | `src/pages/robots.txt.ts` |
 | `/llms.txt`, `/llms-full.txt` | llmstxt.org: the summary, "Use Pacer from an agent" (the skill, the pacer command, the price history API, the catalogs, search), every page with its twin; and every page's text in one file | `src/pages/llms.txt.ts`, `scripts/llms-full.mjs` |
 | `/index.md`, `/features.md`, `/cli.md`, `/how-pacer-counts.md`, `/claude-prices.md`, `/compare.md`, `/compare/<tool>.md`, `/privacy.md`, `/faq.md`, `/changelog.md` | Each page's Markdown twin, by the same converter, with the Search for Agents pointers as `agent:` front matter | `scripts/llms-full.mjs`, `MARKDOWN_PAGES` |
-| `/.well-known/api-catalog` | RFC 9727 linkset: `/price-history.json`, with `service-desc` (its JSON Schema), `service-doc` (`/claude-prices/` and its twin) and the privacy policy. The appcast is the app's update feed, not an API, and is left out | `apiCatalog` |
+| `/claude-prices.json` | The public copy of the price list for everyone but the app: byte for byte `public/price-history.json`, written at build time, a plain static asset (not in `run_worker_first`: no Worker request, no `feed_request` count, nothing taken from the daily limit), CORS `*`, an hour's caching. `/price-history.json` stays the app's path, counted and not advertised. `scripts/check-discovery.mjs` fails the build if the two differ or the copy is ever routed to the Worker | `scripts/llms-full.mjs`, `PATHS.priceList` |
+| `/.well-known/api-catalog` | RFC 9727 linkset: `/claude-prices.json`, with `service-desc` (its JSON Schema), `service-doc` (`/claude-prices/` and its twin) and the privacy policy. The appcast is the app's update feed, not an API, and is left out | `apiCatalog` |
 | `/price-history.schema.json` | JSON Schema 2020-12 of the price history, validated against the real file in `test/prices.test.ts` | `public/` |
 | `/.well-known/ai-catalog.json`, `/.well-known/ard.json` | One document at both paths: an AI Catalog (v0.9) of ARD (v0.91) entries for llms.txt, the full text, the skill (with SKILL.md's digest), the API catalog and the price history | `aiCatalog` |
-| `/.well-known/agent-skills/index.json`, `/.well-known/agent-skills/pacer.tar.gz`, `/.well-known/agent-skills/pacer/*` | Agent Skills Discovery (Cloudflare's RFC v0.2.0): the `pacer` skill as an archive (it has supporting files), with the archive's SHA-256, and each file on its own. Copied from `../Skills/pacer` at build time, byte for byte, so it never drifts from the repo. The description adds that the skill needs the app, the Homebrew command, and to install the skill from Pacer's Settings: a copy installed by hand has no `pacer` command beside it, and Pacer's installer then leaves the directory alone (`ClaudeSkillInstaller`, `.foreign`) | `scripts/skill.mjs`, `agentSkillsIndex` |
+| `/.well-known/agent-skills/index.json`, `/.well-known/agent-skills/pacer.tar.gz`, `/.well-known/agent-skills/pacer/*` | Agent Skills Discovery (Cloudflare's RFC v0.2.0): the `pacer` skill as an archive (it has supporting files), with the archive's SHA-256, and each file on its own. Copied from `../Skills/pacer` at build time, byte for byte, so it never drifts from the repo. The description adds that the skill needs the app, the Homebrew command, and to install the skill from Pacer's Settings (so it differs from SKILL.md's own, which the RFC allows) | `scripts/skill.mjs`, `agentSkillsIndex` |
 | `/.well-known/search`, `/search-index.json` | Search for Agents: `GET ?q=` (or `QUERY` with a text or JSON body) answers with the best sections of the pages, in Markdown. A BM25 pass over the twins' sections, indexed at build time and read through the assets binding once per isolate | `scripts/search.mjs`, `worker/search.ts` |
 | `/.well-known/security.txt` | RFC 9116: GitHub private advisories (on for the repo) and issues; expires a year after each build | `securityTxt` |
+
+Two things to know about the published skill (owner's call, 2026-11-27): a
+copy installed from the site, by hand or by an agent, shows as `.foreign` in
+Pacer's Settings (`ClaudeSkillInstaller`: Pacer did not write it, so it leaves
+it alone and has no `pacer` command beside it); and it tracks `main`, so it can
+be ahead of the latest release.
 
 Not published, because nothing needs them: OAuth or OpenID metadata
 (`/.well-known/oauth-protected-resource`, `oauth-authorization-server`,
@@ -165,9 +172,10 @@ page, add it to `MARKDOWN_PAGES` (and so to `run_worker_first`, through
 against the Workers Free plan's account-wide daily limit that update checks
 share ([The Worker](#the-worker)). Traffic is small (about 15 counted feed
 requests a day), and room-planner already routes its pages through its Worker
-on the same account. If the limit ever comes close, take the page routes out of
-`run_worker_first`: the pages and twins stay up as static assets, only the
-negotiation stops.
+on the same account. Third parties reading the price list use
+`/claude-prices.json`, which never runs the Worker. If the limit ever comes
+close, take the page routes out of `run_worker_first`: the pages and twins stay
+up as static assets, only the negotiation stops.
 
 ## Analytics
 
@@ -202,7 +210,7 @@ Node 22.23.4 or newer (`.nvmrc`), pnpm.
 ```sh
 pnpm install
 pnpm dev              # http://localhost:4321 (no Worker routes)
-pnpm build            # dist/, sitemap, llms-full.txt, CSP hashes, then the feed gate (check-feeds.mjs)
+pnpm build            # dist/, sitemap, llms-full.txt and the discovery files, CSP hashes, then the feed gate (check-feeds.mjs) and check-discovery.mjs
 pnpm test             # the Worker's and the feed gate's tests inside workerd (@cloudflare/vitest-plugin), and test/ in Node
 pnpm check            # astro check, plus the Worker's types
 pnpm build:ci         # test, check, build: what Workers Builds runs

@@ -71,7 +71,15 @@ export const PATHS = {
   search: '/.well-known/search',
   searchIndex: '/search-index.json',
   security: '/.well-known/security.txt',
+  /** The app's copy of the price list: counted by the Worker, never advertised (see `priceList`). */
   priceHistory: '/price-history.json',
+  /**
+   * The public copy for everyone else: the same bytes, written at build time
+   * (scripts/llms-full.mjs), a plain static asset that never runs the Worker,
+   * so other readers neither use up the daily request limit the app's update
+   * checks share nor show up in its feed_request counts.
+   */
+  priceList: '/claude-prices.json',
   priceSchema: '/price-history.schema.json',
   prices: '/claude-prices/',
   cli: '/cli/',
@@ -98,19 +106,33 @@ export const PAGE_ROUTES = [
 export const SEARCH_ROUTES = [PATHS.search];
 
 /**
+ * Whether `pathname` runs the Worker first under a `run_worker_first` list:
+ * a pattern matches it (`*` matches anything, `/` included) and no `!`
+ * pattern does, as Cloudflare's static-assets routing reads the list.
+ * @param {string[]} routes
+ * @param {string} pathname
+ */
+export function runsWorkerFirst(routes, pathname) {
+  const match = (pattern) =>
+    new RegExp(`^${pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')}$`).test(pathname);
+  return routes.some((r) => !r.startsWith('!') && match(r)) && !routes.some((r) => r.startsWith('!') && match(r.slice(1)));
+}
+
+/**
  * RFC 9727 API catalog (an RFC 9264 linkset). Pacer has one public API: the
- * dated Claude price list the app reads, /price-history.json, described by
- * its JSON Schema and documented on /claude-prices/. The update feed is a
- * Sparkle appcast for the app, not an API, and is left out.
+ * dated Claude price list, /claude-prices.json (the same bytes the app reads
+ * at /price-history.json), described by its JSON Schema and documented on
+ * /claude-prices/. The update feed is a Sparkle appcast for the app, not an
+ * API, and is left out, as is the app's own copy of the price list.
  * @param {string} origin e.g. `https://pacer.andrechek.com`
  */
 export function apiCatalog(origin) {
   const u = (p) => `${origin}${p}`;
   return {
     linkset: [
-      { anchor: u(PATHS.apiCatalog), item: [{ href: u(PATHS.priceHistory), type: 'application/json' }] },
+      { anchor: u(PATHS.apiCatalog), item: [{ href: u(PATHS.priceList), type: 'application/json' }] },
       {
-        anchor: u(PATHS.priceHistory),
+        anchor: u(PATHS.priceList),
         'service-desc': [{ href: u(PATHS.priceSchema), type: 'application/schema+json' }],
         'service-doc': [
           { href: u(PATHS.prices), type: 'text/html' },
@@ -281,7 +303,7 @@ export function aiCatalog(origin, { skillDescription, skillDigest }) {
         identifier: id('price-history'),
         displayName: 'Claude price history',
         type: 'application/json',
-        url: u(PATHS.priceHistory),
+        url: u(PATHS.priceList),
         description: `Dated per-million-token prices for every Claude model (input, output, cache reads, 5-minute and 1-hour cache writes, long-context tiers), as Pacer prices usage. Public, no key, CORS open, refreshed every 6 hours. JSON Schema: ${u(PATHS.priceSchema)}. Documentation: ${u(PATHS.prices)}.`,
         tags: ['claude', 'pricing', 'anthropic-api', 'json'],
         capabilities: ['GET'],

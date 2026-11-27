@@ -13,7 +13,9 @@ const current = currentPrices(list, now);
 const changes = priceChanges(list, now);
 const site = Astro.site ?? new URL(Astro.url.origin);
 const abs = (path: string) => new URL(path, site).toString();
-const dataUrl = abs(PATHS.priceHistory);
+// The public copy (PATHS.priceList), never the app's /price-history.json: the
+// same bytes, but a static asset that doesn't run the Worker.
+const dataUrl = abs(PATHS.priceList);
 const schemaUrl = abs(PATHS.priceSchema);
 const checked = list.checkedAt ?? list.asOf;
 const checkedText = `${new Date(checked).toISOString().slice(0, 16).replace('T', ' ')} UTC`;
@@ -52,8 +54,8 @@ const dataset = {
   <header class="wrap page-head">
     <h1>Claude API prices</h1>
     <p class="lede">
-      What each Claude model costs per million tokens on the Claude API, when that price took effect, and every change
-      before it. These are the prices Pacer uses.
+      What each Claude model costs per million tokens on Anthropic's own Claude API, when that price took effect, and
+      every change before it. These are the prices Pacer uses.
     </p>
     <p class="small muted">Price list checked {checkedText}.</p>
   </header>
@@ -94,7 +96,11 @@ const dataset = {
       </table>
     </div>
     <div class="prose notes small">
-      <p>US dollars per million tokens. A long-context row prices the whole request once its prompt (input, cache reads and cache writes) passes the threshold.</p>
+      <p>
+        US dollars per million tokens, on the first-party Claude API. Prices on Amazon Bedrock, Google Vertex AI and
+        Microsoft Foundry aren't listed here.
+      </p>
+      <p>A long-context row prices the whole request once its prompt (input, cache reads and cache writes) passes the threshold.</p>
       {fast.length > 0 && <p>Fast mode costs {[...new Set(fast.map((c) => c.fastMultiplier))].join(' or ')}× the rates above on {names(fast)}.</p>}
       {
         regional.length > 0 && (
@@ -149,8 +155,8 @@ const dataset = {
         </li>
       </ul>
       <p class="small muted">
-        This page shows the Claude API's own prices. The file also carries Amazon Bedrock, Google Vertex AI and Microsoft
-        Foundry prices.
+        This page lists first-party Claude API prices only. The JSON below also carries the cloud platforms' prices
+        (Bedrock, Vertex AI, Foundry).
       </p>
     </section>
 
@@ -159,11 +165,11 @@ const dataset = {
       <p>The whole history is one public JSON file, the same one the app reads. No key, no sign-up.</p>
       <table class="facts">
         <tbody>
-          <tr><th scope="row">URL</th><td><a href={PATHS.priceHistory}>{dataUrl}</a></td></tr>
+          <tr><th scope="row">URL</th><td><a href={PATHS.priceList}>{dataUrl}</a></td></tr>
           <tr><th scope="row">Schema</th><td><a href={PATHS.priceSchema}>{schemaUrl}</a> (JSON Schema 2020-12)</td></tr>
           <tr><th scope="row">Updates</th><td>The price list every six hours, when a price moves; reviewed records with corrections and releases.</td></tr>
           <tr><th scope="row">CORS</th><td><code>Access-Control-Allow-Origin: *</code>, so a web page can read it.</td></tr>
-          <tr><th scope="row">Caching</th><td>An ETag and <code>max-age=60</code>. Send <code>If-None-Match</code>, and fetch it a few times a day at most: it changes at most every six hours.</td></tr>
+          <tr><th scope="row">Caching</th><td>An ETag and <code>max-age=3600</code>. It changes at most every six hours, so a few fetches a day are plenty.</td></tr>
         </tbody>
       </table>
       <p>Today's Opus 5.5 rates, for example:</p>

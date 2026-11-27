@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://pacer.andrechek.com/price-history.schema.json",
   "title": "Pacer's Claude price history",
-  "description": "The dated Claude prices Pacer prices usage with: https://pacer.andrechek.com/price-history.json. Curated records (`records`) are reviewed by hand against Anthropic's pricing page and release notes; the price list (`catalog`) is merged from public price catalogs every six hours. Which record prices a moment: among the records whose window holds it, for the same model, provider, region, speed and tier, a curated record wins, except that an open-ended curated record loses to a price-list record with other numbers that opened after `asOf` (or the record's `reviewedAt`); then the later start. Documentation: https://pacer.andrechek.com/claude-prices/.",
+  "description": "The dated Claude prices Pacer prices usage with: https://pacer.andrechek.com/claude-prices.json (the app reads the same file at /price-history.json). Curated records (`records`) are reviewed by hand against Anthropic's pricing page and release notes; the price list (`catalog`) is merged from public price catalogs every six hours. Which record prices a moment: among the records whose window holds it, for the same model, provider, region, speed and tier, a curated record wins, except that an open-ended curated record loses to a price-list record with other numbers that opened after `asOf` (or the record's `reviewedAt`); then the later start. Documentation: https://pacer.andrechek.com/claude-prices/.",
   "type": "object",
   "required": ["schema", "asOf", "records"],
   "properties": {

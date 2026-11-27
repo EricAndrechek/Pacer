@@ -50,7 +50,7 @@ ${FEATURES.map((f) => `- ${f}`).join('\n')}
 
 - [The Claude Code skill](${url(PATHS.skill)}): teaches an agent to pause a long run or a fan-out of subagents before a rate limit (\`pacer gate\`, \`pacer status\`), save its work, and resume when there is room (\`pacer wait\`). It needs Pacer on the Mac: install the app (\`${BREW_COMMAND}\`), then the skill from Pacer's Settings, which links the \`pacer\` command beside it. Also as an archive in the [Agent Skills index](${url(PATHS.agentSkills)}).
 - [The pacer command](${url('/cli/')}): every subcommand, exit codes, gate-only and informed pacing.${md('/cli/')}
-- [Claude price history API](${url(PATHS.priceHistory)}): dated per-million-token prices for every Claude model, the file Pacer prices usage with. Public JSON, no key, CORS open, refreshed every six hours. [JSON Schema](${url(PATHS.priceSchema)}); [documentation](${url(PATHS.prices)}).
+- [Claude price history API](${url(PATHS.priceList)}): dated per-million-token prices for every Claude model, the same file Pacer prices usage with. Public JSON, no key, CORS open, refreshed every six hours. [JSON Schema](${url(PATHS.priceSchema)}); [documentation](${url(PATHS.prices)}).
 - [API catalog](${url(PATHS.apiCatalog)}) (RFC 9727) and [AI catalog](${url(PATHS.aiCatalog)}) (also at ${url(PATHS.ard)}): the same, for discovery. There is no MCP server, REST API or sign-in.
 - Search: \`GET ${url(PATHS.search)}?q=<words>\` returns the best sections of this site's pages, in Markdown.
 - Every page has a Markdown twin: ask for \`Accept: text/markdown\`, or use the links below.
