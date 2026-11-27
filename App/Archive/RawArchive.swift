@@ -647,10 +647,17 @@ struct ArchivedTurn: Sendable {
     /// `ArchiveRoundTrip` does. Comparing it as nil would re-append every
     /// pre-#352 turn the store has a speed or region for — a backfill the
     /// archive deliberately never ran, on the scan actor.
+    ///
+    /// The same byte carries two marks the reconcile sets while it walks the
+    /// store, so they cost no memory: `visited`, any store row of this turn
+    /// seen this pass, and `reached`, one seen with at least the archived
+    /// output (see `visit`).
     struct Recorded: OptionSet, Sendable {
         let rawValue: UInt8
         static let speed = Recorded(rawValue: 1 << 0)
         static let inferenceGeo = Recorded(rawValue: 1 << 1)
+        static let visited = Recorded(rawValue: 1 << 2)
+        static let reached = Recorded(rawValue: 1 << 3)
     }
 
     enum Verdict: Equatable {
@@ -661,21 +668,47 @@ struct ArchivedTurn: Sendable {
         /// Equal output, something else rewritten (#433).
         case patched
         /// The archive holds MORE output than the store. An append can't fix
-        /// that — the collapse keeps the larger copy — so it is counted and
-        /// left. The six-day soak, and every check since, found none.
+        /// that — the collapse keeps the larger copy — so it is left, and
+        /// counted per turn when no store row of it reached the archived
+        /// output. The six-day soak, and every check since, found none.
         case ahead
+        /// Equal output, but an earlier store row of the same turn already
+        /// reached it: a store duplicate, not compared (see `visit`).
+        case superseded
     }
 
     let outputTokens: Int64
     let fingerprint: Int
-    let recorded: Recorded
+    var recorded: Recorded
 
-    /// What the reconcile does with a store row of this turn.
-    func verdict(storeOutput: Int64, storeFingerprint: () -> Int) -> Verdict {
-        if storeOutput > outputTokens { return .upgraded }
+    /// What the reconcile does with a store row of this turn, given in the
+    /// walk's order (`sampledAt`, then row id), and marks the turn.
+    ///
+    /// **One store row per turn is compared at equal output: the first.**
+    /// The store can hold the same key twice (residue from before its dedup
+    /// guard, until `repairDuplicateSamples` runs), at equal output and a
+    /// different `sampledAt`. Comparing both against the archive's one copy
+    /// re-appended whichever differed, the collapse kept it, and the next
+    /// pass re-appended the other: re-appends 0, 1, 0, 1 forever. The first
+    /// row at equal output in this order is the one the store's repair keeps
+    /// (largest output, then earliest, ties in row-id order), so that is the
+    /// copy the archive follows. A later row with MORE output than the
+    /// archive is still an upgrade: the repair would keep it, and the
+    /// collapse keeps the largest output whatever else was appended.
+    mutating func visit(storeOutput: Int64, storeFingerprint: () -> Int) -> Verdict {
+        defer { recorded.insert(.visited) }
         if storeOutput < outputTokens { return .ahead }
+        if storeOutput > outputTokens {
+            recorded.insert(.reached)
+            return .upgraded
+        }
+        guard !recorded.contains(.reached) else { return .superseded }
+        recorded.insert(.reached)
         return storeFingerprint() == fingerprint ? .same : .patched
     }
+
+    /// Visited this pass, and no store row of it reached the archived output.
+    var isAhead: Bool { recorded.contains(.visited) && !recorded.contains(.reached) }
 
     /// The store's side, hashed the way this turn was archived: a column
     /// this copy didn't record is left out on both sides. Plain values, so a

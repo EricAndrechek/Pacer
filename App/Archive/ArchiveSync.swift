@@ -52,7 +52,10 @@ final class ArchiveSync {
         var missing = 0
         var upgraded = 0
         var patched = 0
+        /// Turns, not rows: archived with more output than any store row.
         var ahead = 0
+        /// Later store rows of a turn already compared (store duplicates).
+        var superseded = 0
         var reappended: Int { upgraded + patched }
     }
     /// The last pass's counts, for the archive tests compiled beside this file.
@@ -181,7 +184,8 @@ final class ArchiveSync {
         // output-only comparison never saw that, so one Mac's hourly check
         // failed on input or cache from 0.8.2 on, and the full reconcile each
         // failure triggers never converged.
-        let archived = try archive.reconcileView(since: since)
+        // `var`: the walk marks each turn it visits, in place.
+        var archived = try archive.reconcileView(since: since)
 
         let descriptor = FetchDescriptor<TokenSample>(
             predicate: since.map { cutoff in
@@ -193,15 +197,17 @@ final class ArchiveSync {
         // seeks the `sampledAt` index to where the last ended (#394).
         try ModelWalk.forEach(descriptor, orderedBy: \.sampledAt, in: container) { sample in
             guard let key = sample.dedupKey, !pending.contains(key) else { return }
-            guard let turn = archived[key] else {
+            guard let index = archived.index(forKey: key) else {
                 missed.append(row(from: sample))   // never archived
                 counts.missing += 1
                 return
             }
             // Hashed only at equal output, which is almost every row: the
             // store side is plain field reads off the row the walk already
-            // holds.
-            let verdict = turn.verdict(storeOutput: sample.outputTokens) {
+            // holds. `turn` is a copy for the hash, so the mark below writes
+            // the map in place without overlapping it.
+            let turn = archived.values[index]
+            let verdict = archived.values[index].visit(storeOutput: sample.outputTokens) {
                 turn.storeFingerprint(
                     input: sample.inputTokens, cacheRead: sample.cacheReadTokens,
                     cc5m: sample.cacheCreation5mTokens, cc1h: sample.cacheCreation1hTokens,
@@ -224,15 +230,19 @@ final class ArchiveSync {
             case .patched:
                 missed.append(row(from: sample))
                 counts.patched += 1
+            case .superseded:
+                counts.superseded += 1
             case .ahead:
-                counts.ahead += 1
+                break   // counted per turn below
             }
         }
-        if !missed.isEmpty || counts.ahead > 0 {
+        counts.ahead = archived.values.reduce(0) { $0 + ($1.isAhead ? 1 : 0) }
+        if !missed.isEmpty || counts.ahead > 0 || counts.superseded > 0 {
             Log.write("ArchiveSync",
                       "reconcile\(full ? " (full)" : ""): \(counts.missing) skipped, "
                       + "\(counts.upgraded) upgraded, \(counts.patched) patched since archiving"
-                      + (counts.ahead > 0 ? ", \(counts.ahead) archived with more output than the store" : ""))
+                      + (counts.ahead > 0 ? ", \(counts.ahead) archived with more output than the store" : "")
+                      + (counts.superseded > 0 ? ", \(counts.superseded) store duplicate(s) not compared" : ""))
         }
         lastReconcile = counts
         pendingCollapse = counts.reappended > 0

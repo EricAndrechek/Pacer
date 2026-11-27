@@ -388,6 +388,85 @@ struct RawArchiveReconcileTests {
         #expect(Self.pass(container, url) == ArchiveSync.ReconcileCounts())
     }
 
+    /// A turn an hour after the others, in both stores: the archive's
+    /// newest, so the forward path's watermark is past the duplicates below,
+    /// as it is on a real store (duplicates are old residue). Without it a
+    /// fresh sync's watermark, read back from the archive, can sit between
+    /// two copies and archive the later one again as new.
+    static let later = (key: "m9:r9", breakdown: breakdown(5, 6, 7, 0, 0),
+                        at: yesterdayNoon.addingTimeInterval(3_600))
+
+    @ScanActor
+    @Test("a store duplicate at equal output settles on the copy the store's repair keeps")
+    func storeDuplicateSettles() throws {
+        let url = try Self.tempURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        // One key stored twice (residue `repairDuplicateSamples` removes):
+        // equal output, a second apart, input differing. The repair keeps
+        // the earlier one.
+        let container = try PacerStore.makeInMemoryContainer()
+        let context = ModelContext(container)
+        let first = Self.yesterdayNoon
+        context.insert(Self.sample("m1:r1", Self.breakdown(10, 20, 30, 0, 0), at: first))
+        context.insert(Self.sample("m1:r1", Self.breakdown(11, 20, 30, 0, 0),
+                                   at: first.addingTimeInterval(1)))
+        context.insert(Self.sample(Self.later.key, Self.later.breakdown, at: Self.later.at))
+        try context.save()
+
+        // The forward path archives all three; the next launch's collapse
+        // keeps the later append of m1:r1, the copy the repair would drop.
+        // Comparing both store rows re-appended whichever differed from the
+        // archive's copy, every pass (0, 1, 1, 1 ...). Now the earlier row is
+        // re-archived once, and the later one is never compared again.
+        var re: [Int] = []
+        var superseded: [Int] = []
+        for _ in 0..<5 {
+            let counts = try #require(Self.pass(container, url))
+            re.append(counts.reappended)
+            superseded.append(counts.superseded)
+        }
+        #expect(re == [0, 1, 0, 0, 0])
+        #expect(superseded == [0, 1, 1, 1, 1])
+        // The marks live in the byte that was already there: an entry of the
+        // full reconcile's map is still 24 bytes.
+        #expect(MemoryLayout<ArchivedTurn>.stride == 24)
+        #expect(MemoryLayout<ArchivedTurn.Recorded>.size == 1)
+        #expect(try Self.archived("m1:r1", at: url).map(\.breakdown.inputTokens) == [10])
+    }
+
+    @ScanActor
+    @Test("a later store duplicate with more output is still an upgrade")
+    func laterDuplicateWithMoreOutputUpgrades() throws {
+        let url = try Self.tempURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        // Archived partial; the store then holds the partial and, a second
+        // later, the finished copy under the same key. The repair keeps the
+        // finished one (largest output first), so the archive must too,
+        // although the partial row reaches the archived output first.
+        do {
+            let archive = try RawArchive(url: url)
+            try archive.append([
+                Self.row("m1:r1", Self.breakdown(10, 1, 30, 0, 0)),
+                Self.row(Self.later.key, Self.later.breakdown, at: Self.later.at),
+            ])
+        }
+        let container = try PacerStore.makeInMemoryContainer()
+        let context = ModelContext(container)
+        context.insert(Self.sample("m1:r1", Self.breakdown(10, 1, 30, 0, 0)))
+        context.insert(Self.sample("m1:r1", Self.breakdown(10, 289, 30, 0, 0),
+                                   at: Self.yesterdayNoon.addingTimeInterval(1)))
+        context.insert(Self.sample(Self.later.key, Self.later.breakdown, at: Self.later.at))
+        try context.save()
+
+        var counts = ArchiveSync.ReconcileCounts()
+        counts.upgraded = 1
+        #expect(Self.pass(container, url) == counts)
+        #expect(try Self.archived("m1:r1", at: url).map(\.breakdown.outputTokens) == [289])
+        // Settled: the partial row is behind the archive and the finished one
+        // matches it, so the turn is not `ahead` either.
+        #expect(Self.pass(container, url) == ArchiveSync.ReconcileCounts())
+    }
+
     @ScanActor
     @Test("an archive holding more output than the store is counted, not re-appended, and the check names each field")
     func archiveAheadIsCountedAndNamed() throws {
