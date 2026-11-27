@@ -109,13 +109,15 @@ final class ArchiveSync {
             // reconciled on a throttle: ask the archive which dedup keys it
             // already holds for that window and append the store rows it
             // doesn't. Bounded work, and self-correcting.
-            rows.append(contentsOf: try missedTurns(
-                archive: archive, context: context,
+            //
+            // The reconcile appends what it finds itself, in batches.
+            let reconciled = try reconcileIfDue(
+                archive: archive,
                 // Already staged by the forward path above and NOT yet in the
                 // archive, so reconciliation would otherwise "rescue" them a
                 // second time. An append-only table can't take that back —
                 // caught only because the check counted one row too many.
-                pending: Set(rows.compactMap(\.dedupKey))))
+                pending: Set(rows.compactMap(\.dedupKey)))
 
             if !rows.isEmpty { try archive.append(rows) }
             if pendingCollapse {
@@ -128,10 +130,10 @@ final class ArchiveSync {
             // Advanced only after the append succeeded, so a failed write is
             // retried rather than skipped.
             if !rows.isEmpty { watermark = newest }
-            appendedTotal += rows.count
+            appendedTotal += rows.count + reconciled
             // Logged sparsely — every cycle would be noise, but silence made
             // it impossible to tell "working" from "never ran".
-            if !rows.isEmpty, appendedTotal >= nextLogAt {
+            if rows.count + reconciled > 0, appendedTotal >= nextLogAt {
                 Log.write("ArchiveSync", "archived \(appendedTotal) turn(s) this session")
                 nextLogAt = appendedTotal + 500
             }
@@ -150,23 +152,45 @@ final class ArchiveSync {
         }
     }
 
-    /// Store turns inside the trailing window that the archive doesn't have.
+    /// Store turns inside the trailing window that the archive doesn't have,
+    /// or holds otherwise than the store now does, appended again.
     ///
     /// Keyed on `dedupKey` because that's the identity the rest of the app
     /// already agrees on. Turns without one (no message id and no request id)
     /// can't be matched and are left to the forward path — they're rare, and
     /// guessing at identity here would risk archiving the same turn twice,
     /// which an append-only table can't take back.
-    private func missedTurns(archive: RawArchive, context: ModelContext,
-                             pending: Set<String>) throws -> [ArchiveRow] {
+    ///
+    /// Returns how many rows it appended.
+    private func reconcileIfDue(archive: RawArchive, pending: Set<String>) throws -> Int {
         let now = Date()
         if let last = lastReconcileAt,
-           now.timeIntervalSince(last) < Self.reconcileInterval { return [] }
+           now.timeIntervalSince(last) < Self.reconcileInterval { return 0 }
         lastReconcileAt = now
 
         let full = needsFullReconcile
         needsFullReconcile = false
-        let since: Date? = full ? nil : now.addingTimeInterval(-Self.reconcileWindow)
+        let appended = try reconcile(
+            archive: archive, since: full ? nil : now.addingTimeInterval(-Self.reconcileWindow),
+            pending: pending)
+        return appended
+    }
+
+    /// Rows re-appended or rescued are staged and appended this many at a
+    /// time, as `ArchiveBackfill` does. The first pass after an upgrade can
+    /// find hundreds of thousands of turns rewritten since they were
+    /// archived; holding them all for one append is a row value each, where
+    /// the walk itself holds one page. Batched rather than capped per pass:
+    /// the walk dominates a pass (69-323 s for a full one on a real 1.2M-row
+    /// copy) and costs the same whatever it finds, so a cap would repeat it
+    /// once per cap, 30 minutes apart. The collapse still runs once, after
+    /// the pass: 500k superseded copies took 2.9 s with this archive's
+    /// settings (one thread, 256 MB; measured with the DuckDB CLI).
+    static let appendBatchRows = 5_000
+
+    private func reconcile(archive: RawArchive, since: Date?,
+                           pending: Set<String>) throws -> Int {
+        let full = since == nil
         // Values, not just presence. A streamed message is archived PARTIAL
         // and then upgraded in place in the store when its finished copy
         // arrives; the archive can't see that mutation, so a key can be
@@ -184,6 +208,7 @@ final class ArchiveSync {
         // output-only comparison never saw that, so one Mac's hourly check
         // failed on input or cache from 0.8.2 on, and the full reconcile each
         // failure triggers never converged.
+        //
         // `var`: the walk marks each turn it visits, in place.
         var archived = try archive.reconcileView(since: since)
 
@@ -191,14 +216,22 @@ final class ArchiveSync {
             predicate: since.map { cutoff in
                 #Predicate<TokenSample> { $0.sampledAt >= cutoff }
             })
-        var missed: [ArchiveRow] = []
         var counts = ReconcileCounts()
+        var batch: [ArchiveRow] = []
+        var appended = 0
+        func stage(_ sample: TokenSample) throws {
+            batch.append(row(from: sample))
+            guard batch.count >= Self.appendBatchRows else { return }
+            try archive.append(batch)
+            appended += batch.count
+            batch.removeAll(keepingCapacity: true)
+        }
         // Thirty days is ~370k turns on a heavy store, fifteen pages: each
         // seeks the `sampledAt` index to where the last ended (#394).
         try ModelWalk.forEach(descriptor, orderedBy: \.sampledAt, in: container) { sample in
             guard let key = sample.dedupKey, !pending.contains(key) else { return }
             guard let index = archived.index(forKey: key) else {
-                missed.append(row(from: sample))   // never archived
+                try stage(sample)   // never archived
                 counts.missing += 1
                 return
             }
@@ -225,10 +258,10 @@ final class ArchiveSync {
             // path; at equal output it is the later append
             // (`RawArchive.collapseOrder`).
             case .upgraded:
-                missed.append(row(from: sample))
+                try stage(sample)
                 counts.upgraded += 1
             case .patched:
-                missed.append(row(from: sample))
+                try stage(sample)
                 counts.patched += 1
             case .superseded:
                 counts.superseded += 1
@@ -236,8 +269,12 @@ final class ArchiveSync {
                 break   // counted per turn below
             }
         }
+        if !batch.isEmpty {
+            try archive.append(batch)
+            appended += batch.count
+        }
         counts.ahead = archived.values.reduce(0) { $0 + ($1.isAhead ? 1 : 0) }
-        if !missed.isEmpty || counts.ahead > 0 || counts.superseded > 0 {
+        if appended > 0 || counts.ahead > 0 || counts.superseded > 0 {
             Log.write("ArchiveSync",
                       "reconcile\(full ? " (full)" : ""): \(counts.missing) skipped, "
                       + "\(counts.upgraded) upgraded, \(counts.patched) patched since archiving"
@@ -246,7 +283,7 @@ final class ArchiveSync {
         }
         lastReconcile = counts
         pendingCollapse = counts.reappended > 0
-        return missed
+        return appended
     }
 
     /// Compare the archive against the store over a settled window and record

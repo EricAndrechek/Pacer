@@ -326,6 +326,41 @@ struct RawArchiveReconcileTests {
     }
 
     @ScanActor
+    @Test("a pass that re-archives more than a batch re-archives all of it")
+    func reappendsAreBatched() throws {
+        let url = try Self.tempURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        // Two full batches and part of a third, as the first pass after an
+        // upgrade finds them: every turn rewritten at equal output.
+        let n = 2 * ArchiveSync.appendBatchRows + 2_000
+        let container = try PacerStore.makeInMemoryContainer()
+        let context = ModelContext(container)
+        var samples: [TokenSample] = []
+        for i in 0..<n {
+            let s = Self.sample("m\(i):r\(i)", Self.breakdown(100, 50, 1_000, 0, 0),
+                                at: Self.yesterdayNoon.addingTimeInterval(Double(i) / 1_000))
+            context.insert(s)
+            samples.append(s)
+        }
+        try context.save()
+        #expect(Self.pass(container, url) == ArchiveSync.ReconcileCounts())
+
+        for s in samples { s.inputTokens = 101 }
+        try context.save()
+
+        var counts = ArchiveSync.ReconcileCounts()
+        counts.patched = n
+        #expect(Self.pass(container, url) == counts)
+        // Every turn once, at the store's input: 12,000 x 101, and output
+        // untouched at 12,000 x 50.
+        let totals = try RawArchive(url: url).totals()
+        #expect(totals.rows == Int64(n))
+        #expect(totals.input == Int64(n) * 101)
+        #expect(totals.output == Int64(n) * 50)
+        #expect(Self.pass(container, url) == ArchiveSync.ReconcileCounts())
+    }
+
+    @ScanActor
     @Test("a streamed partial is still superseded by its finished copy")
     func streamedPartialIsUpgraded() throws {
         let url = try Self.tempURL()
