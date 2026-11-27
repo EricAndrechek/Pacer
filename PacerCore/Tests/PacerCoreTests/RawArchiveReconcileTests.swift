@@ -57,13 +57,14 @@ struct RawArchiveReconcileTests {
             speed: speed, inferenceGeo: geo)
     }
 
-    static func sample(_ key: String, _ b: TokenBreakdown, at: Date = yesterdayNoon) -> TokenSample {
+    static func sample(_ key: String, _ b: TokenBreakdown, at: Date = yesterdayNoon,
+                       cost: Double? = nil) -> TokenSample {
         TokenSample(
             sampledAt: at, date: TokenSample.formatDate(at), model: opus,
             inputTokens: b.inputTokens, outputTokens: b.outputTokens,
             cacheReadTokens: b.cacheReadTokens, cacheCreation5mTokens: b.cacheCreation5mTokens,
-            cacheCreation1hTokens: b.cacheCreation1hTokens, dedupKey: key, sessionId: "s",
-            projectPath: "/tmp/p", ccVersion: "2.1.1")
+            cacheCreation1hTokens: b.cacheCreation1hTokens, sourceCostUSD: cost, dedupKey: key,
+            sessionId: "s", projectPath: "/tmp/p", ccVersion: "2.1.1")
     }
 
     /// The one archived copy of `key`, read back.
@@ -295,6 +296,33 @@ struct RawArchiveReconcileTests {
         #expect(Self.pass(container, url) == ArchiveSync.ReconcileCounts())
         #expect(try RawArchive(url: url).totals() == RawArchive.Totals(
             rows: 2, input: 127, output: 370, cacheRead: 4_700, cc5m: 0, cc1h: 200))
+    }
+
+    @ScanActor
+    @Test("a source cost rewritten at equal tokens is re-archived")
+    func sourceCostIsCompared() throws {
+        let url = try Self.tempURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let container = try PacerStore.makeInMemoryContainer()
+        let context = ModelContext(container)
+        // Claude Code's own `costUSD`, stored as `sourceCostUSD`; a re-read
+        // that patches the row rewrites it with the tokens unchanged.
+        let turn = Self.sample("m1:r1", Self.breakdown(10, 20, 30, 0, 0), cost: 0.5)
+        context.insert(turn)
+        context.insert(Self.sample("m2:r2", Self.breakdown(40, 50, 60, 0, 0), cost: 0.25))
+        try context.save()
+        #expect(Self.pass(container, url) == ArchiveSync.ReconcileCounts())
+        #expect(try Self.archived("m1:r1", at: url).map(\.sourceCostUSD) == [0.5])
+
+        turn.sourceCostUSD = 0.75
+        try context.save()
+
+        var counts = ArchiveSync.ReconcileCounts()
+        counts.patched = 1
+        #expect(Self.pass(container, url) == counts)
+        #expect(try Self.archived("m1:r1", at: url).map(\.sourceCostUSD) == [0.75])
+        #expect(try Self.archived("m2:r2", at: url).map(\.sourceCostUSD) == [0.25])
+        #expect(Self.pass(container, url) == ArchiveSync.ReconcileCounts())
     }
 
     @ScanActor
