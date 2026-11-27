@@ -204,14 +204,15 @@ enum LiveRenderMode {
     }
 
     /// The update states the `sidebar` page is drawn in: up to date,
-    /// downloading and ready by default (checking and a failed check look like
-    /// up to date there), or what `PACER_RENDER_UPDATE_STATE` names.
+    /// downloading, available (#470) and ready by default (checking and a
+    /// failed check look like up to date there), or what
+    /// `PACER_RENDER_UPDATE_STATE` names.
     static var updateStates: [UpdateState] {
         let raw = ProcessInfo.processInfo.environment["PACER_RENDER_UPDATE_STATE"] ?? ""
         let named = raw.split(separator: ",").compactMap { UpdateState(override: String($0)) }
         if !named.isEmpty { return named }
         let next = sampleNextVersion(after: UpdateStatus.currentVersion)
-        return [.upToDate, .downloading(version: next), .readyToInstall(version: next)]
+        return [.upToDate, .downloading(version: next), .available(version: next), .readyToInstall(version: next)]
     }
 
     /// A version for the default renders to offer: the next patch of this

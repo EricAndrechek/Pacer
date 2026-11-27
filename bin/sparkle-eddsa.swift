@@ -5,6 +5,7 @@
 //   swift bin/sparkle-eddsa.swift verify <public-key-b64> <signature-b64> <file>
 //   swift bin/sparkle-eddsa.swift keygen <private-key-file>   # THROWAWAY test keys only
 //   swift bin/sparkle-eddsa.swift pubkey <private-key-file>
+//   swift bin/sparkle-eddsa.swift sign <private-key-file> <file>   # THROWAWAY test keys only
 //
 // `verify` exits 0 and prints OK when <signature> is a valid Ed25519 signature
 // of the whole file under <public-key> (the app's SUPublicEDKey), else 1.
@@ -17,8 +18,14 @@
 // login Keychain. The release key lives in the SPARKLE_ED_PRIVATE_KEY secret
 // and nowhere else; never point anything here at it.
 //
-// sign_update also accepts the older 96-byte key format; `pubkey` reads only
-// the 32-byte seed format that `keygen` writes.
+// `sign` prints the base64 Ed25519 signature of the whole file, the
+// `sparkle:edSignature` an appcast enclosure carries, and checks it before
+// printing. It is for the update end-to-end test (bin/update-e2e.sh), which
+// signs its test archives with a key `keygen` made in the same job: releases
+// sign with Sparkle's own `sign_update` and the release key, never with this.
+//
+// sign_update also accepts the older 96-byte key format; `pubkey` and `sign`
+// read only the 32-byte seed format that `keygen` writes.
 
 import CryptoKit
 import Foundation
@@ -82,6 +89,18 @@ case "pubkey":
     }
     print(key.publicKey.rawRepresentation.base64EncodedString())
 
+case "sign":
+    guard args.count == 4 else { fail("usage: sparkle-eddsa.swift sign <private-key-file> <file>") }
+    guard let key = try? Curve25519.Signing.PrivateKey(rawRepresentation: readSeed(args[2])) else {
+        fail("not an Ed25519 seed")
+    }
+    guard let file = try? Data(contentsOf: URL(fileURLWithPath: args[3]), options: .alwaysMapped) else {
+        fail("cannot read \(args[3])")
+    }
+    guard let signature = try? key.signature(for: file),
+          key.publicKey.isValidSignature(signature, for: file) else { fail("signing failed") }
+    print(signature.base64EncodedString())
+
 default:
-    fail("unknown command \(args[1]); expected verify, keygen or pubkey")
+    fail("unknown command \(args[1]); expected verify, keygen, pubkey or sign")
 }

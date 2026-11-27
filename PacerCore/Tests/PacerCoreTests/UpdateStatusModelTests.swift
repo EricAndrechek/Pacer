@@ -165,6 +165,41 @@ struct UpdateStateTests {
         #expect(state.token == "installing-0.9.5")
     }
 
+    @Test("a pending update shows its action; a hold wins over it; its download shows as one; a click restarts once downloaded")
+    func available() {
+        for phase in [UpdateState.upToDate, .checking, .failed] {
+            let state = UpdateState.resolve(phase: phase, heldVersion: nil, availableVersion: "0.9.6")
+            #expect(state == .available(version: "0.9.6"))
+            #expect(state.readyVersion == "0.9.6")
+            #expect(state.isAvailable)
+            #expect(!state.isInstalling)
+        }
+        #expect(UpdateState.resolve(phase: .upToDate, heldVersion: "0.9.7", availableVersion: "0.9.6")
+                == .readyToInstall(version: "0.9.7"))
+        // An arm's download shows as a download, the policy's or a click's.
+        #expect(UpdateState.resolve(phase: .downloading(version: "0.9.7"), heldVersion: nil,
+                                    availableVersion: "0.9.7") == .downloading(version: "0.9.7"))
+        #expect(UpdateState.resolve(phase: .downloading(version: "0.9.7"), heldVersion: nil,
+                                    availableVersion: "0.9.7", requested: true) == .downloading(version: "0.9.7"))
+        // A click: downloading from its check on, restarting once downloaded.
+        #expect(UpdateState.resolve(phase: .checking, heldVersion: nil, availableVersion: "0.9.7", requested: true)
+                == .downloading(version: "0.9.7"))
+        let clicked = UpdateState.resolve(phase: .upToDate, heldVersion: nil, availableVersion: "0.9.7",
+                                          requested: true)
+        #expect(clicked == .installing(version: "0.9.7"))
+        #expect(!clicked.isAvailable)
+        // The policy's arm reading the feed: still just available.
+        #expect(UpdateState.resolve(phase: .checking, heldVersion: nil, availableVersion: "0.9.7")
+                == .available(version: "0.9.7"))
+        // The phase never claims available on its own.
+        #expect(UpdateState.resolve(phase: .available(version: "0.9.6"), heldVersion: nil) == .upToDate)
+        #expect(!UpdateState.readyToInstall(version: "0.9.6").isAvailable)
+        #expect(UpdateCopy.menuInstallTitle(for: .available(version: "0.9.6")) == "Update to 0.9.6 — Restart")
+        #expect(UpdateState(override: "available:0.9.6") == .available(version: "0.9.6"))
+        #expect(UpdateState(override: "available") == nil)
+        #expect(UpdateState.available(version: "0.9.6").token == "available-0.9.6")
+    }
+
     @Test("a failure stands until the next check")
     func failure() {
         let failedDownload = run([.checkStarted, .downloadStarted(version: "0.9.5"), .downloadFailed])
@@ -212,12 +247,13 @@ struct UpdateFeedbackCopyTests {
     func updateStrings() {
         #expect(UpdateCopy.sidebarInstall == "Restart to Update")
         #expect(UpdateCopy.sidebarReady("0.9.5") == "Pacer 0.9.5 is ready")
+        #expect(UpdateCopy.sidebarAvailable("0.9.5") == "Pacer 0.9.5 is available")
         #expect(UpdateCopy.menuInstall("0.9.5") == "Update to 0.9.5 — Restart")
         #expect(UpdateCopy.downloading("0.9.5") == "Downloading 0.9.5…")
         #expect(UpdateCopy.checkForUpdates == "Check for Updates…")
     }
 
-    @Test("the status menu offers the install only while an update is ready")
+    @Test("the status menu offers the install only while an update is available or ready")
     func menuUpdateItem() {
         #expect(UpdateCopy.menuInstallTitle(for: .readyToInstall(version: "0.9.5")) == "Update to 0.9.5 — Restart")
         for state in [UpdateState.upToDate, .checking, .downloading(version: "0.9.5"), .failed] {

@@ -136,8 +136,9 @@ struct PacerApp: App {
                 // Sparkle's standard "Check for Updates…" item. Lives
                 // under the application menu, above "Settings…", which
                 // is where every Mac app puts it. The view auto-disables
-                // while a check is already in flight.
-                CheckForUpdatesView(updater: updater.updater)
+                // while a check is already in flight, and adds "Update to …
+                // — Restart" above it while an update is offered.
+                CheckForUpdatesView(updater: updater.updater, style: .menu)
             }
             // ⌘1..⌘4 jump between sidebar destinations. Live in
             // `.commands` so they're part of the menu-bar responder
