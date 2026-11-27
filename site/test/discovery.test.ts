@@ -17,6 +17,8 @@ import {
   MARKDOWN_PAGES,
   PAGE_ROUTES,
   PATHS,
+  SEARCH_ROUTES,
+  WORKER_ROUTES,
   REPO,
   SKILL_REQUIREMENT,
   isPageRoute,
@@ -81,7 +83,7 @@ describe('pages, twins and routes', () => {
 
   it('every page with a twin runs the Worker first, and nothing else does but the Worker routes and search', () => {
     const covered = (path: string) =>
-      PAGE_ROUTES.includes(path) || (path.startsWith('/compare/') && !path.endsWith('.md') && PAGE_ROUTES.includes('/compare/*'));
+      PAGE_ROUTES.includes(path);
     for (const page of ALL_PAGES) {
       expect(covered(`/${page}`), page).toBe(true);
       expect(isPageRoute(`/${page}`), page).toBe(true);
@@ -89,6 +91,13 @@ describe('pages, twins and routes', () => {
     for (const path of ['/404/', '/appcast.xml', '/price-history.json', '/download/', '/api/feedback', '/faq.md', '/llms.txt']) {
       expect(isPageRoute(path), path).toBe(false);
     }
+    // Under /compare/, only the pages themselves run the Worker: not their twins, not a page
+    // that doesn't exist, not any asset.
+    const routes = [...WORKER_ROUTES, ...PAGE_ROUTES, ...SEARCH_ROUTES];
+    for (const path of ['/compare/ccusage.md', '/compare.md', '/compare/nothing/', '/compare/ccusage/index.html', '/compare/x.png', '/compare/ccusage/extra/']) {
+      expect(runsWorkerFirst(routes, path), path).toBe(false);
+    }
+    expect(routes.every((r) => !r.includes('*'))).toBe(true);
   });
 
   it('writes each twin with the Search for Agents front matter, the page and its source', () => {

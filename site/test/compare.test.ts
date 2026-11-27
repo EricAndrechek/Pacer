@@ -3,7 +3,7 @@
 // the README's table is the site's.
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { COMPARE_TOOL, markdownPath } from '../scripts/discovery.mjs';
+import { COMPARE_TOOL, COMPARE_TOOLS, markdownPath } from '../scripts/discovery.mjs';
 import { CHECKED, HUB, PACER, ROWS, TOOLS, readmeTable, toolPages } from '../src/lib/compare';
 
 describe('the facts', () => {
@@ -53,6 +53,8 @@ describe('the per-tool pages', () => {
       }
     }
     expect(pages.map((t) => t.slug).sort()).toEqual(['ccusage', 'claude-code-usage-command', 'claude-code-usage-monitor', 'claudebar', 'codexbar']);
+    // The routes and twins are built from scripts/discovery.mjs's list: the two must agree.
+    expect([...COMPARE_TOOLS].sort()).toEqual(pages.map((t) => t.slug).sort());
   });
 });
 

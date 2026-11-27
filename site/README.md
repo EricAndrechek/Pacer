@@ -28,7 +28,8 @@ read from `https://pacer.andrechek.com/` (`SUFeedURL`,
 ## The Worker
 
 Only `/download/`, `/api/feedback`, `/appcast.xml` and `/price-history.json`,
-the pages, and `/.well-known/search` reach Worker code (`run_worker_first` in
+the pages that have a Markdown twin (each by name), and `/.well-known/search`
+reach Worker code (`run_worker_first` in
 `wrangler.jsonc`, from `scripts/discovery.mjs` and checked by a test in
 `worker/index.test.ts`); everything else (scripts, styles, images, the `.md`
 twins, every other discovery file) is a static asset and never runs it. The
@@ -165,14 +166,19 @@ that doesn't exist is the 404 page either way. `worker/md-router.mjs`
 re-exports it for tsc (the package ships TypeScript source). When you add a
 page, add it to `MARKDOWN_PAGES` (and so to `run_worker_first`, through
 `PAGE_ROUTES`; the routing test fails until they agree) and to
-`scripts/llms-full.mjs`'s `PAGES`. A new `/compare/<tool>/` page needs neither:
-`/compare/*` covers it.
+`scripts/llms-full.mjs`'s `PAGES`; a new `/compare/<tool>/` page goes in
+`COMPARE_TOOLS` (`test/compare.test.ts` fails until it matches
+`src/lib/compare.ts`). Routes are named one by one, never a wildcard, so nothing
+else under a page's path (its twin, an asset, a page that doesn't exist) runs
+the Worker.
 
-**What it costs.** Every page view is now a Worker request, which counts
-against the Workers Free plan's account-wide daily limit that update checks
-share ([The Worker](#the-worker)). Traffic is small (about 15 counted feed
-requests a day), and room-planner already routes its pages through its Worker
-on the same account. Third parties reading the price list use
+**What it costs.** Every request for a page, a person's, a search engine's or
+an AI crawler's, and every search, is now a Worker request. Each counts toward
+the Workers Free plan's account-wide daily request limit, the same limit
+update checks share ([The Worker](#the-worker)), and room-planner's pages count
+toward it too (same account). The figure measured so far, about 15 a day,
+counts the app's feed requests only; page and crawler traffic is not measured
+here and comes on top. Third parties reading the price list use
 `/claude-prices.json`, which never runs the Worker. If the limit ever comes
 close, take the page routes out of `run_worker_first`: the pages and twins stay
 up as static assets, only the negotiation stops.

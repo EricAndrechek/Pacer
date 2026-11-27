@@ -22,12 +22,14 @@
     // under the Workers Free plan's account-wide daily request limit: past it,
     // these paths answer 429 until 00:00 UTC. 0.9.5+ then reads the feed from
     // raw.githubusercontent.com; 0.9.4 has no fallback and waits. Accepted by
-    // the owner, 2026-11-25. Then the pages, for the Markdown router
-    // (@wave-rf/cloudflare-md-router: the .md twin to agents that ask for it),
-    // but not their twins, and the search endpoint (site/README.md, "Discovery
-    // for agents"). The list is scripts/discovery.mjs's WORKER_ROUTES,
-    // PAGE_ROUTES and SEARCH_ROUTES (worker/index.test.ts checks it). Every
-    // path not listed never runs Worker code.
+    // the owner, 2026-11-25. Then the pages that have a Markdown twin, each by
+    // name, for the Markdown router (@wave-rf/cloudflare-md-router: the .md
+    // twin to agents that ask for it), and the search endpoint (site/README.md,
+    // "Discovery for agents"). No wildcard: nothing else under a page's path,
+    // its twin and assets included, runs the Worker. The list is
+    // scripts/discovery.mjs's WORKER_ROUTES, PAGE_ROUTES and SEARCH_ROUTES
+    // (worker/index.test.ts checks it). Every path not listed never runs
+    // Worker code.
     "run_worker_first": [
       "/download",
       "/download/",
@@ -42,8 +44,12 @@
       "/privacy/",
       "/faq/",
       "/changelog/",
-      "/compare/*",
-      "!/compare/*.md",
+      "/compare/",
+      "/compare/ccusage/",
+      "/compare/claude-code-usage-command/",
+      "/compare/claude-code-usage-monitor/",
+      "/compare/claudebar/",
+      "/compare/codexbar/",
       "/.well-known/search",
     ],
   },

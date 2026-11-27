@@ -3,6 +3,7 @@ export declare const REPO: string;
 export declare const BREW_COMMAND: string;
 export declare const MARKDOWN_PAGES: string[];
 export declare const COMPARE_TOOL: RegExp;
+export declare const COMPARE_TOOLS: string[];
 export declare function markdownPath(path: string): string | null;
 export declare function isPageRoute(pathname: string): boolean;
 export declare const PATHS: {

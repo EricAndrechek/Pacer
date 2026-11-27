@@ -11,7 +11,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  COMPARE_TOOL,
+  COMPARE_TOOLS,
   MARKDOWN_PAGES,
   PATHS,
   agentSkillsIndex,
@@ -161,7 +161,7 @@ const read = (dist, path, file = 'index.html') =>
  * @param {Date} [now]
  */
 export function writeDiscovery(dist, origin, built, now = new Date()) {
-  const tools = built.filter((p) => COMPARE_TOOL.test(p)).sort();
+  const tools = COMPARE_TOOLS.map((t) => `compare/${t}/`).filter((p) => built.includes(p));
   const order = PAGES.flatMap((p) => (p === 'compare/' ? [p, ...tools] : [p]));
 
   const sections = order.map((path) => `<!-- ${origin}/${path} -->\n\n${htmlToMarkdown(read(dist, path), origin)}`);

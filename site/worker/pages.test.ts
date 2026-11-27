@@ -113,7 +113,7 @@ describe('pages through the Markdown router', () => {
     expect((await get('/cli/', { Accept: 'text/markdown' })).response.headers.get('link')).toBeNull();
   });
 
-  it('answers a page that does not exist with the 404 page, as HTML, whatever the Accept', async () => {
+  it('answers a page that does not exist with the 404 page, as HTML, whatever the Accept (in production it never reaches the Worker)', async () => {
     for (const accept of ['text/html', 'text/markdown']) {
       const { response } = await get('/compare/nothing-here/', { Accept: accept });
       expect(response.status, accept).toBe(404);

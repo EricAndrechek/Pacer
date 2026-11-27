@@ -16,7 +16,7 @@ export const BREW_COMMAND = 'brew install --cask ericandrechek/tap/pacer';
 
 /**
  * Pages with a Markdown twin, as site paths without the leading slash. The
- * per-tool comparison pages (`compare/<tool>/`) have one too (COMPARE_TOOL).
+ * per-tool comparison pages (`compare/<tool>/`, COMPARE_TOOLS) have one too.
  */
 export const MARKDOWN_PAGES = [
   '',
@@ -30,8 +30,16 @@ export const MARKDOWN_PAGES = [
   'changelog/',
 ];
 
-/** `compare/ccusage/` and the other per-tool comparison pages. */
+/** The shape of a per-tool comparison page's path: `compare/ccusage/`. */
 export const COMPARE_TOOL = /^compare\/[a-z0-9]+(?:-[a-z0-9]+)*\/$/;
+
+/**
+ * The per-tool comparison pages, by slug: the pages src/lib/compare.ts gives
+ * a `page` (test/compare.test.ts holds the two lists equal). Listed, not
+ * matched by a pattern, so run_worker_first names each page and nothing else
+ * under /compare/ runs the Worker.
+ */
+export const COMPARE_TOOLS = ['ccusage', 'claude-code-usage-command', 'claude-code-usage-monitor', 'claudebar', 'codexbar'];
 
 /**
  * The Markdown twin of a page path (with or without the leading slash), or
@@ -42,7 +50,7 @@ export const COMPARE_TOOL = /^compare\/[a-z0-9]+(?:-[a-z0-9]+)*\/$/;
  */
 export function markdownPath(path) {
   const p = path.replace(/^\/+/, '');
-  if (!MARKDOWN_PAGES.includes(p) && !COMPARE_TOOL.test(p)) return null;
+  if (!MARKDOWN_PAGES.includes(p) && !COMPARE_TOOLS.some((t) => p === `compare/${t}/`)) return null;
   return p === '' ? '/index.md' : `/${p.replace(/\/$/, '')}.md`;
 }
 
@@ -96,13 +104,7 @@ export const PATHS = {
  * /.well-known/ files) is a static asset and never runs Worker code.
  */
 export const WORKER_ROUTES = ['/download', '/download/', '/api/feedback', '/appcast.xml', '/price-history.json'];
-export const PAGE_ROUTES = [
-  ...MARKDOWN_PAGES.filter((p) => p !== 'compare/').map((p) => `/${p}`),
-  // /compare/ and every /compare/<tool>/ (a route may not also list one a
-  // wildcard covers: wrangler rejects it at deploy), but not their twins.
-  '/compare/*',
-  '!/compare/*.md',
-];
+export const PAGE_ROUTES = [...MARKDOWN_PAGES.map((p) => `/${p}`), ...COMPARE_TOOLS.map((t) => `/compare/${t}/`)];
 export const SEARCH_ROUTES = [PATHS.search];
 
 /**
