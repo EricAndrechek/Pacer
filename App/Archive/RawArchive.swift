@@ -656,8 +656,8 @@ struct ArchivedTurn: Sendable {
     ///
     /// Those rows are told apart by `account_id`, added with the other two:
     /// on a real archive every row with an account has speed and region set
-    /// and every row without one has neither (1,025,217 / 198,032, none
-    /// mixed). So a NULL beside an account is a recorded nil, and a store
+    /// and every row without one has neither (about 199k with an account,
+    /// 1,025,217 without, none mixed). So a NULL beside an account is a recorded nil, and a store
     /// that later says "fast" re-archives the turn. A row archived since
     /// without an account (unattributed) can't be told from an old one and
     /// keeps the "not recorded" reading.
