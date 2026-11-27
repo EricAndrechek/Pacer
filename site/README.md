@@ -12,23 +12,31 @@ read from `https://pacer.andrechek.com/` (`SUFeedURL`,
 
 | Path | What |
 | --- | --- |
-| `src/pages/` | Home, Features, For agents (`/cli/`), How it counts, Privacy, FAQ, Changelog, 404, plus `robots.txt` and `llms.txt` |
+| `src/pages/` | Home, Features, For agents (`/cli/`), How it counts, Claude prices, Compare (a hub and `compare/[tool].astro`), Privacy, FAQ, Changelog, 404, plus `robots.txt` and `llms.txt` |
+| `src/lib/prices.ts` | `/claude-prices/`: reads `public/price-history.json` at build time and picks each moment's price by the app's rule (`PriceLedger`) |
+| `src/lib/compare.ts` | Every comparison fact, with its source: the `/compare/` pages, llms.txt and README.md's table come from it |
 | `src/lib/site.ts` | Facts every page repeats (URLs, requirements, feature list). The version is the newest `../docs/release-notes/*.md` |
 | `src/lib/releases.ts` | Reads `../docs/release-notes/` at build time for the changelog |
 | `src/lib/faq.ts` | FAQ text, used by the page and its `FAQPage` JSON-LD |
 | `../docs/screenshots/` | The README screenshots, imported directly (`@screenshots/...`), so the site never falls behind the app |
 | `public/appcast.xml`, `public/price-history.json` | The update feed and the price history. Written by releases, and the price history's `catalog` section (the price list) every six hours by `.github/workflows/price-catalog-sync.yml`; hand edits only as `docs/releasing.md` says |
-| `worker/index.ts`, `worker/lib.ts`, `worker/feedback.ts` | The Worker: `/download/`, `/api/feedback`, and counting update-feed and price-history requests |
-| `scripts/` | `lastmod.mjs` (sitemap dates from git), `llms-full.mjs` (`/llms-full.txt` from the built pages), `csp-hashes.mjs`, `indexnow.mjs`, `feeds.mjs` + `check-feeds.mjs` (the feed's deploy gate) |
+| `worker/index.ts`, `worker/lib.ts`, `worker/feedback.ts`, `worker/search.ts` | The Worker: `/download/`, `/api/feedback`, counting update-feed and price-history requests, the pages' Markdown router and `/.well-known/search` |
+| `scripts/` | `lastmod.mjs` (sitemap dates from git), `llms-full.mjs` (`/llms-full.txt`, the Markdown twins and the discovery files, from the built pages), `discovery.mjs` (what the discovery files say), `search.mjs`, `skill.mjs` (the published skill), `csp-hashes.mjs`, `indexnow.mjs`, `feeds.mjs` + `check-feeds.mjs` (the feed's deploy gate) |
+| `test/` | The site's own tests, in Node: the discovery files against each other, the price page, the comparison facts |
 | `public/_headers` | Security headers and the CSP (inline-script hashes filled in by `pnpm build`) |
 
 ## The Worker
 
-Only `/download/`, `/api/feedback`, `/appcast.xml` and `/price-history.json`
-reach Worker code (`run_worker_first` in `wrangler.jsonc`, checked by a test
-in `worker/index.test.ts`); everything else is a static asset and never runs
-it. The update feed's requests do run the Worker, which counts them and serves
-the file untouched (below), so the feed shares the Worker's request limit.
+Only `/download/`, `/api/feedback`, `/appcast.xml` and `/price-history.json`,
+the pages, and `/.well-known/search` reach Worker code (`run_worker_first` in
+`wrangler.jsonc`, from `scripts/discovery.mjs` and checked by a test in
+`worker/index.test.ts`); everything else (scripts, styles, images, the `.md`
+twins, every other discovery file) is a static asset and never runs it. The
+update feed's requests do run the Worker, which counts them and serves the file
+untouched (below), so the feed shares the Worker's request limit. The pages
+go through the Markdown router ([Discovery for agents](#discovery-for-agents)),
+which the feed, `/download/` and `/api/feedback` never reach: the Worker
+answers them first (`worker/pages.test.ts`).
 
 - **`/appcast.xml`, `/price-history.json`** are `public/` files.
   `public/_headers` gives them their Content-Type
@@ -104,6 +112,63 @@ the file untouched (below), so the feed shares the Worker's request limit.
   when the entry module has any other named export, so the logic lives in
   `worker/lib.ts` (a test guards this).
 
+## Discovery for agents
+
+Pacer is a desktop app, so what agents get here is its documentation, its
+Claude Code skill and one public data file; there is no MCP server, REST API or
+sign-in. Every file is built from one source, `scripts/discovery.mjs`, so the
+URLs agree everywhere; `test/discovery.test.ts` builds them over a stand-in
+`dist/` and checks they agree with each other, the routes and the repo's skill.
+Ported from room-planner's (its `docs/DEPLOY.md`, "Discovery for agents").
+
+| URL | What | Source |
+| --- | --- | --- |
+| `/robots.txt` | Every crawler allowed, AI crawlers included, with `Content-Signal: search=yes, ai-input=yes, ai-train=yes` (the owner's choice: assistants should know Pacer), the sitemap, an `Agentmap:` line naming the AI catalog, and the llms.txt pointer. `/download` stays disallowed | `src/pages/robots.txt.ts` |
+| `/llms.txt`, `/llms-full.txt` | llmstxt.org: the summary, "Use Pacer from an agent" (the skill, the pacer command, the price history API, the catalogs, search), every page with its twin; and every page's text in one file | `src/pages/llms.txt.ts`, `scripts/llms-full.mjs` |
+| `/index.md`, `/features.md`, `/cli.md`, `/how-pacer-counts.md`, `/claude-prices.md`, `/compare.md`, `/compare/<tool>.md`, `/privacy.md`, `/faq.md`, `/changelog.md` | Each page's Markdown twin, by the same converter, with the Search for Agents pointers as `agent:` front matter | `scripts/llms-full.mjs`, `MARKDOWN_PAGES` |
+| `/.well-known/api-catalog` | RFC 9727 linkset: `/price-history.json`, with `service-desc` (its JSON Schema), `service-doc` (`/claude-prices/` and its twin) and the privacy policy. The appcast is the app's update feed, not an API, and is left out | `apiCatalog` |
+| `/price-history.schema.json` | JSON Schema 2020-12 of the price history, validated against the real file in `test/prices.test.ts` | `public/` |
+| `/.well-known/ai-catalog.json`, `/.well-known/ard.json` | One document at both paths: an AI Catalog (v0.9) of ARD (v0.91) entries for llms.txt, the full text, the skill (with SKILL.md's digest), the API catalog and the price history | `aiCatalog` |
+| `/.well-known/agent-skills/index.json`, `/.well-known/agent-skills/pacer.tar.gz`, `/.well-known/agent-skills/pacer/*` | Agent Skills Discovery (Cloudflare's RFC v0.2.0): the `pacer` skill as an archive (it has supporting files), with the archive's SHA-256, and each file on its own. Copied from `../Skills/pacer` at build time, byte for byte, so it never drifts from the repo. The description adds that the skill needs the app, the Homebrew command, and to install the skill from Pacer's Settings: a copy installed by hand has no `pacer` command beside it, and Pacer's installer then leaves the directory alone (`ClaudeSkillInstaller`, `.foreign`) | `scripts/skill.mjs`, `agentSkillsIndex` |
+| `/.well-known/search`, `/search-index.json` | Search for Agents: `GET ?q=` (or `QUERY` with a text or JSON body) answers with the best sections of the pages, in Markdown. A BM25 pass over the twins' sections, indexed at build time and read through the assets binding once per isolate | `scripts/search.mjs`, `worker/search.ts` |
+| `/.well-known/security.txt` | RFC 9116: GitHub private advisories (on for the repo) and issues; expires a year after each build | `securityTxt` |
+
+Not published, because nothing needs them: OAuth or OpenID metadata
+(`/.well-known/oauth-protected-resource`, `oauth-authorization-server`,
+`openid-configuration`; each a 404, which says no sign-in), an MCP server card,
+an OpenAPI description, commerce protocols.
+
+**Pointers.** `/`, `/cli/` and `/claude-prices/` carry `describedby`
+(llms.txt), `api-catalog`, `service-doc` (`/claude-prices/`), `ard`,
+`ai-catalog` and their twin as `<link>`s, and the Worker sends the same as
+`Link` headers. Every page has `<link rel="alternate" type="text/markdown">`
+and the `agent:` meta tags.
+
+**Headers.** `scripts/llms-full.mjs` appends `_headers` rules for the files it
+writes (`text/markdown` for the twins, `application/linkset+json`,
+`application/ai-catalog+json`, `application/gzip`), with CORS and an hour's
+caching. They are static assets and never run the Worker.
+
+**The Markdown router.** Pages go through `@wave-rf/cloudflare-md-router`
+(0.5.0, pinned, as on room-planner) in `worker/index.ts`, with `vary: true`:
+`Accept: text/markdown` and known LLM crawlers (GPTBot, ClaudeBot,
+PerplexityBot and others) get the twin; everyone else, Googlebot and Bingbot
+included, gets the HTML with a `Link` to it; both carry `Vary: Accept`. A page
+that doesn't exist is the 404 page either way. `worker/md-router.mjs`
+re-exports it for tsc (the package ships TypeScript source). When you add a
+page, add it to `MARKDOWN_PAGES` (and so to `run_worker_first`, through
+`PAGE_ROUTES`; the routing test fails until they agree) and to
+`scripts/llms-full.mjs`'s `PAGES`. A new `/compare/<tool>/` page needs neither:
+`/compare/*` covers it.
+
+**What it costs.** Every page view is now a Worker request, which counts
+against the Workers Free plan's account-wide daily limit that update checks
+share ([The Worker](#the-worker)). Traffic is small (about 15 counted feed
+requests a day), and room-planner already routes its pages through its Worker
+on the same account. If the limit ever comes close, take the page routes out of
+`run_worker_first`: the pages and twins stay up as static assets, only the
+negotiation stops.
+
 ## Analytics
 
 PostHog, the app's own project (owner's decision): web events carry
@@ -138,7 +203,7 @@ Node 22.23.4 or newer (`.nvmrc`), pnpm.
 pnpm install
 pnpm dev              # http://localhost:4321 (no Worker routes)
 pnpm build            # dist/, sitemap, llms-full.txt, CSP hashes, then the feed gate (check-feeds.mjs)
-pnpm test             # the Worker's and the feed gate's tests, inside workerd (@cloudflare/vitest-plugin)
+pnpm test             # the Worker's and the feed gate's tests inside workerd (@cloudflare/vitest-plugin), and test/ in Node
 pnpm check            # astro check, plus the Worker's types
 pnpm build:ci         # test, check, build: what Workers Builds runs
 pnpm dev:worker       # build, then the real Worker + assets on http://localhost:8787 (local only)
@@ -178,10 +243,12 @@ GitHub secrets. Same setup as room-planner's `docs/DEPLOY.md`.
   URLs" (Workers → Routing → workers.dev); left out, `preview_urls` would
   follow `workers_dev`. Previews are public; the Worker must have been deployed
   once first. A preview serves its own branch's `public/appcast.xml`.
-- **Watch paths:** the site also changes when `docs/release-notes/` or
-  `docs/screenshots/` do, so if build watch paths are set, include `site/*`,
-  `docs/release-notes/*` and `docs/screenshots/*`, and nothing else; app-only
-  commits then don't redeploy the site. Every release's feed commit
+- **Watch paths:** the site also changes when `docs/release-notes/`,
+  `docs/screenshots/` or `Skills/pacer/` do (the build reads all three from the
+  repo root, which Workers Builds checks out whole: root directory `site` only
+  sets where the build runs), so if build watch paths are set, include `site/*`,
+  `docs/release-notes/*`, `docs/screenshots/*` and `Skills/pacer/*`, and
+  nothing else; app-only commits then don't redeploy the site. Every release's feed commit
   (`site/public/`) must deploy: `site/*` covers it, and the commit never
   carries `[skip ci]`, which Workers Builds honours.
 - **Git history:** sitemap `<lastmod>` and changelog dates come from git. In a
