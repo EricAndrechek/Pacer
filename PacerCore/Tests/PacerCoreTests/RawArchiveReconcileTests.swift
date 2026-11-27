@@ -159,6 +159,31 @@ struct RawArchiveReconcileTests {
         #expect(after.outputTokens == 289 && after.fingerprint == before.fingerprint)
     }
 
+    @Test("the reconcile view keeps the later append across its read pages")
+    func reconcileViewAcrossPages() throws {
+        let url = try Self.tempURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let archive = try RawArchive(url: url)
+        let stale = Self.breakdown(100, 289, 5_000, 0, 0)
+        let fresh = Self.breakdown(120, 289, 4_000, 0, 0)
+        // Each turn's first copy on the first page, its second on the next.
+        var rows = [Self.row("m1:r1", stale), Self.row("m2:r2", Self.breakdown(10, 412, 800, 0, 0))]
+        for i in 0..<Int(RawArchive.reconcilePageRows) {
+            rows.append(Self.row("f\(i)", Self.breakdown(1, 1, 1, 0, 0)))
+        }
+        rows.append(Self.row("m1:r1", fresh))
+        rows.append(Self.row("m2:r2", Self.breakdown(10, 3, 800, 0, 0)))   // late partial
+        try archive.append(rows)
+
+        let view = try archive.reconcileView(since: nil)
+        #expect(view.count == Int(RawArchive.reconcilePageRows) + 2)
+        let fingerprint = ArchivedTurn.fingerprint(
+            input: 120, cacheRead: 4_000, cc5m: 0, cc1h: 0, sourceCostUSD: nil,
+            sampledAtMicros: ArchiveRow.micros(Self.yesterdayNoon), speed: nil, inferenceGeo: nil)
+        #expect(view["m1:r1"]?.fingerprint == fingerprint)
+        #expect(view["m2:r2"]?.outputTokens == 412)
+    }
+
     /// The collapse's tie-break is `rowid DESC`, so it needs rowid to follow
     /// append order on the vendored engine, including after a checkpoint has
     /// compacted the row groups a collapse thinned out, which renumbers rows.

@@ -369,25 +369,45 @@ final class RawArchive {
     /// can rewrite.
     ///
     /// A plain scan, with the winner picked here, rather than a window
-    /// function or a `GROUP BY` in SQL: on a 1.2M-row archive with one
-    /// thread, the scan took 0.20 s at a 116 MB peak, `GROUP BY` (what this
-    /// replaced, output only) 0.14 s at 252 MB, and `row_number()` 0.46 s at
-    /// 311 MB. Duplicates exist only between an append and its collapse, so
-    /// the winner test almost never runs.
+    /// function in SQL: on a 1.2M-row archive with one thread the scan took
+    /// 0.20 s, `row_number()` 0.46 s (and the output-only `GROUP BY` this
+    /// replaced 0.14 s). Duplicates exist only between an append and its
+    /// collapse, so the winner test almost never runs.
     ///
-    /// The scan returns rows in insertion order: DuckDB preserves it for a
-    /// query without `ORDER BY` (`preserve_insertion_order`, on by default
-    /// and never changed here), and it is `rowid` order, so a later row of
-    /// a key is a later append. That is what lets the map hold no `rowid`.
+    /// Read in `rowid` pages, ascending, and each page returns its rows in
+    /// insertion order (DuckDB preserves it for a query without `ORDER BY`,
+    /// `preserve_insertion_order`, on by default and never changed here),
+    /// which is `rowid` order. So a later row of a key is a later append, and
+    /// the map holds no `rowid`. Paged because `duckdb_query` materializes its
+    /// whole result before the first chunk is fetched: ten columns of every
+    /// row at once raised a full reconcile's peak footprint by 190 MB on a
+    /// real 1.2M-row copy (the streaming result API is deprecated in 1.5).
+    /// A `rowid` range is pushed into the scan: 15 ms a page.
     func reconcileView(since: Date?) throws -> [String: ArchivedTurn] {
-        var result = duckdb_result()
         let filter = since.map {
             " AND sampled_at >= make_timestamp(\(ArchiveRow.micros($0)))"
         } ?? ""
         // Sized up front: growing a million-entry map doubles it, and the
-        // old and new storage coexist while it does (measured on a full
-        // reconcile: +84 MB peak against the output-only map, unreserved).
-        let rows = try scalar("SELECT COUNT(*) FROM turn WHERE dedup_key IS NOT NULL" + filter)
+        // old and new storage coexist while it does.
+        var out: [String: ArchivedTurn] = [:]
+        out.reserveCapacity(Int(try scalar(
+            "SELECT COUNT(*) FROM turn WHERE dedup_key IS NOT NULL" + filter)))
+        let last = try scalar("SELECT COALESCE(MAX(rowid), -1) FROM turn")
+        var low: Int64 = 0
+        while low <= last {
+            let high = low + Self.reconcilePageRows
+            try readReconcilePage(
+                "\(filter) AND rowid >= \(low) AND rowid < \(high)", into: &out)
+            low = high
+        }
+        return out
+    }
+
+    /// About one row group.
+    static let reconcilePageRows: Int64 = 131_072
+
+    private func readReconcilePage(_ filter: String, into out: inout [String: ArchivedTurn]) throws {
+        var result = duckdb_result()
         // Column order is what the reader below indexes.
         let sql = """
             SELECT dedup_key, output_tokens, input_tokens, cache_read,
@@ -402,8 +422,6 @@ final class RawArchive {
                 duckdb_result_error(&result).map { String(cString: $0) } ?? "unknown")
         }
 
-        var out: [String: ArchivedTurn] = [:]
-        out.reserveCapacity(Int(rows))
         while let chunk = duckdb_fetch_chunk(result) {
             defer { var c: duckdb_data_chunk? = chunk; duckdb_destroy_data_chunk(&c) }
             let count = Int(duckdb_data_chunk_get_size(chunk))
@@ -423,7 +441,7 @@ final class RawArchive {
                 else { continue }
                 let output = int64(1, row)
                 // `collapseOrder`, in Swift: most output, then the later
-                // append, which is the later row of the scan.
+                // append, which is the later row read.
                 if let kept = out[key], kept.outputTokens > output { continue }
                 let speed = Self.text(data[8], row, isNull: isNull(8, row))
                 let geo = Self.text(data[9], row, isNull: isNull(9, row))
@@ -442,7 +460,6 @@ final class RawArchive {
                     recorded: recorded)
             }
         }
-        return out
     }
 
     /// A VARCHAR value out of a chunk's vector data, or nil when NULL.
