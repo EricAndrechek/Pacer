@@ -264,13 +264,34 @@ failure triggers never converged.
   the collapse keeps: its output, plus a fingerprint of every other field the
   store can rewrite (`SamplePersister.apply`: input, cache read, both
   cache-creation tiers, source cost, speed, `inference_geo`) and
-  `sampled_at`. A store row that differs is re-appended. A NULL `speed` or
-  `inference_geo` is "not recorded" (rows from before #352) and matches
-  anything, as `ArchiveRoundTrip` treats it. On a real 1.2M-turn archive
-  544k rows have a NULL `inference_geo` the store has a value for (403k for
-  `speed`), so comparing NULL as nil would re-append 45% of the archive. A
+  `sampled_at`. A store row that differs is re-appended, in batches of 5,000
+  as the walk goes (not capped per pass: the walk costs the same whatever it
+  finds, so a cap would repeat it), and the collapse runs once after.
+  A NULL `speed` or `inference_geo` on a row with no `account_id` is "not
+  recorded" (rows from before #352) and matches anything, as
+  `ArchiveRoundTrip` treats it. On a real 1.2M-turn archive 544k rows have a
+  NULL `inference_geo` the store has a value for (403k for `speed`), so
+  comparing NULL as nil would re-append 45% of the archive. `account_id`
+  arrived with those columns, and on that archive every row with one has
+  speed and region set (198,032 rows) and every row without one has neither
+  (1,025,217), so beside an account a NULL is a recorded nil and compared. A
   key the archive holds with more output than the store is counted, not
   re-appended: no append could win.
+- **Store duplicates.** The store can hold one key twice (residue until
+  `repairDuplicateSamples` runs). At equal output only the first store row in
+  the walk's order (`sampledAt`, then row id) is compared: the one the repair
+  keeps. Comparing both re-appended whichever differed from the archive's
+  copy, every pass, forever. A later row with more output is still an
+  upgrade.
+- **Restoring the store from a backup now rolls the archive back.** Store
+  wins (`RawArchive`'s contract), and the reconcile now acts on it at equal
+  output: a restored row with the same output but its pre-patch input, cache,
+  cost, speed or region is re-archived as the store holds it, and the collapse
+  supersedes the archive's patched copy. The output-only reconcile left that
+  copy alone. This is a new way to lose a patched value; it comes back only
+  from a re-read of transcripts that still exist (a `currentScanVersion`
+  bump). A restored row with less output than the archive is still left
+  (`ahead`), so streamed output is never rolled back.
 - **On real data.** A copy of the maintainer's store and archive (not the Mac
   in #433) had no key differing at equal output, and a full pass found only
   the 56 turns written between the two copies. The same copy with 1,218
