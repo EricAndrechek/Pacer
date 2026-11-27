@@ -137,6 +137,11 @@ export function htmlToMarkdown(html, origin) {
     .replace(/<\/(p|div|section|figure|figcaption|ul|ol|article|header|li|details|dd|dt)>/gi, '\n')
     .replace(/<(p|div|section|figure|figcaption|ul|ol|article|header|details|dd|dt)\b[^>]*>/gi, '\n')
     .replace(/<br\s*\/?>/gi, '\n')
+    // Inline elements a page lays out as blocks (a date beside a name, one
+    // line per change) are words of their own: a closing tag directly
+    // followed by another tag would otherwise glue two sentences together
+    // ("(5 min, 1 h).Fast mode").
+    .replace(/<\/(span|time|small)>(?=<)/gi, '</$1> ')
     .replace(/<[^>]+>/g, '');
 
   return decode(s)

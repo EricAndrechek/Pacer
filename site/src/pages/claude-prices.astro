@@ -125,12 +125,12 @@ const dataset = {
           changes.map((c) => (
             <li>
               <time datetime={day(c.at)}>{day(c.at)}</time>
-              <div>
+              <span class="what">
                 <strong>{c.name}</strong>
                 {c.lines.map((l) => (
                   <span class="line">{l}</span>
                 ))}
-              </div>
+              </span>
             </li>
           ))
         }
@@ -257,8 +257,11 @@ const dataset = {
     color: var(--ink-2);
     font-variant-numeric: tabular-nums;
   }
+  .changes .what strong,
   .changes .line {
     display: block;
+  }
+  .changes .line {
     color: var(--ink-2);
   }
   .facts {
