@@ -29,6 +29,7 @@
   "devDependencies": {
     "@astrojs/check": "0.9.12",
     "@cloudflare/vitest-plugin": "1.9.0",
+    "ajv": "8.20.0",
     "playwright": "1.65.1",
     "sharp": "0.35.5",
     "typescript": "^6.0.3",

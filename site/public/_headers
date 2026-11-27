@@ -36,6 +36,8 @@
   Content-Type: text/plain; charset=utf-8
 /llms-full.txt
   Content-Type: text/plain; charset=utf-8
+# The Markdown twins and the other discovery files (/.well-known/*, /search-index.json) get
+# their rules appended to dist/_headers by scripts/llms-full.mjs.
 
 # The update feed (Sparkle reads it: SUFeedURL) and the dated price history
 # (CuratedPriceHistory.remoteURL), both static files written by the release
@@ -49,6 +51,11 @@
 /price-history.json
   Content-Type: application/json; charset=utf-8
   Cache-Control: public, max-age=60, stale-while-revalidate=300
+  Access-Control-Allow-Origin: *
+# The price history's JSON Schema (the API's service-desc: /.well-known/api-catalog).
+/price-history.schema.json
+  Content-Type: application/schema+json
+  Cache-Control: public, max-age=3600
   Access-Control-Allow-Origin: *
 
 # workers.dev (every branch preview, and production's workers.dev address whenever

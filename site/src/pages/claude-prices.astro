@@ -1,0 +1,272 @@
+---
+import Base from '../layouts/Base.astro';
+import { PATHS } from '../../scripts/discovery.mjs';
+import { currentPrices, day, loadPriceList, priceChanges, usd, type Rates } from '../lib/prices';
+
+// Built from public/price-history.json, the file every Pacer reads
+// (src/lib/prices.ts says how a price is chosen). The catalog sync commits it
+// to main every six hours when a price moves, and each commit redeploys the
+// site, so this page is never more than one deploy behind the app.
+const now = Date.now();
+const list = loadPriceList(now);
+const current = currentPrices(list, now);
+const changes = priceChanges(list, now);
+const site = Astro.site ?? new URL(Astro.url.origin);
+const abs = (path: string) => new URL(path, site).toString();
+const dataUrl = abs(PATHS.priceHistory);
+const schemaUrl = abs(PATHS.priceSchema);
+const checked = list.checkedAt ?? list.asOf;
+const checkedText = `${new Date(checked).toISOString().slice(0, 16).replace('T', ' ')} UTC`;
+
+const COLUMNS: [keyof Rates, string][] = [
+  ['input', 'Input'],
+  ['output', 'Output'],
+  ['cacheRead', 'Cache reads'],
+  ['cacheWrite5m', 'Cache writes, 5 min'],
+  ['cacheWrite1h', 'Cache writes, 1 h'],
+];
+const fast = current.filter((c) => c.fastMultiplier);
+const regional = current.filter((c) => c.regionalMultiplier && c.regionalMultiplier !== 1);
+const regionalValues = [...new Set(regional.map((c) => c.regionalMultiplier))];
+const names = (cs: typeof current) => cs.map((c) => c.name).join(', ');
+const curl = `curl -s ${dataUrl} \\\n  | jq '.records[] | select(.model == "claude-opus-5-5" and .effectiveTo == null)'`;
+
+const dataset = {
+  '@type': 'Dataset',
+  '@id': `${abs('/claude-prices/')}#dataset`,
+  name: 'Claude API price history',
+  description:
+    'Dated per-million-token prices for Claude models (input, output, cache reads, 5-minute and 1-hour cache writes, long-context tiers), as Pacer prices Claude Code usage.',
+  url: abs('/claude-prices/'),
+  isAccessibleForFree: true,
+  dateModified: new Date(checked).toISOString(),
+  distribution: [{ '@type': 'DataDownload', encodingFormat: 'application/json', contentUrl: dataUrl }],
+};
+---
+
+<Base
+  title="Claude API prices per million tokens, with history | Pacer"
+  description="Current Claude prices per million tokens for every model (input, output, cache reads, 5-minute and 1-hour cache writes, long-context tiers), when each took effect, and every change since. Also as JSON."
+  jsonLd={[dataset]}
+>
+  <header class="wrap page-head">
+    <h1>Claude API prices</h1>
+    <p class="lede">
+      What each Claude model costs per million tokens on the Claude API, when that price took effect, and every change
+      before it. These are the prices Pacer uses.
+    </p>
+    <p class="small muted">Price list checked {checkedText}.</p>
+  </header>
+
+  <section class="wrap" aria-labelledby="now">
+    <h2 id="now" class="sr-only">Current prices</h2>
+    <div class="scroll">
+      <table class="prices">
+        <caption class="sr-only">Current prices, US dollars per million tokens</caption>
+        <thead>
+          <tr>
+            <th scope="col">Model</th>
+            {COLUMNS.map(([, label]) => <th scope="col" class="num">{label}</th>)}
+            <th scope="col">Since</th>
+          </tr>
+        </thead>
+        <tbody>
+          {
+            current.map((c) =>
+              c.tiers.map((t) => (
+                <tr class={t.tier ? 'tier' : undefined}>
+                  {t.tier ? (
+                    <th scope="row">Prompts over {t.tier / 1000}k tokens</th>
+                  ) : (
+                    <th scope="row">
+                      {c.name} <code>{c.model}</code>
+                    </th>
+                  )}
+                  {COLUMNS.map(([k]) => (
+                    <td class="num">{usd(t.record.rates[k])}</td>
+                  ))}
+                  <td>{t.tier ? '' : <time datetime={day(c.since)}>{day(c.since)}</time>}</td>
+                </tr>
+              )),
+            )
+          }
+        </tbody>
+      </table>
+    </div>
+    <div class="prose notes small">
+      <p>US dollars per million tokens. A long-context row prices the whole request once its prompt (input, cache reads and cache writes) passes the threshold.</p>
+      {fast.length > 0 && <p>Fast mode costs {[...new Set(fast.map((c) => c.fastMultiplier))].join(' or ')}× the rates above on {names(fast)}.</p>}
+      {
+        regional.length > 0 && (
+          <p>
+            US-only data residency costs {regionalValues.join(' or ')}× on {names(regional)}.
+          </p>
+        )
+      }
+    </div>
+  </section>
+
+  <div class="wrap prose">
+    <section aria-labelledby="history">
+      <h2 id="history">Price changes</h2>
+      <p>Newest first. A model's first entry is the price it was listed at.</p>
+      <ol class="changes">
+        {
+          changes.map((c) => (
+            <li>
+              <time datetime={day(c.at)}>{day(c.at)}</time>
+              <div>
+                <strong>{c.name}</strong>
+                {c.lines.map((l) => (
+                  <span class="line">{l}</span>
+                ))}
+              </div>
+            </li>
+          ))
+        }
+      </ol>
+    </section>
+
+    <section aria-labelledby="where">
+      <h2 id="where">Where the prices come from</h2>
+      <p>
+        From Anthropic's published pricing, through public price catalogs, curated by Pacer. Pacer is not affiliated with
+        Anthropic: for a bill, <a href="https://platform.claude.com/docs/en/about-claude/pricing">Anthropic's pricing page</a>
+        is the authority.
+      </p>
+      <ul>
+        <li>
+          <strong>Reviewed records</strong> are checked by hand against Anthropic's pricing page and release notes, with the
+          source of each. They hold what catalogs can't: launch prices, introductory rates, changes over time.
+        </li>
+        <li>
+          <strong>The price list</strong> merges three public catalogs (LiteLLM, models.dev and Catwalk) every six hours.
+          A change opens a new dated record and closes the old one, so every Mac prices it from the same moment.
+        </li>
+        <li>
+          <strong>Which one counts:</strong> a reviewed record wins, unless the list saw a different price after the last
+          review. A price change never rewrites what you already spent.
+        </li>
+      </ul>
+      <p class="small muted">
+        This page shows the Claude API's own prices. The file also carries Amazon Bedrock, Google Vertex AI and Microsoft
+        Foundry prices.
+      </p>
+    </section>
+
+    <section aria-labelledby="api">
+      <h2 id="api">Use the data</h2>
+      <p>The whole history is one public JSON file, the same one the app reads. No key, no sign-up.</p>
+      <table class="facts">
+        <tbody>
+          <tr><th scope="row">URL</th><td><a href={PATHS.priceHistory}>{dataUrl}</a></td></tr>
+          <tr><th scope="row">Schema</th><td><a href={PATHS.priceSchema}>{schemaUrl}</a> (JSON Schema 2020-12)</td></tr>
+          <tr><th scope="row">Updates</th><td>The price list every six hours, when a price moves; reviewed records with corrections and releases.</td></tr>
+          <tr><th scope="row">CORS</th><td><code>Access-Control-Allow-Origin: *</code>, so a web page can read it.</td></tr>
+          <tr><th scope="row">Caching</th><td>An ETag and <code>max-age=60</code>. Send <code>If-None-Match</code>, and fetch it a few times a day at most: it changes at most every six hours.</td></tr>
+        </tbody>
+      </table>
+      <p>Today's Opus 5.5 rates, for example:</p>
+      <pre>{curl}</pre>
+      <p>
+        Each record has a model, a provider and region, <code>effectiveFrom</code> and <code>effectiveTo</code> (null while
+        in effect), and <code>perMTok</code> rates. Reviewed records are in <code>records</code>; the price list is in
+        <code>catalog.records</code>. To pick the price for a moment, take the records whose window holds it and apply the
+        rule above; the schema spells it out.
+      </p>
+    </section>
+  </div>
+</Base>
+
+<style>
+  .scroll {
+    overflow-x: auto;
+    margin-inline: calc(-1 * var(--gutter));
+    padding-inline: var(--gutter);
+  }
+  .prices {
+    min-width: 760px;
+  }
+  .prices th[scope='row'] {
+    font-weight: 700;
+    white-space: nowrap;
+  }
+  .prices th[scope='row'] code {
+    font-size: 0.78em;
+    font-weight: 400;
+    margin-left: 0.35em;
+    color: var(--ink-3);
+    background: none;
+    padding: 0;
+  }
+  .prices .tier th[scope='row'] {
+    font-weight: 500;
+    color: var(--ink-2);
+    padding-left: 1.2em;
+  }
+  .prices .tier th,
+  .prices .tier td {
+    border-top: 0;
+    padding-top: 0.2em;
+  }
+  .prices tr:has(+ .tier) th,
+  .prices tr:has(+ .tier) td {
+    border-bottom: 0;
+  }
+  .num {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  td:last-child {
+    white-space: nowrap;
+    color: var(--ink-2);
+    padding-left: 1.2em;
+  }
+  .notes {
+    margin-top: 1rem;
+    color: var(--ink-2);
+  }
+  .notes p {
+    margin: 0 0 0.4em;
+  }
+  .changes {
+    list-style: none;
+    padding: 0;
+  }
+  .changes li {
+    display: grid;
+    grid-template-columns: 7.5em minmax(0, 1fr);
+    gap: 0.4em 1em;
+    padding-block: 0.7em;
+    border-bottom: 1px solid var(--line);
+  }
+  .changes li + li {
+    margin-top: 0;
+  }
+  .changes time {
+    color: var(--ink-2);
+    font-variant-numeric: tabular-nums;
+  }
+  .changes .line {
+    display: block;
+    color: var(--ink-2);
+  }
+  .facts th[scope='row'] {
+    white-space: nowrap;
+    width: 1%;
+    padding-right: 1.5em;
+  }
+  .facts td {
+    overflow-wrap: anywhere;
+  }
+  pre {
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  @media (max-width: 560px) {
+    .changes li {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+</style>
