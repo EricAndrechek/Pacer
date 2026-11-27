@@ -65,11 +65,12 @@ t() {
   # The cap tests below assert a 90% ceiling; AUTO=1 leaves WEEK_MAX at its
   # default (auto) for the weekly-burn tests.
   # NO5_TRUST=0 unless NO5T is set: most scenarios describe an account already
-  # known to have no 5h window. NO5SEED="<id> <epoch> …" seeds the on-disk
-  # first-seen record.
+  # known to have no 5h window. NO5SEED="<id> <first> <last> …" seeds the
+  # on-disk record; NO5RAW writes it verbatim (printf %b).
   { [ -n "${AUTO:-}" ] || echo 'WEEK_MAX=90'; echo "NO5_TRUST=${NO5T:-0}"; printf '%s\n' "$conf"; } >"$d/conf"
   [ -n "$last" ] && printf '%s\n' "$last" >"$d/state/last_switch"
-  [ -n "${NO5SEED:-}" ] && printf '%s %s\n' $NO5SEED >"$d/state/no5.since"
+  [ -n "${NO5SEED:-}" ] && printf '%s %s %s\n' $NO5SEED >"$d/state/no5.since"
+  [ -n "${NO5RAW:-}" ] && printf '%b' "$NO5RAW" >"$d/state/no5.since"
   out=$(PATH="$T/bin:$PATH" FAKE_DIR=$T FAKE_ACT=$act FAKE_ACCTS=$accts \
         ROTATE_CONF=$d/conf ROTATE_STATE=$d/state PACER_API=${API:-http://127.0.0.1:1} \
         BURN_OVERRIDE=${BURN:-} BURN7_OVERRIDE=${BURN7:-} "$ROT" dry 2>&1)
@@ -223,13 +224,21 @@ t "10m'' a stale 5h reading with a passed reset is not shown as a live window" '
 # a read that merely drops a 5h-spent account's five_hour must not make it a target.
 NO5T=900 t "10n a no-5h target seen just now is not a target" '^[0-9:]{8} HOLD 1 at 97%' \
   1 "1:97:100:40:ok 3:null:-:67:ok $SPENT" 'EARLY=0' "" ' 3: 5h -% .* 7d 67%'
-NO5T=900 NO5SEED="acc3acc0 $(( NOW - 1200 ))" t "10n' the same, no 5h for 20 min: a target" 'WOULD SWITCH → 3 .*\[limit: 1 at 97%' \
+NO5T=900 NO5SEED="acc3acc0 $(( NOW - 1200 )) $(( NOW - 60 ))" t "10n' the same, no 5h for 20 min: a target" 'WOULD SWITCH → 3 .*\[limit: 1 at 97%' \
   1 "1:97:100:40:ok 3:null:-:67:ok $SPENT" 'EARLY=0' "" ' 3: 5h none 7d 67%'
 NO5T=900 t "10n'' an active account seen with no 5h just now: hold, say why" \
   '^[0-9:]{8} WARN no 5h window reported for the active account 1 yet; holding until that has lasted 15 min' \
   1 "1:null:-:40:ok 2:0:-:10:ok"
-NO5T=900 NO5SEED="acc1acc0 $(( NOW - 1200 ))" t "10n''' the active one with no 5h for 20 min: judged on 7d" '^[0-9:]{8} no switch: 1 at 0%' \
+NO5T=900 NO5SEED="acc1acc0 $(( NOW - 1200 )) $(( NOW - 60 ))" t "10n''' the active one with no 5h for 20 min: judged on 7d" '^[0-9:]{8} no switch: 1 at 0%' \
   1 "1:null:-:40:ok 2:0:-:10:ok" "" "" ' 1: 5h none 7d 40%'
+# The run must be unbroken: a record last seen 20 min ago (a stopped controller,
+# a cswap outage) is dropped, so the 5h-spent target of 10n stays untrusted.
+NO5T=900 NO5SEED="acc3acc0 $(( NOW - 7200 )) $(( NOW - 1200 ))" t "10n'''' a stale record starts the run again: not a target" '^[0-9:]{8} HOLD 1 at 97%' \
+  1 "1:97:100:40:ok 3:null:-:67:ok $SPENT" 'EARLY=0' "" ' 3: 5h -% .* 7d 67%'
+NO5T=900 NO5RAW="garbage\nacc3acc0 notanumber $NOW\nacc3acc0 $(( NOW - 1200 )) $NOW extra\n\n" t "10n''''' a corrupt record is ignored: not a target" '^[0-9:]{8} HOLD 1 at 97%' \
+  1 "1:97:100:40:ok 3:null:-:67:ok $SPENT" 'EARLY=0'
+NO5T=900 NO5RAW="acc3acc0 $(( NOW - 1200 ))\n" t "10n'''''' the old two-field record is ignored" '^[0-9:]{8} HOLD 1 at 97%' \
+  1 "1:97:100:40:ok 3:null:-:67:ok $SPENT" 'EARLY=0'
 # A leading zero in a config number is decimal, not octal ("value too great for base").
 AUTO=1 t "10o WEEK_RELEASE_1=08 / WEEK_MAX_1=09: read as 8 and 9" 'WOULD SWITCH → 2 .*\[7-day: 1 at 92%' \
   1 "1:null:-:92:ok:2000 2:null:-:10:ok" 'WEEK_MAX_1=09 WEEK_RELEASE_1=08' "" ' 1: 5h none 7d 92% \(lim 9\)'

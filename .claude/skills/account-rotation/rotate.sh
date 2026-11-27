@@ -97,7 +97,8 @@ API=${PACER_API:-http://127.0.0.1:7223}
 load_conf() {
   local -A def=([EARLY]=2 [STAGGER]=9000 [MIN_SWITCH_GAP]=300 [BRIDGE_MIN_PTS]=6
     [BRIDGE_MIN_MINUTES]=20 [BURN_UNKNOWN]=40 [EXPIRE_WINDOW]=2700 [EXPIRE_MIN_PTS]=8
-    [WEEK_ROOM_MIN]=1 [RESERVE_WEEK_MAX]=97 [STALE_AFTER]=2100 [STALE_BURN]=8 [NO5_TRUST]=900)
+    [WEEK_ROOM_MIN]=1 [RESERVE_WEEK_MAX]=97 [STALE_AFTER]=2100 [STALE_BURN]=8 [NO5_TRUST]=900
+    [NO5_STALE]=600)
   local k bad=""
   for k in "${!def[@]}"; do printf -v "$k" %s "${def[$k]}"; done
   WEEK_MAX=auto; EXCLUDE=""; RESERVE_SLOT=""
@@ -365,15 +366,26 @@ gap_warn_due() {
 last_status=0; hold_since=0; hold_said=0; hold_burn=0; rsv_err=0
 # Accounts with no 5h limit at all (see below), from the last fresh cswap read.
 cswap_fresh=0
-declare -A NO5=() NO5_SINCE=() PREV_STAT=() LEXP_SAID=() BAD_SINCE=() BAD_SAID=() STALE_SAID=()
+declare -A NO5=() NO5_SINCE=() NO5_SEEN=() PREV_STAT=() LEXP_SAID=() BAD_SINCE=() BAD_SAID=() STALE_SAID=()
+# no5.since: "<account> <first seen> <last seen>" per line. A run of no-5h reads
+# counts only while it is unbroken: an entry whose last sighting is more than
+# NO5_STALE old (the controller stopped, cswap silent, a read with neither
+# figure) is dropped, or a 5h window that came back and was spent in the gap
+# would look trusted on the first read that drops it again (#488 review).
+# Anything malformed, or the older two-field form, is ignored.
 if [ -f "$NO5FILE" ]; then
-  while read -r k v; do [ -n "$k" ] && [[ $v =~ ^[0-9]+$ ]] && NO5_SINCE[$k]=$v; done <"$NO5FILE"
+  t0=$(date +%s)
+  while read -r k v w rest; do
+    [ -n "$k" ] && [ -z "$rest" ] && [[ $v =~ ^[0-9]+$ ]] && [[ ${w:-} =~ ^[0-9]+$ ]] || continue
+    [ $(( t0 - 10#$w )) -le "$NO5_STALE" ] && [ "$(( 10#$v ))" -le "$(( 10#$w ))" ] || continue
+    NO5_SINCE[$k]=$(( 10#$v )); NO5_SEEN[$k]=$(( 10#$w ))
+  done <"$NO5FILE"
 fi
 save_no5() {
   [ "$DRY" = 1 ] && return 0
   local k
-  for k in "${!NO5_SINCE[@]}"; do printf '%s %s\n' "$k" "${NO5_SINCE[$k]}"; done >"$NO5FILE.tmp.$$" \
-    && mv -f "$NO5FILE.tmp.$$" "$NO5FILE"
+  for k in "${!NO5_SINCE[@]}"; do printf '%s %s %s\n' "$k" "${NO5_SINCE[$k]}" "${NO5_SEEN[$k]:-${NO5_SINCE[$k]}}"; done \
+    >"$NO5FILE.tmp.$$" && mv -f "$NO5FILE.tmp.$$" "$NO5FILE"
 }
 # The accounts this loop's decision pass would switch to, for the heartbeat
 # below; empty when the pass did not run.
@@ -487,10 +499,18 @@ while :; do
     for s in "${SLOTS[@]}"; do
       sid=${ID[$s]}
       if [ -z "${U5[$sid]:-}" ] && [ -n "${U7[$sid]:-}" ]; then
-        [ -n "${NO5_SINCE[$sid]:-}" ] || { NO5_SINCE[$sid]=$now; no5_dirty=1; }
+        # A run broken for more than NO5_STALE starts again from now.
+        if [ -z "${NO5_SINCE[$sid]:-}" ] || [ $(( now - ${NO5_SEEN[$sid]:-0} )) -gt "$NO5_STALE" ]; then
+          NO5_SINCE[$sid]=$now
+        fi
+        NO5_SEEN[$sid]=$now; no5_dirty=1
         [ $(( now - NO5_SINCE[$sid] )) -ge "$NO5_TRUST" ] && NO5[$sid]=1
-      elif [ -n "${U5[$sid]:-}" ] && [ -n "${NO5_SINCE[$sid]:-}" ]; then
-        unset 'NO5_SINCE[$sid]'; no5_dirty=1
+      elif [ -n "${NO5_SINCE[$sid]:-}" ]; then
+        # A 5h figure ends the run; a read with neither figure ends it once
+        # the last sighting is stale.
+        if [ -n "${U5[$sid]:-}" ] || [ $(( now - ${NO5_SEEN[$sid]:-0} )) -gt "$NO5_STALE" ]; then
+          unset 'NO5_SINCE[$sid]' 'NO5_SEEN[$sid]'; no5_dirty=1
+        fi
       fi
     done
     [ "$no5_dirty" = 1 ] && save_no5
