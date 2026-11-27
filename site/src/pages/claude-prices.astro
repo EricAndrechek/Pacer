@@ -287,5 +287,16 @@ const dataset = {
     .changes li {
       grid-template-columns: minmax(0, 1fr);
     }
+    /* On a phone the model column stays in view while the prices scroll under it. */
+    .prices th[scope='row'] {
+      position: sticky;
+      left: 0;
+      z-index: 1;
+      background: var(--paper);
+    }
+    .prices th[scope='row'] code {
+      display: table;
+      margin: 0.15em 0 0;
+    }
   }
 </style>

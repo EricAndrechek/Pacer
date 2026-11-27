@@ -22,7 +22,7 @@ const markClass = (c: Cell) => (c.mark ? `mark ${c.mark}` : 'mark');
     </p>
   </header>
 
-  <section class="wrap wide" aria-labelledby="table-title">
+  <section class="wrap" aria-labelledby="table-title">
     <h2 id="table-title" class="sr-only">Every tool, side by side</h2>
     <div class="hscroll" tabindex="0" role="region" aria-labelledby="table-title">
       <table class="hub">
@@ -108,20 +108,18 @@ const markClass = (c: Cell) => (c.mark ? `mark ${c.mark}` : 'mark');
 </script>
 
 <style>
-  /* Nine columns: wider than the reading column, so the whole table shows at
-     1280 px; below that it scrolls, with the row labels kept in view. */
-  .wide {
-    max-width: 1400px;
-  }
+  /* Nine columns sized to fit the page's 1100 px column, so the whole table
+     shows from about 1180 px wide; below that it scrolls, with the row labels
+     kept in view and the scroll cue (.hscroll). */
   .hub {
-    min-width: 1100px;
-    font-size: 0.9rem;
+    min-width: 1040px;
+    font-size: 0.86rem;
   }
   .hub th[scope='row'] {
     position: sticky;
     left: 0;
     background: var(--paper);
-    min-width: 13em;
+    min-width: 10.5em;
     font-weight: 650;
     z-index: 1;
   }
@@ -133,7 +131,8 @@ const markClass = (c: Cell) => (c.mark ? `mark ${c.mark}` : 'mark');
     color: var(--ink);
   }
   .hub td {
-    min-width: 7.5em;
+    min-width: 6.6em;
+    padding-right: 0.7em;
   }
   .hub td.pacer {
     background: color-mix(in srgb, var(--pace) 7%, transparent);
