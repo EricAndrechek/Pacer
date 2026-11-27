@@ -374,14 +374,23 @@ final class RawArchive {
     /// replaced, output only) 0.14 s at 252 MB, and `row_number()` 0.46 s at
     /// 311 MB. Duplicates exist only between an append and its collapse, so
     /// the winner test almost never runs.
+    ///
+    /// The scan returns rows in insertion order: DuckDB preserves it for a
+    /// query without `ORDER BY` (`preserve_insertion_order`, on by default
+    /// and never changed here), and it is `rowid` order, so a later row of
+    /// a key is a later append. That is what lets the map hold no `rowid`.
     func reconcileView(since: Date?) throws -> [String: ArchivedTurn] {
         var result = duckdb_result()
         let filter = since.map {
             " AND sampled_at >= make_timestamp(\(ArchiveRow.micros($0)))"
         } ?? ""
+        // Sized up front: growing a million-entry map doubles it, and the
+        // old and new storage coexist while it does (measured on a full
+        // reconcile: +84 MB peak against the output-only map, unreserved).
+        let rows = try scalar("SELECT COUNT(*) FROM turn WHERE dedup_key IS NOT NULL" + filter)
         // Column order is what the reader below indexes.
         let sql = """
-            SELECT dedup_key, rowid, output_tokens, input_tokens, cache_read,
+            SELECT dedup_key, output_tokens, input_tokens, cache_read,
                    cache_creation_5m, cache_creation_1h, source_cost,
                    CAST(EPOCH_US(sampled_at) AS BIGINT), speed, inference_geo
             FROM turn WHERE dedup_key IS NOT NULL\(filter)
@@ -394,11 +403,12 @@ final class RawArchive {
         }
 
         var out: [String: ArchivedTurn] = [:]
+        out.reserveCapacity(Int(rows))
         while let chunk = duckdb_fetch_chunk(result) {
             defer { var c: duckdb_data_chunk? = chunk; duckdb_destroy_data_chunk(&c) }
             let count = Int(duckdb_data_chunk_get_size(chunk))
             guard count > 0 else { continue }
-            let vectors = (0..<11).map { duckdb_data_chunk_get_vector(chunk, UInt64($0)) }
+            let vectors = (0..<10).map { duckdb_data_chunk_get_vector(chunk, UInt64($0)) }
             let data = vectors.map { duckdb_vector_get_data($0) }
             let validity = vectors.map { duckdb_vector_get_validity($0) }
             func isNull(_ col: Int, _ row: Int) -> Bool {
@@ -411,28 +421,25 @@ final class RawArchive {
             for row in 0..<count {
                 guard let key = Self.text(data[0], row, isNull: isNull(0, row)), !key.isEmpty
                 else { continue }
-                let rowid = int64(1, row)
-                let output = int64(2, row)
-                // `collapseOrder`, in Swift: most output, then the later append.
-                if let kept = out[key],
-                   kept.outputTokens > output || (kept.outputTokens == output && kept.rowid > rowid) {
-                    continue
-                }
-                let speed = Self.text(data[9], row, isNull: isNull(9, row))
-                let geo = Self.text(data[10], row, isNull: isNull(10, row))
+                let output = int64(1, row)
+                // `collapseOrder`, in Swift: most output, then the later
+                // append, which is the later row of the scan.
+                if let kept = out[key], kept.outputTokens > output { continue }
+                let speed = Self.text(data[8], row, isNull: isNull(8, row))
+                let geo = Self.text(data[9], row, isNull: isNull(9, row))
                 let recorded: ArchivedTurn.Recorded = [
                     speed == nil ? [] : .speed, geo == nil ? [] : .inferenceGeo,
                 ]
                 out[key] = ArchivedTurn(
                     outputTokens: output,
                     fingerprint: ArchivedTurn.fingerprint(
-                        input: int64(3, row), cacheRead: int64(4, row),
-                        cc5m: int64(5, row), cc1h: int64(6, row),
-                        sourceCostUSD: isNull(7, row)
-                            ? nil : data[7]?.assumingMemoryBound(to: Double.self)[row],
-                        sampledAtMicros: int64(8, row),
+                        input: int64(2, row), cacheRead: int64(3, row),
+                        cc5m: int64(4, row), cc1h: int64(5, row),
+                        sourceCostUSD: isNull(6, row)
+                            ? nil : data[6]?.assumingMemoryBound(to: Double.self)[row],
+                        sampledAtMicros: int64(7, row),
                         speed: speed, inferenceGeo: geo),
-                    recorded: recorded, rowid: rowid)
+                    recorded: recorded)
             }
         }
         return out
@@ -610,8 +617,8 @@ struct ArchiveRow: Sendable {
 /// be caught here instead.
 ///
 /// A fingerprint rather than the values: a full reconcile holds one of these
-/// per archived turn (1.2M on a real archive), at 32 bytes each where the
-/// values would take about 104 (the output-only reconcile held 8). `Hasher` is
+/// per archived turn (1.2M on a real archive), at 24 bytes each where the
+/// values would take about 96 (the output-only reconcile held 8). `Hasher` is
 /// seeded per process, which is enough: both sides are hashed by the same
 /// process, in the same pass, and a collision between two different rows of
 /// one turn is a 1-in-2^64 chance of leaving one stale.
@@ -645,8 +652,6 @@ struct ArchivedTurn: Sendable {
     let outputTokens: Int64
     let fingerprint: Int
     let recorded: Recorded
-    /// For picking the collapse's copy while the view is built.
-    let rowid: Int64
 
     /// What the reconcile does with a store row of this turn.
     func verdict(storeOutput: Int64, storeFingerprint: () -> Int) -> Verdict {

@@ -279,8 +279,10 @@ failure triggers never converged.
 - **Cost.** The view is a plain scan; the collapse's winner is picked in Swift.
   On a 1.2M-row archive, one thread: 0.20 s at a 116 MB peak, against 0.14 s
   at 252 MB for the old `GROUP BY` and 0.46 s at 311 MB for `row_number()`.
-  The map holds 32 bytes per key where it held 8. The store side is the same
-  walk, hashing fields the row already holds.
+  The map holds 24 bytes per key where it held 8, and is sized up front. A full
+  pass over a real 1.2M-row copy: 64 s of CPU against 59 s, 550 MB peak against
+  466 MB before the map was sized (the doubling's two copies coexist). The
+  store side is the same walk, hashing fields the row already holds.
 - `ArchiveImporter` and `IngestParityTests` are untouched: the collapse orders
   archive rows, which are written from the store, not transcript lines.
 
