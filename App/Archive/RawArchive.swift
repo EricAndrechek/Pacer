@@ -173,7 +173,7 @@ final class RawArchive {
 
         for row in rows {
             duckdb_append_timestamp(appender, duckdb_timestamp(
-                micros: Int64(row.sampledAt.timeIntervalSince1970 * 1_000_000)))
+                micros: ArchiveRow.micros(row.sampledAt)))
             appendText(appender, row.date)
             duckdb_append_int32(appender, Int32(row.localHour))
             appendText(appender, row.model)
@@ -291,15 +291,45 @@ final class RawArchive {
         return keys
     }
 
-    /// Collapse turns held more than once, keeping the copy with the most
-    /// output tokens — the same rule the store's repair uses.
+    /// Which of a turn's copies the collapse keeps: the most output, then the
+    /// copy appended last.
+    ///
+    /// - **Most output first** is rule 7 as far as the archive can see it. It
+    ///   holds no `stop_reason`, and a streamed message's finished copy is the
+    ///   one with the most output (true for every key on a real corpus,
+    ///   `docs/duckdb-archive.md`), so a partial copy never wins, however late
+    ///   it was appended.
+    /// - **Then the latest append**, because every row is written from the
+    ///   store as it was at the time, so the newest copy is the store's
+    ///   current one. The store rewrites a row at EQUAL output when a full
+    ///   re-read brings the pricing detail it predates (fast mode,
+    ///   `inference_geo`, a response split into several calls): input and
+    ///   cache change, output does not. The reconcile re-appends that row, and
+    ///   the tie-break this replaced (earliest `sampled_at`, then lowest
+    ///   `rowid`) kept the stale copy, so the hourly check failed on one Mac
+    ///   from 0.8.2 on and the full reconcile it triggers never converged
+    ///   (#433).
+    ///
+    /// `rowid` is the append order: DuckDB appends to the end of the table and
+    /// never reuses a deleted row's slot, and a checkpoint that compacts row
+    /// groups renumbers rows without reordering them
+    /// (`RawArchiveReconcileTests` checks that on the vendored engine). Rows
+    /// are compared by it only within one key, so its values never matter,
+    /// only their order. `reconcileView` picks the same copy in Swift; the
+    /// tests pin the two together.
+    static let collapseOrder = "output_tokens DESC, rowid DESC"
+
+    /// Collapse turns held more than once, keeping the copy `collapseOrder`
+    /// ranks first.
     ///
     /// Sits uneasily with "append-only", so: append-only is a rule about not
     /// rewriting *observations*. Two rows describing one turn aren't two
     /// observations, they're one bookkeeping error, and this file's own
     /// contract already says the store is the system of record and wins on
     /// any disagreement. When the store collapses a duplicate, an archive
-    /// that kept both would be permanently, visibly wrong.
+    /// that kept both would be permanently, visibly wrong. The same holds for
+    /// a copy the store has since rewritten: the reconcile appends the store's
+    /// current copy, and this supersedes the stale one.
     ///
     /// Returns the number of rows removed. Checks first and executes nothing
     /// when there is nothing to do, so the common path issues no DELETE at
@@ -320,28 +350,41 @@ final class RawArchive {
                 SELECT rowid FROM (
                     SELECT rowid, row_number() OVER (
                         PARTITION BY dedup_key
-                        ORDER BY output_tokens DESC, sampled_at ASC, rowid ASC) AS rn
+                        ORDER BY \(Self.collapseOrder)) AS rn
                     FROM turn WHERE dedup_key IS NOT NULL)
                 WHERE rn > 1)
             """)
         return before - (try scalar("SELECT COUNT(*) FROM turn"))
     }
 
-    /// Best `output_tokens` archived per dedup key, at or after `since`.
+    /// Per dedup key, at or after `since`: the copy the collapse keeps, as
+    /// the reconcile compares it (`ArchivedTurn`).
     ///
     /// Presence alone isn't enough to tell whether a turn is faithfully
-    /// archived: a streamed message is written partial and UPGRADED in place
-    /// in the store when its finished copy arrives, so a key can be present
-    /// and still be wrong. The archive can't see that mutation, so the caller
-    /// compares values.
-    func outputByDedupKey(since: Date?) throws -> [String: Int64] {
+    /// archived: the store rewrites rows in place — a streamed message when
+    /// its finished copy arrives, a finished one when a full re-read brings
+    /// pricing detail it predates — so a key can be present and still be
+    /// wrong. The archive can't see those writes, so the caller compares
+    /// values: output, and a fingerprint of every other field the store
+    /// can rewrite.
+    ///
+    /// A plain scan, with the winner picked here, rather than a window
+    /// function or a `GROUP BY` in SQL: on a 1.2M-row archive with one
+    /// thread, the scan took 0.20 s at a 116 MB peak, `GROUP BY` (what this
+    /// replaced, output only) 0.14 s at 252 MB, and `row_number()` 0.46 s at
+    /// 311 MB. Duplicates exist only between an append and its collapse, so
+    /// the winner test almost never runs.
+    func reconcileView(since: Date?) throws -> [String: ArchivedTurn] {
         var result = duckdb_result()
         let filter = since.map {
-            " AND sampled_at >= make_timestamp(\(Int64($0.timeIntervalSince1970 * 1_000_000)))"
+            " AND sampled_at >= make_timestamp(\(ArchiveRow.micros($0)))"
         } ?? ""
+        // Column order is what the reader below indexes.
         let sql = """
-            SELECT dedup_key, MAX(output_tokens) FROM turn
-            WHERE dedup_key IS NOT NULL\(filter) GROUP BY dedup_key
+            SELECT dedup_key, rowid, output_tokens, input_tokens, cache_read,
+                   cache_creation_5m, cache_creation_1h, source_cost,
+                   CAST(EPOCH_US(sampled_at) AS BIGINT), speed, inference_geo
+            FROM turn WHERE dedup_key IS NOT NULL\(filter)
             """
         let ok = sql.withCString { duckdb_query(con, $0, &result) } == DuckDBSuccess
         defer { duckdb_destroy_result(&result) }
@@ -350,33 +393,64 @@ final class RawArchive {
                 duckdb_result_error(&result).map { String(cString: $0) } ?? "unknown")
         }
 
-        var out: [String: Int64] = [:]
+        var out: [String: ArchivedTurn] = [:]
         while let chunk = duckdb_fetch_chunk(result) {
             defer { var c: duckdb_data_chunk? = chunk; duckdb_destroy_data_chunk(&c) }
             let count = Int(duckdb_data_chunk_get_size(chunk))
-            guard count > 0,
-                  let keyData = duckdb_vector_get_data(duckdb_data_chunk_get_vector(chunk, 0)),
-                  let valData = duckdb_vector_get_data(duckdb_data_chunk_get_vector(chunk, 1))
-            else { continue }
-            let keys = keyData.assumingMemoryBound(to: duckdb_string_t.self)
-            let values = valData.assumingMemoryBound(to: Int64.self)
+            guard count > 0 else { continue }
+            let vectors = (0..<11).map { duckdb_data_chunk_get_vector(chunk, UInt64($0)) }
+            let data = vectors.map { duckdb_vector_get_data($0) }
+            let validity = vectors.map { duckdb_vector_get_validity($0) }
+            func isNull(_ col: Int, _ row: Int) -> Bool {
+                guard let v = validity[col] else { return false }
+                return !duckdb_validity_row_is_valid(v, UInt64(row))
+            }
+            func int64(_ col: Int, _ row: Int) -> Int64 {
+                data[col]?.assumingMemoryBound(to: Int64.self)[row] ?? 0
+            }
             for row in 0..<count {
-                var value = keys[row]
-                let length = Int(duckdb_string_t_length(value))
-                guard length > 0 else { continue }
-                let key: String
-                if duckdb_string_is_inlined(value) {
-                    key = withUnsafeBytes(of: &value.value.inlined.inlined) { raw in
-                        String(decoding: raw.prefix(length), as: UTF8.self)
-                    }
-                } else if let pointer = duckdb_string_t_data(&value) {
-                    key = String(decoding: UnsafeRawBufferPointer(start: pointer, count: length),
-                                 as: UTF8.self)
-                } else { continue }
-                out[key] = values[row]
+                guard let key = Self.text(data[0], row, isNull: isNull(0, row)), !key.isEmpty
+                else { continue }
+                let rowid = int64(1, row)
+                let output = int64(2, row)
+                // `collapseOrder`, in Swift: most output, then the later append.
+                if let kept = out[key],
+                   kept.outputTokens > output || (kept.outputTokens == output && kept.rowid > rowid) {
+                    continue
+                }
+                let speed = Self.text(data[9], row, isNull: isNull(9, row))
+                let geo = Self.text(data[10], row, isNull: isNull(10, row))
+                let recorded: ArchivedTurn.Recorded = [
+                    speed == nil ? [] : .speed, geo == nil ? [] : .inferenceGeo,
+                ]
+                out[key] = ArchivedTurn(
+                    outputTokens: output,
+                    fingerprint: ArchivedTurn.fingerprint(
+                        input: int64(3, row), cacheRead: int64(4, row),
+                        cc5m: int64(5, row), cc1h: int64(6, row),
+                        sourceCostUSD: isNull(7, row)
+                            ? nil : data[7]?.assumingMemoryBound(to: Double.self)[row],
+                        sampledAtMicros: int64(8, row),
+                        speed: speed, inferenceGeo: geo),
+                    recorded: recorded, rowid: rowid)
             }
         }
         return out
+    }
+
+    /// A VARCHAR value out of a chunk's vector data, or nil when NULL.
+    private static func text(_ base: UnsafeMutableRawPointer?, _ row: Int, isNull: Bool) -> String? {
+        guard !isNull, let base else { return nil }
+        var value = base.assumingMemoryBound(to: duckdb_string_t.self)[row]
+        let length = Int(duckdb_string_t_length(value))
+        guard length > 0 else { return "" }
+        if duckdb_string_is_inlined(value) {
+            return withUnsafeBytes(of: &value.value.inlined.inlined) {
+                String(decoding: $0.prefix(length), as: UTF8.self)
+            }
+        }
+        guard let pointer = duckdb_string_t_data(&value) else { return nil }
+        return String(decoding: UnsafeRawBufferPointer(start: pointer, count: length), as: UTF8.self)
     }
 
     /// Read whole turns back out for one local date.
@@ -513,4 +587,106 @@ struct ArchiveRow: Sendable {
     let accountId: String?
     let speed: String?
     let inferenceGeo: String?
+
+    /// `sampled_at` as the archive stores it: whole microseconds, truncated.
+    /// One function for the write and for the reconcile's comparison, so the
+    /// two can't round differently and see every turn as changed.
+    static func micros(_ date: Date) -> Int64 {
+        Int64(date.timeIntervalSince1970 * 1_000_000)
+    }
+}
+
+/// One archived turn as the reconcile compares it against the store: the copy
+/// the duplicate collapse keeps (`RawArchive.collapseOrder`), reduced to what
+/// the store can rewrite after archiving (#433).
+///
+/// The store rewrites a row through `SamplePersister.apply`: input, output,
+/// cache read, both cache-creation tiers, source cost, speed and
+/// `inference_geo` (and thinking tokens, which the archive doesn't carry).
+/// Output is kept as a number, because its direction decides what to do. The
+/// rest are a fingerprint, plus `sampled_at`, which no store write changes:
+/// the collapse no longer breaks ties on it, so a pair of copies that differ
+/// only there (residue of a store duplicate, `repairDuplicateSamples`) has to
+/// be caught here instead.
+///
+/// A fingerprint rather than the values: a full reconcile holds one of these
+/// per archived turn (1.2M on a real archive), at 32 bytes each where the
+/// values would take about 104 (the output-only reconcile held 8). `Hasher` is
+/// seeded per process, which is enough: both sides are hashed by the same
+/// process, in the same pass, and a collision between two different rows of
+/// one turn is a 1-in-2^64 chance of leaving one stale.
+struct ArchivedTurn: Sendable {
+
+    /// Which of the columns added in #352 held a value. NULL there means
+    /// "not recorded" on every row archived before them (never backfilled),
+    /// so a NULL is compared as matching whatever the store holds, as
+    /// `ArchiveRoundTrip` does. Comparing it as nil would re-append every
+    /// pre-#352 turn the store has a speed or region for — a backfill the
+    /// archive deliberately never ran, on the scan actor.
+    struct Recorded: OptionSet, Sendable {
+        let rawValue: UInt8
+        static let speed = Recorded(rawValue: 1 << 0)
+        static let inferenceGeo = Recorded(rawValue: 1 << 1)
+    }
+
+    enum Verdict: Equatable {
+        /// The archived copy matches the store's.
+        case same
+        /// The store holds more output: the archived copy is mid-stream.
+        case upgraded
+        /// Equal output, something else rewritten (#433).
+        case patched
+        /// The archive holds MORE output than the store. An append can't fix
+        /// that — the collapse keeps the larger copy — so it is counted and
+        /// left. The six-day soak, and every check since, found none.
+        case ahead
+    }
+
+    let outputTokens: Int64
+    let fingerprint: Int
+    let recorded: Recorded
+    /// For picking the collapse's copy while the view is built.
+    let rowid: Int64
+
+    /// What the reconcile does with a store row of this turn.
+    func verdict(storeOutput: Int64, storeFingerprint: () -> Int) -> Verdict {
+        if storeOutput > outputTokens { return .upgraded }
+        if storeOutput < outputTokens { return .ahead }
+        return storeFingerprint() == fingerprint ? .same : .patched
+    }
+
+    /// The store's side, hashed the way this turn was archived: a column
+    /// this copy didn't record is left out on both sides. Plain values, so a
+    /// full reconcile hashes a million store rows without building a row
+    /// value for each.
+    func storeFingerprint(
+        input: Int64, cacheRead: Int64, cc5m: Int64, cc1h: Int64,
+        sourceCostUSD: Double?, sampledAt: Date, speed: String?, inferenceGeo: String?
+    ) -> Int {
+        Self.fingerprint(
+            input: input, cacheRead: cacheRead, cc5m: cc5m, cc1h: cc1h,
+            sourceCostUSD: sourceCostUSD, sampledAtMicros: ArchiveRow.micros(sampledAt),
+            speed: recorded.contains(.speed) ? speed : nil,
+            inferenceGeo: recorded.contains(.inferenceGeo) ? inferenceGeo : nil)
+    }
+
+    /// Every compared field but output. Both sides call this one function.
+    static func fingerprint(
+        input: Int64, cacheRead: Int64, cc5m: Int64, cc1h: Int64,
+        sourceCostUSD: Double?, sampledAtMicros: Int64,
+        speed: String?, inferenceGeo: String?
+    ) -> Int {
+        var hasher = Hasher()
+        hasher.combine(input)
+        hasher.combine(cacheRead)
+        hasher.combine(cc5m)
+        hasher.combine(cc1h)
+        // The bits, not the value: the archive stores the store's Double
+        // exactly, and bits are what round-trip.
+        hasher.combine(sourceCostUSD?.bitPattern)
+        hasher.combine(sampledAtMicros)
+        hasher.combine(speed)
+        hasher.combine(inferenceGeo)
+        return hasher.finalize()
+    }
 }

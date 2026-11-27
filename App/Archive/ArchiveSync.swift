@@ -41,9 +41,22 @@ final class ArchiveSync {
     /// when something is provably wrong, and it makes convergence independent
     /// of whether the window happened to be wide enough.
     private var needsFullReconcile = false
-    /// Set when reconciliation re-appended an upgraded turn, so the archive
-    /// briefly holds both copies and must collapse to the fuller one.
+    /// Set when reconciliation re-appended a turn the store has rewritten,
+    /// so the archive briefly holds both copies and must collapse to the
+    /// store's.
     private var pendingCollapse = false
+
+    /// What one reconcile pass found, by `ArchivedTurn.Verdict`. Counts only.
+    struct ReconcileCounts: Equatable {
+        /// In the store, not archived at all.
+        var missing = 0
+        var upgraded = 0
+        var patched = 0
+        var ahead = 0
+        var reappended: Int { upgraded + patched }
+    }
+    /// The last pass's counts, for the archive tests compiled beside this file.
+    private(set) var lastReconcile: ReconcileCounts?
 
     /// How often the trailing window is reconciled rather than trusted.
     private static let reconcileInterval: TimeInterval = 30 * 60
@@ -160,37 +173,69 @@ final class ArchiveSync {
         // archive held less output than the store, ZERO where it held more,
         // 2,351,397 output tokens missing. Presence-only reconciliation
         // called every one of them fine.
-        let archived = try archive.outputByDedupKey(since: since)
+        //
+        // And every value, not just output (#433). Since 0.8.0 a full
+        // re-read also rewrites a stored row at EQUAL output when it brings
+        // pricing detail the row predates (fast mode, `inference_geo`, a
+        // response split into several calls): input and cache change. An
+        // output-only comparison never saw that, so one Mac's hourly check
+        // failed on input or cache from 0.8.2 on, and the full reconcile each
+        // failure triggers never converged.
+        let archived = try archive.reconcileView(since: since)
 
         let descriptor = FetchDescriptor<TokenSample>(
             predicate: since.map { cutoff in
                 #Predicate<TokenSample> { $0.sampledAt >= cutoff }
             })
         var missed: [ArchiveRow] = []
-        var upgraded = 0
+        var counts = ReconcileCounts()
         // Thirty days is ~370k turns on a heavy store, fifteen pages: each
         // seeks the `sampledAt` index to where the last ended (#394).
         try ModelWalk.forEach(descriptor, orderedBy: \.sampledAt, in: container) { sample in
             guard let key = sample.dedupKey, !pending.contains(key) else { return }
-            guard let archivedOutput = archived[key] else {
+            guard let turn = archived[key] else {
                 missed.append(row(from: sample))   // never archived
+                counts.missing += 1
                 return
             }
-            // Archived, but with a smaller output than the store now holds —
-            // i.e. we captured it mid-stream. Re-append; the duplicate
-            // collapse below keeps the fuller copy, which is the same rule
-            // `ParsedUsageEntry.supersedes` applies on the live path.
-            if sample.outputTokens > archivedOutput {
+            // Hashed only at equal output, which is almost every row: the
+            // store side is plain field reads off the row the walk already
+            // holds.
+            let verdict = turn.verdict(storeOutput: sample.outputTokens) {
+                turn.storeFingerprint(
+                    input: sample.inputTokens, cacheRead: sample.cacheReadTokens,
+                    cc5m: sample.cacheCreation5mTokens, cc1h: sample.cacheCreation1hTokens,
+                    sourceCostUSD: sample.sourceCostUSD, sampledAt: sample.sampledAt,
+                    speed: sample.speed, inferenceGeo: sample.inferenceGeo)
+            }
+            switch verdict {
+            case .same:
+                break
+            // Archived, but not as the store now holds it: captured
+            // mid-stream (`upgraded`), or rewritten since at equal output
+            // (`patched`). Re-append the store's copy; the duplicate collapse
+            // below keeps it. For a streamed message that is the fuller copy,
+            // the rule `ParsedUsageEntry.supersedes` applies on the live
+            // path; at equal output it is the later append
+            // (`RawArchive.collapseOrder`).
+            case .upgraded:
                 missed.append(row(from: sample))
-                upgraded += 1
+                counts.upgraded += 1
+            case .patched:
+                missed.append(row(from: sample))
+                counts.patched += 1
+            case .ahead:
+                counts.ahead += 1
             }
         }
-        if !missed.isEmpty {
+        if !missed.isEmpty || counts.ahead > 0 {
             Log.write("ArchiveSync",
-                      "reconcile\(full ? " (full)" : ""): \(missed.count - upgraded) skipped, "
-                      + "\(upgraded) upgraded since archiving")
+                      "reconcile\(full ? " (full)" : ""): \(counts.missing) skipped, "
+                      + "\(counts.upgraded) upgraded, \(counts.patched) patched since archiving"
+                      + (counts.ahead > 0 ? ", \(counts.ahead) archived with more output than the store" : ""))
         }
-        pendingCollapse = upgraded > 0
+        lastReconcile = counts
+        pendingCollapse = counts.reappended > 0
         return missed
     }
 

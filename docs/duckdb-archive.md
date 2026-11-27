@@ -250,6 +250,40 @@ paths are untouched (the archive is fed from the store, and
 `IngestParityTests` already compares both paths' `accountId`, `speed` and
 `inferenceGeo` per row); `RawArchiveMigrationTests` runs with the parity tests.
 
+### Update 2026-11-27 — the reconcile compares the whole turn (#433)
+
+One release Mac failed the hourly integrity check on every check from 0.8.2
+on, with rows and output equal. Since 0.8.0 a full re-read rewrites a stored
+row at **equal output** when it brings pricing detail the row predates (fast
+mode, `inference_geo`, a response split into several calls), so its input
+and cache change. The reconcile re-appended a turn only when the store held
+more output, so it never saw those rewrites, and the full reconcile each
+failure triggers never converged.
+
+- **What it compares.** `RawArchive.reconcileView` gives, per key, the copy
+  the collapse keeps: its output, plus a fingerprint of every other field the
+  store can rewrite (`SamplePersister.apply`: input, cache read, both
+  cache-creation tiers, source cost, speed, `inference_geo`) and
+  `sampled_at`. A store row that differs is re-appended. A NULL `speed` or
+  `inference_geo` is "not recorded" (rows from before #352) and matches
+  anything, as `ArchiveRoundTrip` treats it. A key the archive holds with more
+  output than the store is counted, not re-appended: no append could win.
+- **Which copy the collapse keeps** (`RawArchive.collapseOrder`): the most
+  output, then the latest append (`rowid DESC`). Most output first keeps rule 7:
+  a partial never beats its finished copy. The old tie-break, the earliest
+  `sampled_at` then the lowest `rowid`, kept the stale copy at equal output.
+  `rowid` is append order: DuckDB appends to the end and never reuses a
+  deleted slot, and a compacting checkpoint renumbers rows without reordering
+  them (`RawArchiveReconcileTests` checks it on the vendored engine). No
+  column was added.
+- **Cost.** The view is a plain scan; the collapse's winner is picked in Swift.
+  On a 1.2M-row archive, one thread: 0.20 s at a 116 MB peak, against 0.14 s
+  at 252 MB for the old `GROUP BY` and 0.46 s at 311 MB for `row_number()`.
+  The map holds 32 bytes per key where it held 8. The store side is the same
+  walk, hashing fields the row already holds.
+- `ArchiveImporter` and `IngestParityTests` are untouched: the collapse orders
+  archive rows, which are written from the store, not transcript lines.
+
 ## The bug the gate found (this one DID ship)
 
 Claude Code appends the same assistant message to the transcript several times
