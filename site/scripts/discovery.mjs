@@ -107,6 +107,9 @@ export const WORKER_ROUTES = ['/download', '/download/', '/api/feedback', '/appc
 export const PAGE_ROUTES = [...MARKDOWN_PAGES.map((p) => `/${p}`), ...COMPARE_TOOLS.map((t) => `/compare/${t}/`)];
 export const SEARCH_ROUTES = [PATHS.search];
 
+/** RFC 9727's profile URI, for the API catalog's Content-Type. */
+export const API_CATALOG_PROFILE = 'https://www.rfc-editor.org/info/rfc9727';
+
 /**
  * Whether `pathname` runs the Worker first under a `run_worker_first` list:
  * a pattern matches it (`*` matches anything, `/` included) and no `!`

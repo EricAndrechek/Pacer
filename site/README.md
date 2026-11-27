@@ -153,7 +153,7 @@ an OpenAPI description, commerce protocols.
 and the `agent:` meta tags.
 
 **Headers.** `scripts/llms-full.mjs` appends `_headers` rules for the files it
-writes (`text/markdown` for the twins, `application/linkset+json`,
+writes (`text/markdown` for the twins, `application/linkset+json` with RFC 9727's profile,
 `application/ai-catalog+json`, `application/gzip`), with CORS and an hour's
 caching. They are static assets and never run the Worker.
 

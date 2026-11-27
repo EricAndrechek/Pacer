@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 import {
   COMPARE_TOOLS,
   MARKDOWN_PAGES,
+  API_CATALOG_PROFILE,
   PATHS,
   agentSkillsIndex,
   aiCatalog,
@@ -46,7 +47,8 @@ const discoveryHeaders = (mdPaths, skillFiles) =>
     "# discovery files (scripts/discovery.mjs). The pages' Link headers come from the Worker",
     '# (worker/index.ts). None of these paths runs the Worker.',
     ...mdPaths.flatMap((p) => rule(p, 'text/markdown; charset=utf-8')),
-    ...rule(PATHS.apiCatalog, 'application/linkset+json'),
+    // RFC 9727 section 4.4: the linkset media type with the API catalog profile.
+    ...rule(PATHS.apiCatalog, `application/linkset+json; profile="${API_CATALOG_PROFILE}"`),
     ...rule(PATHS.aiCatalog, 'application/ai-catalog+json'),
     ...rule(PATHS.ard, 'application/ai-catalog+json'),
     ...rule(PATHS.agentSkills, 'application/json'),

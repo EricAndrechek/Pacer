@@ -125,7 +125,7 @@ describe('pages, twins and routes', () => {
     const headers = text('_headers');
     for (const page of ALL_PAGES) expect(headers).toContain(`${markdownPath(page)}\n  Content-Type: text/markdown; charset=utf-8`);
     for (const [path, type] of [
-      [PATHS.apiCatalog, 'application/linkset+json'],
+      [PATHS.apiCatalog, 'application/linkset+json; profile="https://www.rfc-editor.org/info/rfc9727"'],
       [PATHS.aiCatalog, 'application/ai-catalog+json'],
       [PATHS.ard, 'application/ai-catalog+json'],
       [PATHS.agentSkills, 'application/json'],

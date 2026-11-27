@@ -30,6 +30,7 @@ export declare const PATHS: {
 export declare const WORKER_ROUTES: string[];
 export declare const PAGE_ROUTES: string[];
 export declare const SEARCH_ROUTES: string[];
+export declare const API_CATALOG_PROFILE: string;
 export declare function runsWorkerFirst(routes: string[], pathname: string): boolean;
 export interface Link {
   href: string;
