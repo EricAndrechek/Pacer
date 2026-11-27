@@ -147,6 +147,32 @@ failed" (`feed=update_archive`, same once-a-day limit); and a launch whose
 `checkForUpdatesInBackground()` once, two minutes later, so a Mac that installed an
 older held update finds the newest quickly.
 
+**Downloads wait for the install moment (after 0.9.5, #470).** A background check
+that finds an update does not download it: `updater(_:shouldProceedWithUpdate:updateCheck:)`
+vetoes it (`UpdateDeferral`) and the update is *available*, its first sighting kept
+across launches. Checks go on every six hours meanwhile, and a newer release
+replaces the pending one. When `UpdateInstallPolicy` says install, or someone
+clicks "Restart to Update" / "Update to … — Restart" (shown for an available
+update too), Pacer runs the check that downloads (`UpdateInstallScheduler`
+arms): Sparkle reads the feed then, takes the newest release and its delta, and
+the install follows at once. So a Mac several releases behind installs the newest
+once, not a held older one and then the newest. What is not deferred: the user's
+"Check for Updates…", critical, information-only and major-upgrade items, any
+update when automatic downloads are off, and any update pending for 72 h, which
+is downloaded the way it was before (the hold, then install-on-quit) so a bug in
+arming cannot strand a Mac; `update.defer_fallback` counts those. An update that
+is only available is not installed when Pacer quits: nothing is downloaded yet.
+An arm that fails leaves the update pending. One that could not reach the site
+is retried a quarter of an hour later by the feed fallback's re-check, which
+downloads from the fallback feed (a plain check there would only defer the
+update again); one that failed past the feed (the download, its signature or
+extraction, or an authorization Sparkle asked for) is retried after 30 minutes,
+then 2 hours, then every 6 hours, since each may have cost a full download. The
+app menu keeps "Check for Updates…" under the update item, and a click on the
+update with automatic downloads turned off runs Sparkle's own dialog. Every Sparkle behaviour this relies on is
+pinned with its 2.10.1 file and line in `UpdateDeferral`; a Sparkle bump re-reads
+them, and the end-to-end test below runs it.
+
 ### How a release publishes it
 
 The `Publish the update feed` step runs `bin/publish-feeds.sh release`
@@ -379,11 +405,13 @@ reads the whole appcast and offers the newest item it may install
 `sparkle:deltaFrom` is its own `CFBundleVersion` when the newest release has
 one (the last five releases do), and the full DMG otherwise or if the delta
 fails. The one exception is an update already downloaded and waiting: Sparkle
-resumes that one before it reads the feed again (`SPUUpdater.m`, the
+resumes that one before it reads the feed again (`SPUUpdater.m:904-906`, the
 `resumableUpdate` branch), so that Mac installs it and then, on its next
-check, the newest. 0.8.3 and later install a waiting update at the next idle
+check, the newest. 0.8.3 to 0.9.5 install a waiting update at the next idle
 moment (`UpdateInstallScheduler`, within a day, three at most), so the gap is
-hours, not a second update cycle; 0.8.0–0.8.2 hold it until Pacer quits.
+hours, not a second update cycle; 0.8.0–0.8.2 hold it until Pacer quits. After
+0.9.5 (#470) nothing is downloaded until the install moment, so nothing waits
+and goes stale: the Mac installs the newest once ("The update feed" above).
 
 So 0.9.0's store meets 0.9.5's code directly, and every migration has to
 compose across any gap:
@@ -592,7 +620,41 @@ app's installer service name (`SPUInstallerDriver.m`), and touches the
 installed copy so LaunchServices notices it (`SUFileManager.m`), which can
 register a second Pacer, widget included, beside the real one. Launching an
 old Pacer to update itself would open the shared store and the dashboard. A
-client run belongs on a disposable machine.
+client run belongs on a disposable machine, which is what the next section does.
+
+### Testing the update path end to end
+
+`.github/workflows/update-e2e.yml` (manual, and on pull requests that touch
+`App/Update/`, `PacerCore/Sources/PacerCore/Update/`, `UpdateE2E/`,
+`bin/update-e2e.sh` or `bin/sparkle-eddsa.swift`) runs a Sparkle client through
+the real update path on a GitHub-hosted `macos-26` runner, with nobody clicking
+anything. The client is `UpdateE2E/`, a small app made of Pacer's own update code
+(`App/Update` compiled verbatim: `PacerUpdater`, `UpdateInstallScheduler`,
+`UpdateStatus`), PacerCore and Sparkle 2.10.1, under its own bundle id. Not Pacer
+itself: its build is DuckDB, the forecast networks and the widget, none of which
+the update path touches, and ad hoc it cannot hold its App Group.
+
+`bin/update-e2e.sh build <dir>` builds it three times (A, B, C: builds 1, 2, 3),
+signs them ad hoc inside-out as releases are signed, and zips and signs B and C
+with an EdDSA key it generates (`bin/sparkle-eddsa.swift keygen`/`sign`; never
+the release key). `bin/update-e2e.sh run <dir>` serves an appcast with
+`python3 -m http.server` and checks, from the app's log, the server's request
+log and the installed bundle:
+
+1. A launches with B in the feed and defers it: no archive is requested. C is
+   added and replaces B as the pending update, still with no download. At the
+   install moment (the test app's `install-now` file makes the Mac read as idle,
+   so `UpdateInstallPolicy` itself says install) A downloads C, only C, and
+   relaunches into it, once.
+2. C's archive answers 404: A stays on A, retries with the backoff (30 min,
+   then 2 h in Pacer; the test app divides every spacing by 360, so 5 s, then
+   20 s, which the job checks), never falls back to B, and installs C once the
+   archive is back.
+
+`run` refuses anywhere but a GitHub-hosted runner (or a VM that sets
+`PACER_UPDATE_E2E_DISPOSABLE_MAC=yes`). `build` launches nothing and is safe
+on any Mac. The test app's timings come from `UpdateInstallScheduler.Tuning`,
+which only it sets.
 
 ### Pulling a bad release
 

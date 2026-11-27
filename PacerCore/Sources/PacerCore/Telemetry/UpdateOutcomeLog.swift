@@ -31,6 +31,11 @@ public enum UpdateOutcomeLog {
     public enum Outcome: String, Sendable {
         case noUpdate = "no_update"
         case found = "found"
+        /// Found by a background check and left on the server until Pacer can
+        /// install it (`UpdateDeferral`, #470). Recorded when what is pending
+        /// changes (a first sighting, a newer release), not on every check that
+        /// sees it again, so its age is how long the Mac has had one pending.
+        case available = "available"
         case downloadFailed = "download_failed"
         /// Installing because someone chose to: Sparkle's own dialog, or the
         /// "Update to … — Restart" items (`UpdateCopy`).
@@ -113,9 +118,14 @@ public enum UpdateOutcomeLog {
     /// appcast fetch and a failed download in the same `SUDownloadError`
     /// (2001), and only the underlying `NSURLErrorDomain` code says whether the
     /// Mac was offline, timed out, or got an HTTP error.
+    ///
+    /// A deferred download (`UpdateDeferral`) also ends its cycle through the
+    /// error channel. It is recorded as `available` where it is decided, and
+    /// never here as an error.
     public static func recordEndOfCycle(domain: String, code: Int,
                                         underlyingDomain: String? = nil, underlyingCode: Int? = nil,
                                         now: Date = Date(), store: UserDefaults = PacerPreferences.store) {
+        if UpdateDeferral.isDeferral(domain: domain, code: code) { return }
         if domain == sparkleErrorDomain, code == sparkleNoUpdateCode {
             record(.noUpdate, endOfCycle: true, now: now, store: store)
             return

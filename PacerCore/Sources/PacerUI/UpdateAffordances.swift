@@ -44,9 +44,10 @@ public struct PacerVersionLabel: View {
     }
 }
 
-/// The in-window update action: nothing until an update is ready, then a row
-/// in the sidebar rows' own grammar (icon, label, the same insets) on an
-/// accent wash, "Restart to Update" over "Pacer 0.9.5 is ready". Dimmed and
+/// The in-window update action: nothing until an update is available or
+/// ready, then a row in the sidebar rows' own grammar (icon, label, the same
+/// insets) on an accent wash, "Restart to Update" over "Pacer 0.9.5 is ready",
+/// or "… is available" for one that downloads when clicked (#470). Dimmed and
 /// "Restarting…" once the install has started. `install` runs on the click;
 /// the caller decides what that does.
 ///
@@ -68,13 +69,15 @@ public struct PacerUpdateAction: View {
         // One branch for ready and installing, so the row keeps its identity
         // when a click starts the install and only dims.
         if let version = state.readyVersion {
-            UpdateRow(version: version, installing: state.isInstalling, install: install)
+            UpdateRow(version: version, available: state.isAvailable, installing: state.isInstalling,
+                      install: install)
         }
     }
 }
 
 private struct UpdateRow: View {
     let version: String
+    let available: Bool
     let installing: Bool
     let install: () -> Void
     @State private var hovering = false
@@ -102,7 +105,11 @@ private struct UpdateRow: View {
         .buttonStyle(.plain)
         .disabled(installing)
         .onHover { hovering = $0 }
-        .accessibilityLabel("\(UpdateCopy.sidebarInstall), \(UpdateCopy.sidebarReady(version))")
+        .accessibilityLabel("\(UpdateCopy.sidebarInstall), \(subtitle)")
+    }
+
+    private var subtitle: String {
+        available ? UpdateCopy.sidebarAvailable(version) : UpdateCopy.sidebarReady(version)
     }
 
     private func content(icon: Bool) -> some View {
@@ -118,7 +125,7 @@ private struct UpdateRow: View {
                     .font(.body)
                     .fontWeight(.semibold)
                     .foregroundStyle(.tint)
-                Text(UpdateCopy.sidebarReady(version))
+                Text(subtitle)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

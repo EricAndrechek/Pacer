@@ -172,16 +172,20 @@ public struct AppVersionLabel: Sendable, Equatable {
 /// Where Pacer's own update stands, for the surfaces that show it (the
 /// sidebar footer, the status menu, the app menu).
 ///
-/// `readyToInstall` is never reached through `applying(_:)`: an update is
-/// ready exactly while `UpdateInstallScheduler` holds Sparkle's install
-/// block, so the app derives it from that hold (`resolve`). Two records of
-/// "ready" could disagree; one cannot.
+/// `available`, `readyToInstall` and `installing` are never reached through
+/// `applying(_:)`: an update is available while `UpdateSchedule` has one
+/// pending, and ready exactly while `UpdateInstallScheduler` holds Sparkle's
+/// install block, so the app derives them from the scheduler (`resolve`). Two
+/// records of "ready" could disagree; one cannot.
 public enum UpdateState: Sendable, Equatable {
     /// Nothing to act on: no check running, nothing downloaded. Also the
     /// state before the first check, so the surfaces never claim more.
     case upToDate
     case checking
     case downloading(version: String)
+    /// Found and left on the server until Pacer can install it (#470): the
+    /// action downloads it and restarts.
+    case available(version: String)
     case readyToInstall(version: String)
     /// The install was started (a click or the policy) and Pacer has not
     /// relaunched yet: the action is shown, disabled.
@@ -222,13 +226,23 @@ public enum UpdateState: Sendable, Equatable {
     }
 
     /// The state to show: a held update wins over whatever the last check
-    /// said, since nothing else can run while it is held.
-    public static func resolve(phase: UpdateState, heldVersion: String?, installing: Bool = false) -> UpdateState {
+    /// said, since nothing else can run while it is held (`installing`: its
+    /// block has been called). Then a pending one: an arm's download shows as a
+    /// download whoever started it; one someone clicked for (`requested`)
+    /// shows as downloading from the moment its check starts and as
+    /// restarting once the download is done; otherwise it is available.
+    public static func resolve(phase: UpdateState, heldVersion: String?, installing: Bool = false,
+                               availableVersion: String? = nil, requested: Bool = false) -> UpdateState {
         if let heldVersion {
             return installing ? .installing(version: heldVersion) : .readyToInstall(version: heldVersion)
         }
+        if let availableVersion {
+            if case .downloading = phase { return phase }
+            guard requested else { return .available(version: availableVersion) }
+            return phase == .checking ? .downloading(version: availableVersion) : .installing(version: availableVersion)
+        }
         switch phase {
-        case .readyToInstall, .installing: return .upToDate
+        case .readyToInstall, .installing, .available: return .upToDate
         default: return phase
         }
     }
@@ -238,12 +252,25 @@ public enum UpdateState: Sendable, Equatable {
         domain == UpdateOutcomeLog.sparkleErrorDomain && code == UpdateOutcomeLog.sparkleNoUpdateCode
     }
 
-    /// The held update's version, ready or already installing.
+    /// An error that ends a cycle without anything having failed: "you're up
+    /// to date", or a download deferred until Pacer can install it (#470).
+    public static func isQuietEnd(domain: String, code: Int) -> Bool {
+        isNoUpdate(domain: domain, code: code) || UpdateDeferral.isDeferral(domain: domain, code: code)
+    }
+
+    /// The version the update action offers: pending, held, or already
+    /// installing. Every surface shows the action exactly while this is set.
     public var readyVersion: String? {
         switch self {
-        case .readyToInstall(let version), .installing(let version): return version
+        case .available(let version), .readyToInstall(let version), .installing(let version): return version
         default: return nil
         }
+    }
+
+    /// Pending but not downloaded: the action's subtitle says available, not ready.
+    public var isAvailable: Bool {
+        if case .available = self { return true }
+        return false
     }
 
     public var isInstalling: Bool {
@@ -252,7 +279,8 @@ public enum UpdateState: Sendable, Equatable {
     }
 
     /// A render override (`PACER_RENDER_UPDATE_STATE`): `up-to-date`,
-    /// `checking`, `downloading:0.9.5`, `ready:0.9.5`, `failed`.
+    /// `checking`, `downloading:0.9.5`, `available:0.9.5`, `ready:0.9.5`,
+    /// `installing:0.9.5`, `failed`.
     public init?(override raw: String) {
         let parts = raw.trimmingCharacters(in: .whitespaces).split(separator: ":", maxSplits: 1).map(String.init)
         guard let name = parts.first?.lowercased() else { return nil }
@@ -264,6 +292,9 @@ public enum UpdateState: Sendable, Equatable {
         case "downloading":
             guard let version else { return nil }
             self = .downloading(version: version)
+        case "available":
+            guard let version else { return nil }
+            self = .available(version: version)
         case "ready", "readytoinstall":
             guard let version else { return nil }
             self = .readyToInstall(version: version)
@@ -280,6 +311,7 @@ public enum UpdateState: Sendable, Equatable {
         case .upToDate: return "up-to-date"
         case .checking: return "checking"
         case .downloading(let version): return "downloading-\(version)"
+        case .available(let version): return "available-\(version)"
         case .readyToInstall(let version): return "ready-\(version)"
         case .installing(let version): return "installing-\(version)"
         case .failed: return "failed"
@@ -295,6 +327,8 @@ public enum UpdateCopy {
     /// does, and under it what is waiting.
     public static let sidebarInstall = "Restart to Update"
     public static func sidebarReady(_ version: String) -> String { "Pacer \(version) is ready" }
+    /// The same row for an update that downloads when clicked (#470).
+    public static func sidebarAvailable(_ version: String) -> String { "Pacer \(version) is available" }
     /// The same row once the install has started.
     public static let sidebarInstalling = "Restarting…"
 
@@ -303,8 +337,8 @@ public enum UpdateCopy {
 
     public static func downloading(_ version: String) -> String { "Downloading \(version)…" }
 
-    /// The status menu's update item: only while an update is ready (shown
-    /// disabled once it is installing, `UpdateState.isInstalling`).
+    /// The status menu's update item: only while an update is available or
+    /// ready (shown disabled once it is installing, `UpdateState.isInstalling`).
     public static func menuInstallTitle(for state: UpdateState) -> String? {
         state.readyVersion.map(menuInstall)
     }

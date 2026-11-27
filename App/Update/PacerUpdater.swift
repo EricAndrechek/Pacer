@@ -68,6 +68,9 @@ final class PacerUpdater: ObservableObject {
             userDriverDelegate: userDriverDelegate
         )
         #endif
+        // What the scheduler arms (#470): the check it starts at the install
+        // moment is this updater's.
+        UpdateInstallScheduler.shared.attach(controller.updater)
         scheduleCatchUpCheck()
     }
 
@@ -97,8 +100,9 @@ final class PacerUpdater: ObservableObject {
 /// Writes what Sparkle did to `UpdateOutcomeLog`, for the daily check-in, and
 /// takes over installing a downloaded update (`willInstallUpdateOnQuit`), which
 /// Sparkle would otherwise leave until a quit that a menu-bar agent never does:
-/// see `UpdateInstallScheduler`. That hand-off is the one callback here that
-/// changes what Sparkle does, besides the Debug-only `mayPerform` veto below.
+/// see `UpdateInstallScheduler`. That hand-off and the download deferral
+/// (`shouldProceedWithUpdate`, #470) are the callbacks here that change what
+/// Sparkle does, besides the Debug-only `mayPerform` veto below.
 /// Every build uses it; the Debug delegate subclasses it so both keep
 /// reporting. In Debug the hand-off never fires: it comes only from the
 /// automatic (background) driver, and the veto stops every background check
@@ -158,6 +162,19 @@ private class PacerUpdaterDelegate: NSObject, SPUUpdaterDelegate {
     func updater(_ updater: SPUUpdater, willDownloadUpdate item: SUAppcastItem, with request: NSMutableURLRequest) {
         FeedRequestHeaders.strip(request)
         note(.downloadStarted(version: item.displayVersionString))
+        MainActor.assumeIsolated { UpdateInstallScheduler.shared.noteDownloadStarted() }
+    }
+
+    /// Someone answered one of Sparkle's own update dialogs. During an arm,
+    /// Sparkle shows one only when the silent install needs authorization: it
+    /// gets 4008 from the installer launcher (`SPUInstallerDriver.m:472-473`),
+    /// keeps the download resumable and shows it at once
+    /// (`SPUAutomaticUpdateDriver.m:150`, `SPUUIBasedUpdateDriver.m:257-258`).
+    /// The scheduler backs its next arm off, or the dialog would come back
+    /// with every one.
+    func updater(_ updater: SPUUpdater, userDidMake choice: SPUUserUpdateChoice, forUpdate updateItem: SUAppcastItem,
+                 state: SPUUserUpdateState) {
+        MainActor.assumeIsolated { UpdateInstallScheduler.shared.noteShownToUser() }
     }
 
     func updater(_ updater: SPUUpdater, shouldDownloadReleaseNotesForUpdate updateItem: SUAppcastItem) -> Bool {
@@ -168,6 +185,31 @@ private class PacerUpdaterDelegate: NSObject, SPUUpdaterDelegate {
 
     func updater(_ updater: SPUUpdater, didFinishLoading appcast: SUAppcast) {
         feedLoaded = true
+    }
+
+    /// Download now, or leave the update on the server until Pacer can install
+    /// it (`UpdateDeferral`, #470). Sparkle asks after reading the feed and
+    /// choosing the best item, before downloading anything or calling
+    /// `didFindValidUpdate`, and never for an update it is resuming
+    /// (`SPUBasicUpdateDriver.m:150-158`, Sparkle 2.10.1). Throwing vetoes it:
+    /// the cycle aborts with this error, nothing resumable is kept, and the
+    /// next scheduled check runs as usual (the walk-through is in
+    /// `UpdateDeferral`). The user's "Check for Updates…" is never vetoed.
+    func updater(_ updater: SPUUpdater, shouldProceedWithUpdate item: SUAppcastItem,
+                 updateCheck: SPUUpdateCheck) throws {
+        let found = UpdateDeferral.Found(
+            background: updateCheck == .updatesInBackground,
+            automaticDownloads: updater.automaticallyDownloadsUpdates,
+            critical: item.isCriticalUpdate,
+            informationOnly: item.isInformationOnlyUpdate,
+            majorUpgrade: item.isMajorUpgrade)
+        let version = item.displayVersionString
+        let build = item.versionString
+        let decision = MainActor.assumeIsolated {
+            UpdateInstallScheduler.shared.decide(found, version: version, build: build)
+        }
+        guard decision == .defer else { return }
+        throw UpdateDeferral.error(version: version)
     }
 
     func updater(_ updater: SPUUpdater, didFindValidUpdate item: SUAppcastItem) {
@@ -211,6 +253,18 @@ private class PacerUpdaterDelegate: NSObject, SPUUpdaterDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak updater] in
             guard let updater, updater.automaticallyChecksForUpdates else { return }
             updater.checkForUpdatesInBackground()
+        }
+    }
+
+    /// The re-check that reads the fallback feed after the site failed. When
+    /// the failed check was an arm, this one is that arm's retry (#470): a
+    /// plain check would find the update, defer it and spend the fallback, so
+    /// nothing would arm while the site stays down.
+    private func failoverRecheck(_ updater: SPUUpdater, after delay: TimeInterval) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak updater] in
+            guard let updater, updater.automaticallyChecksForUpdates else { return }
+            let armed = MainActor.assumeIsolated { UpdateInstallScheduler.shared.armForFailover() }
+            if !armed { updater.checkForUpdatesInBackground() }
         }
     }
 
@@ -259,7 +313,9 @@ private class PacerUpdaterDelegate: NSObject, SPUUpdaterDelegate {
     func updater(_ updater: SPUUpdater, didAbortWithError error: any Error) {
         MainActor.assumeIsolated { UpdateInstallScheduler.shared.release() }
         let ns = error as NSError
-        note(.aborted(noUpdate: UpdateState.isNoUpdate(domain: ns.domain, code: ns.code)))
+        // A deferred download ends its cycle through the error channel too;
+        // it is no failure (the offer shows from the scheduler).
+        note(.aborted(noUpdate: UpdateState.isQuietEnd(domain: ns.domain, code: ns.code)))
     }
 
     func updater(_ updater: SPUUpdater, didFinishUpdateCycleFor updateCheck: SPUUpdateCheck, error: (any Error)?) {
@@ -267,6 +323,14 @@ private class PacerUpdaterDelegate: NSObject, SPUUpdaterDelegate {
         // block with it.
         MainActor.assumeIsolated { UpdateInstallScheduler.shared.release() }
         let ns = error as NSError?
+        let deferred = ns.map { UpdateDeferral.isDeferral(domain: $0.domain, code: $0.code) } ?? false
+        // How an arm ended, if one was under way (`UpdateSchedule.cycleEnded`).
+        // A deferral ends none: it is how an update became available, already
+        // handled in `shouldProceedWithUpdate`.
+        if let end = UpdateSchedule.CycleEnd.classify(errorDomain: ns?.domain, code: ns?.code,
+                                                      feedLoaded: feedLoaded) {
+            MainActor.assumeIsolated { UpdateInstallScheduler.shared.cycleEnded(end) }
+        }
         let underlying = ns?.userInfo[NSUnderlyingErrorKey] as? NSError
         // "Up to date" arrives as an error too; only a feed that could not be
         // reached counts (see `FeedFallback.appcastFailure`).
@@ -276,12 +340,13 @@ private class PacerUpdaterDelegate: NSObject, SPUUpdaterDelegate {
             FeedFallback.report(feed: .appcast, failure: primary, fallbackOK: fallbackOK)
         }
         // The primary just failed: read the fallback soon, not in ~6 h.
-        if !wasFallback, feedChooser.usesFallback { recheck(updater, after: FeedFallback.failoverRecheckDelay) }
-        // A check that got through (an answer, even "up to date") ends the backoff.
-        if ns == nil || (ns?.domain == "SUSparkleErrorDomain" && ns?.code == 1001) { downloadFailures = 0 }
-        let failed = ns.map { !UpdateState.isNoUpdate(domain: $0.domain, code: $0.code) } ?? false
+        if !wasFallback, feedChooser.usesFallback { failoverRecheck(updater, after: FeedFallback.failoverRecheckDelay) }
+        // A check that got through (an answer, even "up to date" or "later") ends the backoff.
+        if ns == nil || deferred || (ns?.domain == "SUSparkleErrorDomain" && ns?.code == 1001) { downloadFailures = 0 }
+        let failed = ns.map { !UpdateState.isQuietEnd(domain: $0.domain, code: $0.code) } ?? false
         note(.cycleFinished(failed: failed))
-        guard let ns else { return }
+        // Recorded as `available` when it was deferred, never as an error.
+        guard let ns, !deferred else { return }
         // Domain and code only (and the underlying error's): never the description.
         UpdateOutcomeLog.recordEndOfCycle(domain: ns.domain, code: ns.code,
                                           underlyingDomain: underlying?.domain,
@@ -378,31 +443,52 @@ private final class DevBuildUpdaterDelegate: PacerUpdaterDelegate {
 /// and disables the menu item accordingly. Sparkle's recommended
 /// SwiftUI integration shape.
 ///
-/// While a downloaded update waits for a quiet moment (`UpdateInstallScheduler`)
-/// Sparkle's session stays open and no check can run, so the item installs
-/// that update instead, as "Update to 0.9.5 — Restart", the status menu's words
-/// (`UpdateCopy`).
+/// While an update is offered (pending since #470, or downloaded and waiting
+/// for a quiet moment, `UpdateInstallScheduler`), "Update to 0.9.5 — Restart",
+/// the status menu's words (`UpdateCopy`), installs it. The app menu (`.menu`)
+/// shows that item above "Check for Updates…" and keeps the check, which runs
+/// Sparkle's own dialog whenever no session is open (a held update keeps one
+/// open, so it is greyed out then). The About window's single link (`.single`)
+/// turns into the install while there is one to offer.
 struct CheckForUpdatesView: View {
-    @ObservedObject private var checker: UpdaterChecker
+    enum Style { case single, menu }
 
-    init(updater: SPUUpdater) {
+    @ObservedObject private var checker: UpdaterChecker
+    private let style: Style
+
+    init(updater: SPUUpdater, style: Style = .single) {
         self.checker = UpdaterChecker(updater: updater)
+        self.style = style
     }
 
     var body: some View {
-        // Read here, in this body, so the title follows the hold.
+        // Read here, in this body, so the titles follow the schedule.
         let state = UpdateStatus.shared.state
-        let ready = state.readyVersion
-        Button(ready.map(UpdateCopy.menuInstall) ?? UpdateCopy.checkForUpdates) {
-            // Decided at the click, not from the render: the hold can end
-            // between the two.
-            if UpdateInstallScheduler.shared.readyVersion != nil {
-                UpdateStatus.shared.installNow()
-            } else {
-                checker.updater.checkForUpdates()
+        let offered = state.readyVersion
+        switch style {
+        case .menu:
+            if let offered {
+                Button(UpdateCopy.menuInstall(offered)) { install() }
+                    .disabled(state.isInstalling)
             }
+            Button(UpdateCopy.checkForUpdates) { checker.updater.checkForUpdates() }
+                .disabled(!checker.canCheckForUpdates)
+        case .single:
+            Button(offered.map(UpdateCopy.menuInstall) ?? UpdateCopy.checkForUpdates) {
+                // Decided at the click, not from the render: the hold can end
+                // between the two.
+                if UpdateInstallScheduler.shared.offeredVersion != nil {
+                    install()
+                } else {
+                    checker.updater.checkForUpdates()
+                }
+            }
+            .disabled(state.isInstalling || (offered == nil && !checker.canCheckForUpdates))
         }
-        .disabled(state.isInstalling || (ready == nil && !checker.canCheckForUpdates))
+    }
+
+    private func install() {
+        UpdateStatus.shared.installNow()
     }
 }
 

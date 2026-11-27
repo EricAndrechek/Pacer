@@ -99,6 +99,33 @@ Three health counters (not usage: Sentry metrics, and `counter.*` in PostHog's `
 
 On a mismatch, `Telemetry.problem("Session totals disagree with Claude Code")`, at most one per token kind and ratio band per run (crash toggle, `.error` cap), so one upstream defect is one Sentry issue. Tags only: `canary.kind` (`input`, `output`, `cache_read`, `cache_write`, `requests`); `canary.ratio_band`, Claude Code's number over Pacer's (for `requests`, answered over held; `<0.5`, `0.5-0.9`, `0.9-0.98`, `0.98-1.02`, `1.02-1.1`, `1.1-1.25`, `1.25-2`, `>2`; above 1 is Pacer under-counting; through 0.9.2 the top band was `>1.1`); `canary.cc_version`, the Claude Code version that wrote the session's latest turns (`other` unless plain dotted digits, `unknown` if none). Never a token count, an exact ratio, a path, a project or a session id. The local log (`[DataCanary]`) carries the exact ratios and the first eight characters of each session id.
 
+## Install the newest release once (after 0.9.5, #470)
+A background check that finds an update no longer downloads it: the update is
+*available* until the install moment (`UpdateDeferral`, `UpdateSchedule`,
+`UpdateInstallScheduler`), when Pacer runs the check that downloads the newest
+release and installs it. Nothing new leaves the Mac beyond these, all health
+signals (not usage: Sentry metrics, and `counter.*` in PostHog's
+`daily_checkin`), no ids, versions or paths in the keys:
+- `lifecycle.update_result=available` (with `lifecycle.update_version`): an update
+  was found and left on the server. Recorded when what is pending changes (a first
+  sighting, a newer release), not on every six-hourly check that sees it again, so
+  `lifecycle.update_result_hours` is how long the Mac has had it pending. The
+  deferral itself ends Sparkle's cycle through the error channel; that error
+  (`com.ericandrechek.pacer.update` 470) is never recorded as a result or an
+  `lifecycle.update_error`.
+- `update.arm.<outcome>`: each arm attempt (the check that downloads), by outcome:
+  `held` (downloaded and handed over), `installed` (counted at the first launch
+  of the new build, since the install relaunches Pacer before a check-in),
+  `nothing_newer` (the check found no update: the release was pulled),
+  `feed_failed`, `download_failed` (the feed was read and the download, its
+  extraction or its signature failed), `needs_authorization` (the install needs
+  an administrator, so Sparkle showed its own dialog instead), `busy` (Sparkle
+  was in another session when Pacer wanted to arm; once per wish, not per
+  minute). Arms that fail past the feed back off: 30 min, 2 h, then 6 h.
+- `update.defer_fallback`: an update pending for 72 h was downloaded the way it was
+  before #470 (the hold, then install-on-quit), because arming had not managed it.
+  Near zero on a healthy fleet; a rise is a bug in arming.
+
 ## Archive integrity (after 0.9.2, #433)
 The hourly archive check (`ArchiveSync`) counts `data.archive_integrity.ok` / `.mismatch`. On a mismatch it also counts, once per check, which way each gap goes and its order of magnitude (`ArchiveIntegrityGap`; `TelemetryBands.magnitude`, `e0` for 1-9, `e3` for 1,000-9,999), never a count:
 - `data.archive_integrity.rows.<over|under|equal>[.eN]`: the archive's turns against the store's (the hourly rollup's count), for whole days before today; `over` is the archive holding more.
@@ -854,7 +881,7 @@ if they rarely do, download them only when cheaper models leave room to improve.
     counts, archive size, transcript file count, both config dirs present, `CLAUDE_CONFIG_DIR`
     set, time-zone offset (day-boundary bugs).
 14. **Lifecycle**: launched at login or by hand, uptime, restarts per day, unclean exits, Sparkle
-    check/install failures, time from a release to each Mac running it. `lifecycle.update_result` is one of `no_update`, `found`, `download_failed`, `will_install`, `ready_to_install` (downloaded, waiting for a quiet moment), `idle_install` (relaunched to install at one), `error_<domain>_<code>`. `lifecycle.update_result_hours` is how long that result has stood, in whole hours (a `found` or `ready_to_install` days old is an update stuck waiting; with `lifecycle.sparkle_last_check_hours` it separates "checked and found nothing new" from "has not looked"). `lifecycle.update_error` is why it failed, with `download_failed` and with an `error_<domain>_<code>` result whose error has an underlying one: `error_<domain tail>_<code>`, then `:` and the same for the underlying error (e.g. `error_nsurlerrordomain_-1009:error_kcfstreamerrordomain_-2`; `error_sparkle_2001:error_nsurlerrordomain_-1009` is an appcast fetch that found the Mac offline, which Sparkle reports with the same 2001 as a failed download). Through 0.9.2 the separator was `/`, which made the pair one 40+ character token that `TelemetryScrubber` redacts as a likely credential, so a pair arrived as `<redacted>`. Domain tail and code only, never a description; cleared by any later result without an error (#406). `lifecycle.update_delta` (`true`/`false`, only with an install result: `ready_to_install`, `will_install`, `idle_install`) is whether the installed update was a Sparkle delta; Sparkle falls back to the full DMG without reporting a failure, and the item it hands `willInstallUpdate` is the one actually installed, so a fallback reads `false`. Cleared by any later result without one.
+    check/install failures, time from a release to each Mac running it. `lifecycle.update_result` is one of `no_update`, `found`, `available` (found and left on the server until the install moment, after 0.9.5, #470: see "Install the newest release once"), `download_failed`, `will_install`, `ready_to_install` (downloaded, waiting for a quiet moment), `idle_install` (relaunched to install at one), `error_<domain>_<code>`. `lifecycle.update_result_hours` is how long that result has stood, in whole hours (a `found` or `ready_to_install` days old is an update stuck waiting; with `lifecycle.sparkle_last_check_hours` it separates "checked and found nothing new" from "has not looked"). `lifecycle.update_error` is why it failed, with `download_failed` and with an `error_<domain>_<code>` result whose error has an underlying one: `error_<domain tail>_<code>`, then `:` and the same for the underlying error (e.g. `error_nsurlerrordomain_-1009:error_kcfstreamerrordomain_-2`; `error_sparkle_2001:error_nsurlerrordomain_-1009` is an appcast fetch that found the Mac offline, which Sparkle reports with the same 2001 as a failed download). Through 0.9.2 the separator was `/`, which made the pair one 40+ character token that `TelemetryScrubber` redacts as a likely credential, so a pair arrived as `<redacted>`. Domain tail and code only, never a description; cleared by any later result without an error (#406). `lifecycle.update_delta` (`true`/`false`, only with an install result: `ready_to_install`, `will_install`, `idle_install`) is whether the installed update was a Sparkle delta; Sparkle falls back to the full DMG without reporting a failure, and the item it hands `willInstallUpdate` is the one actually installed, so a fallback reads `false`. Cleared by any later result without one.
 15. **Energy**: process CPU seconds per hour and while idle (the 0 % idle invariant, fleet-wide).
 16. **Feature errors**: notification permission state, API server port in use, skill install
     failures, widget timeline failures.
