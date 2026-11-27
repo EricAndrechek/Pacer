@@ -173,6 +173,10 @@ final class ArchiveSync {
         let appended = try reconcile(
             archive: archive, since: full ? nil : now.addingTimeInterval(-Self.reconcileWindow),
             pending: pending)
+        // A full pass held a map of every archived turn (1.2M on a real
+        // archive) and walked the whole store: hand the freed pages back, as
+        // the other heavy passes do (AGENTS.md, memory rules).
+        if full { MemoryHygiene.relieve() }
         return appended
     }
 
