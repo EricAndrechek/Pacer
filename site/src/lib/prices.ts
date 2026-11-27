@@ -263,6 +263,21 @@ export function compareModels(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
+/**
+ * Whether the first-party API offers US-only data residency (`inference_geo`)
+ * for a model: Claude 4.6 and later only. Anthropic's pricing page: "Models
+ * earlier than Claude 4.6 don't support the `inference_geo` parameter"; a
+ * request with it is a 400. A record's `regionalMultiplier` also carries the
+ * cloud platforms' regional-endpoint premium, which starts at the 4.5 models,
+ * so it alone doesn't say a model has data residency. Mythos Preview, with no
+ * version number, is left out: the pricing page doesn't say either way.
+ */
+export function supportsDataResidency(model: string): boolean {
+  const [major = 0, minor = 0] = versionOf(model);
+  if (!versionOf(model).length) return false;
+  return major > 4 || (major === 4 && minor >= 6);
+}
+
 export interface CurrentPrice {
   model: string;
   name: string;
@@ -347,7 +362,7 @@ function fastText(s: Segment): string | null {
 }
 
 /** What changed between two neighbouring stretches of one model's history, in words. */
-function describe(prev: Segment | null, next: Segment): string[] {
+function describe(model: string, prev: Segment | null, next: Segment): string[] {
   const lines: string[] = [];
   const tiers = [...new Set([...(prev?.standard ?? []), ...next.standard].map((p) => p.tier))].sort((a, b) => a - b);
   for (const tier of tiers) {
@@ -370,7 +385,10 @@ function describe(prev: Segment | null, next: Segment): string[] {
   if (fa !== fb) lines.push(fb === null ? 'Fast mode pricing ended.' : `Fast mode: ${fb}.`);
   const ra = prev?.standard.find((p) => p.tier === 0)?.record.regionalMultiplier ?? null;
   const rb = next.standard.find((p) => p.tier === 0)?.record.regionalMultiplier ?? null;
-  if (prev && ra !== rb) lines.push(rb === null ? 'The US-only data residency premium ended.' : `US-only data residency: ${rb}× the standard rates.`);
+  // Only a model with data residency has a first-party premium to speak of.
+  if (prev && ra !== rb && supportsDataResidency(model)) {
+    lines.push(rb === null ? 'The US-only data residency premium ended.' : `US-only data residency: ${rb}× the standard rates.`);
+  }
   return lines;
 }
 
@@ -381,7 +399,7 @@ export function priceChanges(list: PriceList, now: number): Change[] {
     const segs = segments(records).filter((s) => s.from <= now);
     segs.forEach((s, i) => {
       const prev = i > 0 && segs[i - 1]!.to === s.from ? segs[i - 1]! : null;
-      const lines = describe(prev, s);
+      const lines = describe(model, prev, s);
       if (lines.length) out.push({ at: s.from, model, name: displayName(model), lines });
     });
     const last = segs.at(-1);

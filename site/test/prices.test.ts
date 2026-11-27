@@ -15,6 +15,7 @@ import {
   segments,
   usd,
   displayName,
+  supportsDataResidency,
   type PriceList,
 } from '../src/lib/prices';
 
@@ -132,6 +133,16 @@ describe('the page', () => {
   it('merges stretches with the same numbers', () => {
     // Opus 4.5: one curated record, and a list record with the same price.
     expect(segments(model(list, 'claude-opus-4-5'))).toHaveLength(1);
+  });
+
+  it('offers data residency only on Claude 4.6 and later, whatever the regional premium says', () => {
+    expect(['claude-opus-4-6', 'claude-sonnet-4-6', 'claude-opus-5-5', 'claude-haiku-5-5', 'claude-fable-5-2'].every(supportsDataResidency)).toBe(true);
+    expect(['claude-opus-4-5', 'claude-sonnet-4-5', 'claude-haiku-4-5', 'claude-3-5-haiku', 'claude-mythos-preview'].some(supportsDataResidency)).toBe(false);
+    // The 4.5 models carry the cloud platforms' 1.1 premium in the file, but no first-party residency.
+    expect(byModel['claude-opus-4-5']!.regionalMultiplier).toBe(1.1);
+    for (const c of priceChanges(list, NOW)) {
+      if (!supportsDataResidency(c.model)) for (const l of c.lines) expect(l, c.model).not.toMatch(/residency/);
+    }
   });
 
   it('formats money and names', () => {

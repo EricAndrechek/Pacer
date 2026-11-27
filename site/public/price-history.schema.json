@@ -55,7 +55,7 @@
         "effectiveTo": { "anyOf": [{ "$ref": "#/$defs/instant" }, { "type": "null" }], "description": "Exclusive. null: still in effect." },
         "perMTok": { "$ref": "#/$defs/perMTok" },
         "fastMultiplier": { "$ref": "#/$defs/multiplier", "description": "Fast mode costs this many times the standard rates (every category)." },
-        "regionalMultiplier": { "$ref": "#/$defs/multiplier", "description": "A non-global endpoint, or US-only data residency (inference_geo), costs this many times the standard rates." }
+        "regionalMultiplier": { "$ref": "#/$defs/multiplier", "description": "A regional or multi-region endpoint on a cloud platform (from the 4.5 models), or US-only data residency on the Claude API (inference_geo, Claude 4.6 and later only), costs this many times the standard rates." }
       }
     },
     "curatedRecord": {

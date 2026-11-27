@@ -1,7 +1,7 @@
 ---
 import Base from '../layouts/Base.astro';
 import { PATHS } from '../../scripts/discovery.mjs';
-import { currentPrices, day, loadPriceList, priceChanges, usd, type Rates } from '../lib/prices';
+import { currentPrices, day, loadPriceList, priceChanges, supportsDataResidency, usd, type Rates } from '../lib/prices';
 
 // Built from public/price-history.json, the file every Pacer reads
 // (src/lib/prices.ts says how a price is chosen). The catalog sync commits it
@@ -28,7 +28,9 @@ const COLUMNS: [keyof Rates, string][] = [
   ['cacheWrite1h', 'Cache writes, 1 h'],
 ];
 const fast = current.filter((c) => c.fastMultiplier);
-const regional = current.filter((c) => c.regionalMultiplier && c.regionalMultiplier !== 1);
+// US-only data residency exists for Claude 4.6 and later only (supportsDataResidency): an
+// earlier model's regionalMultiplier is the cloud platforms' regional-endpoint premium.
+const regional = current.filter((c) => supportsDataResidency(c.model) && c.regionalMultiplier && c.regionalMultiplier !== 1);
 const regionalValues = [...new Set(regional.map((c) => c.regionalMultiplier))];
 const names = (cs: typeof current) => cs.map((c) => c.name).join(', ');
 const curl = `curl -s ${dataUrl} \\\n  | jq '.records[] | select(.model == "claude-opus-5-5" and .effectiveTo == null)'`;
@@ -105,7 +107,8 @@ const dataset = {
       {
         regional.length > 0 && (
           <p>
-            US-only data residency costs {regionalValues.join(' or ')}× on {names(regional)}.
+            US-only data residency (<code>inference_geo: "us"</code>) costs {regionalValues.join(' or ')}× on Claude 4.6
+            and later: {names(regional)}. Earlier models don't offer it.
           </p>
         )
       }
