@@ -49,11 +49,11 @@ struct RawArchiveReconcileTests {
     }
 
     static func row(_ key: String, _ b: TokenBreakdown, at: Date = yesterdayNoon,
-                    speed: String? = nil, geo: String? = nil) -> ArchiveRow {
+                    account: String? = nil, speed: String? = nil, geo: String? = nil) -> ArchiveRow {
         ArchiveRow(
             sampledAt: at, date: TokenSample.formatDate(at), localHour: 12, model: opus,
             breakdown: b, sourceCostUSD: nil, dedupKey: key, sessionId: "s",
-            originalProjectPath: "/tmp/p", ccVersion: "2.1.1", accountId: nil,
+            originalProjectPath: "/tmp/p", ccVersion: "2.1.1", accountId: account,
             speed: speed, inferenceGeo: geo)
     }
 
@@ -387,6 +387,42 @@ struct RawArchiveReconcileTests {
         #expect(try RawArchive(url: url).totals().rows == 3)
         #expect(Self.pass(container, url) == ArchiveSync.ReconcileCounts())
         #expect(try RawArchive(url: url).totals().rows == 3)
+    }
+
+    @ScanActor
+    @Test("beside an account, a NULL speed or region is a recorded nil")
+    func attributedNullIsRecorded() throws {
+        let url = try Self.tempURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        // Archived since #352 with an account and no speed or region, then
+        // patched in the store to fast / us. And the same turn shape without
+        // an account, which can't be told from a row archived before #352.
+        do {
+            let archive = try RawArchive(url: url)
+            try archive.append([
+                Self.row("acct:r1", Self.breakdown(10, 20, 30, 0, 0), account: "acct-a"),
+                Self.row("acct:r2", Self.breakdown(10, 20, 30, 0, 0), account: "acct-a"),
+                Self.row("none:r3", Self.breakdown(10, 20, 30, 0, 0)),
+            ])
+        }
+        let container = try PacerStore.makeInMemoryContainer()
+        let context = ModelContext(container)
+        let fast = Self.sample("acct:r1", Self.breakdown(10, 20, 30, 0, 0))
+        fast.speed = "fast"
+        let us = Self.sample("acct:r2", Self.breakdown(10, 20, 30, 0, 0))
+        us.inferenceGeo = "us"
+        let unattributed = Self.sample("none:r3", Self.breakdown(10, 20, 30, 0, 0))
+        unattributed.speed = "fast"
+        for s in [fast, us, unattributed] { context.insert(s) }
+        try context.save()
+
+        var counts = ArchiveSync.ReconcileCounts()
+        counts.patched = 2
+        #expect(Self.pass(container, url) == counts)
+        #expect(try Self.archived("acct:r1", at: url).map(\.speed) == ["fast"])
+        #expect(try Self.archived("acct:r2", at: url).map(\.inferenceGeo) == ["us"])
+        #expect(try Self.archived("none:r3", at: url).map(\.speed) == [nil])
+        #expect(Self.pass(container, url) == ArchiveSync.ReconcileCounts())
     }
 
     @ScanActor

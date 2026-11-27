@@ -412,7 +412,8 @@ final class RawArchive {
         let sql = """
             SELECT dedup_key, output_tokens, input_tokens, cache_read,
                    cache_creation_5m, cache_creation_1h, source_cost,
-                   CAST(EPOCH_US(sampled_at) AS BIGINT), speed, inference_geo
+                   CAST(EPOCH_US(sampled_at) AS BIGINT), speed, inference_geo,
+                   account_id IS NULL
             FROM turn WHERE dedup_key IS NOT NULL\(filter)
             """
         let ok = sql.withCString { duckdb_query(con, $0, &result) } == DuckDBSuccess
@@ -426,7 +427,7 @@ final class RawArchive {
             defer { var c: duckdb_data_chunk? = chunk; duckdb_destroy_data_chunk(&c) }
             let count = Int(duckdb_data_chunk_get_size(chunk))
             guard count > 0 else { continue }
-            let vectors = (0..<10).map { duckdb_data_chunk_get_vector(chunk, UInt64($0)) }
+            let vectors = (0..<11).map { duckdb_data_chunk_get_vector(chunk, UInt64($0)) }
             let data = vectors.map { duckdb_vector_get_data($0) }
             let validity = vectors.map { duckdb_vector_get_validity($0) }
             func isNull(_ col: Int, _ row: Int) -> Bool {
@@ -445,8 +446,12 @@ final class RawArchive {
                 if let kept = out[key], kept.outputTokens > output { continue }
                 let speed = Self.text(data[8], row, isNull: isNull(8, row))
                 let geo = Self.text(data[9], row, isNull: isNull(9, row))
+                // An account means the row was written with #352's columns,
+                // so a NULL speed or region there is a recorded nil.
+                let attributed = data[10]?.assumingMemoryBound(to: Bool.self)[row] == false
                 let recorded: ArchivedTurn.Recorded = [
-                    speed == nil ? [] : .speed, geo == nil ? [] : .inferenceGeo,
+                    (speed != nil || attributed) ? .speed : [],
+                    (geo != nil || attributed) ? .inferenceGeo : [],
                 ]
                 out[key] = ArchivedTurn(
                     outputTokens: output,
@@ -641,12 +646,21 @@ struct ArchiveRow: Sendable {
 /// one turn is a 1-in-2^64 chance of leaving one stale.
 struct ArchivedTurn: Sendable {
 
-    /// Which of the columns added in #352 held a value. NULL there means
-    /// "not recorded" on every row archived before them (never backfilled),
-    /// so a NULL is compared as matching whatever the store holds, as
+    /// Which of the columns added in #352 this copy recorded. A NULL speed or
+    /// region on a row archived before them (never backfilled) means "not
+    /// recorded" and is compared as matching whatever the store holds, as
     /// `ArchiveRoundTrip` does. Comparing it as nil would re-append every
     /// pre-#352 turn the store has a speed or region for — a backfill the
-    /// archive deliberately never ran, on the scan actor.
+    /// archive deliberately never ran, on the scan actor: 544k of 1.2M rows
+    /// on a real archive.
+    ///
+    /// Those rows are told apart by `account_id`, added with the other two:
+    /// on a real archive every row with an account has speed and region set
+    /// and every row without one has neither (1,025,217 / 198,032, none
+    /// mixed). So a NULL beside an account is a recorded nil, and a store
+    /// that later says "fast" re-archives the turn. A row archived since
+    /// without an account (unattributed) can't be told from an old one and
+    /// keeps the "not recorded" reading.
     ///
     /// The same byte carries two marks the reconcile sets while it walks the
     /// store, so they cost no memory: `visited`, any store row of this turn
