@@ -266,8 +266,16 @@ failure triggers never converged.
   cache-creation tiers, source cost, speed, `inference_geo`) and
   `sampled_at`. A store row that differs is re-appended. A NULL `speed` or
   `inference_geo` is "not recorded" (rows from before #352) and matches
-  anything, as `ArchiveRoundTrip` treats it. A key the archive holds with more
-  output than the store is counted, not re-appended: no append could win.
+  anything, as `ArchiveRoundTrip` treats it. On a real 1.2M-turn archive
+  544k rows have a NULL `inference_geo` the store has a value for (403k for
+  `speed`), so comparing NULL as nil would re-append 45% of the archive. A
+  key the archive holds with more output than the store is counted, not
+  re-appended: no append could win.
+- **On real data.** A copy of the maintainer's store and archive (not the Mac
+  in #433) had no key differing at equal output, and a full pass found only
+  the 56 turns written between the two copies. The same copy with 1,218
+  stored rows rewritten at equal output re-archived exactly those 1,218 in one
+  full pass; a second found nothing, and every field then matched.
 - **Which copy the collapse keeps** (`RawArchive.collapseOrder`): the most
   output, then the latest append (`rowid DESC`). Most output first keeps rule 7:
   a partial never beats its finished copy. The old tie-break, the earliest
@@ -276,13 +284,16 @@ failure triggers never converged.
   deleted slot, and a compacting checkpoint renumbers rows without reordering
   them (`RawArchiveReconcileTests` checks it on the vendored engine). No
   column was added.
-- **Cost.** The view is a plain scan; the collapse's winner is picked in Swift.
-  On a 1.2M-row archive, one thread: 0.20 s at a 116 MB peak, against 0.14 s
-  at 252 MB for the old `GROUP BY` and 0.46 s at 311 MB for `row_number()`.
-  The map holds 24 bytes per key where it held 8, and is sized up front. A full
-  pass over a real 1.2M-row copy: 64 s of CPU against 59 s, 550 MB peak against
-  466 MB before the map was sized (the doubling's two copies coexist). The
-  store side is the same walk, hashing fields the row already holds.
+- **Cost.** The view is a plain scan, read in `rowid` pages (`duckdb_query`
+  materializes a whole result, and the streaming API is deprecated in 1.5),
+  with the collapse's winner picked in Swift; the map holds 24 bytes per key
+  where it held 8, sized up front. Measured on a copy of a real 1.2M-row
+  archive and store, each run its own process, twice: the archive read took
+  2.5–2.7 s of CPU at a 310 MB peak footprint, against 1.3–1.8 s at
+  454–535 MB for the old `GROUP BY`; a whole full pass (the store walk
+  dominates, and is unchanged but for hashing fields the row already holds)
+  34–37 s of CPU against 30–33 s. Wall time is the walk's I/O and varied
+  from 69 to 323 s for the same pass on a loaded Mac.
 - `ArchiveImporter` and `IngestParityTests` are untouched: the collapse orders
   archive rows, which are written from the store, not transcript lines.
 
