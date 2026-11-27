@@ -1,13 +1,85 @@
 // Builds dist/llms-full.txt (https://llmstxt.org): the text of every page as
 // Markdown, converted from the built HTML so it can never drift from what the
-// pages say. Runs as an Astro integration after the build (astro.config.mjs).
-// Adapted from room-planner's scripts/llms-full.mjs (adds <pre> blocks).
-import { readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+// pages say. Then the discovery files made from the build (scripts/discovery.mjs;
+// site/README.md, "Discovery for agents"): the Markdown twin of every page, the
+// search index, the Agent Skills index with the skill (scripts/skill.mjs), the
+// AI catalog (ai-catalog.json, ard.json), the API catalog and security.txt,
+// and their _headers rules. Runs as an Astro integration after the build
+// (astro.config.mjs). Adapted from room-planner's scripts/llms-full.mjs (adds
+// <pre> blocks).
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  COMPARE_TOOLS,
+  MARKDOWN_PAGES,
+  API_CATALOG_PROFILE,
+  PATHS,
+  agentSkillsIndex,
+  aiCatalog,
+  apiCatalog,
+  markdownPath,
+  searchPointers,
+  securityTxt,
+  skillIndexDescription,
+} from './discovery.mjs';
+import { buildSearchIndex } from './search.mjs';
+import { frontMatter as skillFrontMatter, readSkill, sha256, skillArchive } from './skill.mjs';
 
-/** Site paths included, in order. */
-export const PAGES = ['', 'features/', 'cli/', 'how-pacer-counts/', 'privacy/', 'faq/', 'changelog/'];
+/** Site paths in llms-full.txt, in order. The per-tool comparison pages follow /compare/. */
+export const PAGES = ['', 'features/', 'cli/', 'how-pacer-counts/', 'claude-prices/', 'compare/', 'privacy/', 'faq/', 'changelog/'];
+
+/** A `_headers` rule: a public discovery file, readable from anywhere, cached for an hour. */
+const rule = (path, type, extra = []) => [
+  path,
+  `  Content-Type: ${type}`,
+  '  Access-Control-Allow-Origin: *',
+  '  Cache-Control: public, max-age=3600',
+  ...extra,
+  '',
+];
+
+/** `_headers` rules for the files this integration writes (appended to dist/_headers). */
+const discoveryHeaders = (mdPaths, skillFiles) =>
+  [
+    '',
+    '# Written by scripts/llms-full.mjs at build time: the Markdown twins of the pages and the',
+    "# discovery files (scripts/discovery.mjs). The pages' Link headers come from the Worker",
+    '# (worker/index.ts). None of these paths runs the Worker.',
+    ...mdPaths.flatMap((p) => rule(p, 'text/markdown; charset=utf-8')),
+    // RFC 9727 section 4.4: the linkset media type with the API catalog profile.
+    ...rule(PATHS.apiCatalog, `application/linkset+json; profile="${API_CATALOG_PROFILE}"`),
+    ...rule(PATHS.aiCatalog, 'application/ai-catalog+json'),
+    ...rule(PATHS.ard, 'application/ai-catalog+json'),
+    ...rule(PATHS.agentSkills, 'application/json'),
+    ...rule(PATHS.skillArchive, 'application/gzip'),
+    // The public copy of the price list: refreshed at most every six hours.
+    ...rule(PATHS.priceList, 'application/json; charset=utf-8'),
+    ...skillFiles.flatMap((f) =>
+      rule(`${PATHS.skillDir}${f.name}`, f.name.endsWith('.md') ? 'text/markdown; charset=utf-8' : 'text/plain; charset=utf-8'),
+    ),
+    PATHS.searchIndex,
+    '  Content-Type: application/json',
+    '  Cache-Control: public, max-age=3600',
+    '',
+    PATHS.security,
+    '  Content-Type: text/plain; charset=utf-8',
+    '  Access-Control-Allow-Origin: *',
+    '',
+  ].join('\n');
+
+/** YAML front matter for a Markdown twin: the Search for Agents pointers (`agent:`). */
+const twinFrontMatter = (origin) => {
+  const lines = Object.entries(searchPointers(origin)).map(([k, v]) => `  ${k}: ${JSON.stringify(v)}`);
+  return `---\nagent:\n${lines.join('\n')}\n---\n\n`;
+};
+
+/** Write a file under dist, creating its directory. */
+const write = (dist, path, data) => {
+  mkdirSync(dirname(join(dist, path)), { recursive: true });
+  writeFileSync(join(dist, path), data);
+};
+const writeJson = (dist, path, value) => write(dist, path, `${JSON.stringify(value, null, 2)}\n`);
 
 const ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ', '#39': "'" };
 const decode = (s) =>
@@ -67,6 +139,11 @@ export function htmlToMarkdown(html, origin) {
     .replace(/<\/(p|div|section|figure|figcaption|ul|ol|article|header|li|details|dd|dt)>/gi, '\n')
     .replace(/<(p|div|section|figure|figcaption|ul|ol|article|header|details|dd|dt)\b[^>]*>/gi, '\n')
     .replace(/<br\s*\/?>/gi, '\n')
+    // Inline elements a page lays out as blocks (a date beside a name, one
+    // line per change) are words of their own: a closing tag directly
+    // followed by another tag would otherwise glue two sentences together
+    // ("(5 min, 1 h).Fast mode").
+    .replace(/<\/(span|time|small)>(?=<)/gi, '</$1> ')
     .replace(/<[^>]+>/g, '');
 
   return decode(s)
@@ -79,9 +156,73 @@ export function htmlToMarkdown(html, origin) {
     .trim();
 }
 
-const read = (dist, path) => readFileSync(join(dist, path, 'index.html'), 'utf8');
+/** A built page's HTML, or with `file` set, any file's bytes. */
+const read = (dist, path, file = 'index.html') =>
+  file === '' ? readFileSync(join(dist, path)) : readFileSync(join(dist, path, file), 'utf8');
 
-/** Astro integration: write dist/llms-full.txt after the build. */
+/**
+ * Every discovery file made from the build, written into `dist`.
+ * @param {string} dist
+ * @param {string} origin
+ * @param {string[]} built site paths Astro built (`compare/ccusage/`, ...)
+ * @param {Date} [now]
+ */
+export function writeDiscovery(dist, origin, built, now = new Date()) {
+  const tools = COMPARE_TOOLS.map((t) => `compare/${t}/`).filter((p) => built.includes(p));
+  const order = PAGES.flatMap((p) => (p === 'compare/' ? [p, ...tools] : [p]));
+
+  const sections = order.map((path) => `<!-- ${origin}/${path} -->\n\n${htmlToMarkdown(read(dist, path), origin)}`);
+  const head =
+    '# Pacer: the full text of pacer.andrechek.com\n\n' +
+    `> Every page of ${origin}/ as Markdown, generated from the site at build time. ` +
+    `Summary and links: ${origin}${PATHS.llms}\n`;
+  writeFileSync(join(dist, 'llms-full.txt'), `${head}\n${sections.join('\n\n---\n\n')}\n`);
+
+  // The Markdown twin of every page (the same converter). Their front matter
+  // names the search endpoint, which searches their text.
+  const mdPaths = [];
+  const searchPages = [];
+  for (const path of [...MARKDOWN_PAGES, ...tools]) {
+    const md = markdownPath(path);
+    if (!md) continue;
+    const html = read(dist, path);
+    const title = decode(/<title>([\s\S]*?)<\/title>/i.exec(html)?.[1]?.trim() ?? '');
+    const body = htmlToMarkdown(html, origin);
+    const text = body.startsWith('# ') ? body : `# ${title}\n\n${body}`;
+    const source = `${origin}/${path}`;
+    write(dist, md, `${twinFrontMatter(origin)}${text}\n\n---\n\nSource: ${source}\n`);
+    mdPaths.push(md);
+    searchPages.push({ url: source, title: /^# (.+)$/m.exec(text)?.[1]?.trim() ?? title, markdown: text });
+  }
+  writeJson(dist, PATHS.searchIndex, buildSearchIndex(searchPages));
+
+  // The skill, byte for byte from ../Skills/pacer: each file, and the archive
+  // the Agent Skills index lists with its digest.
+  const skill = readSkill();
+  for (const f of skill) write(dist, `${PATHS.skillDir}${f.name}`, f.bytes);
+  const archive = skillArchive(skill);
+  write(dist, PATHS.skillArchive, archive);
+  const skillMd = skill.find((f) => f.name === 'SKILL.md').bytes;
+  const { description } = skillFrontMatter(skillMd.toString('utf8'));
+  writeJson(dist, PATHS.agentSkills, agentSkillsIndex({ description: skillIndexDescription(description), digest: sha256(archive) }));
+  const catalog = aiCatalog(origin, { skillDescription: description, skillDigest: sha256(skillMd) });
+  writeJson(dist, PATHS.aiCatalog, catalog);
+  writeJson(dist, PATHS.ard, catalog);
+
+  // The price list's public copy: the bytes Astro copied from public/ (which
+  // check-feeds.mjs holds to public/ byte for byte), at a path that is a plain
+  // static asset. scripts/check-discovery.mjs checks the two after the build.
+  write(dist, PATHS.priceList, read(dist, PATHS.priceHistory.slice(1), ''));
+
+  write(dist, PATHS.apiCatalog, `${JSON.stringify(apiCatalog(origin), null, 2)}\n`);
+  write(dist, PATHS.security, securityTxt(origin, now));
+
+  const headersFile = join(dist, '_headers');
+  writeFileSync(headersFile, readFileSync(headersFile, 'utf8') + discoveryHeaders(mdPaths, skill));
+  return { mdPaths, tools };
+}
+
+/** Astro integration: write dist/llms-full.txt and the discovery files after the build. */
 export function llmsFull() {
   /** @type {string | undefined} */
   let site;
@@ -92,16 +233,14 @@ export function llmsFull() {
       'astro:config:done': ({ config }) => {
         site = config.site;
       },
-      /** @param {{ dir: URL }} options */
-      'astro:build:done': ({ dir }) => {
-        const dist = fileURLToPath(dir);
+      /** @param {{ dir: URL, pages: { pathname: string }[] }} options */
+      'astro:build:done': ({ dir, pages }) => {
         const origin = (site ?? 'http://localhost').replace(/\/+$/, '');
-        const sections = PAGES.map((path) => `<!-- ${origin}/${path} -->\n\n${htmlToMarkdown(read(dist, path), origin)}`);
-        const head =
-          '# Pacer: the full text of pacer.andrechek.com\n\n' +
-          `> Every page of ${origin}/ as Markdown, generated from the site at build time. ` +
-          `Summary and links: ${origin}/llms.txt\n`;
-        writeFileSync(join(dist, 'llms-full.txt'), `${head}\n${sections.join('\n\n---\n\n')}\n`);
+        writeDiscovery(
+          fileURLToPath(dir),
+          origin,
+          pages.map((p) => p.pathname.replace(/^\/+/, '')),
+        );
       },
     },
   };

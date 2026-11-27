@@ -8,3 +8,4 @@ minimumReleaseAgeExclude:
   - '@cloudflare/workers-utils@0.57.0'
   - miniflare@5.20261123.1-beta
   - wrangler@4.168.0
+  - '@wave-rf/cloudflare-md-router@0.5.0'

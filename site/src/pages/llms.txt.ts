@@ -1,4 +1,6 @@
 import type { APIRoute } from 'astro';
+import { PATHS, markdownPath } from '../../scripts/discovery.mjs';
+import { HUB, toolPages } from '../lib/compare';
 import { FAQ } from '../lib/faq';
 import {
   BREW_COMMAND,
@@ -19,6 +21,12 @@ import {
  */
 export const GET: APIRoute = ({ site }) => {
   const url = (path: string) => new URL(path, site ?? 'http://localhost').toString();
+  /** ` ([Markdown](…))` for a page with a Markdown twin. */
+  const md = (path: string) => {
+    const m = markdownPath(path);
+    return m ? ` ([Markdown](${url(m)}))` : '';
+  };
+  const compared = HUB.filter((t) => t.slug !== 'pacer').map((t) => t.name);
 
   const body = `# ${SITE_NAME}
 
@@ -38,15 +46,29 @@ Features:
 
 ${FEATURES.map((f) => `- ${f}`).join('\n')}
 
+## Use Pacer from an agent
+
+- [The Claude Code skill](${url(PATHS.skill)}): teaches an agent to pause a long run or a fan-out of subagents before a rate limit (\`pacer gate\`, \`pacer status\`), save its work, and resume when there is room (\`pacer wait\`). It needs Pacer on the Mac: install the app (\`${BREW_COMMAND}\`), then the skill from Pacer's Settings, which links the \`pacer\` command beside it. Also as an archive in the [Agent Skills index](${url(PATHS.agentSkills)}).
+- [The pacer command](${url('/cli/')}): every subcommand, exit codes, gate-only and informed pacing.${md('/cli/')}
+- [Claude price history API](${url(PATHS.priceList)}): dated per-million-token prices for every Claude model, the same file Pacer prices usage with. Public JSON, no key, CORS open, refreshed every six hours. [JSON Schema](${url(PATHS.priceSchema)}); [documentation](${url(PATHS.prices)}).
+- [API catalog](${url(PATHS.apiCatalog)}) (RFC 9727) and [AI catalog](${url(PATHS.aiCatalog)}) (also at ${url(PATHS.ard)}): the same, for discovery. There is no MCP server, REST API or sign-in.
+- Search: \`GET ${url(PATHS.search)}?q=<words>\` returns the best sections of this site's pages, in Markdown.
+- Every page has a Markdown twin: ask for \`Accept: text/markdown\`, or use the links below.
+
 ## Pages
 
-- [Home](${url('/')}): what Pacer is, screenshots, download.
-- [Features](${url('/features/')}): everything the app does.
-- [For agents: the pacer command and Claude Code skill](${url('/cli/')}): gate, status, wait and report; gate-only and informed pacing.
-- [How Pacer counts](${url('/how-pacer-counts/')}): where the numbers come from, and why they differ from ccusage.
-- [Privacy](${url('/privacy/')}): what the app sends, the two toggles, and the site's cookieless analytics.
-- [FAQ](${url('/faq/')}): ${FAQ.map((f) => f.q.replace(/\?$/, '').toLowerCase()).join('; ')}.
-- [Changelog](${url('/changelog/')}): every release's notes.
+- [Home](${url('/')}): what Pacer is, screenshots, download.${md('/')}
+- [Features](${url('/features/')}): everything the app does.${md('/features/')}
+- [For agents: the pacer command and Claude Code skill](${url('/cli/')}): gate, status, wait and report; gate-only and informed pacing.${md('/cli/')}
+- [How Pacer counts](${url('/how-pacer-counts/')}): where the numbers come from, and why they differ from ccusage.${md('/how-pacer-counts/')}
+- [Claude API prices](${url(PATHS.prices)}): the current price of every Claude model per million tokens, when it took effect, every change, and the API.${md(PATHS.prices)}
+- [How Pacer compares](${url('/compare/')}): Pacer next to ${compared.join(', ')}.${md('/compare/')}
+${toolPages()
+  .map((t) => `  - [${t.page.title}](${url(`/compare/${t.slug}/`)}): ${t.page.description.split('. ')[0]}.${md(`/compare/${t.slug}/`)}`)
+  .join('\n')}
+- [Privacy](${url('/privacy/')}): what the app sends, the two toggles, and the site's cookieless analytics.${md('/privacy/')}
+- [FAQ](${url('/faq/')}): ${FAQ.map((f) => f.q.replace(/\?$/, '').toLowerCase()).join('; ')}.${md('/faq/')}
+- [Changelog](${url('/changelog/')}): every release's notes.${md('/changelog/')}
 
 ## Optional
 
