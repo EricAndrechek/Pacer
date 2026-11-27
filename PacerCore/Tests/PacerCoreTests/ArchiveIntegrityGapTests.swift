@@ -85,6 +85,42 @@ struct ArchiveIntegrityGapTests {
         ])
     }
 
+    @Test("a mismatch only in input or cache names the field, with its direction and magnitude")
+    func inputOrCacheOnly() {
+        // The shape one Mac sent for weeks (#433): rows and output equal.
+        let keys = ArchiveIntegrityGap.counterKeys(
+            archived: Sums(rows: 10, input: 4_000, output: 700, cacheRead: 9_000_000, cc5m: 0, cc1h: 0),
+            stored: Sums(rows: 10, input: 6_500, output: 700, cacheRead: 7_000_000, cc5m: 0, cc1h: 0),
+            sampleRows: 10)
+        #expect(keys == [
+            "data.archive_integrity.rows.equal",
+            "data.archive_integrity.output.equal",
+            "data.archive_integrity.input.under.e3",        // 6,500 - 4,000 = 2,500
+            "data.archive_integrity.cache_read.over.e6",    // 9M - 7M = 2,000,000
+            "data.archive_integrity.cc5m.equal",
+            "data.archive_integrity.cc1h.equal",
+            "data.archive_integrity.rollup_rows.equal",
+        ])
+    }
+
+    @Test("each token field reads its own pair of sums")
+    func eachFieldItsOwnKey() {
+        // A different gap, and a different way, per field, so a field wired
+        // to the wrong sum shows as the wrong magnitude or direction.
+        let keys = ArchiveIntegrityGap.counterKeys(
+            archived: Sums(rows: 3, input: 105, output: 9, cacheRead: 1_000, cc5m: 0, cc1h: 4_000),
+            stored: Sums(rows: 3, input: 100, output: 9, cacheRead: 1_050, cc5m: 500, cc1h: 0),
+            sampleRows: nil)
+        #expect(keys == [
+            "data.archive_integrity.rows.equal",
+            "data.archive_integrity.output.equal",
+            "data.archive_integrity.input.over.e0",         // 5
+            "data.archive_integrity.cache_read.under.e1",   // 50
+            "data.archive_integrity.cc5m.under.e2",         // 500
+            "data.archive_integrity.cc1h.over.e3",          // 4,000
+        ])
+    }
+
     @Test("keys carry no number but a magnitude")
     func noCounts() {
         let keys = Self.keys(
