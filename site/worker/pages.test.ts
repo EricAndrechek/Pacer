@@ -129,7 +129,7 @@ describe('the update feed and the price history never reach the router', () => {
       { Accept: 'text/markdown' },
       { 'User-Agent': 'Mozilla/5.0 (compatible; GPTBot/1.2; +https://openai.com/gptbot)' },
       { Accept: 'text/markdown', 'User-Agent': 'Pacer/0.9.7 Sparkle/2.10.1' },
-    ]) {
+    ] as Record<string, string>[]) {
       it(`${path}, ${JSON.stringify(headers)}`, async () => {
         const { response, assets } = await get(path, headers);
         expect(assets).toHaveBeenCalledTimes(1);

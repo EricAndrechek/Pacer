@@ -32,7 +32,7 @@
 //   it.
 // - /.well-known/search is Search for Agents over the pages (worker/search.ts).
 
-import { createMdRouter } from '@wave-rf/cloudflare-md-router';
+import { createMdRouter } from './md-router.mjs';
 import { API_POINTER_PAGES, PATHS, isPageRoute, linkHeader } from '../scripts/discovery.mjs';
 import { feedback } from './feedback';
 import { download, environmentOf, feedFileOf, serveFeed } from './lib';
