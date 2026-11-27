@@ -310,12 +310,20 @@ final class ArchiveSync {
             let sampleRows = midScan ? nil : (try? context.fetchCount(FetchDescriptor<TokenSample>(
                 predicate: #Predicate<TokenSample> { $0.date < today }))).map(Int64.init)
             var detail = "rows \(archived.rows)/\(stored.rows) out \(archived.output)/\(stored.output)"
+            // The other token fields only where they differ, so the line in
+            // the log (and in `make verify-data`) names the field (#433).
+            for (name, a, s) in [("in", archived.input, stored.input),
+                                 ("cacheRead", archived.cacheRead, stored.cacheRead),
+                                 ("cc5m", archived.cc5m, stored.cc5m),
+                                 ("cc1h", archived.cc1h, stored.cc1h)] where a != s {
+                detail += " \(name) \(a)/\(s)"
+            }
             if let sampleRows { detail += " samples \(sampleRows)" }
             if midScan { detail += " mid-scan" }
-            // Direction and order of magnitude only: what the check-in sends.
+            // Direction and order of magnitude only, per field: what the
+            // check-in sends.
             for key in ArchiveIntegrityGap.counterKeys(
-                archivedRows: archived.rows, storedRows: stored.rows,
-                archivedOutput: archived.output, storedOutput: stored.output,
+                archived: Self.sums(archived), stored: Self.sums(stored),
                 sampleRows: sampleRows, midScan: midScan) {
                 TelemetryCounters.add(key)
             }
@@ -340,6 +348,11 @@ final class ArchiveSync {
                   "integrity check \(checks): \(archived == stored ? "ok" : "MISMATCH") "
                   + "(\(archived.rows) turns, \(mismatches) mismatch(es) all-time)")
         try writeMeta(ClaudeCodeMetaKey.archiveIntegrity, value: verdict, context: context)
+    }
+
+    private static func sums(_ t: RawArchive.Totals) -> ArchiveIntegrityGap.Sums {
+        .init(rows: t.rows, input: t.input, output: t.output,
+              cacheRead: t.cacheRead, cc5m: t.cc5m, cc1h: t.cc1h)
     }
 
     private func fetchMeta(_ key: String, context: ModelContext) throws -> String? {
