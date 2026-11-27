@@ -73,6 +73,48 @@ import Testing
         }
     }
 
+    // MARK: - Usage scope (#482)
+    //
+    // Each blob carries a `rateLimitTier`, so `read()` never looks at the
+    // credentials file on the machine running the tests.
+
+    private static func scopedBlob(_ scopes: String?) -> Data {
+        let field = scopes.map { #","scopes":\#($0)"# } ?? ""
+        return Data(#"{"claudeAiOauth":{"accessToken":"tok","rateLimitTier":"t"\#(field)}}"#.utf8)
+    }
+
+    @Test("a credential whose scopes lack user:profile is skipped: the usage endpoint refuses it (#482)")
+    func skipsCredentialWithoutUsageScope() {
+        let blob = Self.scopedBlob(#"["user:inference"]"#)
+        #expect(KeychainOAuth(rawReader: { .success(blob) }).read() == .failure(.notFound))
+        let spaced = Self.scopedBlob(#""user:inference user:sessions:claude_code""#)
+        #expect(KeychainOAuth(rawReader: { .success(spaced) }).read() == .failure(.notFound))
+    }
+
+    @Test("a credential whose scopes include user:profile is kept (#482)")
+    func keepsCredentialWithUsageScope() {
+        for scopes in [#"["user:inference","user:profile","user:sessions:claude_code"]"#,
+                       #""user:inference user:profile""#] {
+            let blob = Self.scopedBlob(scopes)
+            guard case .success(let cred) = KeychainOAuth(rawReader: { .success(blob) }).read() else {
+                Issue.record("expected success for scopes \(scopes)")
+                continue
+            }
+            #expect(cred.accessToken == "tok")
+        }
+    }
+
+    @Test("no scopes field, or one that says nothing, is unknown: the credential is kept (#482)")
+    func keepsCredentialWithUnknownScopes() {
+        for scopes in [nil, "[]", "null", "42"] as [String?] {
+            let blob = Self.scopedBlob(scopes)
+            guard case .success = KeychainOAuth(rawReader: { .success(blob) }).read() else {
+                Issue.record("expected success for scopes \(scopes ?? "absent")")
+                continue
+            }
+        }
+    }
+
     // MARK: - Decoding failures
 
     @Test func rejectsMissingAccessToken() {

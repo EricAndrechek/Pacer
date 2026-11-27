@@ -48,7 +48,9 @@ timeline times, `energy.cpu_seconds`), forecast accuracy, and the health
 counters (`data.*`, `oauth.*`, `cred.*`, `telemetry.*`, `main_thread.*`,
 `api.snapshot_ms.*`, `ui.click.delay.*`, `accounts.*`, `crash_relaunch.*`).
 
-`oauth.lane_parked_403`: counter of lanes parked in place for 6 h after 3 HTTP 403s in a row on one token while another lane of the pool is healthy (#434), drained by the daily check-in. No ids, bodies or tokens (the body is only classified locally). Non-usage counter, so a Sentry metric.
+`oauth.lane_parked_403`: counter of lanes parked in place for 6 h after 3 HTTP 403s in a row on one token while another lane of the pool is healthy (#434), drained by the daily check-in. The healthy lane must be the same account's, except for a token refused from its first poll (so with no account) with Anthropic's scope refusal, which any account's healthy lane can vouch for; a 403 right after the 6 h parks again at once (#482). No ids, bodies or tokens (the body is only classified locally). Non-usage counter, so a Sentry metric.
+
+`oauth.lane_park_declined.<reason>`: counter of polls that were a lane's 3rd or later 403 in a row but did not park it (#482), drained by the daily check-in. `reason` is one of three fixed words: `edge` (the body is an edge page, not Anthropic's JSON), `no_account` (a lane that has never had a good reading, so no account to vouch within, and a body that is not the scope refusal), `no_sibling` (no healthy lane that could vouch). No ids, bodies or tokens. Non-usage counter, so a Sentry metric.
 
 `accounts.login_change.explained` / `accounts.login_change.unexplained`: counters of default-login changes a switcher's own log does / does not account for, drained by the daily check-in. No ids. A healthy machine has near zero unexplained; several a day means the switcher-log parse broke (#382). Non-usage counters, so Sentry metrics.
 

@@ -1,5 +1,7 @@
+import CryptoKit
 import Foundation
 import Security
+import Synchronization
 
 /// One decoded copy of the OAuth credential blob Claude Code stores in
 /// the user's login Keychain under service name `Claude Code-credentials`.
@@ -94,7 +96,9 @@ public struct OAuthCredential: Sendable, Equatable, Codable {
 /// need to update.
 public enum KeychainOAuthError: Error, Sendable, Equatable {
     /// No `Claude Code-credentials` entry in the Keychain. Expected on
-    /// a machine where Claude Code was never signed in.
+    /// a machine where Claude Code was never signed in. Also the answer for
+    /// an entry whose `scopes` lack `user:profile` (#482): a token the usage
+    /// endpoint refuses is no credential to Pacer.
     case notFound
     /// The user declined the system access prompt, or the daemon ran
     /// from a context where macOS refuses to show one
@@ -388,12 +392,43 @@ public struct KeychainOAuth: Sendable {
     //         "subscriptionType": "max",         // optional, coarse
     //         "rateLimitTier": "default_claude_max_20x",  // optional, exact
     //         "refreshToken": "...",             // ignored
-    //         "scopes": [...]                    // ignored
+    //         "scopes": ["user:profile", ...]    // must include user:profile
     //     } }
     //
     // We tolerate missing `expiresAt`/`subscriptionType`; their absence
     // is benign on some account types. Missing `accessToken` is fatal —
     // the whole point of the read.
+
+    /// The scope `/api/oauth/usage` requires.
+    static let usageScope = "user:profile"
+
+    /// The `scopes` field as a list, or nil when it says nothing: absent, not
+    /// a list or string, or an empty list. Claude Code writes a JSON array; a
+    /// space- or comma-separated string is read too.
+    static func scopeList(_ raw: Any?) -> [String]? {
+        let list: [String]
+        if let strings = raw as? [Any] {
+            list = strings.compactMap { $0 as? String }
+        } else if let joined = raw as? String {
+            list = joined.split(whereSeparator: { $0.isWhitespace || $0 == "," }).map(String.init)
+        } else {
+            return nil
+        }
+        return list.isEmpty ? nil : list
+    }
+
+    /// Tokens already logged as skipped this launch, by fingerprint, so a
+    /// discovery once a minute does not repeat the line.
+    private static let loggedScopeSkips = Mutex<Set<String>>([])
+
+    private static func logScopeSkip(token: String, scopes: [String]) {
+        let fingerprint = SHA256.hash(data: Data(token.utf8)).prefix(6).map { String(format: "%02x", $0) }.joined()
+        guard loggedScopeSkips.withLock({ $0.insert(fingerprint).inserted }) else { return }
+        // Scope names only, never the token; local log, never sent.
+        let named = scopes.prefix(8).map { String($0.prefix(48)) }.joined(separator: " ")
+        Log.write("KeychainOAuth", "skipping a Claude Code credential without the \(usageScope) scope "
+            + "(scopes: \(named)): the usage endpoint refuses it with HTTP 403")
+    }
 
     private func decode(_ data: Data) -> Result<OAuthCredential, KeychainOAuthError> {
         // `security -w` emits the password followed by a newline; trim
@@ -414,6 +449,19 @@ public struct KeychainOAuth: Sendable {
 
         guard let accessToken = oauth["accessToken"] as? String, !accessToken.isEmpty else {
             return .failure(.malformedJSON(underlying: "missing or empty accessToken"))
+        }
+
+        // A token without `user:profile` cannot read usage: the endpoint
+        // answers it with 403 on every poll (#482, a long-lived inference-only
+        // token polled about 24 times a day). `DesktopOAuth` keeps only
+        // `user:profile` entries; this is the same rule for Claude Code's
+        // blob, and it reads as no credential (`.notFound`), which is what such
+        // a token is to Pacer. A field that says nothing (absent, empty, not a
+        // list) is unknown, not a refusal, so that token is still polled:
+        // skipping the only token wrongly would stop every reading.
+        if let scopes = Self.scopeList(oauth["scopes"]), !scopes.contains(Self.usageScope) {
+            Self.logScopeSkip(token: accessToken, scopes: scopes)
+            return .failure(.notFound)
         }
 
         // expiresAt may be Int64 (Unix milliseconds, the documented form),
