@@ -64,7 +64,7 @@ const dataset = {
 
   <section class="wrap" aria-labelledby="now">
     <h2 id="now" class="sr-only">Current prices</h2>
-    <div class="scroll">
+    <div class="hscroll" tabindex="0" role="region" aria-label="Current prices">
       <table class="prices">
         <caption class="sr-only">Current prices, US dollars per million tokens</caption>
         <thead>
@@ -97,6 +97,7 @@ const dataset = {
         </tbody>
       </table>
     </div>
+    <p class="scroll-hint small" aria-hidden="true" data-llms="skip">Scroll sideways for every price →</p>
     <div class="prose notes small">
       <p>
         US dollars per million tokens, on the first-party Claude API. Prices on Amazon Bedrock, Google Vertex AI and
@@ -187,15 +188,11 @@ const dataset = {
   </div>
 </Base>
 
+<script>
+  import '../scripts/scroll-cue';
+</script>
+
 <style>
-  /* Wide tables scroll inside the page, never the page itself; positioned so
-     the visually hidden text in their cells is clipped with them. */
-  .scroll {
-    position: relative;
-    overflow-x: auto;
-    margin-inline: calc(-1 * var(--gutter));
-    padding-inline: var(--gutter);
-  }
   .prices {
     min-width: 760px;
   }

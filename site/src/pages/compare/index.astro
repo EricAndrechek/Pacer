@@ -22,9 +22,9 @@ const markClass = (c: Cell) => (c.mark ? `mark ${c.mark}` : 'mark');
     </p>
   </header>
 
-  <section class="wrap" aria-labelledby="table-title">
+  <section class="wrap wide" aria-labelledby="table-title">
     <h2 id="table-title" class="sr-only">Every tool, side by side</h2>
-    <div class="scroll" tabindex="0" role="region" aria-labelledby="table-title">
+    <div class="hscroll" tabindex="0" role="region" aria-labelledby="table-title">
       <table class="hub">
         <thead>
           <tr>
@@ -59,6 +59,7 @@ const markClass = (c: Cell) => (c.mark ? `mark ${c.mark}` : 'mark');
         </tbody>
       </table>
     </div>
+    <p class="scroll-hint small" aria-hidden="true" data-llms="skip">Scroll sideways for every tool →</p>
     <p class="legend small muted">
       ✓ does it. – doesn't. Partly: does some of it, as noted. Not stated: its own pages don't say. n/a: doesn't apply.
       Each tool's column is read from its own site or repository, checked {CHECKED}; these tools move fast, so corrections
@@ -102,14 +103,15 @@ const markClass = (c: Cell) => (c.mark ? `mark ${c.mark}` : 'mark');
   </div>
 </Base>
 
+<script>
+  import '../../scripts/scroll-cue';
+</script>
+
 <style>
-  /* Wide tables scroll inside the page, never the page itself; positioned so
-     the visually hidden text in their cells is clipped with them. */
-  .scroll {
-    position: relative;
-    overflow-x: auto;
-    margin-inline: calc(-1 * var(--gutter));
-    padding-inline: var(--gutter);
+  /* Nine columns: wider than the reading column, so the whole table shows at
+     1280 px; below that it scrolls, with the row labels kept in view. */
+  .wide {
+    max-width: 1400px;
   }
   .hub {
     min-width: 1100px;

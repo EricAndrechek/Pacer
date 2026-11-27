@@ -233,6 +233,29 @@ li + li {
 .prose {
   max-width: var(--measure);
 }
+/* A table wider than the page scrolls sideways inside it, never the page
+   itself. Positioned, so visually hidden text in its cells is clipped with it.
+   src/scripts/scroll-cue.ts sets data-more while there is more to the right:
+   the edge fades and the hint after it shows. */
+.hscroll {
+  position: relative;
+  overflow-x: auto;
+  margin-inline: calc(-1 * var(--gutter));
+  padding-inline: var(--gutter);
+}
+.hscroll[data-more] {
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 64px), transparent);
+  mask-image: linear-gradient(to right, #000 calc(100% - 64px), transparent);
+}
+.scroll-hint {
+  display: none;
+  margin: 0.5rem 0 0;
+  color: var(--ink-3);
+}
+.hscroll[data-more] + .scroll-hint {
+  display: block;
+}
+
 /* A prose column inside the page's wrap keeps the wrap's left edge, so it lines
    up with the page head; only its children are held to a reading width. */
 .wrap.prose {
