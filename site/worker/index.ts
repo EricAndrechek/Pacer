@@ -31,11 +31,15 @@
 //   the feed, /download and /api/feedback are answered above it, and never by
 //   it.
 // - /.well-known/search is Search for Agents over the pages (worker/search.ts).
+// - Each page request and search is counted as one anonymous `page_view`
+//   (path, kind of client, Markdown or HTML, status class) in ctx.waitUntil,
+//   like the feed (worker/pageview.ts).
 
 import { createMdRouter } from './md-router.mjs';
 import { API_POINTER_PAGES, PATHS, isPageRoute, linkHeader } from '../scripts/discovery.mjs';
 import { feedback } from './feedback';
 import { download, environmentOf, feedFileOf, serveFeed } from './lib';
+import { countPageView } from './pageview';
 import { handleSearch } from './search';
 
 const pages = createMdRouter<Env>({ vary: true });
@@ -102,6 +106,10 @@ export default {
             : isPageRoute(url.pathname)
               ? await page(request, env, ctx, url.pathname)
               : await env.ASSETS.fetch(request);
+    // A page or a search: one anonymous page_view, after the answer and
+    // never able to change it (worker/pageview.ts). The feed counts itself
+    // above; /download and /api/feedback are not pages.
+    if (url.pathname === PATHS.search || isPageRoute(url.pathname)) countPageView(request, env, ctx, url.pathname, response);
     // workers.dev (every branch preview) must stay out of search results.
     // Static assets get this from public/_headers' host rule; the Worker's own
     // responses get it here.

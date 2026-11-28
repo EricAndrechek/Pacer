@@ -311,12 +311,18 @@ for the app); posthog-js cannot drop it.
 | `download_clicked` | a Download link, or the Homebrew command copied | `source`: `button` \| `brew_copy`; `placement`: `hero`, `home-end`, `features-end`, `header`, `menu` |
 | `docs_link_clicked` | a link to the repo's docs | `href` (one of the site's own links) |
 
-**Worker** (`site/worker/lib.ts`), sent server-side from `/download/` in
-`ctx.waitUntil`, so it never delays the redirect:
+**Worker** (`site/worker/lib.ts`, `site/worker/pageview.ts`), sent
+server-side in `ctx.waitUntil`, so it never delays the answer:
 
 | Event | When | Properties |
 | --- | --- | --- |
 | `website_download` | a GET of `/download/`, not from a crawler, not with DNT or GPC | `country` (Cloudflare's), `version` (the DMG redirected to), `environment`, `distinct_id` a random UUID per download, `$process_person_profile: false`, `$ip: null`, `$geoip_disable: true` |
+| `page_view` | a GET of a page (crawlers and agents included) or of `/.well-known/search`; not HEAD, not a 404, not with DNT or GPC | `path` (the matched route, never a query string), `class` (`human` \| `search_crawler` \| `ai_agent` \| `other_bot`, from `Accept: text/markdown` and the User-Agent, which is not sent), `representation` (`markdown` \| `html`), `status` (`2xx` \| `3xx` \| `304` \| `4xx` \| `5xx`), `environment`, `distinct_id` a random UUID per request, `$process_person_profile: false`, `$ip: null`, `$geoip_disable: true` |
+
+**Cloudflare Web Analytics** is on for the domain (the owner's decision,
+2026-11-28): Cloudflare's cookieless beacon, injected into every page by
+Cloudflare and reporting to Cloudflare, not PostHog. The CSP allows it
+(`site/public/_headers`).
 
 The visitor's IP never reaches PostHog from the Worker: the request is the
 Worker's own. The site's Privacy page says all of this in plain words; change

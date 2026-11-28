@@ -756,7 +756,8 @@ describe('everything else', () => {
     const { response, assets } = await call('/features/');
     expect(assets).toHaveBeenCalledTimes(1);
     expect(await response.text()).toBe('asset');
-    expect(upstream).not.toHaveBeenCalled();
+    // Nothing is fetched to answer; a page's one fetch is its page_view count (worker/pageview.test.ts).
+    expect(upstream!.mock.calls.every(([input]) => urlOf(input) === POSTHOG)).toBe(true);
   });
 });
 

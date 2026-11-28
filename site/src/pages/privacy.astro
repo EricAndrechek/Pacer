@@ -4,7 +4,9 @@ import Base from '../layouts/Base.astro';
 // The first two paragraphs are README.md's "Privacy" section, word for word:
 // that is the public promise (AGENTS.md "Telemetry"). The rest is sourced from
 // PacerCore/Telemetry/TelemetryConsent.swift, docs/telemetry-plan.md and
-// AGENTS.md, and, for this site, src/components/PostHog.astro and worker/lib.ts.
+// AGENTS.md, and, for this site, src/components/PostHog.astro, worker/lib.ts,
+// worker/pageview.ts and public/_headers (Cloudflare Web Analytics, on for the
+// domain since 2026-11-28).
 // The browser can't keep the IP from PostHog: posthog-js's `ip` option has no
 // effect (its own warning says so); only a project transformation or "Discard IP
 // data" can, which is why the page says the IP is kept.
@@ -108,7 +110,17 @@ import Base from '../layouts/Base.astro';
         <li>
           <strong>What is recorded:</strong> the pages you view, and a few clicks: a download button, copying the
           Homebrew command, and links to Pacer's docs. Every event is marked as coming from the website. If your browser
-          sends Do Not Track or Global Privacy Control, nothing is recorded, downloads included.
+          sends Do Not Track or Global Privacy Control, none of this is recorded, downloads and page counts included.
+        </li>
+        <li>
+          <strong>Page counts:</strong> the site's server also counts each page request: which page, whether a person, a
+          search engine or an AI agent asked, and whether it got the page or its Markdown version. No IP address, cookie
+          or identifier goes with it.
+        </li>
+        <li>
+          <strong>Cloudflare Web Analytics</strong>, run by Cloudflare, counts page loads and how fast they are. It sets
+          no cookies. It is Cloudflare's, so the Do Not Track and Global Privacy Control rule above is not ours to apply
+          to it.
         </li>
         <li>
           <strong>Your IP address:</strong> PostHog sees it, like any web request, and uses it for an approximate

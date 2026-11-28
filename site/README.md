@@ -76,6 +76,8 @@ answers them first (`worker/pages.test.ts`).
   until Macs are on 0.9.5. To stop counting, take the two paths out of
   `run_worker_first`: the files are plain static assets again with the next
   deploy.
+- **The pages and `/.well-known/search`** also send one anonymous `page_view`
+  each, in `ctx.waitUntil` ([Analytics](#analytics)).
 - **`/download/`** redirects (302) to the newest DMG **in the site's appcast**,
   read through the assets binding (`env.ASSETS`, never the network), the same
   file Sparkle reads, so a release pulled from the appcast
@@ -193,9 +195,9 @@ in localStorage; a new random id per page load), `person_profiles:
 heatmaps, surveys, flags and web vitals off, `respect_dnt`, and off under
 Global Privacy Control, automation and localhost. Events: `$pageview`,
 `download_clicked` (`source: button | brew_copy`, `placement`),
-`docs_link_clicked` (`href`), plus the Worker's `website_download` and
-`feed_request` (`surface: 'feed'`: the app's own update checks and price
-fetches, counted by the Worker; above). Nothing
+`docs_link_clicked` (`href`), plus the Worker's `website_download`,
+`page_view` (below) and `feed_request` (`surface: 'feed'`: the app's own
+update checks and price fetches, counted by the Worker; above). Nothing
 joins a web visitor to an app install: conversion is read in aggregate
 (`website_download` counts against new installs in the app's daily check-in).
 PostHog still receives the visitor's IP with page views and the project keeps
@@ -203,6 +205,29 @@ it: posthog-js's `ip` option is a no-op, so dropping it would take a PostHog
 transformation filtered on `surface = website` (not set up). The Worker's
 `website_download` never carries it.
 The Privacy page describes exactly this; change both together.
+
+**`page_view`, from the Worker** (`worker/pageview.ts`): the pages run the
+Worker first for the Markdown router, so it counts every page request and
+search, crawlers and agents included, which the browser snippet never sees.
+One event each, sent like `feed_request` (`sendEvent` in `ctx.waitUntil`,
+after the answer, never able to fail or delay it), with only `surface:
+'website'`, `environment`, `path` (the matched route: never a query string),
+`class` (`ai_agent`: `Accept: text/markdown` or md-router's `LLM_BOT_UA`;
+`search_crawler`: Googlebot, Bingbot, DuckDuckBot, Applebot, YandexBot,
+Baiduspider and the like; `other_bot`: curl, wget, python, Go-http-client,
+headless browsers, an empty User-Agent, anything saying bot, crawl or spider;
+otherwise `human`), `representation` (`markdown` or `html`, as served) and
+`status` (`2xx`, `3xx`, `304`, `4xx`, `5xx`). A new random `distinct_id` each
+time and no person profile; never the IP, the User-Agent, the referrer,
+cookies or any id. Not counted: HEAD, the feed (its own `feed_request`), 404s,
+DNT or GPC.
+
+**Cloudflare Web Analytics** is on for the domain (the owner's decision,
+2026-11-28): Cloudflare injects its beacon into every HTML page, a module
+script from `static.cloudflareinsights.com` that reports to
+`cloudflareinsights.com`, both allowed by the CSP in `public/_headers`
+(pinned by `test/csp.test.ts`). It sets no cookies; its numbers are in the
+Cloudflare dashboard, not PostHog.
 
 The token defaults to the app's public project token (`src/lib/site.ts`, and
 `POSTHOG_TOKEN` in `wrangler.jsonc` for the Worker). Build variable
