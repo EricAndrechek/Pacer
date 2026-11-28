@@ -173,8 +173,8 @@ importers:
         specifier: 5.3.0
         version: 5.3.0
       '@wave-rf/cloudflare-md-router':
-        specifier: 0.5.1
-        version: 0.5.1(@cloudflare/workers-types@5.20261125.1)
+        specifier: 0.6.0
+        version: 0.6.0(@cloudflare/workers-types@5.20261125.1)
       astro:
         specifier: 7.4.13
         version: 7.4.13(@types/node@26.6.6)(esbuild@0.28.2)(yaml@2.9.1)
@@ -1248,8 +1248,8 @@ packages:
   '@vscode/l10n@0.0.18':
     resolution: {integrity: sha512-KYSIHVmslkaCDyw013pphY+d7x1qV8IZupYfeIfzNA+nsaWHbn5uPuQRvdRFsa9zFzGeudPuoGoZ1Op4jrJXIQ==}
 
-  '@wave-rf/cloudflare-md-router@0.5.1':
-    resolution: {integrity: sha512-0k9at2yl+UUcOjXw9ptR14nVRN3e8wcWcdQ/fLbiFUwoM/jRVpF4mH67GDZmcsmbSUmhyr7eizQf9CfA6SNjVA==}
+  '@wave-rf/cloudflare-md-router@0.6.0':
+    resolution: {integrity: sha512-I2gCEqjMo8GBqNDO6gmYVUeAZkcrUn8dJJVJ+/72JUZkEOKadVpB2c5EWyK23Jt3hpc59MUBwqeNblkwzt2F0Q==}
     engines: {node: '>=18.0.0'}
     hasBin: true
     peerDependencies:
@@ -3365,7 +3365,7 @@ snapshots:
 
   '@vscode/l10n@0.0.18': {}
 
-  '@wave-rf/cloudflare-md-router@0.5.1(@cloudflare/workers-types@5.20261125.1)':
+  '@wave-rf/cloudflare-md-router@0.6.0(@cloudflare/workers-types@5.20261125.1)':
     dependencies:
       '@cloudflare/workers-types': 5.20261125.1
 

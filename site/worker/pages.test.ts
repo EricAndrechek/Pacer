@@ -133,19 +133,29 @@ describe('pages through the Markdown router', () => {
     expect((await get('/cli/', { Accept: 'text/markdown' }, 'HEAD')).response.headers.get('content-type')).toBe('text/markdown; charset=utf-8');
   });
 
-  it('answers a conditional Markdown request with the full twin, never the HTML (md-router 0.5.1 fetches the twin without the validators)', async () => {
+  it('answers a Markdown revalidation itself: a 304 for the twin it holds, the full twin otherwise, never the HTML (md-router 0.6.0)', async () => {
     for (const headers of [
       { Accept: 'text/markdown', 'If-None-Match': MD_ETAG },
-      { 'User-Agent': 'Mozilla/5.0 (compatible; GPTBot/1.2; +https://openai.com/gptbot)', 'If-None-Match': MD_ETAG, 'If-Modified-Since': 'Wed, 26 Nov 2026 00:00:00 GMT' },
+      { 'User-Agent': 'Mozilla/5.0 (compatible; GPTBot/1.2; +https://openai.com/gptbot)', 'If-None-Match': MD_ETAG },
     ] as Record<string, string>[]) {
       const { response, assets } = await get('/faq/', headers);
-      expect(response.status).toBe(200);
+      expect(response.status).toBe(304);
       expect(response.headers.get('content-type')).toBe('text/markdown; charset=utf-8');
-      expect(await response.text()).toBe('# Questions');
+      expect(response.headers.get('cache-control')).toBe('private, max-age=0, must-revalidate');
+      expect(response.body).toBeNull();
+      // The router fetches the twin without the client's validators, so a 304 is its own answer.
       for (const [input] of assets.mock.calls) {
         expect((input as Request).headers.get('If-None-Match')).toBeNull();
-        expect((input as Request).headers.get('If-Modified-Since')).toBeNull();
       }
+    }
+    // A stale tag (or If-Modified-Since alone) gets the full twin.
+    for (const headers of [
+      { Accept: 'text/markdown', 'If-None-Match': '"stale"' },
+      { Accept: 'text/markdown', 'If-Modified-Since': 'Wed, 26 Nov 2026 00:00:00 GMT' },
+    ] as Record<string, string>[]) {
+      const { response } = await get('/faq/', headers);
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe('# Questions');
     }
     // A browser's conditional request for the HTML still reaches the assets layer as it came.
     const html = await get('/faq/', { Accept: 'text/html', 'If-None-Match': '"html-1"' });

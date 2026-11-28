@@ -1,4 +1,4 @@
-// The part of @wave-rf/cloudflare-md-router (0.5.1, src/worker.ts) the Worker uses.
+// The part of @wave-rf/cloudflare-md-router (0.6.0, src/worker.ts) the Worker uses.
 export interface MdRouterOptions {
   botUserAgents?: RegExp | false;
   mdPathFor?: (pathname: string) => string;
