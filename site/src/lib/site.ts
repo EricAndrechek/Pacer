@@ -2,16 +2,18 @@
 // repo's README.md, AGENTS.md, Skills/pacer and docs/release-notes; keep it
 // in step with those rather than inventing new claims.
 import { latestVersion } from './releases';
+import { BREW_COMMAND, REPO } from '../../scripts/discovery.mjs';
 
 export const SITE_NAME = 'Pacer';
 export const VERSION = latestVersion();
 
-export const REPO = 'https://github.com/EricAndrechek/Pacer';
+// The repository and the Homebrew command live in scripts/discovery.mjs, which
+// the discovery files (the skill's description among them) are built from.
+export { BREW_COMMAND, REPO };
 export const RELEASES = `${REPO}/releases`;
 export const LATEST_RELEASE = `${REPO}/releases/latest`;
 /** The Worker redirects this to the latest release's DMG and counts it (worker/index.ts). */
 export const DOWNLOAD_PATH = '/download/';
-export const BREW_COMMAND = 'brew install --cask ericandrechek/tap/pacer';
 export const README_PRIVACY = `${REPO}#privacy`;
 export const LICENSE_URL = `${REPO}/blob/main/LICENSE`;
 export const ISSUES = `${REPO}/issues`;

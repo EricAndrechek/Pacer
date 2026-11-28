@@ -10,7 +10,7 @@
   },
   "scripts": {
     "dev": "astro dev",
-    "build": "astro build && node scripts/csp-hashes.mjs && node scripts/check-feeds.mjs",
+    "build": "astro build && node scripts/csp-hashes.mjs && node scripts/check-feeds.mjs && node scripts/check-discovery.mjs",
     "build:ci": "pnpm test && pnpm check && pnpm build",
     "preview": "astro preview",
     "check": "astro check && pnpm run types && tsc -p worker/tsconfig.json",
@@ -22,12 +22,14 @@
   "dependencies": {
     "@astrojs/sitemap": "3.7.6",
     "@fontsource-variable/archivo": "5.3.0",
+    "@wave-rf/cloudflare-md-router": "0.6.0",
     "astro": "7.4.13",
     "marked": "18.3.0"
   },
   "devDependencies": {
     "@astrojs/check": "0.9.12",
     "@cloudflare/vitest-plugin": "1.9.0",
+    "ajv": "8.20.0",
     "playwright": "1.65.1",
     "sharp": "0.35.5",
     "typescript": "^6.0.3",

@@ -32,6 +32,9 @@ PIDFILE=$STATE_DIR/rotate.pid
 # at the time, to which slot). Kept on disk so a stop/start does not forget
 # the one-switch gap or the ping-pong guard.
 LASTFILE=$STATE_DIR/last_switch
+# When each account was first seen with a 7d reading and no 5h one, on disk so
+# a restart does not make every Ultra account untrusted again (see NO5 below).
+NO5FILE=$STATE_DIR/no5.since
 
 is_running() {
   local pid
@@ -94,13 +97,14 @@ API=${PACER_API:-http://127.0.0.1:7223}
 load_conf() {
   local -A def=([EARLY]=2 [STAGGER]=9000 [MIN_SWITCH_GAP]=300 [BRIDGE_MIN_PTS]=6
     [BRIDGE_MIN_MINUTES]=20 [BURN_UNKNOWN]=40 [EXPIRE_WINDOW]=2700 [EXPIRE_MIN_PTS]=8
-    [WEEK_ROOM_MIN]=1 [RESERVE_WEEK_MAX]=97 [STALE_AFTER]=2100 [STALE_BURN]=8)
+    [WEEK_ROOM_MIN]=1 [RESERVE_WEEK_MAX]=97 [STALE_AFTER]=2100 [STALE_BURN]=8 [NO5_TRUST]=900
+    [NO5_STALE]=600)
   local k bad=""
   for k in "${!def[@]}"; do printf -v "$k" %s "${def[$k]}"; done
   WEEK_MAX=auto; EXCLUDE=""; RESERVE_SLOT=""
   # A WEEK_MAX_<slot> deleted from the conf must stop applying, not linger
   # from an earlier read.
-  unset "${!WEEK_MAX_@}"
+  unset "${!WEEK_MAX_@}" "${!WEEK_RELEASE_@}"
   # shellcheck disable=SC1090
   [ -f "$CONF" ] && . "$CONF"
   # The conf is re-read every loop, so a value the arithmetic can't read (a
@@ -111,7 +115,12 @@ load_conf() {
     [[ ${!k:-} =~ ^[0-9]+$ ]] || { bad+=" $k=${!k:-}"; printf -v "$k" %s "${def[$k]}"; }
   done
   [[ ${WEEK_MAX:-} =~ ^([0-9]+|auto)$ ]] || { bad+=" WEEK_MAX=${WEEK_MAX:-}"; WEEK_MAX=auto; }
-  for k in "${!WEEK_MAX_@}"; do [[ ${!k} =~ ^[0-9]+$ ]] || { bad+=" $k=${!k}"; unset "$k"; }; done
+  for k in "${!WEEK_MAX_@}" "${!WEEK_RELEASE_@}"; do [[ ${!k} =~ ^[0-9]+$ ]] || { bad+=" $k=${!k}"; unset "$k"; }; done
+  # Read every number as decimal: bash arithmetic takes a leading 0 for octal,
+  # so WEEK_RELEASE_1=08 passed the check above and then killed the loop with
+  # "value too great for base" (PR #488 review).
+  for k in "${!def[@]}" "${!WEEK_MAX_@}" "${!WEEK_RELEASE_@}"; do printf -v "$k" %d "$(( 10#${!k} ))"; done
+  [[ $WEEK_MAX =~ ^[0-9]+$ ]] && WEEK_MAX=$(( 10#$WEEK_MAX ))
   if [ "$bad" != "${conf_bad:-}" ]; then
     [ -n "$bad" ] && say "WARN rotate.conf: ignoring$bad (defaults used)"
     conf_bad=$bad
@@ -120,11 +129,22 @@ load_conf() {
 # The 7d limit for a slot: its own WEEK_MAX_<slot> if set, else a numeric
 # WEEK_MAX, else (auto, the default) the weekly safe limit minus EARLY, from the
 # weekly burn like the 5h switch point. No fixed ceiling is right for everyone.
+#
+# A slot's own cap can hold room back for use outside the rotation (another
+# device), and room held back past the reset is simply lost. WEEK_RELEASE_<slot>
+# (hours) lifts that cap to the slot's normal limit for the last that-many hours
+# before its 7d reset, so the held-back room gets spent instead of wasted.
 wkmax() {
-  local v="WEEK_MAX_$1"
-  if [ -n "${!v:-}" ]; then echo "${!v}"
-  elif [[ ${WEEK_MAX:-auto} =~ ^[0-9]+$ ]]; then echo "$WEEK_MAX"
-  else echo $(( $(safe7 "${ID[$1]:-}") - EARLY )); fi
+  local v="WEEK_MAX_$1" r="WEEK_RELEASE_$1" base l
+  if [[ ${WEEK_MAX:-auto} =~ ^[0-9]+$ ]]; then base=$WEEK_MAX
+  else base=$(( $(safe7 "${ID[$1]:-}") - EARLY )); fi
+  if [ -n "${!v:-}" ]; then
+    if [ -n "${!r:-}" ] && [ "$base" -gt "${!v}" ]; then
+      l=$(left7 "${ID[$1]:-}")
+      if [ "$l" != - ] && [ "$l" -le $(( ${!r} * 3600 )) ]; then echo "$base"; return; fi
+    fi
+    echo "${!v}"
+  else echo "$base"; fi
 }
 # Weekly room a target needs: BRIDGE_MIN_MINUTES at the active's 7d burn,
 # rounded up, at least WEEK_ROOM_MIN.
@@ -155,10 +175,10 @@ read_metrics() {
       # 99.1% at a 99% limit, and the controller saw room that wasn't there).
       # Either may only raise the figure.
       used:five_hour|live:five_hour)
-        { [ -z "${U5[$acct]:-}" ] || [ "$val" -gt "${U5[$acct]}" ]; } && U5[$acct]=$val;;
+        if [ -z "${U5[$acct]:-}" ] || [ "$val" -gt "${U5[$acct]}" ]; then U5[$acct]=$val; fi;;
       reset:five_hour) R5[$acct]=$val;;
       used:seven_day|live:seven_day)
-        { [ -z "${U7[$acct]:-}" ] || [ "$val" -gt "${U7[$acct]}" ]; } && U7[$acct]=$val;;
+        if [ -z "${U7[$acct]:-}" ] || [ "$val" -gt "${U7[$acct]}" ]; then U7[$acct]=$val; fi;;
       recent:five_hour) B5[$acct]=$val;;
       model:five_hour) [ -n "${B5[$acct]:-}" ] || B5[$acct]=$val;;
       age:five_hour)   A5[$acct]=$val;;
@@ -185,6 +205,11 @@ read_metrics() {
       split($0, v, " "); printf "model %s %s %.3f\n", substr($2,1,8), $4, v[2] }
     /^pacer_rate_limit_sample_age_seconds\{account="[^"]+",window="seven_day"\}/ {
       split($0, v, " "); printf "age %s %s %d\n", substr($2,1,8), $4, v[2] }')
+  # The loop's status is its last command's: a reading that raised nothing used
+  # to end it on a false test, the caller took that as "Pacer unreachable", and
+  # every Pacer figure was dropped (2026-10-28 to 10-31, unseen by the tests,
+  # whose last line always raised). Reaching here means the read worked.
+  return 0
 }
 # Every account's 5h/7d from cswap's own cache, kept fresh by its menu bar app.
 # The primary source: under memory pressure Pacer's API stopped answering at all
@@ -327,13 +352,41 @@ if [ "$DRY" = 0 ]; then
 fi
 # A missing reading for the active account is normal for a loop or two after a
 # switch (cswap reads the new login); only a gap of GAP_WARN_SECS is worth a WARN.
-GAP_WARN_SECS=300; missing_since=0
-# gap_warn_due NOW: track the first-missing time; true once it has lasted long enough.
+GAP_WARN_SECS=300; missing_since=0; gap_said=0
+# gap_warn_due NOW: track the first-missing time; true once it has lasted long
+# enough, then again every 10 min. An idle login with no 5h window open reads
+# "no 5h" from cswap for hours, and a WARN every minute woke the supervisor
+# every minute (2026-10-31) for a hold that cost nothing.
 gap_warn_due() {
-  [ "$missing_since" = 0 ] && missing_since=$1
-  [ "$DRY" = 1 ] || [ $(( $1 - missing_since )) -ge "$GAP_WARN_SECS" ]
+  [ "$missing_since" = 0 ] && { missing_since=$1; gap_said=0; }
+  [ "$DRY" = 1 ] && return 0
+  [ $(( $1 - missing_since )) -ge "$GAP_WARN_SECS" ] && [ $(( $1 - gap_said )) -ge 600 ] || return 1
+  gap_said=$1
 }
 last_status=0; hold_since=0; hold_said=0; hold_burn=0; rsv_err=0
+# Accounts with no 5h limit at all (see below), from the last fresh cswap read.
+cswap_fresh=0
+declare -A NO5=() NO5_SINCE=() NO5_SEEN=() PREV_STAT=() LEXP_SAID=() BAD_SINCE=() BAD_SAID=() STALE_SAID=()
+# no5.since: "<account> <first seen> <last seen>" per line. A run of no-5h reads
+# counts only while it is unbroken: an entry whose last sighting is more than
+# NO5_STALE old (the controller stopped, cswap silent, a read with neither
+# figure) is dropped, or a 5h window that came back and was spent in the gap
+# would look trusted on the first read that drops it again (#488 review).
+# Anything malformed, or the older two-field form, is ignored.
+if [ -f "$NO5FILE" ]; then
+  t0=$(date +%s)
+  while read -r k v w rest; do
+    [ -n "$k" ] && [ -z "$rest" ] && [[ $v =~ ^[0-9]+$ ]] && [[ ${w:-} =~ ^[0-9]+$ ]] || continue
+    [ $(( t0 - 10#$w )) -le "$NO5_STALE" ] && [ "$(( 10#$v ))" -le "$(( 10#$w ))" ] || continue
+    NO5_SINCE[$k]=$(( 10#$v )); NO5_SEEN[$k]=$(( 10#$w ))
+  done <"$NO5FILE"
+fi
+save_no5() {
+  [ "$DRY" = 1 ] && return 0
+  local k
+  for k in "${!NO5_SINCE[@]}"; do printf '%s %s %s\n' "$k" "${NO5_SINCE[$k]}" "${NO5_SEEN[$k]:-${NO5_SINCE[$k]}}"; done \
+    >"$NO5FILE.tmp.$$" && mv -f "$NO5FILE.tmp.$$" "$NO5FILE"
+}
 # The accounts this loop's decision pass would switch to, for the heartbeat
 # below; empty when the pass did not run.
 hb_targets=""
@@ -365,7 +418,6 @@ write_heartbeat() {
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "$holding" "$list" >"$HEARTBEAT.tmp.$$" \
     && mv -f "$HEARTBEAT.tmp.$$" "$HEARTBEAT"
 }
-declare -A PREV_STAT=() LEXP_SAID=() BAD_SINCE=() BAD_SAID=() STALE_SAID=()
 # When the active slot last changed (our switch, an adopted external one, or
 # this start), for the stale-login check below. ACTIVE_SINCE_OVERRIDE (dry
 # mode only) is for tests.
@@ -392,6 +444,16 @@ while :; do
     for k in "${!CR7[@]}"; do R7[$k]=${CR7[$k]}; done
     for k in "${!P5[@]}"; do
       pr=${PR5[$k]:-}; cr=${R5[$k]:-}
+      # cswap can drop an account's 5h window altogether while its 7d stays
+      # fresh (2026-10-31: the active account at 3% with 3h to go read "no
+      # 5h" and the controller held blind). Pacer polls on its own; take its
+      # figure then, but only a reading at most 15 min old: an older one says
+      # nothing about now, and on a fast burner even 30 min can hide 20 points
+      # (with none, the account may count as having no 5h limit; see NO5 below).
+      if [ -z "${U5[$k]:-}" ] && [ -n "${A5[$k]:-}" ] && [ "${A5[$k]}" -le 900 ]; then
+        U5[$k]=${P5[$k]}; [ -n "$pr" ] && [ -z "$cr" ] && R5[$k]=$pr
+        continue
+      fi
       if [ -n "$pr" ] && [ -n "$cr" ] && [ "$pr" -gt 0 ] && [ "$cr" -gt 0 ] \
          && [ $(( pr > cr ? pr - cr : cr - pr )) -le 900 ] && [ "${P5[$k]}" -gt "${U5[$k]:-0}" ]; then
         U5[$k]=${P5[$k]}
@@ -402,6 +464,7 @@ while :; do
     done
     for k in "${!R5[@]}"; do RESET_AT[$k]=$(( now + R5[$k] )); done
     for k in "${!R7[@]}"; do RESET7_AT[$k]=$(( now + R7[$k] )); done
+    cswap_fresh=1
   elif [ ${#RESET_AT[@]} -gt 0 ] && [ ${#SLOTS[@]} -gt 0 ]; then
     # cswap silent: keep its last figures, let cached resets count.
     for k in "${!RESET_AT[@]}"; do R5[$k]=$(( RESET_AT[$k] - now )); done
@@ -414,6 +477,46 @@ while :; do
   [ -n "$act" ] || act=$CACT
   [ -n "$act" ] && [ -n "${ID[$act]:-}" ] || { say "WARN active account unreadable; holding"; [ "$DRY" = 1 ] && exit 1; sleep 60; continue; }
   actid=${ID[$act]}
+  # An account with a 7d reading and no 5h one, from cswap or a Pacer reading
+  # under an hour old, has no 5h limit: Anthropic dropped the 5h window for
+  # verified Ultra (ex-Max 20x) accounts on 2026-10-30, and from 10-31 every
+  # account here stopped reporting one. Reading that as "no reading" held the
+  # controller for two days and ruled out every target. Such an account has
+  # unlimited 5h room (0% used, no window running), so no 5h rule ever fires
+  # for it, and it is judged on its 7d and its login alone. Any 5h figure that
+  # does come back (an unverified account keeps a temporary 5h cap) puts it on
+  # the 5h path again. Decided on fresh cswap reads only; a silent cswap keeps
+  # the last answer.
+  #
+  # A cswap read that merely drops a 5h-spent account's five_hour looks the
+  # same, and "no 5h limit" makes that account a target: the one path onto a
+  # 5h-spent login (PR #488 review). So trust "no 5h window" only once it has
+  # lasted NO5_TRUST seconds (NO5_SINCE, kept on disk); until then the account
+  # has no 5h reading: never a target, and a hold if it is the active one. Any
+  # 5h figure clears it; a read with neither figure says nothing either way.
+  if [ "$cswap_fresh" = 1 ]; then
+    NO5=(); no5_dirty=0
+    for s in "${SLOTS[@]}"; do
+      sid=${ID[$s]}
+      if [ -z "${U5[$sid]:-}" ] && [ -n "${U7[$sid]:-}" ]; then
+        # A run broken for more than NO5_STALE starts again from now.
+        if [ -z "${NO5_SINCE[$sid]:-}" ] || [ $(( now - ${NO5_SEEN[$sid]:-0} )) -gt "$NO5_STALE" ]; then
+          NO5_SINCE[$sid]=$now
+        fi
+        NO5_SEEN[$sid]=$now; no5_dirty=1
+        [ $(( now - NO5_SINCE[$sid] )) -ge "$NO5_TRUST" ] && NO5[$sid]=1
+      elif [ -n "${NO5_SINCE[$sid]:-}" ]; then
+        # A 5h figure ends the run; a read with neither figure ends it once
+        # the last sighting is stale.
+        if [ -n "${U5[$sid]:-}" ] || [ $(( now - ${NO5_SEEN[$sid]:-0} )) -gt "$NO5_STALE" ]; then
+          unset 'NO5_SINCE[$sid]' 'NO5_SEEN[$sid]'; no5_dirty=1
+        fi
+      fi
+    done
+    [ "$no5_dirty" = 1 ] && save_no5
+  fi
+  for k in "${!NO5[@]}"; do U5[$k]=0; unset 'R5[$k]'; done
+  cswap_fresh=0
   # A login cswap can no longer refresh drops out of rotation silently (it is
   # never a target). Say so once, loudly, because only the owner can fix it.
   for s in "${SLOTS[@]}"; do
@@ -493,7 +596,9 @@ while :; do
     line="status: on $act"
     for s in "${SLOTS[@]}"; do
       sid=${ID[$s]}
-      line+=" | $s: 5h $(eff5 "$sid")% (sw $(switch_at "$sid")) left $(fmt_left "$(left5 "$sid")") 7d $(eff7 "$sid")% (lim $(wkmax "$s")) left $(fmt_left "$(left7 "$sid")") [${STAT[$sid]} $(( ${AGE[$sid]:-0} / 60 ))m]"
+      if [ -n "${NO5[$sid]:-}" ]; then h5="5h none"
+      else h5="5h $(eff5 "$sid")% (sw $(switch_at "$sid")) left $(fmt_left "$(left5 "$sid")")"; fi
+      line+=" | $s: $h5 7d $(eff7 "$sid")% (lim $(wkmax "$s")) left $(fmt_left "$(left7 "$sid")") [${STAT[$sid]} $(( ${AGE[$sid]:-0} / 60 ))m]"
     done
     line+=" | burn ${burn}%/h ($burn_src): a target needs ${need} points, expiring ${xneed}; 7d burn ${burn7:-?}%/h ($burn7_src): a target needs ${n7} points of 7d room"
     say "$line"
@@ -502,7 +607,12 @@ while :; do
 
   mine=$(eff5 "$actid"); mywk=$(eff7 "$actid"); myleft=$(left5 "$actid"); at=$(switch_at "$actid")
   if [ "$mine" = - ] || [ "$mywk" = - ]; then
-    gap_warn_due "$now" && say "WARN no reading for the active account $act; holding"; [ "$DRY" = 1 ] && exit 1; sleep 60; continue
+    if [ "$mywk" != - ] && [ -n "${NO5_SINCE[$actid]:-}" ]; then
+      gap_warn_due "$now" && say "WARN no 5h window reported for the active account $act yet; holding until that has lasted $(( NO5_TRUST / 60 )) min"
+    else
+      gap_warn_due "$now" && say "WARN no reading for the active account $act; holding"
+    fi
+    [ "$DRY" = 1 ] && exit 1; sleep 60; continue
   fi
   missing_since=0
   # The active's own room is about to be lost at its reset: spending it beats
@@ -617,9 +727,13 @@ while :; do
     # A hold starts within 3 points of the switch point and ends only well below
     # it (8), on a switch or a reset: the switch point moves with the burn, and
     # without the band one wobble logged HOLD and "hold over" a minute apart
-    # (2026-10-21 15:05Z/15:06Z), each one a wake for the supervisor.
+    # (2026-10-21 15:05Z/15:06Z), each one a wake for the supervisor. The 7d
+    # test gets the same band: the weekly limit moves with the weekly burn, and
+    # an account at 97-98% flipped HOLD/"hold over" every few minutes
+    # (2026-11-07 23:43Z-23:55Z) as that limit wobbled a point either side.
     elif [ -z "$best" ] && { [ "$mine" -ge $(( at - 3 )) ] || [ "$mywk" -ge "$(wkmax "$act")" ] \
-         || { [ "$hold_said" = 1 ] && [ "$mine" -ge $(( at - 8 )) ]; }; }; then
+         || { [ "$hold_said" = 1 ] && { [ "$mine" -ge $(( at - 8 )) ] \
+              || [ "$mywk" -ge $(( $(wkmax "$act") - 8 )) ]; }; }; }; then
       held=1
       # One HOLD per episode (the watcher relays it), then a quiet reminder
       # every 30 min so a long hold is still visible in the log.

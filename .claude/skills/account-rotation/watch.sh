@@ -20,6 +20,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 ROTATE_HOME=${ROTATE_HOME:-$HOME/.local/state/pacer-account-rotation}
 LOG=$ROTATE_HOME/state/rotate.log
 SEEN=$ROTATE_HOME/state/stuck.seen
+WARNED=$ROTATE_HOME/state/warn.seen
 HB=$(( ${1:-90} * 60 ))
 MODE=${2:-all}
 PAT=' (SWITCH|EXTERNAL|HOLD|hold over|ERROR|WARN|start)'
@@ -45,7 +46,28 @@ while :; do
   new=$(tail -c +$(( offset + 1 )) "$LOG" 2>/dev/null)
   offset=$(wc -c <"$LOG" 2>/dev/null || echo 0)
   hits=$(printf '%s\n' "$new" | grep -E "$PAT" || true)
-  if [ -n "$hits" ]; then echo "rotate:"; printf '%s\n' "$hits"; exit 0; fi
+  # A WARN that repeats word for word (an idle login's "no reading", every 10
+  # min for hours) already woke the supervisor once; it says nothing new for three
+  # hours. Anything else, or the same WARN three hours on, still wakes. A WARN
+  # that says the controller is holding blind (no reading, account unreadable)
+  # mutes for one hour only: a hold that lasts deserves a second look.
+  if [ -n "$hits" ] && ! printf '%s\n' "$hits" | grep -vqE '^[0-9:]{8} WARN '; then
+    fresh_warn=$(printf '%s\n' "$hits" | cut -c10- | sort -u | while read -r w; do
+      win=10800; case $w in *holding*|*unreadable*) win=3600;; esac
+      prev=$(awk -F'\t' -v w="$w" '$2 == w { print $1 }' "$WARNED" 2>/dev/null | tail -1)
+      [ -n "$prev" ] && [ $(( now - prev )) -lt "$win" ] || echo "$w"
+    done)
+    [ -n "$fresh_warn" ] || hits=
+  fi
+  if [ -n "$hits" ]; then
+    printf '%s\n' "$hits" | grep -E '^[0-9:]{8} WARN ' | cut -c10- | sort -u | while read -r w; do
+      printf '%s\t%s\n' "$now" "$w"; done >>"$WARNED"
+    # Only the last three hours matter; keep the file small.
+    if [ "$(wc -l <"$WARNED" 2>/dev/null || echo 0)" -gt 1000 ]; then
+      tail -n 500 "$WARNED" >"$WARNED.tmp.$$" && mv -f "$WARNED.tmp.$$" "$WARNED"
+    fi
+    echo "rotate:"; printf '%s\n' "$hits"; exit 0
+  fi
   if ! "$HERE/rotate.sh" status | head -1 | grep -q '^running'; then
     echo "controller NOT running"; "$HERE/rotate.sh" log 3; exit 0
   fi

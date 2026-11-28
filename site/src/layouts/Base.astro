@@ -2,6 +2,7 @@
 import '../styles/global.css';
 import archivo from '@fontsource-variable/archivo/files/archivo-latin-wdth-normal.woff2?url';
 import PostHog from '../components/PostHog.astro';
+import { API_POINTER_PAGES, markdownPath, pointerLinks, searchPointers } from '../../scripts/discovery.mjs';
 import SiteHeader from '../components/SiteHeader.astro';
 import SiteFooter from '../components/SiteFooter.astro';
 import {
@@ -40,6 +41,13 @@ const abs = (path: string) => new URL(path.replace(/^\/+/, ''), site).toString()
 const canonical = new URL(Astro.url.pathname, site).toString();
 const home = abs('/');
 const ogImage = abs(OG_IMAGE.path);
+// Discovery (scripts/discovery.mjs; site/README.md, "Discovery for agents"): the
+// page's Markdown twin, the discovery pointers on /, /cli/ and /claude-prices/
+// (the same as the Worker's Link header), and the Search for Agents pointers.
+const pagePath = Astro.url.pathname.replace(/^\/+/, '');
+const markdown = noindex ? null : markdownPath(pagePath);
+const pointers = !noindex && API_POINTER_PAGES.includes(pagePath) ? pointerLinks(pagePath, { twin: false }) : [];
+const search = searchPointers(abs('/').replace(/\/+$/, ''));
 
 const website = {
   '@type': 'WebSite',
@@ -113,6 +121,12 @@ const fontFace = `@font-face{font-family:'Archivo';font-style:normal;font-displa
 
     <link rel="sitemap" href="/sitemap-index.xml" />
     <link rel="alternate" type="text/plain" href="/llms.txt" title="llms.txt" />
+    {markdown && <link rel="alternate" type="text/markdown" href={markdown} />}
+    {pointers.map((l) => <link rel={l.rel} type={l.type} href={l.href} />)}
+    <meta name="agent:instructions" content={search.instructions} />
+    <meta name="agent:endpoint" content={search.endpoint} />
+    <meta name="agent:method" content={search.method} />
+    <meta name="agent:documentation" content={search.documentation} />
     {
       graph.length > 0 && (
         <script type="application/ld+json" set:html={JSON.stringify(jsonLd).replace(/</g, '\\u003c')} />

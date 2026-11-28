@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pacer.andrechek.com/price-history.schema.json",
+  "title": "Pacer's Claude price history",
+  "description": "The dated Claude prices Pacer prices usage with: https://pacer.andrechek.com/claude-prices.json (the app reads the same file at /price-history.json). Curated records (`records`) are reviewed by hand against Anthropic's pricing page and release notes; the price list (`catalog`) is merged from public price catalogs every six hours. Which record prices a moment: among the records whose window holds it, for the same model, provider, region, speed and tier, a curated record wins, except that an open-ended curated record loses to a price-list record with other numbers that opened after `asOf` (or the record's `reviewedAt`); then the later start. Documentation: https://pacer.andrechek.com/claude-prices/.",
+  "type": "object",
+  "required": ["schema", "asOf", "records"],
+  "properties": {
+    "schema": { "const": 1, "description": "The file format's version." },
+    "asOf": { "$ref": "#/$defs/day", "description": "When the curated records were last reviewed: every curated record's `reviewedAt` unless it has its own." },
+    "source": { "type": "string", "format": "uri", "description": "Where the curated prices are checked." },
+    "records": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Curated records. Provider, region, speed and tier default to the Claude API's own (anthropic, global, standard, 0).",
+      "items": { "$ref": "#/$defs/curatedRecord" }
+    },
+    "catalog": {
+      "type": "object",
+      "description": "The price list: catalog prices merged and dated once, on Pacer's side, by .github/workflows/price-catalog-sync.yml. A record opens only when a price changes, dated by the run that saw it, and the record it replaces closes at that instant.",
+      "required": ["changedAt", "checkedAt", "records"],
+      "properties": {
+        "changedAt": { "$ref": "#/$defs/instant", "description": "When a record was last opened or closed." },
+        "checkedAt": { "$ref": "#/$defs/instant", "description": "When the sync last confirmed the list (at least weekly). Ten days without one and the app stops trusting the list's open records." },
+        "records": { "type": "array", "items": { "$ref": "#/$defs/catalogRecord" } }
+      }
+    }
+  },
+  "$defs": {
+    "day": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$", "description": "A UTC day: YYYY-MM-DD means midnight UTC." },
+    "instant": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}(T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2}))?$", "description": "A UTC day or an ISO 8601 instant." },
+    "usdPerMTok": { "type": "number", "minimum": 0, "description": "US dollars per million tokens." },
+    "perMTok": {
+      "type": "object",
+      "required": ["input", "output", "cacheRead", "cacheWrite5m", "cacheWrite1h"],
+      "properties": {
+        "input": { "$ref": "#/$defs/usdPerMTok" },
+        "output": { "$ref": "#/$defs/usdPerMTok" },
+        "cacheRead": { "$ref": "#/$defs/usdPerMTok", "description": "Cache hits." },
+        "cacheWrite5m": { "$ref": "#/$defs/usdPerMTok", "description": "Cache writes with the 5-minute lifetime." },
+        "cacheWrite1h": { "$ref": "#/$defs/usdPerMTok", "description": "Cache writes with the 1-hour lifetime." }
+      }
+    },
+    "multiplier": { "type": ["number", "null"], "minimum": 0 },
+    "common": {
+      "type": "object",
+      "required": ["model", "effectiveFrom", "perMTok"],
+      "properties": {
+        "model": { "type": "string", "minLength": 1, "description": "The model id without a date suffix, lowercase: claude-opus-5-5." },
+        "provider": { "enum": ["anthropic", "bedrock", "vertex", "foundry", "other"], "default": "anthropic", "description": "anthropic is the Claude API." },
+        "region": { "enum": ["global", "us", "us-gov", "eu", "apac"], "default": "global" },
+        "speed": { "enum": ["standard", "fast"], "default": "standard", "description": "fast: an explicit fast-mode price, which wins over a standard record's fastMultiplier." },
+        "tierAbovePromptTokens": { "type": "integer", "minimum": 0, "default": 0, "description": "0 for the base rate. Otherwise a request whose prompt (input, cache reads and both cache writes) is above this many tokens takes these rates for the whole request." },
+        "effectiveFrom": { "$ref": "#/$defs/instant" },
+        "effectiveTo": { "anyOf": [{ "$ref": "#/$defs/instant" }, { "type": "null" }], "description": "Exclusive. null: still in effect." },
+        "perMTok": { "$ref": "#/$defs/perMTok" },
+        "fastMultiplier": { "$ref": "#/$defs/multiplier", "description": "Fast mode costs this many times the standard rates (every category)." },
+        "regionalMultiplier": { "$ref": "#/$defs/multiplier", "description": "A regional or multi-region endpoint on a cloud platform (from the 4.5 models), or US-only data residency on the Claude API (inference_geo, Claude 4.6 and later only), costs this many times the standard rates." }
+      }
+    },
+    "curatedRecord": {
+      "allOf": [{ "$ref": "#/$defs/common" }],
+      "properties": {
+        "sourceURL": { "type": "string", "format": "uri", "description": "Where the price was checked." },
+        "note": { "type": "string" },
+        "reviewedAt": { "$ref": "#/$defs/instant", "description": "Overrides asOf as this record's review date." }
+      }
+    },
+    "catalogRecord": {
+      "allOf": [{ "$ref": "#/$defs/common" }],
+      "required": ["provider", "region", "effectiveTo", "source"],
+      "properties": {
+        "source": { "enum": ["curated", "litellm", "models.dev", "catwalk", "fallback"], "description": "The catalog the merged price came from." },
+        "derived": {
+          "type": "array",
+          "items": { "enum": ["cacheWrite5m", "cacheWrite1h"] },
+          "description": "Cache-write rates the catalogs did not publish, derived from the input rate (5 minutes: 1.25×, 1 hour: 2×)."
+        }
+      }
+    }
+  }
+}

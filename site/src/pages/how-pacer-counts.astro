@@ -1,53 +1,12 @@
 ---
 import Base from '../layouts/Base.astro';
+import { CCUSAGE_DIFFERENCES } from '../lib/compare';
 
 // Sourced from AGENTS.md ("Ground truth is the raw JSONL", the ccusage table,
 // correctness rules 1-7), README.md, docs/design.md (cost modes),
 // PacerCore/Pricing/CuratedPriceHistory.swift and docs/release-notes.
-const differences = [
-  {
-    what: 'Cache writes',
-    ccusage: 'One number.',
-    pacer: '5-minute and 1-hour writes kept apart.',
-    why: 'Anthropic prices them differently.',
-  },
-  {
-    what: 'Streamed replies',
-    ccusage: 'Keeps the first copy of a reply.',
-    pacer: 'Keeps the finished copy.',
-    why: 'Claude Code writes a reply to its transcript several times while it streams, and only the last copy has the full output count. Keeping the first under-counted output by about 63% in the transcripts where this was found. When Pacer shows more output than ccusage, this is usually why.',
-  },
-  {
-    what: 'Price',
-    ccusage: "Today's price, for every day.",
-    pacer: 'The price in effect when the request was made.',
-    why: "A price change shouldn't rewrite what you already spent.",
-  },
-  {
-    what: 'Long prompts',
-    ccusage: 'Only the tokens above 200k at the higher rate.',
-    pacer: 'The whole request at the higher rate once its prompt crosses the threshold.',
-    why: 'That is how Anthropic bills it.',
-  },
-  {
-    what: 'Data residency',
-    ccusage: 'Not priced.',
-    pacer: 'A multiplier on the standard rate (US-only routing, for example).',
-    why: 'Anthropic documents it as one.',
-  },
-  {
-    what: 'Claude Desktop',
-    ccusage: 'Not read.',
-    pacer: 'Its agent-mode sessions are counted too.',
-    why: 'Desktop usage draws on the same limits.',
-  },
-  {
-    what: 'Rate limits',
-    ccusage: 'Estimated from your logs.',
-    pacer: "Anthropic's own reading for your account.",
-    why: 'Only Anthropic knows how full a window is.',
-  },
-];
+// The table is shared with /compare/ccusage/ (src/lib/compare.ts).
+const differences = CCUSAGE_DIFFERENCES;
 ---
 
 <Base
@@ -108,7 +67,7 @@ const differences = [
     <section aria-labelledby="ccusage">
       <h2 id="ccusage">Why it differs from ccusage</h2>
       <p>
-        <a href="https://github.com/ryoppippi/ccusage">ccusage</a> is a good command-line tool, and Pacer started as a
+        <a href="https://github.com/ccusage/ccusage">ccusage</a> is a good command-line tool, and Pacer started as a
         port of it. Pacer's numbers are checked against the raw transcripts, not against ccusage, and where the two
         disagree it is usually one of these:
       </p>
@@ -141,7 +100,10 @@ const differences = [
   </div>
 
   <div class="wrap prose">
-    <p>Where a comparison with ccusage disagrees on one of these, Pacer's number is the intended one.</p>
+    <p>
+      Where a comparison with ccusage disagrees on one of these, Pacer's number is the intended one. More on the two, and on
+      the other trackers: <a href="/compare/">how Pacer compares</a>.
+    </p>
 
     <section aria-labelledby="pricing">
       <h2 id="pricing">Pricing</h2>
@@ -154,7 +116,7 @@ const differences = [
           <strong>Rates</strong> come from public price catalogs, merged once and dated on our side so every Mac prices a
           change from the same moment, plus a reviewed price history for what catalogs can't hold: introductory rates,
           launch-day prices, changes over time. Each entry names its source. Both are public:
-          <a href="/price-history.json">price-history.json</a>.
+          <a href="/claude-prices/">Claude API prices</a>.
         </li>
         <li>
           <strong>A new model</strong> is priced as soon as a catalog lists it, and Pacer rebuilds the history it had

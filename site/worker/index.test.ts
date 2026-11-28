@@ -1,6 +1,7 @@
 import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
 import wrangler from '../wrangler.jsonc?raw';
+import { PAGE_ROUTES, SEARCH_ROUTES, WORKER_ROUTES, isPageRoute } from '../scripts/discovery.mjs';
 import * as entry from './index';
 import worker from './index';
 import {
@@ -726,10 +727,16 @@ describe('workers.dev', () => {
 });
 
 describe('routing', () => {
-  it('runs the Worker first for the update feed, the price history, /download and /api/feedback, and nothing else', () => {
+  it('runs the Worker first for the update feed, the price history, /download, /api/feedback, the pages and search, and nothing else', () => {
     const runFirst = /"run_worker_first":\s*\[([^\]]*)\]/.exec(wrangler)?.[1] ?? '';
     const paths = [...runFirst.matchAll(/"([^"]+)"/g)].map((m) => m[1]);
-    expect(paths.sort()).toEqual(['/api/feedback', '/appcast.xml', '/download', '/download/', '/price-history.json']);
+    // The Worker's own five, then the pages (for the Markdown router, not their
+    // .md twins) and /.well-known/search (site/README.md, "Discovery for agents").
+    expect([...WORKER_ROUTES].sort()).toEqual(['/api/feedback', '/appcast.xml', '/download', '/download/', '/price-history.json']);
+    expect(paths.sort()).toEqual([...WORKER_ROUTES, ...PAGE_ROUTES, ...SEARCH_ROUTES].sort());
+    // No page route reaches a feed file, /download or /api/feedback.
+    for (const route of [...PAGE_ROUTES, ...SEARCH_ROUTES]) expect(WORKER_ROUTES, route).not.toContain(route);
+    for (const path of WORKER_ROUTES) expect(isPageRoute(path), path).toBe(false);
     // Each listed feed path is one the handler counts and serves as an asset.
     expect(feedFileOf('/appcast.xml')).toBe('appcast');
     expect(feedFileOf('/price-history.json')).toBe('price_history');
