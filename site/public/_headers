@@ -8,12 +8,16 @@
 #        inline scripts (the PostHog snippet with define:vars, small Astro scripts), whose
 #        hashes change per build, so scripts/csp-hashes.mjs (run by `build`) replaces
 #        'unsafe-inline' with a hash of each one. The build fails if this line is missing.
-#        PostHog loads array.js and lazy bundles from *.posthog.com. Nothing else
-#        is allowed: the site uses no other analytics (Cloudflare Web Analytics
-#        included; turn its automatic setup off for the domain if the zone has it on).
+#        PostHog loads array.js and lazy bundles from *.posthog.com.
+#        Cloudflare Web Analytics is on for the domain (the owner's decision,
+#        2026-11-28): Cloudflare injects <script type="module" src="https://static.cloudflareinsights.com/
+#        beacon.min.js/v…" integrity="sha512-…" data-cf-beacon='{…}' crossorigin="anonymous"> into
+#        every HTML page (as served on 2026-11-28): an external script with its settings in a data
+#        attribute, so it needs that host and no hash. Nothing else is allowed.
 #  - style-src 'self' 'unsafe-inline'   Astro inlines its scoped CSS and the @font-face rule.
 #  - img-src 'self' data:               screenshots are same-origin.
-#  - connect-src 'self' https://*.posthog.com
+#  - connect-src 'self' https://*.posthog.com https://cloudflareinsights.com
+#        The Web Analytics beacon posts to https://cloudflareinsights.com/cdn-cgi/rum.
 #  - object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'.
 /*
   X-Content-Type-Options: nosniff
@@ -21,7 +25,7 @@
   X-Frame-Options: DENY
   Permissions-Policy: accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=(), interest-cohort=()
   Strict-Transport-Security: max-age=31536000; includeSubDomains
-  Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline' https://*.posthog.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://*.posthog.com; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; upgrade-insecure-requests
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline' https://*.posthog.com https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://*.posthog.com https://cloudflareinsights.com; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; upgrade-insecure-requests
 
 # Hashed build output: cache forever.
 /_astro/*
