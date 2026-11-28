@@ -41,9 +41,25 @@ final class ArchiveSync {
     /// when something is provably wrong, and it makes convergence independent
     /// of whether the window happened to be wide enough.
     private var needsFullReconcile = false
-    /// Set when reconciliation re-appended an upgraded turn, so the archive
-    /// briefly holds both copies and must collapse to the fuller one.
+    /// Set when reconciliation re-appended a turn the store has rewritten,
+    /// so the archive briefly holds both copies and must collapse to the
+    /// store's.
     private var pendingCollapse = false
+
+    /// What one reconcile pass found, by `ArchivedTurn.Verdict`. Counts only.
+    struct ReconcileCounts: Equatable {
+        /// In the store, not archived at all.
+        var missing = 0
+        var upgraded = 0
+        var patched = 0
+        /// Turns, not rows: archived with more output than any store row.
+        var ahead = 0
+        /// Later store rows of a turn already compared (store duplicates).
+        var superseded = 0
+        var reappended: Int { upgraded + patched }
+    }
+    /// The last pass's counts, for the archive tests compiled beside this file.
+    private(set) var lastReconcile: ReconcileCounts?
 
     /// How often the trailing window is reconciled rather than trusted.
     private static let reconcileInterval: TimeInterval = 30 * 60
@@ -93,13 +109,15 @@ final class ArchiveSync {
             // reconciled on a throttle: ask the archive which dedup keys it
             // already holds for that window and append the store rows it
             // doesn't. Bounded work, and self-correcting.
-            rows.append(contentsOf: try missedTurns(
-                archive: archive, context: context,
+            //
+            // The reconcile appends what it finds itself, in batches.
+            let reconciled = try reconcileIfDue(
+                archive: archive,
                 // Already staged by the forward path above and NOT yet in the
                 // archive, so reconciliation would otherwise "rescue" them a
                 // second time. An append-only table can't take that back —
                 // caught only because the check counted one row too many.
-                pending: Set(rows.compactMap(\.dedupKey))))
+                pending: Set(rows.compactMap(\.dedupKey)))
 
             if !rows.isEmpty { try archive.append(rows) }
             if pendingCollapse {
@@ -112,10 +130,10 @@ final class ArchiveSync {
             // Advanced only after the append succeeded, so a failed write is
             // retried rather than skipped.
             if !rows.isEmpty { watermark = newest }
-            appendedTotal += rows.count
+            appendedTotal += rows.count + reconciled
             // Logged sparsely — every cycle would be noise, but silence made
             // it impossible to tell "working" from "never ran".
-            if !rows.isEmpty, appendedTotal >= nextLogAt {
+            if rows.count + reconciled > 0, appendedTotal >= nextLogAt {
                 Log.write("ArchiveSync", "archived \(appendedTotal) turn(s) this session")
                 nextLogAt = appendedTotal + 500
             }
@@ -134,23 +152,49 @@ final class ArchiveSync {
         }
     }
 
-    /// Store turns inside the trailing window that the archive doesn't have.
+    /// Store turns inside the trailing window that the archive doesn't have,
+    /// or holds otherwise than the store now does, appended again.
     ///
     /// Keyed on `dedupKey` because that's the identity the rest of the app
     /// already agrees on. Turns without one (no message id and no request id)
     /// can't be matched and are left to the forward path — they're rare, and
     /// guessing at identity here would risk archiving the same turn twice,
     /// which an append-only table can't take back.
-    private func missedTurns(archive: RawArchive, context: ModelContext,
-                             pending: Set<String>) throws -> [ArchiveRow] {
+    ///
+    /// Returns how many rows it appended.
+    private func reconcileIfDue(archive: RawArchive, pending: Set<String>) throws -> Int {
         let now = Date()
         if let last = lastReconcileAt,
-           now.timeIntervalSince(last) < Self.reconcileInterval { return [] }
+           now.timeIntervalSince(last) < Self.reconcileInterval { return 0 }
         lastReconcileAt = now
 
         let full = needsFullReconcile
         needsFullReconcile = false
-        let since: Date? = full ? nil : now.addingTimeInterval(-Self.reconcileWindow)
+        let appended = try reconcile(
+            archive: archive, since: full ? nil : now.addingTimeInterval(-Self.reconcileWindow),
+            pending: pending)
+        // A full pass held a map of every archived turn (1.2M on a real
+        // archive) and walked the whole store: hand the freed pages back, as
+        // the other heavy passes do (AGENTS.md, memory rules).
+        if full { MemoryHygiene.relieve() }
+        return appended
+    }
+
+    /// Rows re-appended or rescued are staged and appended this many at a
+    /// time, as `ArchiveBackfill` does. The first pass after an upgrade can
+    /// find hundreds of thousands of turns rewritten since they were
+    /// archived; holding them all for one append is a row value each, where
+    /// the walk itself holds one page. Batched rather than capped per pass:
+    /// the walk dominates a pass (69-323 s for a full one on a real 1.2M-row
+    /// copy) and costs the same whatever it finds, so a cap would repeat it
+    /// once per cap, 30 minutes apart. The collapse still runs once, after
+    /// the pass: 500k superseded copies took 2.9 s with this archive's
+    /// settings (one thread, 256 MB; measured with the DuckDB CLI).
+    static let appendBatchRows = 5_000
+
+    private func reconcile(archive: RawArchive, since: Date?,
+                           pending: Set<String>) throws -> Int {
+        let full = since == nil
         // Values, not just presence. A streamed message is archived PARTIAL
         // and then upgraded in place in the store when its finished copy
         // arrives; the archive can't see that mutation, so a key can be
@@ -160,38 +204,90 @@ final class ArchiveSync {
         // archive held less output than the store, ZERO where it held more,
         // 2,351,397 output tokens missing. Presence-only reconciliation
         // called every one of them fine.
-        let archived = try archive.outputByDedupKey(since: since)
+        //
+        // And every value, not just output (#433). Since 0.8.0 a full
+        // re-read also rewrites a stored row at EQUAL output when it brings
+        // pricing detail the row predates (fast mode, `inference_geo`, a
+        // response split into several calls): input and cache change. An
+        // output-only comparison never saw that, so one Mac's hourly check
+        // failed on input or cache from 0.8.2 on, and the full reconcile each
+        // failure triggers never converged.
+        //
+        // `var`: the walk marks each turn it visits, in place.
+        var archived = try archive.reconcileView(since: since)
 
         let descriptor = FetchDescriptor<TokenSample>(
             predicate: since.map { cutoff in
                 #Predicate<TokenSample> { $0.sampledAt >= cutoff }
             })
-        var missed: [ArchiveRow] = []
-        var upgraded = 0
+        var counts = ReconcileCounts()
+        var batch: [ArchiveRow] = []
+        var appended = 0
+        func stage(_ sample: TokenSample) throws {
+            batch.append(row(from: sample))
+            guard batch.count >= Self.appendBatchRows else { return }
+            try archive.append(batch)
+            appended += batch.count
+            batch.removeAll(keepingCapacity: true)
+        }
         // Thirty days is ~370k turns on a heavy store, fifteen pages: each
         // seeks the `sampledAt` index to where the last ended (#394).
         try ModelWalk.forEach(descriptor, orderedBy: \.sampledAt, in: container) { sample in
             guard let key = sample.dedupKey, !pending.contains(key) else { return }
-            guard let archivedOutput = archived[key] else {
-                missed.append(row(from: sample))   // never archived
+            guard let index = archived.index(forKey: key) else {
+                try stage(sample)   // never archived
+                counts.missing += 1
                 return
             }
-            // Archived, but with a smaller output than the store now holds —
-            // i.e. we captured it mid-stream. Re-append; the duplicate
-            // collapse below keeps the fuller copy, which is the same rule
-            // `ParsedUsageEntry.supersedes` applies on the live path.
-            if sample.outputTokens > archivedOutput {
-                missed.append(row(from: sample))
-                upgraded += 1
+            // Hashed only at equal output, which is almost every row: the
+            // store side is plain field reads off the row the walk already
+            // holds. `turn` is a copy for the hash, so the mark below writes
+            // the map in place without overlapping it.
+            let turn = archived.values[index]
+            let verdict = archived.values[index].visit(storeOutput: sample.outputTokens) {
+                turn.storeFingerprint(
+                    input: sample.inputTokens, cacheRead: sample.cacheReadTokens,
+                    cc5m: sample.cacheCreation5mTokens, cc1h: sample.cacheCreation1hTokens,
+                    sourceCostUSD: sample.sourceCostUSD, sampledAt: sample.sampledAt,
+                    speed: sample.speed, inferenceGeo: sample.inferenceGeo)
+            }
+            switch verdict {
+            case .same:
+                break
+            // Archived, but not as the store now holds it: captured
+            // mid-stream (`upgraded`), or rewritten since at equal output
+            // (`patched`). Re-append the store's copy; the duplicate collapse
+            // below keeps it. For a streamed message that is the fuller copy,
+            // the rule `ParsedUsageEntry.supersedes` applies on the live
+            // path; at equal output it is the later append
+            // (`RawArchive.collapseOrder`).
+            case .upgraded:
+                try stage(sample)
+                counts.upgraded += 1
+            case .patched:
+                try stage(sample)
+                counts.patched += 1
+            case .superseded:
+                counts.superseded += 1
+            case .ahead:
+                break   // counted per turn below
             }
         }
-        if !missed.isEmpty {
-            Log.write("ArchiveSync",
-                      "reconcile\(full ? " (full)" : ""): \(missed.count - upgraded) skipped, "
-                      + "\(upgraded) upgraded since archiving")
+        if !batch.isEmpty {
+            try archive.append(batch)
+            appended += batch.count
         }
-        pendingCollapse = upgraded > 0
-        return missed
+        counts.ahead = archived.values.reduce(0) { $0 + ($1.isAhead ? 1 : 0) }
+        if appended > 0 || counts.ahead > 0 || counts.superseded > 0 {
+            Log.write("ArchiveSync",
+                      "reconcile\(full ? " (full)" : ""): \(counts.missing) skipped, "
+                      + "\(counts.upgraded) upgraded, \(counts.patched) patched since archiving"
+                      + (counts.ahead > 0 ? ", \(counts.ahead) archived with more output than the store" : "")
+                      + (counts.superseded > 0 ? ", \(counts.superseded) store duplicate(s) not compared" : ""))
+        }
+        lastReconcile = counts
+        pendingCollapse = counts.reappended > 0
+        return appended
     }
 
     /// Compare the archive against the store over a settled window and record
@@ -265,12 +361,20 @@ final class ArchiveSync {
             let sampleRows = midScan ? nil : (try? context.fetchCount(FetchDescriptor<TokenSample>(
                 predicate: #Predicate<TokenSample> { $0.date < today }))).map(Int64.init)
             var detail = "rows \(archived.rows)/\(stored.rows) out \(archived.output)/\(stored.output)"
+            // The other token fields only where they differ, so the line in
+            // the log (and in `make verify-data`) names the field (#433).
+            for (name, a, s) in [("in", archived.input, stored.input),
+                                 ("cacheRead", archived.cacheRead, stored.cacheRead),
+                                 ("cc5m", archived.cc5m, stored.cc5m),
+                                 ("cc1h", archived.cc1h, stored.cc1h)] where a != s {
+                detail += " \(name) \(a)/\(s)"
+            }
             if let sampleRows { detail += " samples \(sampleRows)" }
             if midScan { detail += " mid-scan" }
-            // Direction and order of magnitude only: what the check-in sends.
+            // Direction and order of magnitude only, per field: what the
+            // check-in sends.
             for key in ArchiveIntegrityGap.counterKeys(
-                archivedRows: archived.rows, storedRows: stored.rows,
-                archivedOutput: archived.output, storedOutput: stored.output,
+                archived: Self.sums(archived), stored: Self.sums(stored),
                 sampleRows: sampleRows, midScan: midScan) {
                 TelemetryCounters.add(key)
             }
@@ -295,6 +399,11 @@ final class ArchiveSync {
                   "integrity check \(checks): \(archived == stored ? "ok" : "MISMATCH") "
                   + "(\(archived.rows) turns, \(mismatches) mismatch(es) all-time)")
         try writeMeta(ClaudeCodeMetaKey.archiveIntegrity, value: verdict, context: context)
+    }
+
+    private static func sums(_ t: RawArchive.Totals) -> ArchiveIntegrityGap.Sums {
+        .init(rows: t.rows, input: t.input, output: t.output,
+              cacheRead: t.cacheRead, cc5m: t.cc5m, cc1h: t.cc1h)
     }
 
     private func fetchMeta(_ key: String, context: ModelContext) throws -> String? {

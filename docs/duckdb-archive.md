@@ -250,6 +250,74 @@ paths are untouched (the archive is fed from the store, and
 `IngestParityTests` already compares both paths' `accountId`, `speed` and
 `inferenceGeo` per row); `RawArchiveMigrationTests` runs with the parity tests.
 
+### Update 2026-11-27 — the reconcile compares the whole turn (#433)
+
+One release Mac failed the hourly integrity check on every check from 0.8.2
+on, with rows and output equal. Since 0.8.0 a full re-read rewrites a stored
+row at **equal output** when it brings pricing detail the row predates (fast
+mode, `inference_geo`, a response split into several calls), so its input
+and cache change. The reconcile re-appended a turn only when the store held
+more output, so it never saw those rewrites, and the full reconcile each
+failure triggers never converged.
+
+- **What it compares.** `RawArchive.reconcileView` gives, per key, the copy
+  the collapse keeps: its output, plus a fingerprint of every other field the
+  store can rewrite (`SamplePersister.apply`: input, cache read, both
+  cache-creation tiers, source cost, speed, `inference_geo`) and
+  `sampled_at`. A store row that differs is re-appended, in batches of 5,000
+  as the walk goes (not capped per pass: the walk costs the same whatever it
+  finds, so a cap would repeat it), and the collapse runs once after.
+  A NULL `speed` or `inference_geo` on a row with no `account_id` is "not
+  recorded" (rows from before #352) and matches anything, as
+  `ArchiveRoundTrip` treats it. On a real 1.2M-turn archive 544k rows have a
+  NULL `inference_geo` the store has a value for (403k for `speed`), so
+  comparing NULL as nil would re-append 45% of the archive. `account_id`
+  arrived with those columns, and on that archive every row with one has
+  speed and region set (198,032 rows) and every row without one has neither
+  (1,025,217), so beside an account a NULL is a recorded nil and compared. A
+  key the archive holds with more output than the store is counted, not
+  re-appended: no append could win.
+- **Store duplicates.** The store can hold one key twice (residue until
+  `repairDuplicateSamples` runs). At equal output only the first store row in
+  the walk's order (`sampledAt`, then row id) is compared: the one the repair
+  keeps. Comparing both re-appended whichever differed from the archive's
+  copy, every pass, forever. A later row with more output is still an
+  upgrade.
+- **Restoring the store from a backup now rolls the archive back.** Store
+  wins (`RawArchive`'s contract), and the reconcile now acts on it at equal
+  output: a restored row with the same output but its pre-patch input, cache,
+  cost, speed or region is re-archived as the store holds it, and the collapse
+  supersedes the archive's patched copy. The output-only reconcile left that
+  copy alone. This is a new way to lose a patched value; it comes back only
+  from a re-read of transcripts that still exist (a `currentScanVersion`
+  bump). A restored row with less output than the archive is still left
+  (`ahead`), so streamed output is never rolled back.
+- **On real data.** A copy of the maintainer's store and archive (not the Mac
+  in #433) had no key differing at equal output, and a full pass found only
+  the 56 turns written between the two copies. The same copy with 1,218
+  stored rows rewritten at equal output re-archived exactly those 1,218 in one
+  full pass; a second found nothing, and every field then matched.
+- **Which copy the collapse keeps** (`RawArchive.collapseOrder`): the most
+  output, then the latest append (`rowid DESC`). Most output first keeps rule 7:
+  a partial never beats its finished copy. The old tie-break, the earliest
+  `sampled_at` then the lowest `rowid`, kept the stale copy at equal output.
+  `rowid` is append order: DuckDB appends to the end and never reuses a
+  deleted slot, and a compacting checkpoint renumbers rows without reordering
+  them (`RawArchiveReconcileTests` checks it on the vendored engine). No
+  column was added.
+- **Cost.** The view is a plain scan, read in `rowid` pages (`duckdb_query`
+  materializes a whole result, and the streaming API is deprecated in 1.5),
+  with the collapse's winner picked in Swift; the map holds 24 bytes per key
+  where it held 8, sized up front. Measured on a copy of a real 1.2M-row
+  archive and store, each run its own process, twice: the archive read took
+  2.5–2.7 s of CPU at a 310 MB peak footprint, against 1.3–1.8 s at
+  454–535 MB for the old `GROUP BY`; a whole full pass (the store walk
+  dominates, and is unchanged but for hashing fields the row already holds)
+  34–37 s of CPU against 30–33 s. Wall time is the walk's I/O and varied
+  from 69 to 323 s for the same pass on a loaded Mac.
+- `ArchiveImporter` and `IngestParityTests` are untouched: the collapse orders
+  archive rows, which are written from the store, not transcript lines.
+
 ## The bug the gate found (this one DID ship)
 
 Claude Code appends the same assistant message to the transcript several times

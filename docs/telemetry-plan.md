@@ -130,9 +130,10 @@ signals (not usage: Sentry metrics, and `counter.*` in PostHog's
 The hourly archive check (`ArchiveSync`) counts `data.archive_integrity.ok` / `.mismatch`. On a mismatch it also counts, once per check, which way each gap goes and its order of magnitude (`ArchiveIntegrityGap`; `TelemetryBands.magnitude`, `e0` for 1-9, `e3` for 1,000-9,999), never a count:
 - `data.archive_integrity.rows.<over|under|equal>[.eN]`: the archive's turns against the store's (the hourly rollup's count), for whole days before today; `over` is the archive holding more.
 - `data.archive_integrity.output.<over|under|equal>[.eN]`: the same for output tokens.
+- `data.archive_integrity.input.<over|under|equal>[.eN]`, `.cache_read.…`, `.cc5m.…`, `.cc1h.…`: the same for input, cache-read and the two cache-creation tiers (5-minute, 1-hour), so a check that fails on rows and output equal names the field that differs (#433).
 - `data.archive_integrity.rollup_rows.<over|under|equal>[.eN]`: the rollup's count against the store's own samples for those days, so a rollup that disagrees with its samples, which the reconcile never reads, is told from an archive that is off. The count walks the (date, model) index over every row before today (O(rows): 0.24 s of CPU for 1.17M rows), on the scan actor, only on a failing check. While a scan cycle is part-way through, when a bulk rebuild has saved samples the rollups have not caught up with, it is not taken and the key is `data.archive_integrity.rollup_rows.mid_scan`.
 
-A mismatch only in input or cache tokens shows as `rows.equal` plus `output.equal`: the check compares those too, and these keys don't split them out.
+Until the per-field keys only `rows` and `output` were sent, so a mismatch only in input or cache tokens showed as `rows.equal` plus `output.equal`, as one Mac did on every check from 0.8.2 on. There is no rollup-against-samples key for tokens: it would sum every sample before today, where `rollup_rows` is an index count.
 
 ## PostHog
 
