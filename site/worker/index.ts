@@ -50,10 +50,10 @@ const pages = createMdRouter<Env>({ vary: true });
  *   which `Vary: Accept` doesn't say, so no shared cache may keep it for a
  *   browser asking the same URL.
  *
- * A revalidating Markdown client is the router's job since 0.5.1: it fetches
- * the twin without the client's `If-None-Match` / `If-Modified-Since`, so a
- * twin's 304 is never taken for a missing twin (this Worker used to strip
- * them itself).
+ * A revalidating Markdown client is the router's job: it fetches the twin
+ * without the client's `If-None-Match` / `If-Modified-Since` (0.5.1; this
+ * Worker used to strip them itself) and answers a matching tag with its own
+ * 304 (0.6.0).
  *
  * Then the discovery pointers are added where the page carries them.
  */
