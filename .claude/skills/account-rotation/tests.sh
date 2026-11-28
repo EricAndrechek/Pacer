@@ -64,8 +64,13 @@ t() {
   n=$(( n + 1 )); d=$T/c$n; mkdir -p "$d/state"
   # The cap tests below assert a 90% ceiling; AUTO=1 leaves WEEK_MAX at its
   # default (auto) for the weekly-burn tests.
-  { [ -n "${AUTO:-}" ] || echo 'WEEK_MAX=90'; printf '%s\n' "$conf"; } >"$d/conf"
+  # NO5_TRUST=0 unless NO5T is set: most scenarios describe an account already
+  # known to have no 5h window. NO5SEED="<id> <first> <last> …" seeds the
+  # on-disk record; NO5RAW writes it verbatim (printf %b).
+  { [ -n "${AUTO:-}" ] || echo 'WEEK_MAX=90'; echo "NO5_TRUST=${NO5T:-0}"; printf '%s\n' "$conf"; } >"$d/conf"
   [ -n "$last" ] && printf '%s\n' "$last" >"$d/state/last_switch"
+  [ -n "${NO5SEED:-}" ] && printf '%s %s %s\n' $NO5SEED >"$d/state/no5.since"
+  [ -n "${NO5RAW:-}" ] && printf '%b' "$NO5RAW" >"$d/state/no5.since"
   out=$(PATH="$T/bin:$PATH" FAKE_DIR=$T FAKE_ACT=$act FAKE_ACCTS=$accts \
         ROTATE_CONF=$d/conf ROTATE_STATE=$d/state PACER_API=${API:-http://127.0.0.1:1} \
         BURN_OVERRIDE=${BURN:-} BURN7_OVERRIDE=${BURN7:-} "$ROT" dry 2>&1)
@@ -163,8 +168,9 @@ BURN=24 t "L2 at the switch point, resets in 30m: switches" 'WOULD SWITCH → 2 
   1 "1:96:30:30:ok 2:0:-:20:ok 3:0:-:100:ok 4:0:-:100:ok"
 t "9d limit keeps a target expiring within 45m (stagger yields there)" 'WOULD SWITCH → 3 .*\[limit: 1 at 95%' \
   1 "1:95:200:30:ok 2:0:-:10:ok:8640 3:50:30:20:ok:600 4:0:-:100:ok"
-t "10a missing 5h reading is not room" '^[0-9:]{8} HOLD 1 .*2: -% room -, reset unknown, 7d 10% \[no reading\]' \
-  1 "1:95:26:63:ok 2:null:-:10:ok 3:0:-:99:ok 4:0:-:100:ok"
+t "10a no 5h reading, 7d present: no 5h limit, so full room" 'WOULD SWITCH → 2 .*\[limit: 1 at 95%' \
+  1 "1:95:26:63:ok 2:null:-:10:ok 3:0:-:99:ok 4:0:-:100:ok" "" "" \
+  ' 2: 5h none 7d 10%'
 t "10a' missing 7d reading is not room" '^[0-9:]{8} HOLD 1 .*2: 0% room 93, idle, 7d -% \[no reading\]' \
   1 "1:95:26:63:ok 2:0:-:null:ok 3:0:-:99:ok 4:0:-:100:ok"
 t "10b relogin_required is not a target" '^[0-9:]{8} HOLD 1 .*\[relogin_required\]' \
@@ -178,6 +184,17 @@ t "10d' WEEK_MAX_2=70 admits it" 'WOULD SWITCH → 2 .*\[limit:' \
   1 "1:95:26:63:ok 2:0:-:60:ok 3:0:-:99:ok 4:0:-:100:ok" 'WEEK_MAX_2=70'
 t "10d'' WEEK_MAX_1=60 moves the active" 'WOULD SWITCH → 2 .*\[7-day: 1 at 63%' \
   1 "1:30:200:63:ok 2:0:-:10:ok 3:0:-:99:ok 4:0:-:100:ok" 'WEEK_MAX_1=60'
+# A held-back cap is released for the last WEEK_RELEASE_<slot> hours before the
+# slot's 7d reset, so the room it held is spent, not lost at the reset.
+AUTO=1 t "10d''' WEEK_MAX_1=90, release 12 h, reset in 33 h: cap holds" 'WOULD SWITCH → 2 .*\[7-day: 1 at 92%' \
+  1 "1:null:-:92:ok:2000 2:null:-:10:ok" 'WEEK_MAX_1=90 WEEK_RELEASE_1=12' "" \
+  ' 1: 5h none 7d 92% \(lim 90\)'
+AUTO=1 t "10d'''' same, reset in 10 h: the cap lifts to the normal limit" '^[0-9:]{8} no switch:' \
+  1 "1:null:-:92:ok:600 2:null:-:10:ok" 'WEEK_MAX_1=90 WEEK_RELEASE_1=12' "" \
+  ' 1: 5h none 7d 92% \(lim 97\)'
+AUTO=1 t "10d''''' a bad WEEK_RELEASE_1 is ignored with a WARN" 'WOULD SWITCH → 2 .*\[7-day: 1 at 92%' \
+  1 "1:null:-:92:ok:600 2:null:-:10:ok" 'WEEK_MAX_1=90 WEEK_RELEASE_1=soon' "" \
+  'WARN rotate.conf: ignoring WEEK_RELEASE_1=soon'
 t "10e reserve when nothing else has room" 'WOULD SWITCH → 3 .*\[reserve: 1 at 95%' \
   1 "1:95:26:63:ok 3:0:-:92:ok $SPENT" 'RESERVE_SLOT=3'
 t "10f reserve past its cap: ERROR + HOLD" '^[0-9:]{8} HOLD 3 at 95%' \
@@ -187,8 +204,46 @@ t "10g 7-day rule" 'WOULD SWITCH → 2 .*\[7-day: 1 at 91% on its 7d' \
   1 "1:30:200:91:ok 2:50:120:10:ok 3:0:-:99:ok 4:0:-:100:ok"
 t "10h a passed 7d reset counts as 0%" 'WOULD SWITCH → 2 .*\[limit:' \
   1 "1:95:26:63:ok 2:0:-:99:ok:-5 3:0:-:99:ok 4:0:-:100:ok"
-t "10i no active reading: WARN, hold" '^[0-9:]{8} WARN no reading for the active account 1' \
-  1 "1:null:-:63:ok 2:0:-:10:ok"
+t "10i no active reading at all (5h and 7d): WARN, hold" '^[0-9:]{8} WARN no reading for the active account 1' \
+  1 "1:null:-:null:ok 2:0:-:10:ok"
+# Ultra (ex-Max 20x) accounts have no 5h window since 2026-10-30: the API sends
+# no five_hour at all. Decide on the 7d alone; keep the 5h path for any that report one.
+t "10i' active with no 5h limit, 7d past its cap: 7-day switch" 'WOULD SWITCH → 2 .*\[7-day: 1 at 91% on its 7d' \
+  1 "1:null:-:91:ok 2:null:-:10:ok 3:null:-:99:ok 4:null:-:100:ok" 'WEEK_MAX_1=90'
+t "10i'' active with no 5h limit, 7d under its cap: no switch" '^[0-9:]{8} no switch: 1 at 0%' \
+  1 "1:null:-:89:ok 2:null:-:10:ok 3:null:-:99:ok 4:null:-:100:ok" 'WEEK_MAX_1=90' "" \
+  ' 1: 5h none 7d 89%'
+t "10m a 5h account at its limit moves onto one with no 5h limit" 'WOULD SWITCH → 2 .*\[limit: 1 at 97%' \
+  1 "1:97:100:40:ok 2:null:-:67:ok 3:null:-:99:ok 4:null:-:100:ok" 'EARLY=0'
+t "10m' no 5h limit anywhere: no stagger, no expiring, no limit" '^[0-9:]{8} no switch: 1 at 0%' \
+  1 "1:null:-:40:ok 2:null:-:10:ok 3:null:-:0:ok 4:null:-:14:ok"
+t "10m'' a stale 5h reading with a passed reset is not shown as a live window" '^[0-9:]{8} no switch:' \
+  1 "1:null:-:40:ok 2:93:-5:10:ok" "" "" \
+  ' 2: 5h 0% \(sw [0-9]+\) left -'
+# "No 5h window" is trusted only once it has lasted NO5_TRUST (default 15 min):
+# a read that merely drops a 5h-spent account's five_hour must not make it a target.
+NO5T=900 t "10n a no-5h target seen just now is not a target" '^[0-9:]{8} HOLD 1 at 97%' \
+  1 "1:97:100:40:ok 3:null:-:67:ok $SPENT" 'EARLY=0' "" ' 3: 5h -% .* 7d 67%'
+NO5T=900 NO5SEED="acc3acc0 $(( NOW - 1200 )) $(( NOW - 60 ))" t "10n' the same, no 5h for 20 min: a target" 'WOULD SWITCH → 3 .*\[limit: 1 at 97%' \
+  1 "1:97:100:40:ok 3:null:-:67:ok $SPENT" 'EARLY=0' "" ' 3: 5h none 7d 67%'
+NO5T=900 t "10n'' an active account seen with no 5h just now: hold, say why" \
+  '^[0-9:]{8} WARN no 5h window reported for the active account 1 yet; holding until that has lasted 15 min' \
+  1 "1:null:-:40:ok 2:0:-:10:ok"
+NO5T=900 NO5SEED="acc1acc0 $(( NOW - 1200 )) $(( NOW - 60 ))" t "10n''' the active one with no 5h for 20 min: judged on 7d" '^[0-9:]{8} no switch: 1 at 0%' \
+  1 "1:null:-:40:ok 2:0:-:10:ok" "" "" ' 1: 5h none 7d 40%'
+# The run must be unbroken: a record last seen 20 min ago (a stopped controller,
+# a cswap outage) is dropped, so the 5h-spent target of 10n stays untrusted.
+NO5T=900 NO5SEED="acc3acc0 $(( NOW - 7200 )) $(( NOW - 1200 ))" t "10n'''' a stale record starts the run again: not a target" '^[0-9:]{8} HOLD 1 at 97%' \
+  1 "1:97:100:40:ok 3:null:-:67:ok $SPENT" 'EARLY=0' "" ' 3: 5h -% .* 7d 67%'
+NO5T=900 NO5RAW="garbage\nacc3acc0 notanumber $NOW\nacc3acc0 $(( NOW - 1200 )) $NOW extra\n\n" t "10n''''' a corrupt record is ignored: not a target" '^[0-9:]{8} HOLD 1 at 97%' \
+  1 "1:97:100:40:ok 3:null:-:67:ok $SPENT" 'EARLY=0'
+NO5T=900 NO5RAW="acc3acc0 $(( NOW - 1200 ))\n" t "10n'''''' the old two-field record is ignored" '^[0-9:]{8} HOLD 1 at 97%' \
+  1 "1:97:100:40:ok 3:null:-:67:ok $SPENT" 'EARLY=0'
+# A leading zero in a config number is decimal, not octal ("value too great for base").
+AUTO=1 t "10o WEEK_RELEASE_1=08 / WEEK_MAX_1=09: read as 8 and 9" 'WOULD SWITCH → 2 .*\[7-day: 1 at 92%' \
+  1 "1:null:-:92:ok:2000 2:null:-:10:ok" 'WEEK_MAX_1=09 WEEK_RELEASE_1=08' "" ' 1: 5h none 7d 92% \(lim 9\)'
+AUTO=1 t "10o' WEEK_RELEASE_1=08 lifts the cap inside 8 h of the reset" '^[0-9:]{8} no switch: 1 at 0%' \
+  1 "1:null:-:92:ok:420 2:null:-:10:ok" 'WEEK_MAX_1=90 WEEK_RELEASE_1=08'
 t "10j login expiry ERROR (1 day) and WARN (3)" '^[0-9:]{8} no switch:' \
   1 "1:50:200:30:ok 2:0:-:99:ok:8640:600 4:0:-:100:ok:8640:2880" "" "" \
   'ERROR login for slot 2 .*expires in (9h59m|10h00m)'
@@ -305,6 +360,25 @@ pacer_rate_limit_used_ratio{account="acc1acc0-0000",window="seven_day"} 0.98
 EOF
 AUTO=1 API=http://127.0.0.1:$port t "V2 a lower live estimate never lowers a reading" '^[0-9:]{8} no switch: 1 at 20%' \
   1 "1:20:200:98:ok 3:20:250:40:ok $SPENT" 'EARLY=0'
+# A last line that raises nothing must not make the whole read count as failed.
+cat >"$T/www/metrics" <<'EOF'
+pacer_rate_limit_used_ratio{account="acc1acc0-0000",window="seven_day"} 0.991
+pacer_rate_limit_live_used_ratio{account="acc1acc0-0000",window="seven_day"} 0.95
+EOF
+AUTO=1 API=http://127.0.0.1:$port t "V3 the last metrics line raises nothing: the read still counts" 'WOULD SWITCH → 3 .*\[7-day: 1 at 99%' \
+  1 "1:20:200:98:ok 3:20:250:40:ok $SPENT" 'EARLY=0'
+# --- cswap drops a 5h window: Pacer's reading stands in if under an hour old ---
+cat >"$T/www/metrics" <<'EOF'
+pacer_rate_limit_used_ratio{account="acc1acc0-0000",window="five_hour"} 0.97
+pacer_rate_limit_reset_seconds{account="acc1acc0-0000",window="five_hour"} 5400
+pacer_rate_limit_sample_age_seconds{account="acc1acc0-0000",window="five_hour"} 600
+EOF
+API=http://127.0.0.1:$port t "F1 cswap has no 5h, Pacer says 97% (10 min old): switch" 'WOULD SWITCH → 3 .*\[limit: 1 at 97%' \
+  1 "1:null:-:40:ok 3:20:250:40:ok $SPENT"
+sed -i '' 's/ 600$/ 7200/' "$T/www/metrics"
+API=http://127.0.0.1:$port t "F2 Pacer's 5h is 2 h old: ignored, so no 5h limit" '^[0-9:]{8} no switch: 1 at 0%' \
+  1 "1:null:-:40:ok 3:20:250:40:ok $SPENT" "" "" \
+  ' 1: 5h none 7d 40%'
 kill "$srv" 2>/dev/null
 
 # --- the heartbeat Pacer reads (Skills/pacer/reference.md, "Rotation") -------------
